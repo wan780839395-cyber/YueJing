@@ -95,7 +95,7 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 scripts/validate_task3.py test-counts TXTCoreTests 25
 
-      - name: Run the 19 ReaderDomain tests once (18 existing plus 1 admission boundary)
+      - name: Run the 25 ReaderDomain tests once (19 existing plus 6 reuse regressions)
         run: |
           set -uo pipefail
           set +e
@@ -105,13 +105,34 @@ jobs:
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/task3/ReaderDomainTests.xcresult \
             -parallel-testing-enabled NO -only-testing:ReaderDomainTests \
+            -skip-testing:ReaderDomainTests/ProcessingReuseMeasurementTests \
             CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             test 2>&1 | tee artifacts/task3/ReaderDomainTests.log
           pipeline=("${PIPESTATUS[@]}")
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/ReaderDomainTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts ReaderDomainTests 19
+          python3 scripts/validate_task3.py test-counts ReaderDomainTests 25
+
+      - name: Measure one sequential synthetic reuse path in Release
+        run: |
+          set -uo pipefail
+          python3 scripts/validate_task3.py measurement-settings || exit "$?"
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme ReaderDomain -configuration Release \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/Task3Measurements -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/ProcessingReuseMeasurementTests.xcresult \
+            -parallel-testing-enabled NO -only-testing:ReaderDomainTests/ProcessingReuseMeasurementTests \
+            CODE_SIGNING_ALLOWED=NO ENABLE_TESTABILITY=YES ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/task3/ProcessingReuseMeasurementTests.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/ProcessingReuseMeasurementTests-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 scripts/validate_task3.py test-counts ProcessingReuseMeasurementTests 1 || exit "$?"
+          python3 scripts/validate_task3.py processing-measurements
 
       - name: Compile the actual unsigned iPhoneOS arm64 App
         run: |

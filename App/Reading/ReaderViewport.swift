@@ -20,6 +20,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
     let onWidth: @MainActor (Double) -> Void
     let onSettled: @MainActor (ReadingAnchor) -> Bool
     let onRemoved: @MainActor () -> Void
+    let onApplied: @MainActor (UUID) -> Void
 
     func makeUIViewController(context: Context) -> ReaderViewController {
         let controller = ReaderViewController()
@@ -36,6 +37,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
         let navigation = handle.onNextRestoreIsNavigation
         handle.onNextRestoreIsNavigation = false
         controller.apply(window, userNavigation: navigation)
+        onApplied(window.id)
     }
 
     static func dismantleUIViewController(_ controller: ReaderViewController, coordinator: ()) {

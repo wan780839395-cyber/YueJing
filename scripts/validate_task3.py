@@ -112,6 +112,45 @@ def settings():
     report("effective-test-settings.json", selected)
 
 
+def measurement_settings():
+    selected = {}
+    for target in ("TXTCore", "ReaderDomain", "ReaderDomainTests"):
+        result = subprocess.run(["xcodebuild", "-project", "YueJing.xcodeproj", "-target", target,
+            "-configuration", "Release", "-sdk", "iphonesimulator", "-showBuildSettings", "-json",
+            "-clonedSourcePackagesDirPath", "build/SourcePackages", "-disableAutomaticPackageResolution",
+            "CODE_SIGNING_ALLOWED=NO", "ENABLE_TESTABILITY=YES", "ARCHS=arm64"], capture_output=True, text=True, timeout=120)
+        (OUT / (target + "-measurement-settings.log")).write_text(result.stderr, encoding="utf-8")
+        require(result.returncode == 0, "Measurement build settings failed")
+        rows = [row["buildSettings"] for row in json.loads(result.stdout) if row.get("target") == target]
+        require(len(rows) == 1, "Ambiguous measurement settings")
+        values = {key: rows[0].get(key, "") for key in
+                  ("CONFIGURATION", "SWIFT_OPTIMIZATION_LEVEL", "ENABLE_TESTABILITY", "ARCHS", "IPHONEOS_DEPLOYMENT_TARGET", "SWIFT_VERSION")}
+        require(values["CONFIGURATION"] == "Release" and values["SWIFT_OPTIMIZATION_LEVEL"] == "-O"
+                and values["SWIFT_VERSION"] == "6.0" and values["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6",
+                "Unexpected measurement configuration")
+        require(values["ENABLE_TESTABILITY"] == "YES", "Measurement testability is not enabled")
+        selected[target] = values
+    report("measurement-settings.json", selected)
+
+
+def processing_measurements():
+    log = (OUT / "ProcessingReuseMeasurementTests.log").read_text(encoding="utf-8", errors="replace")
+    rows = [json.loads(line.split("PROCESSING_REUSE_METRIC ", 1)[1])
+            for line in log.splitlines() if "PROCESSING_REUSE_METRIC " in line]
+    require([row["scenario"] for row in rows] ==
+            ["import", "first_open", "same_service_reopen", "new_service_cold_cache"], "Missing/duplicate measurement scenarios")
+    require(all(row["sample_bytes"] == 10485760 and row["seconds"] >= 0 for row in rows), "Unexpected sample or timing")
+    warm = rows[2]
+    require(warm["decode_calls"] == 1 and warm["chapter_calls"] == 1 and warm["document_hits"] == 2
+            and warm["chapter_hits"] == 1, "Warm reuse was not demonstrated")
+    require(not any(p["phase"] in ("decode", "chapters") for p in warm["phases"]), "Warm path recomputed content")
+    report("processing-measurements.json", dict(source_commit=os.environ["GITHUB_SHA"],
+           simulator=json.loads((OUT / "simulator-selection.json").read_text()),
+           configuration="Release/-O, ENABLE_TESTABILITY=YES", repetitions=1, sample="10MiB chinese-chapters-v1, no BOM; fixture generation/write excluded",
+           first_paint="not measured", system_picker_copy="not measured", app_cold_start="not measured; new service in same process only",
+           memory="test-host process RSS at boundaries, includes fixture/allocator; not a sampled peak or cache delta", rows=rows))
+
+
 def test_counts(target, expected):
     declared = [name for path in (ROOT / "Tests" / target).glob("*.swift")
                 for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
@@ -136,10 +175,12 @@ def unsigned(path):
 
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 19)):
+    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 25), ("ProcessingReuseMeasurementTests", 1)):
         counts = json.loads((OUT / (target + "-counts.json")).read_text())
         require(counts["native_exit"] == 0 and counts["expected"] == expected and len(counts["passed"]) == expected,
-                "All 44 real tests must pass before packaging")
+                "All 51 real tests must pass before packaging")
+    require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
+            "Missing same-commit processing evidence")
     require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
     unsigned(APP)
     require(not list(APP.rglob("embedded.mobileprovision")) and not list(APP.rglob("_CodeSignature")), "Unexpected signing material")
@@ -222,7 +263,7 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=44, dependency_gate="app-dependency-gate.json"))
+           tests_passed=51, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":
@@ -232,6 +273,7 @@ if __name__ == "__main__":
             test_counts(sys.argv[2], int(sys.argv[3]))
         else:
             {"select-simulator": select_simulator, "resolved": resolved, "settings": settings,
+             "measurement-settings": measurement_settings, "processing-measurements": processing_measurements,
              "package-gate": package_gate, "verify-ipa": verify_ipa}[command]()
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         print("Task 3 validation stopped: " + str(error), file=sys.stderr)

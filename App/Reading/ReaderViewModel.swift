@@ -12,6 +12,9 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var loading = true
     @Published private(set) var exitSaveFailed = false
     @Published var message: String?
+    @Published private(set) var openingPerformanceSummary: String?
+    private var openingStarted: ContinuousClock.Instant?
+    private var openingMeasurements: [ProcessingMeasurement] = []
     let viewport = ReaderViewportHandle()
     private let bookID: String
     private let service: LibraryService
@@ -37,13 +40,18 @@ final class ReaderViewModel: ObservableObject {
         guard engine == nil, !closing else { return }
         lifecycle = UUID(); loading = true
         let request = lifecycle
+        openingStarted = ContinuousClock().now; openingMeasurements = []; openingPerformanceSummary = nil
+        let timing = ProcessingTrace()
+        defer { timing.end() }
         do {
-            let opened = try await service.openBook(id: bookID)
+            let opened = try await service.openBook(id: bookID, measure: timing.observer)
+            let measurements = await timing.finish()
             guard lifecycle == request, !closing, !Task.isCancelled else {
                 try? await service.store.finishReading(session: opened.reading.session, anchor: nil, sequence: 1)
                 return
             }
             title = opened.book.title; chapters = opened.chapters; session = opened.reading.session
+            openingMeasurements = measurements
             anchor = opened.reading.anchor ?? ReadingAnchor(bookID: bookID, versionID: opened.document.versionID,
                                                             rawByteOffset: opened.document.bomByteCount)
             engine = ReadingLayoutEngine(bookID: bookID, document: opened.document)
@@ -163,9 +171,13 @@ final class ReaderViewModel: ObservableObject {
         layoutTask?.cancel(); generation = UUID()
         layoutNeedsRefresh = true
         let request = generation, settings = preferences, currentWidth = width, revision = positionRevision
+        let timing = openingStarted == nil ? nil : ProcessingTrace()
         layoutTask = Task {
+            defer { timing?.end() }
             do {
-                let rendered = try await engine.window(around: anchor, width: currentWidth, preferences: settings)
+                let rendered = try await engine.window(around: anchor, width: currentWidth, preferences: settings,
+                                                       measure: timing?.observer)
+                let measurements = await timing?.finish() ?? []
                 try Task.checkCancellation()
                 guard request == generation, !closing else { return }
                 guard revision == positionRevision, !viewport.interacting else {
@@ -175,10 +187,24 @@ final class ReaderViewModel: ObservableObject {
                     return
                 }
                 layoutNeedsRefresh = false
+                openingMeasurements.append(contentsOf: measurements)
                 viewport.onNextRestoreIsNavigation = userNavigation
                 window = rendered; loading = false
             } catch is CancellationError { }
             catch { if request == generation { layoutNeedsRefresh = false; loading = false; message = error.localizedDescription } }
         }
+    }
+
+    /// Called after UIKit applies a window. Actual display/first paint is deliberately unmeasured.
+    func windowApplied(_ id: UUID) {
+        guard !closing, window?.id == id, let started = openingStarted else { return }
+        openingStarted = nil
+        let elapsed = started.duration(to: ContinuousClock().now).components
+        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        let summary = String(format: "打开→窗口已应用 %.3fs\n", seconds)
+            + ProcessingMeasurement.summary(openingMeasurements) + "\n正文首绘未测；仅本地摘要。"
+        let request = lifecycle
+        // Avoid publishing during a SwiftUI representable update.
+        Task { if lifecycle == request, !closing { openingPerformanceSummary = summary } }
     }
 }

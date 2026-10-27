@@ -15,8 +15,19 @@ public actor LibraryService {
     private struct Pending { let bytes: Data; let title: String; let encodings: [TXTEncoding] }
     private var pending: [UUID: Pending] = [:]
     private var cancelled: Set<UUID> = []
+    private var processed: ProcessedBookCache
+    private var reuse = ProcessingReuseStatistics()
 
-    public init(store: LibraryStore) { self.store = store }
+    public init(store: LibraryStore, processingCacheLimit: Int = 64 * 1024 * 1024) {
+        self.store = store; processed = ProcessedBookCache(limit: processingCacheLimit)
+    }
+
+    /// Drops the service's reference and invalidates in-flight publishers. Active readers may retain theirs.
+    public func releaseProcessingCache() { processed.invalidate() }
+
+    func processingReuseStatistics() -> ProcessingReuseStatistics {
+        var value = reuse; value.retainedBytes = processed.estimatedBytes; return value
+    }
 
     public static func openDefault() async throws -> LibraryService {
         let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -24,20 +35,24 @@ public actor LibraryService {
         return LibraryService(store: try LibraryStore(root: folder))
     }
 
-    public func prepareImport(url: URL, ticket: UUID, observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
+    public func prepareImport(url: URL, ticket: UUID, measure: ProcessingMeasurementObserver? = nil,
+                              observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
+        let generation = processed.begin()
         try await store.beginImport(ticket)
         let staging = await store.stagingURL(ticket: ticket)
         var keepForChoice = false
         defer { if !keepForChoice { Self.removeStaging(staging) } }
         try check(ticket)
         guard url.isFileURL, url.pathExtension.lowercased() == "txt" else { throw LibraryError.notTXT }
-        try Self.copyReadOnlySource(url, to: staging, observe: observe)
+        try ProcessingMeasurement.timed(.privateCopy, observe: measure) {
+            try Self.copyReadOnlySource(url, to: staging, observe: observe)
+        }
         try check(ticket)
         observe?(.stagedReadStarted)
-        let data = try Data(contentsOf: staging, options: .mappedIfSafe)
+        let data = try ProcessingMeasurement.timed(.read, observe: measure) { try Data(contentsOf: staging, options: .mappedIfSafe) }
         observe?(.stagedReadCompleted)
         guard !data.isEmpty else { throw LibraryError.emptyFile }
-        let identity = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let identity = ProcessingMeasurement.timed(.hash, observe: measure) { Self.identity(data) }
         if let existing = try await store.book(id: identity) {
             try check(ticket)
             observe?(.duplicateFound)
@@ -48,16 +63,17 @@ public actor LibraryService {
         let title = url.deletingPathExtension().lastPathComponent
         do {
             observe?(.decodingStarted)
-            let document = try await processor.decode(data)
+            let document = try await decode(data, measure: measure)
             observe?(.decodingCompleted)
             guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
             try check(ticket)
             let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: title))
+            if !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
             observe?(.committed)
             return .completed(receipt)
         } catch TXTError.ambiguousEncoding(let candidates) {
             observe?(.ambiguityDetected)
-            let cards = try await previews(data, encodings: candidates.map(\.encoding))
+            let cards = try await previews(data, encodings: candidates.map(\.encoding), measure: measure)
             observe?(.previewsReady)
             try check(ticket)
             pending[ticket] = Pending(bytes: data, title: title, encodings: candidates.map(\.encoding))
@@ -66,23 +82,27 @@ public actor LibraryService {
         }
     }
 
-    public func confirmImport(ticket: UUID, encoding: TXTEncoding, observe: ImportStageObserver? = nil) async throws -> ImportReceipt {
+    public func confirmImport(ticket: UUID, encoding: TXTEncoding, measure: ProcessingMeasurementObserver? = nil,
+                              observe: ImportStageObserver? = nil) async throws -> ImportReceipt {
+        let generation = processed.begin()
         guard let candidate = pending.removeValue(forKey: ticket) else { throw CancellationError() }
         let staging = await store.stagingURL(ticket: ticket)
         defer { Self.removeStaging(staging) }
         try check(ticket)
         guard candidate.encodings.contains(encoding) else { throw LibraryError.invalidEncoding }
         observe?(.decodingStarted)
-        let document = try await processor.decode(candidate.bytes, using: encoding)
+        let document = try await decode(candidate.bytes, using: encoding, measure: measure)
         observe?(.decodingCompleted)
         guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
         try check(ticket)
         let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: candidate.title))
+        if !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
         observe?(.committed)
         return receipt
     }
 
     public func cancelImport(_ ticket: UUID) async -> ImportCancellation {
+        processed.invalidate()
         cancelled.insert(ticket)
         pending.removeValue(forKey: ticket)
         let result = await store.cancelImport(ticket)
@@ -91,18 +111,34 @@ public actor LibraryService {
         return result
     }
 
-    public func openBook(id: String) async throws -> OpenedBook {
+    public func openBook(id: String, measure: ProcessingMeasurementObserver? = nil) async throws -> OpenedBook {
+        let generation = processed.begin(bookID: id)
+        var completed = false
+        defer { if !completed { processed.invalidate(ifCurrent: generation) } }
         guard let book = try await store.book(id: id) else { throw LibraryError.missingBook }
         guard let encoding = book.encoding else { throw LibraryError.invalidEncoding }
         let url = try await store.fileURL(bookID: id)
         guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryError.missingFile }
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let data = try ProcessingMeasurement.timed(.read, observe: measure) { try Data(contentsOf: url, options: .mappedIfSafe) }
+        // Always inspect actual bytes, including on a warm hit. Size/mtime cannot prove integrity.
+        guard ProcessingMeasurement.timed(.hash, observe: measure, { Self.identity(data) }) == book.id else { throw LibraryError.changedFile }
+        let cached = processed.lookup(book, token: generation)
         let document: TXTDocument
-        do { document = try await processor.decode(data, using: encoding) }
-        catch is CancellationError { throw CancellationError() }
-        catch { throw LibraryError.changedFile }
+        if let cached { document = cached.document; reuse.documentHits += 1 }
+        else {
+            do { document = try await decode(data, using: encoding, measure: measure) }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw LibraryError.changedFile }
+        }
         guard document.documentID == book.id, document.versionID == book.versionID else { throw LibraryError.changedFile }
-        let chapters = try await processor.chapters(in: document)
+        let chapters: [TXTChapter]
+        if let ready = cached?.chapters { chapters = ready; reuse.chapterHits += 1 }
+        else {
+            reuse.chapterCalls += 1
+            let start = ContinuousClock().now
+            defer { ProcessingMeasurement.finish(.chapters, since: start, observe: measure) }
+            chapters = try await processor.chapters(in: document)
+        }
         try Task.checkCancellation()
         let start = try await store.beginReading(bookID: id, versionID: document.versionID)
         do {
@@ -112,6 +148,9 @@ public actor LibraryService {
             }
             let reading = ReadingStart(session: start.session, anchor: valid,
                                        ignoredIncompatibleProgress: start.ignoredIncompatibleProgress || (start.anchor != nil && valid == nil))
+            if Task.isCancelled { processed.invalidate(ifCurrent: generation) }
+            else { processed.retain(document, chapters: chapters, book: book, token: generation) }
+            completed = true
             return OpenedBook(book: book, document: document, chapters: chapters, reading: reading)
         } catch {
             try? await store.finishReading(session: start.session, anchor: nil, sequence: 1)
@@ -119,11 +158,23 @@ public actor LibraryService {
         }
     }
 
-    private func previews(_ data: Data, encodings: [TXTEncoding]) async throws -> [EncodingCard] {
+    private static func identity(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func decode(_ bytes: Data, using encoding: TXTEncoding? = nil,
+                        measure: ProcessingMeasurementObserver? = nil) async throws -> TXTDocument {
+        reuse.decodeCalls += 1
+        let start = ContinuousClock().now
+        defer { ProcessingMeasurement.finish(.decode, since: start, observe: measure) }
+        return try await processor.decode(bytes, using: encoding)
+    }
+
+    private func previews(_ data: Data, encodings: [TXTEncoding], measure: ProcessingMeasurementObserver?) async throws -> [EncodingCard] {
         var documents: [TXTDocument] = []
         for encoding in encodings {
             try Task.checkCancellation()
-            documents.append(try await processor.decode(data, using: encoding))
+            documents.append(try await decode(data, using: encoding, measure: measure))
         }
         guard let reference = documents.first else { throw LibraryError.invalidEncoding }
         var firstDifference = data.count

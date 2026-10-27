@@ -1,6 +1,24 @@
 # Task 3：TXT 阅读闭环与导入诊断
 
-## 当前：源码会诊与复制导入批次（2026-10-28）
+## 当前：有界处理结果复用（2026-10-28）
+
+用户已确认 d63041b 真机功能正常，粗估导入二十多秒、同进程复开十几秒。源码确认导入的解码结果提交后未保留；每次打开重新解码、建索引和全书分章后才排局部窗口。本批已获批准开发及一次完整验证，但此提交冻结时尚无本批原生结果。
+
+**所有权与预算。** LibraryService actor 持有一个 ProcessedBookCache，仅含不可变 TXTDocument 和可选目录；无 reading session、位置或设置快照。64MiB 是估算阈值，按原字节2倍、UTF16长度4倍、实际索引数组容量2倍及固定开销，再计目录数组容量和标题/ID/版本字符串估算。TXTTypes 仅添加只读估算属性，不调用会物化全边界数组的兼容 getter，不改解码/坐标算法。超限回原正确路径；估算不是实际分配或进程 RSS 上限，活动阅读器/临时解码/系统分配器另计。
+
+**发布和失效。** 导入非重复提交成功后保留已验证文档，首开生成目录后保留完整条目；未提交、失败/取消及重复导入不发布新结果。每次 openBook 仍从私有文件创建 Data 并计算真实 SHA，比对内容 ID 后按书籍 ID/版本/编码命中，绝不凭 size/mtime。缺文件/读取失败/内容变化/版本或编码不符、换书、导入/修复、取消和内存警告清除条目并更新代号；跨 await 捕获的旧代号不能回填或清除新条目。内存警告不改变阅读业务，不能保证释放仍被活动 engine 引用的文档。
+
+每次仍由原 store.beginReading 创建新 session、读最新位置，由 ReaderViewModel 读最新设置并重建局部窗口；退出的进度屏障及取消提交唯一结果不改。Picker [.item]/asCopy=true、安全域/协调复制、原文件只读、严格编码/精确 byte↔UTF16 和数据库架构保持。TXTProcessor 仍负责原处理算法，计数在生产调用点递增，命中时确实不调用解码/分章。
+
+**回归与计时。** 原44项文件/断言保持，新6项覆盖导入/复开复用、新 session/最新位置、同大小改字节、缺文件与错误版本/编码、取消/未提交结果、内存释放、超预算、换书/重复修复和过期发布代号。另1项测试在现有 ReaderDomainTests bundle 内、单独 Release/-O 串行执行（ENABLE_TESTABILITY=YES），10MiB chinese-chapters-v1 合成数据生成/写入不计时，顺序测真实 import→first open/window ready→同 service reopen/window ready→new service cold cache/window ready；不是新基准体系，也不修改旧 TXTCore 性能测试。
+
+记录私有复制（含元数据/协调等待）、Data创建、服务层完整 SHA、decode（含内核自有内容/版本 hash）、chapters 和 window layout。Data 映射触页成本可能落在后续 hash/decode；不能当作物理磁盘 I/O 独立计时。每段及总耗时来自生产调用，计数证明复用；内存仅测试宿主进程边界 RSS，含 fixture/分配器保留，不是采样峰值或缓存增量。新 service 与原 service 同进程/同 store，不能称为 App 重启或冷启动。
+
+App 书架显示选中回调→完成书架刷新（含可能的编码选择等待）及有限阶段摘要，阅读页“处理耗时”显示打开→UIKit应用首个窗口。摘要每次完成后更新，不逐帧刷新；没有首绘测量，不把 window ready/applied 当作屏幕已显示。系统 asCopy 在 delegate 前的云端下载/选择阶段、真机阶段耗时和 App 真冷启动均未测。不持久记录书名/URL/路径/正文/用户书hash，不上传遥测。
+
+本批只一次现有 Task3 run attempt1，期望25 TXTCore+25 ReaderDomain+1串行测量=51项真实通过，随后实际 iPhoneOS arm64 App 编译、资源/依赖/unsigned/iOS16.6 IPA 门验证。失败即停，不自动重推/重跑；结果仅保存在 ignored artifacts。成功后仍需同 iPhone13/iOS16.6.1、同9.5MB TXT 的导入/初开/同进程复开分段对照，内存压力/文件变更/设置与位置也须验收，不能据模拟器承诺秒开。
+
+## 历史：源码会诊与复制导入批次（2026-10-28）
 
 基线 `8f5d5db` / run `40533187004` 已有 25+19=44 项原生测试与真实 App/IPA 验证，真机导入仍未通过。本批先完成本地脚本双模式融合及离线边界验证，再仅向现有兼容接口发送指定问题、DocumentPickerBridge 和 LibraryService 的真实源码，获得一次实际会诊响应。未发送看板或 idea 历史；脚本、配置、记录与脱敏评审证据均不在公开提交范围。
 

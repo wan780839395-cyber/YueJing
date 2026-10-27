@@ -12,6 +12,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var message: String?
     @Published private(set) var importDiagnostics = ImportDiagnosticState()
     @Published private(set) var fileSelection: FileSelectionSession?
+    @Published private(set) var processingSummary: String?
+    private var selectionReceivedAt: ContinuousClock.Instant?
+    private var importMeasurements: [ProcessingMeasurement] = []
     private var ticket: UUID?
     private var importTask: Task<Void, Never>?
     private var stageSink: (id: UUID, continuation: AsyncStream<ImportStage>.Continuation)?
@@ -41,6 +44,7 @@ final class LibraryViewModel: ObservableObject {
     func beginFileSelection() {
         guard canBeginFileSelection else { return }
         let id = UUID()
+        selectionReceivedAt = nil; importMeasurements = []; processingSummary = nil
         importDiagnostics.begin(id)
         fileSelection = FileSelectionSession(id: id,
             selected: { [weak self] id, urls in self?.documentPickerSelected(id, urls: urls) },
@@ -55,6 +59,7 @@ final class LibraryViewModel: ObservableObject {
 
     private func documentPickerSelected(_ id: UUID, urls: [URL]) {
         guard let session = fileSelection, session.id == id, session.receiveSelection(urls) else { return }
+        selectionReceivedAt = ContinuousClock().now
         importDiagnostics.record(urls.isEmpty ? .delegateEmpty : .delegateSelected, for: id)
         importDiagnostics.selected(for: id, hasFile: !urls.isEmpty)
         session.requestDismissal()
@@ -95,11 +100,14 @@ final class LibraryViewModel: ObservableObject {
         importDiagnostics.record(.accepted, for: id)
         importTask = Task {
             let observation = stageObservation(id: id)
+            let timing = ProcessingTrace()
+            defer { timing.end() }
             do {
-                let result = try await service.prepareImport(url: url, ticket: id,
+                let result = try await service.prepareImport(url: url, ticket: id, measure: timing.observer,
                     observe: { _ = observation.continuation.yield($0) })
                 observation.continuation.finish()
                 await observation.task.value
+                await collectTiming(timing, id: id)
                 if stageSink?.id == id { stageSink = nil }
                 guard ticket == id else { _ = await service.cancelImport(id); return }
                 switch result {
@@ -111,6 +119,7 @@ final class LibraryViewModel: ObservableObject {
             } catch {
                 observation.continuation.finish()
                 await observation.task.value
+                await collectTiming(timing, id: id)
                 if stageSink?.id == id { stageSink = nil }
                 await failed(error, id: id)
             }
@@ -122,16 +131,20 @@ final class LibraryViewModel: ObservableObject {
         encodingChoice = nil
         importTask = Task {
             let observation = stageObservation(id: choice.id)
+            let timing = ProcessingTrace()
+            defer { timing.end() }
             do {
-                let receipt = try await service.confirmImport(ticket: choice.id, encoding: encoding,
+                let receipt = try await service.confirmImport(ticket: choice.id, encoding: encoding, measure: timing.observer,
                     observe: { _ = observation.continuation.yield($0) })
                 observation.continuation.finish()
                 await observation.task.value
+                await collectTiming(timing, id: choice.id)
                 if stageSink?.id == choice.id { stageSink = nil }
                 await finish(receipt, id: choice.id)
             } catch {
                 observation.continuation.finish()
                 await observation.task.value
+                await collectTiming(timing, id: choice.id)
                 if stageSink?.id == choice.id { stageSink = nil }
                 await failed(error, id: choice.id)
             }
@@ -160,6 +173,22 @@ final class LibraryViewModel: ObservableObject {
         ticket = nil; importing = false; encodingChoice = nil
         showImportMessage(receipt.duplicate ? "这本书已在书架，原阅读位置已保留。" : "已加入书架。", id: id)
         await reload()
+        if importDiagnostics.attempt == id, let start = selectionReceivedAt {
+            let elapsed = start.duration(to: ContinuousClock().now).components
+            let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            processingSummary = String(format: "选中回调→入架 %.3fs（含等待）\n", seconds)
+                + ProcessingMeasurement.summary(importMeasurements)
+                + "\n系统选择/下载阶段未测；仅本地摘要。"
+        }
+    }
+
+    func releaseProcessingCache() async { await service?.releaseProcessingCache() }
+
+    private func collectTiming(_ trace: ProcessingTrace, id: UUID) async {
+        let values = await trace.finish()
+        guard ticket == id else { return }
+        importMeasurements.append(contentsOf: values)
+        processingSummary = ProcessingMeasurement.summary(importMeasurements)
     }
 
     private func failed(_ error: Error, id: UUID) async {

@@ -13,7 +13,10 @@ public actor ReadingLayoutEngine {
 
     public init(bookID: String, document: TXTDocument) { self.bookID = bookID; self.document = document }
 
-    public func window(around anchor: ReadingAnchor, width: Double, preferences: ReaderPreferences) throws -> ReadingWindow {
+    public func window(around anchor: ReadingAnchor, width: Double, preferences: ReaderPreferences,
+                       measure: ProcessingMeasurementObserver? = nil) throws -> ReadingWindow {
+        let started = ContinuousClock().now
+        defer { ProcessingMeasurement.finish(.layout, since: started, observe: measure) }
         try Task.checkCancellation()
         guard anchor.bookID == bookID, anchor.versionID == document.versionID else { throw LibraryError.invalidAnchor }
         guard width.isFinite, width >= 80, document.utf16Count > 0 else { throw LibraryError.layoutCannotAdvance }

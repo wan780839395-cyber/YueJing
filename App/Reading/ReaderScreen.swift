@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 struct ReaderScreen: View {
-    private enum Sheet: String, Identifiable { case chapters, settings; var id: String { rawValue } }
+    private enum Sheet: String, Identifiable { case chapters, settings, timing; var id: String { rawValue } }
     @StateObject private var model: ReaderViewModel
     @State private var sheet: Sheet?
     @Environment(\.dismiss) private var dismiss
@@ -17,7 +17,7 @@ struct ReaderScreen: View {
         ZStack {
             ReaderViewport(window: model.window, preferences: model.preferences, handle: model.viewport,
                            onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
-                           onSettled: model.scrollingEnded, onRemoved: model.disappeared)
+                           onSettled: model.scrollingEnded, onRemoved: model.disappeared, onApplied: model.windowApplied)
                 .allowsHitTesting(!model.exitSaveFailed)
             if model.loading { ProgressView("正在打开书籍…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
             if !model.loading && model.window == nil {
@@ -36,6 +36,7 @@ struct ReaderScreen: View {
                 Button { Task { if await model.close() { dismiss() } } } label: { Label("书架", systemImage: "chevron.left") }
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button { sheet = .timing } label: { Label("处理耗时", systemImage: "clock") }
                 Button { sheet = .chapters } label: { Label("目录", systemImage: "list.bullet") }.disabled(model.chapters.isEmpty || model.exitSaveFailed)
                 Button { sheet = .settings } label: { Label("阅读设置", systemImage: "textformat.size") }.disabled(model.window == nil || model.exitSaveFailed)
             }
@@ -54,6 +55,12 @@ struct ReaderScreen: View {
                 }
             case .settings:
                 ReaderSettingsView(preferences: $model.preferences, changed: model.settingsChanged)
+            case .timing:
+                NavigationStack {
+                    ScrollView { Text(model.openingPerformanceSummary ?? "尚未应用首个正文窗口。").padding() }
+                        .navigationTitle("本次打开耗时")
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { sheet = nil } } }
+                }
             }
         }
         .alert("阅读提示", isPresented: Binding(get: { model.message != nil }, set: { if !$0 { model.message = nil } })) {

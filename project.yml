@@ -90,6 +90,7 @@ targets:
     deploymentTarget: "16.6"
     sources:
       - path: Tests/ReaderDomainTests
+      - path: Tests/ProcessingReuseMeasurementTests
     dependencies:
       - target: ReaderDomain
       - target: TXTCore

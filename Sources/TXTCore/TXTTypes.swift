@@ -108,6 +108,13 @@ public struct TXTOffsetMap: Sendable {
     public var boundaryCount: Int { index.widths.count + 1 }
     public var utf16Count: Int { index.utf16End }
 
+    /// Read-only allocation estimate; never materializes the compatibility boundary array.
+    public var estimatedStorageBytes: Int {
+        let (checkpoints, overflow) = index.checkpoints.capacity.multipliedReportingOverflow(by: MemoryLayout<TXTBoundary>.stride)
+        let (total, sumOverflow) = checkpoints.addingReportingOverflow(index.widths.capacity)
+        return overflow || sumOverflow ? Int.max : total
+    }
+
     /// Compatibility snapshot: O(scalars) time and a newly allocated full boundary array.
     /// Normal lookup, document length, chapter splitting and pagination do not call this getter.
     public var boundaries: [TXTBoundary] {
@@ -183,6 +190,18 @@ public struct TXTDocument: Sendable {
     public let offsets: TXTOffsetMap
     public var utf16Count: Int { offsets.utf16Count }
     public static let normalizationVersion = "scalar-newline-lf-v1"
+
+    /// Conservative cache accounting, not process RSS or a promise about allocator overhead.
+    public var estimatedRetainedBytes: Int {
+        var result = 1024
+        for (count, multiplier) in [(originalBytes.count, 2), (utf16Count, 4), (offsets.estimatedStorageBytes, 2)] {
+            let (bytes, overflow) = count.multipliedReportingOverflow(by: multiplier)
+            let (next, sumOverflow) = result.addingReportingOverflow(bytes)
+            if overflow || sumOverflow { return Int.max }
+            result = next
+        }
+        return result
+    }
 }
 
 public struct TXTChapter: Sendable {

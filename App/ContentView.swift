@@ -1,5 +1,6 @@
 import SwiftUI
 import ReaderDomain
+import UIKit
 
 @MainActor
 struct ContentView: View {
@@ -28,6 +29,7 @@ struct ContentView: View {
                         }
                         Text("这里只显示本轮阶段，不记录书名、路径或正文。关闭选择器后仍可查看。")
                             .font(.caption).foregroundStyle(.secondary)
+                        if let summary = model.processingSummary { Text(summary).font(.caption) }
                     }
                 }
                 if model.books.isEmpty {
@@ -72,6 +74,9 @@ struct ContentView: View {
             }
         }
         .task { await model.start() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await model.releaseProcessingCache() }
+        }
         .onChange(of: path) { value in if value.isEmpty { Task { await model.reload() } } }
         .background {
             if let session = model.fileSelection {
