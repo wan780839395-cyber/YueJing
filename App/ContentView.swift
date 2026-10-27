@@ -6,11 +6,34 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var model = LibraryViewModel()
     @State private var choosingFile = false
+    @State private var pickerAttempt: UUID?
     @State private var path: [String] = []
 
     var body: some View {
+        let attempt = pickerAttempt
         NavigationStack(path: $path) {
             List {
+                if model.importDiagnostics.attempt != nil {
+                    Section("本次导入状态") {
+                        Text(model.importDiagnostics.callbackSummary)
+                            .font(.headline)
+                        Text("最后阶段：\(model.importDiagnostics.stage?.label ?? "尚未开始")")
+                        if let failure = model.importDiagnostics.failure {
+                            Text(failure.summary)
+                            if let previous = model.importDiagnostics.failedAfter {
+                                Text("出错前阶段：\(previous.label)")
+                            }
+                        }
+                        DisclosureGroup("查看阶段记录") {
+                            ForEach(Array(model.importDiagnostics.history.enumerated()), id: \.offset) { item in
+                                Text("\(item.offset + 1). \(item.element.label)")
+                                    .font(.caption)
+                            }
+                        }
+                        Text("这里只显示本轮阶段，不记录书名、路径或正文。关闭选择器后仍可查看。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if model.books.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("把第一本书放进阅境", systemImage: "books.vertical")
@@ -44,7 +67,10 @@ struct ContentView: View {
             .navigationTitle("阅境")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { choosingFile = true } label: { Label("导入 TXT", systemImage: "plus") }
+                    Button {
+                        pickerAttempt = model.beginFileSelection()
+                        choosingFile = true
+                    } label: { Label("导入 TXT", systemImage: "plus") }
                         .disabled(model.service == nil || model.importing)
                 }
             }
@@ -54,12 +80,11 @@ struct ContentView: View {
         }
         .task { await model.start() }
         .onChange(of: path) { value in if value.isEmpty { Task { await model.reload() } } }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.plainText], allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls): if let url = urls.first { model.importFile(url) }
-            case .failure(let error):
-                if (error as NSError).code != NSUserCancelledError { model.message = "无法选择文件：\(error.localizedDescription)" }
-            }
+        .onChange(of: choosingFile) { presented in
+            if !presented, let attempt { model.fileSelectionClosed(attempt: attempt) }
+        }
+        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.plainText], allowsMultipleSelection: false) { [attempt] result in
+            if let attempt { model.fileSelectionResult(result, attempt: attempt) }
         }
         .sheet(item: $model.encodingChoice) { choice in
             EncodingChoiceView(choice: choice, select: { model.choose($0, for: choice) }, cancel: { Task { await model.cancelImport() } })

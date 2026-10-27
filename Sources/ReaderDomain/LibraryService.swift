@@ -24,30 +24,41 @@ public actor LibraryService {
         return LibraryService(store: try LibraryStore(root: folder))
     }
 
-    public func prepareImport(url: URL, ticket: UUID) async throws -> ImportPreparation {
+    public func prepareImport(url: URL, ticket: UUID, observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
         try await store.beginImport(ticket)
         let staging = await store.stagingURL(ticket: ticket)
         var keepForChoice = false
         defer { if !keepForChoice { Self.removeStaging(staging) } }
         try check(ticket)
         guard url.isFileURL, url.pathExtension.lowercased() == "txt" else { throw LibraryError.notTXT }
-        try Self.copyReadOnlySource(url, to: staging)
+        try Self.copyReadOnlySource(url, to: staging, observe: observe)
         try check(ticket)
+        observe?(.stagedReadStarted)
         let data = try Data(contentsOf: staging, options: .mappedIfSafe)
+        observe?(.stagedReadCompleted)
         guard !data.isEmpty else { throw LibraryError.emptyFile }
         let identity = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         if let existing = try await store.book(id: identity) {
             try check(ticket)
-            return .completed(try await store.commitImport(ticket: ticket, proposed: existing))
+            observe?(.duplicateFound)
+            let receipt = try await store.commitImport(ticket: ticket, proposed: existing)
+            observe?(.committed)
+            return .completed(receipt)
         }
         let title = url.deletingPathExtension().lastPathComponent
         do {
+            observe?(.decodingStarted)
             let document = try await processor.decode(data)
+            observe?(.decodingCompleted)
             guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
             try check(ticket)
-            return .completed(try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: title)))
+            let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: title))
+            observe?(.committed)
+            return .completed(receipt)
         } catch TXTError.ambiguousEncoding(let candidates) {
+            observe?(.ambiguityDetected)
             let cards = try await previews(data, encodings: candidates.map(\.encoding))
+            observe?(.previewsReady)
             try check(ticket)
             pending[ticket] = Pending(bytes: data, title: title, encodings: candidates.map(\.encoding))
             keepForChoice = true
@@ -55,16 +66,20 @@ public actor LibraryService {
         }
     }
 
-    public func confirmImport(ticket: UUID, encoding: TXTEncoding) async throws -> ImportReceipt {
+    public func confirmImport(ticket: UUID, encoding: TXTEncoding, observe: ImportStageObserver? = nil) async throws -> ImportReceipt {
         guard let candidate = pending.removeValue(forKey: ticket) else { throw CancellationError() }
         let staging = await store.stagingURL(ticket: ticket)
         defer { Self.removeStaging(staging) }
         try check(ticket)
         guard candidate.encodings.contains(encoding) else { throw LibraryError.invalidEncoding }
+        observe?(.decodingStarted)
         let document = try await processor.decode(candidate.bytes, using: encoding)
+        observe?(.decodingCompleted)
         guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
         try check(ticket)
-        return try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: candidate.title))
+        let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: candidate.title))
+        observe?(.committed)
+        return receipt
     }
 
     public func cancelImport(_ ticket: UUID) async -> ImportCancellation {
@@ -147,21 +162,30 @@ public actor LibraryService {
                     versionID: document.versionID, byteCount: document.originalBytes.count, utf16Count: document.utf16Count)
     }
 
-    private static func copyReadOnlySource(_ source: URL, to destination: URL) throws {
+    private static func copyReadOnlySource(_ source: URL, to destination: URL, observe: ImportStageObserver?) throws {
+        observe?(.scopeRequested)
         let access = source.startAccessingSecurityScopedResource()
         defer { if access { source.stopAccessingSecurityScopedResource() } }
+        observe?(access ? .scopeGranted : .scopeNotGranted)
+        observe?(.sourceMetadataStarted)
         try Self.requireRegularFile(source)
+        observe?(.sourceMetadataChecked)
         let coordinator = NSFileCoordinator()
         var coordinationError: NSError?, copyError: Error?
+        observe?(.coordinationStarted)
         coordinator.coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { readable in
+            observe?(.accessorStarted)
             do {
                 try Self.requireRegularFile(readable)
+                observe?(.coordinatedMetadataChecked)
                 try FileManager.default.copyItem(at: readable, to: destination)
                 // copyItem must never leave an external symbolic link as the managed "copy".
                 try Self.requireRegularFile(destination)
+                observe?(.copyCompleted)
             }
             catch { copyError = error }
         }
+        observe?(.coordinationFinished)
         if let coordinationError { throw coordinationError }
         if let copyError { throw copyError }
     }
