@@ -1,0 +1,145 @@
+name: TXTCore large-file performance baseline
+run-name: TXT large-file baseline · ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  performance-baseline:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out this source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the selected native toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/txt-core-performance
+          test -d "$DEVELOPER_DIR"
+          {
+            printf 'Source: %s\n' "$GITHUB_SHA"
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun swift --version
+          } 2>&1 | tee artifacts/txt-core-performance/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/txt-core-performance/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/txt-core-performance/toolchain.log
+
+      - name: Verify XcodeGen and generate the project
+        run: |
+          set -euo pipefail
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          test -x _tooling/xcodegen/bin/xcodegen
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/txt-core-performance/xcodegen.log
+          python3 -c 'import os, re, sys; from pathlib import Path; actual = re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", Path("artifacts/txt-core-performance/xcodegen.log").read_text(encoding="utf-8")); sys.exit(0 if actual == [os.environ["XCODEGEN_VERSION"]] else "Unexpected XcodeGen version")'
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
+            2>&1 | tee artifacts/txt-core-performance/project-generation.log
+
+      - name: Select an already installed supported iOS simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > artifacts/txt-core-performance/devices.json
+          xcrun simctl list runtimes -j > artifacts/txt-core-performance/runtimes.json
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          out = Path("artifacts/txt-core-performance")
+          devices = json.loads((out / "devices.json").read_text(encoding="utf-8"))["devices"]
+          runtimes = json.loads((out / "runtimes.json").read_text(encoding="utf-8"))["runtimes"]
+          sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], text=True).strip()
+          def version(value):
+              return tuple((list(map(int, value.split("."))) + [0, 0, 0])[:3])
+          choices = []
+          for runtime in runtimes:
+              if not runtime.get("isAvailable") or not runtime["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-"):
+                  continue
+              if version(runtime["version"]) < version("16.6") or version(runtime["version"]) > version(sdk):
+                  continue
+              for device in devices.get(runtime["identifier"], []):
+                  if device.get("isAvailable") and device["name"].startswith("iPhone"):
+                      choices.append((version(runtime["version"]), device["name"], runtime, device))
+          if not choices:
+              raise SystemExit("No installed available iPhone simulator supported by the selected SDK; no runtime will be installed")
+          _, _, runtime, device = max(choices, key=lambda item: (item[0], item[1]))
+          architecture = platform.machine()
+          if architecture not in ("arm64", "x86_64"):
+              raise SystemExit("Unsupported simulator host architecture: " + architecture)
+          supported = runtime.get("supportedArchitectures")
+          if supported and architecture not in supported:
+              raise SystemExit("Selected installed runtime does not support the host architecture")
+          selection = dict(device_name=device["name"], udid=device["udid"], runtime=runtime["name"],
+                           runtime_version=runtime["version"], sdk=sdk, architecture=architecture, physical_device=False)
+          (out / "simulator-selection.json").write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(selection, indent=2))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write("SIMULATOR_UDID=" + device["udid"] + "\nSIMULATOR_ARCH=" + architecture + "\n")
+          PY
+
+      - name: Check the effective Release performance settings
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          out = Path("artifacts/txt-core-performance")
+          keys = ["PRODUCT_TYPE", "SWIFT_VERSION", "SWIFT_STRICT_CONCURRENCY", "IPHONEOS_DEPLOYMENT_TARGET",
+                  "ARCHS", "TEST_HOST", "BUNDLE_LOADER", "TEST_TARGET_NAME", "SWIFT_OPTIMIZATION_LEVEL", "CONFIGURATION"]
+          selected = {}
+          for target in ("TXTCore", "TXTCorePerformanceTests"):
+              args = ["xcodebuild", "-project", "YueJing.xcodeproj", "-target", target, "-configuration", "Release",
+                      "-sdk", "iphonesimulator", "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO",
+                      "ARCHS=" + os.environ["SIMULATOR_ARCH"]]
+              result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+              (out / (target + "-settings-diagnostics.log")).write_text(result.stderr, encoding="utf-8")
+              if result.returncode:
+                  print(result.stderr, file=sys.stderr)
+                  raise SystemExit(result.returncode)
+              for row in json.loads(result.stdout):
+                  if row.get("target") == target:
+                      selected[target] = {key: row["buildSettings"].get(key, "") for key in keys}
+          (out / "effective-test-settings.json").write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(selected, indent=2))
+          for target in ("TXTCore", "TXTCorePerformanceTests"):
+              settings = selected.get(target, {})
+              if settings.get("SWIFT_VERSION") != "6.0" or settings.get("IPHONEOS_DEPLOYMENT_TARGET") != "16.6":
+                  raise SystemExit("Unexpected language mode or deployment target")
+              if settings.get("CONFIGURATION") != "Release" or settings.get("SWIFT_OPTIMIZATION_LEVEL") != "-O":
+                  raise SystemExit("Expected Release / -O for both the measured framework and performance test")
+          tests = selected["TXTCorePerformanceTests"]
+          if tests.get("PRODUCT_TYPE") != "com.apple.product-type.bundle.unit-test":
+              raise SystemExit("Expected an ordinary performance unit-test target")
+          if any(tests.get(key) for key in ("TEST_HOST", "BUNDLE_LOADER", "TEST_TARGET_NAME")):
+              raise SystemExit("Unexpected application host binding")
+          PY
+
+      - name: Run the single serial large-file performance test once
+        timeout-minutes: 12
+        run: python3 scripts/run_txt_performance.py
+
+      - name: Preserve complete or partial performance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: txt-core-performance-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/txt-core-performance/
+          retention-days: 3
+          if-no-files-found: warn
