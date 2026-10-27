@@ -130,8 +130,9 @@ enum TXTDecoder {
                 guard (0x40...0xFE).contains(second), second != 0x7F else { throw invalid() }
                 length = 2
             }
-            // Public CoreFoundation IDs: GB_18030_2000=0x0632, GBK_95=0x0631.
-            let identifier: CFStringEncoding = encoding == .gb18030 ? 0x0632 : 0x0631
+            // Apple's CP936 converter implements GBK; the scanner still rejects its non-GBK byte forms.
+            let identifier: CFStringEncoding = encoding == .gb18030 ? 0x0632
+                : CFStringEncoding(CFStringEncodings.dosChineseSimplif.rawValue)
             let stringEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(identifier))
             let source = Data(bytes[index..<(index + length)])
             guard let text = String(data: source, encoding: stringEncoding), text.unicodeScalars.count == 1,
