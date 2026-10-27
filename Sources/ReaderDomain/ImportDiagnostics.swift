@@ -5,6 +5,7 @@ import TXTCore
 public enum ImportStage: String, Equatable, Sendable {
     case pickerWaiting, pickerClosedWithoutSelection, pickerClosed
     case selectedCallback, emptyCallback, failedCallback, cancellationCallback
+    case delegateSelected, delegateEmpty, delegateCancelled, pickerHandoffMissing
     case accepted, rejectedUnavailable, rejectedBusy
     case scopeRequested, scopeGranted, scopeNotGranted, sourceMetadataStarted, sourceMetadataChecked
     case coordinationStarted, accessorStarted, coordinatedMetadataChecked, copyCompleted, coordinationFinished
@@ -21,6 +22,10 @@ public enum ImportStage: String, Equatable, Sendable {
         case .emptyCallback: "收到成功回调，但没有文件"
         case .failedCallback: "收到选择文件失败回调"
         case .cancellationCallback: "收到明确的取消错误回调"
+        case .delegateSelected: "已收到delegate选中文件回调"
+        case .delegateEmpty: "已收到delegate空结果回调"
+        case .delegateCancelled: "已收到delegate取消回调"
+        case .pickerHandoffMissing: "选中回调已到达，但待处理文件缺失"
         case .accepted: "已接受本次导入"
         case .rejectedUnavailable: "未接受导入：书架尚未就绪"
         case .rejectedBusy: "未接受导入：已有导入正在处理"
@@ -99,7 +104,7 @@ public struct ImportSafeFailure: Equatable, Sendable {
 }
 
 public struct ImportDiagnosticState: Equatable, Sendable {
-    public enum Callback: Equatable, Sendable { case none, selected, empty, failed, cancelled }
+    public enum Callback: Equatable, Sendable { case none, selected, empty, failed, cancelled, delegateCancelled }
     public private(set) var attempt: UUID?
     public private(set) var pickerPresented = false
     public private(set) var callback: Callback = .none
@@ -127,6 +132,14 @@ public struct ImportDiagnosticState: Equatable, Sendable {
         guard attempt == id, callback == .none else { return false }
         callback = hasFile ? .selected : .empty
         record(hasFile ? .selectedCallback : .emptyCallback, for: id)
+        return true
+    }
+
+    @discardableResult
+    public mutating func delegateCancelled(for id: UUID) -> Bool {
+        guard attempt == id, callback == .none else { return false }
+        callback = .delegateCancelled
+        record(.delegateCancelled, for: id)
         return true
     }
 
@@ -162,6 +175,7 @@ public struct ImportDiagnosticState: Equatable, Sendable {
         case .empty: "已收到空结果回调，未选中文件"
         case .failed: "已收到失败回调，未收到选中文件回调"
         case .cancelled: "已收到明确取消错误回调，未选中文件"
+        case .delegateCancelled: "已收到delegate取消回调，未选中文件"
         }
     }
 }

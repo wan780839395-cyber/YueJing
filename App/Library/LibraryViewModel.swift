@@ -11,6 +11,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var encodingChoice: EncodingChoice?
     @Published var message: String?
     @Published private(set) var importDiagnostics = ImportDiagnosticState()
+    @Published private(set) var fileSelection: FileSelectionSession?
     private var ticket: UUID?
     private var importTask: Task<Void, Never>?
     private var stageSink: (id: UUID, continuation: AsyncStream<ImportStage>.Continuation)?
@@ -34,28 +35,48 @@ final class LibraryViewModel: ObservableObject {
         catch { message = "读取书架失败：\(ImportSafeFailure(error).summary)" }
     }
 
-    func beginFileSelection() -> UUID {
+    var canPresentLibraryFeedback: Bool { fileSelection?.dismissalConfirmed ?? true }
+    var canBeginFileSelection: Bool { service != nil && !importing && canPresentLibraryFeedback }
+
+    func beginFileSelection() {
+        guard canBeginFileSelection else { return }
         let id = UUID()
         importDiagnostics.begin(id)
-        return id
+        fileSelection = FileSelectionSession(id: id,
+            selected: { [weak self] id, urls in self?.documentPickerSelected(id, urls: urls) },
+            cancelled: { [weak self] id in self?.documentPickerCancelled(id) })
     }
 
-    func fileSelectionClosed(attempt: UUID) {
-        importDiagnostics.pickerClosed(for: attempt)
+    func documentPickerDismissed(_ id: UUID) {
+        guard let session = fileSelection, session.id == id, session.confirmDismissal() else { return }
+        importDiagnostics.pickerClosed(for: id)
+        handlePickerResult(session)
     }
 
-    func fileSelectionResult(_ result: Result<[URL], Error>, attempt: UUID) {
+    private func documentPickerSelected(_ id: UUID, urls: [URL]) {
+        guard let session = fileSelection, session.id == id, session.receiveSelection(urls) else { return }
+        importDiagnostics.record(urls.isEmpty ? .delegateEmpty : .delegateSelected, for: id)
+        importDiagnostics.selected(for: id, hasFile: !urls.isEmpty)
+        session.requestDismissal()
+        handlePickerResult(session)
+    }
+
+    private func documentPickerCancelled(_ id: UUID) {
+        guard let session = fileSelection, session.id == id, session.receiveCancellation() else { return }
+        importDiagnostics.delegateCancelled(for: id)
+        session.requestDismissal()
+        handlePickerResult(session)
+    }
+
+    private func handlePickerResult(_ session: FileSelectionSession) {
+        guard fileSelection?.id == session.id, let result = session.takeReady() else { return }
         switch result {
-        case .success(let urls):
-            guard importDiagnostics.selected(for: attempt, hasFile: !urls.isEmpty) else { return }
-            guard let url = urls.first else {
-                showImportMessage("选择器返回了空结果，请重试。", id: attempt)
-                return
-            }
-            importFile(url, id: attempt)
-        case .failure(let error):
-            guard importDiagnostics.pickerFailed(error, for: attempt) else { return }
-            showImportMessage("选择文件未完成：\(ImportSafeFailure(error).summary)", id: attempt)
+        case .selected(let url): importFile(url, id: session.id)
+        case .empty: showImportMessage("选择器返回了空结果，请重试。", id: session.id)
+        case .cancelled: showImportMessage("已取消文件选择，未开始导入。", id: session.id)
+        case .missingSelectedURL:
+            importDiagnostics.record(.pickerHandoffMissing, for: session.id)
+            showImportMessage("已收到选择回调，但待处理文件缺失，请重试。", id: session.id)
         }
     }
 

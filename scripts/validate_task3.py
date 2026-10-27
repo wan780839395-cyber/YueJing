@@ -136,10 +136,10 @@ def unsigned(path):
 
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 13)):
+    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 18)):
         counts = json.loads((OUT / (target + "-counts.json")).read_text())
         require(counts["native_exit"] == 0 and counts["expected"] == expected and len(counts["passed"]) == expected,
-                "All 38 real tests must pass before packaging")
+                "All 43 real tests must pass before packaging")
     require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
     unsigned(APP)
     require(not list(APP.rglob("embedded.mobileprovision")) and not list(APP.rglob("_CodeSignature")), "Unexpected signing material")
@@ -222,7 +222,7 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=38, dependency_gate="app-dependency-gate.json"))
+           tests_passed=43, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":

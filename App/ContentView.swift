@@ -1,16 +1,12 @@
 import SwiftUI
 import ReaderDomain
-import UniformTypeIdentifiers
 
 @MainActor
 struct ContentView: View {
     @StateObject private var model = LibraryViewModel()
-    @State private var choosingFile = false
-    @State private var pickerAttempt: UUID?
     @State private var path: [String] = []
 
     var body: some View {
-        let attempt = pickerAttempt
         NavigationStack(path: $path) {
             List {
                 if model.importDiagnostics.attempt != nil {
@@ -67,11 +63,8 @@ struct ContentView: View {
             .navigationTitle("阅境")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        pickerAttempt = model.beginFileSelection()
-                        choosingFile = true
-                    } label: { Label("导入 TXT", systemImage: "plus") }
-                        .disabled(model.service == nil || model.importing)
+                    Button { model.beginFileSelection() } label: { Label("导入 TXT", systemImage: "plus") }
+                        .disabled(!model.canBeginFileSelection)
                 }
             }
             .navigationDestination(for: String.self) { id in
@@ -80,17 +73,19 @@ struct ContentView: View {
         }
         .task { await model.start() }
         .onChange(of: path) { value in if value.isEmpty { Task { await model.reload() } } }
-        .onChange(of: choosingFile) { presented in
-            if !presented, let attempt { model.fileSelectionClosed(attempt: attempt) }
-        }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.plainText], allowsMultipleSelection: false) { [attempt] result in
-            if let attempt { model.fileSelectionResult(result, attempt: attempt) }
+        .background {
+            if let session = model.fileSelection {
+                DocumentPickerBridge.Presentation(session: session, onDismiss: model.documentPickerDismissed)
+                    .id(session.id)
+            }
         }
         .sheet(item: $model.encodingChoice) { choice in
             EncodingChoiceView(choice: choice, select: { model.choose($0, for: choice) }, cancel: { Task { await model.cancelImport() } })
                 .interactiveDismissDisabled()
         }
-        .alert("阅境", isPresented: Binding(get: { model.message != nil }, set: { if !$0 { model.message = nil } })) {
+        .alert("阅境", isPresented: Binding(
+            get: { model.canPresentLibraryFeedback && model.message != nil },
+            set: { if !$0 && model.canPresentLibraryFeedback { model.message = nil } })) {
             Button("知道了", role: .cancel) { model.message = nil }
         } message: { Text(model.message ?? "") }
     }

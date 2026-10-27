@@ -1,6 +1,19 @@
 # Task 3：TXT 阅读闭环与导入诊断
 
-## 当前导入诊断批次
+## 当前：文件选择入口桥接批次
+
+基线cb1ce89 / run40518279736已通过38项及诊断IPA；用户仍在真机点TXT无反应，截图只记录等待与关闭。旧ContentView的可选attempt捕获可跳过记录，故不能确定OS未回调或指认权限根因。本批只修入口与诊断交接。
+
+- `DocumentPickerBridge.swift` 使用官方 [init(forOpeningContentTypes:asCopy:)](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller/init(foropeningcontenttypes:ascopy:))，plainText单选、asCopy=false；保持“取得外部安全作用域URL→原LibraryService协调复制到私有目录”的语义，不改成由picker预先提供另一份复制品。官方 [UIDocumentPickerDelegate](https://developer.apple.com/documentation/uikit/uidocumentpickerdelegate) 区分选中与取消。本批不假定delegate与dismiss只有一种先后顺序。
+- `FileSelectionSession` 是单轮呈现和短暂pending URL的owner，ID不可变且非可选；它强持有coordinator，coordinator回调只弱持有LibraryViewModel，不形成循环。纯关闭后session仍保留，可接收晚到delegate；下一轮更换session，旧ID被拒绝。交接后立即清空pending URL，不持久化外部URL。
+- 每轮独立host使用同一session绑定sheet，按官方 [sheet onDismiss](https://developer.apple.com/documentation/swiftui/view/sheet(ispresented:ondismiss:content:)) 确认退出。onDisappear不推断成功/取消。仅结果与退出均到达才消费一次，因而两种顺序都可接续；代理先留下固定诊断，编码sheet/结果alert在确认退出后请求，其他书架alert也在picker期间门控。
+- `ImportPickerRoute` 只存ID、固定结果、退出及消费事实，不含URL/正文。新5项回归覆盖成功先于/晚于dismiss、空结果、取消两种顺序、纯关闭、旧/重复/冲突回调及一次消费。所有mutating调用均先执行到局部变量再断言。原38项文件保持，总计25+18=43项，精确同步原手动流程与helper。
+- LibraryService、安全作用域、NSFileCoordinator复制、GRDB、编码和排版代码均不改。诊断只用固定词汇，不记录书名、完整/片段路径、URL、正文或私有错误详情；不上传遥测，不新增权限/entitlement。
+- 一次手动完整验证，全部43项、真实设备App编译与IPA校验全过才交付；失败停，不追加修复/推送/重跑。现有用户看板/脚本/配置不改不发布。此提交冻结时本批仍待原生验证，路由单元测试不模拟真实UIKit/FileProvider/iCloud设备行为。
+
+下一次真机仅重新点选TXT；如仍停选择器，关闭回书架查看“收到delegate选中/取消”与最后阶段；无需提供书籍。没有实际设备反馈前不宣布症状已修复。
+
+## 历史：导入诊断批次
 
 首批提交 `b8fa29ff8fd80c3eb82c9bd24f715a43ff529d44` / run `40505713251` 已通过33项原生测试、设备目标编译及未签名IPA验证；它不等于iPhone阅读/系统选择器/iCloud验收。真机反馈点击iCloud TXT无反应，根因未定。本批只提供下一次试用所需的可见诊断，不先更改过滤类型、读取策略或业务算法。
 
