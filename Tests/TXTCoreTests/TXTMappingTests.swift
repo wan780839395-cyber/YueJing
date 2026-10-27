@@ -56,8 +56,8 @@ struct TXTMappingTests {
         #expect(try document.offsets.rawByteOffset(for: UTF16Offset(0)) == RawByteOffset(3))
         #expect(try document.offsets.rawByteOffset(for: UTF16Offset(1)) == RawByteOffset(4))
         #expect(throws: TXTError.self) { try document.offsets.utf16Offset(for: RawByteOffset(1)) }
-        #expect(throws: TXTError.self) { try await TXTProcessor().decode(bytes, chunkSize: 0) }
-        #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0x41, 0])) }
+        await #expect(throws: TXTError.self) { try await TXTProcessor().decode(bytes, chunkSize: 0) }
+        await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0x41, 0])) }
         #expect(try await TXTProcessor().decode(Data([0x41, 0]), using: .utf16LE).text == "A")
     }
 }

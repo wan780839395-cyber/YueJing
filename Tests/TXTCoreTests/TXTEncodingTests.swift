@@ -61,19 +61,19 @@ struct TXTEncodingTests {
     @Test func malformedBytesNeverBecomeReplacementCharacters() async throws {
         let malformedUTF8: [[UInt8]] = [[0xF0, 0x9F], [0xC0, 0xAF], [0xED, 0xA0, 0x80], [0xF4, 0x90, 0x80, 0x80]]
         for bytes in malformedUTF8 {
-            #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), using: .utf8, chunkSize: 1) }
+            await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), using: .utf8, chunkSize: 1) }
         }
         let malformedGB: [[UInt8]] = [[0x81, 0x30, 0x81], [0x81, 0x30, 0x81, 0xFF], [0x81, 0x7F], [0x80]]
         for bytes in malformedGB {
-            #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), using: .gb18030, chunkSize: 1) }
+            await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), using: .gb18030, chunkSize: 1) }
         }
         let malformedUTF16: [[UInt8]] = [[0xFF, 0xFE, 0x41], [0xFF, 0xFE, 0x00, 0xDC], [0xFF, 0xFE, 0x3D, 0xD8, 0x41, 0]]
         for bytes in malformedUTF16 {
-            #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), chunkSize: 1) }
+            await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data(bytes), chunkSize: 1) }
         }
-        #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0x81])) }
-        #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0xFE]), using: .utf8) }
-        #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0xFE, 0, 0])) }
+        await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0x81])) }
+        await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0xFE]), using: .utf8) }
+        await #expect(throws: TXTError.self) { try await TXTProcessor().decode(Data([0xFF, 0xFE, 0, 0])) }
         let literalReplacement = try await TXTProcessor().decode(Data([0xEF, 0xBF, 0xBD]), using: .utf8)
         #expect(literalReplacement.text == "\u{FFFD}") // Present in the source, not inserted by recovery.
     }
