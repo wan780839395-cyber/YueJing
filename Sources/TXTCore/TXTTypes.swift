@@ -68,19 +68,68 @@ public struct TXTBoundary: Equatable, Sendable {
     public let utf16: UTF16Offset
 }
 
+/// One width byte per normalized scalar, plus absolute coordinates every 256 scalars.
+/// A CRLF pair is one step; supplementary scalars advance UTF-16 by two units.
+struct TXTOffsetIndex: Sendable {
+    fileprivate static let checkpointStride = 256
+    fileprivate var widths: [UInt8] = []
+    fileprivate var checkpoints: [TXTBoundary]
+    fileprivate var rawEnd: Int
+    fileprivate var utf16End = 0
+
+    init(rawStart: Int) {
+        rawEnd = rawStart
+        checkpoints = [TXTBoundary(rawByte: RawByteOffset(rawStart), utf16: UTF16Offset(0))]
+    }
+
+    mutating func append(rawLength: Int, utf16Length: Int) {
+        // Each encoded scalar is at most four bytes; normalization may merge a CR and LF.
+        precondition((1...8).contains(rawLength) && (1...2).contains(utf16Length))
+        widths.append(UInt8((rawLength << 1) | (utf16Length - 1)))
+        rawEnd += rawLength
+        utf16End += utf16Length
+        if widths.count % Self.checkpointStride == 0 {
+            checkpoints.append(TXTBoundary(rawByte: RawByteOffset(rawEnd), utf16: UTF16Offset(utf16End)))
+        }
+    }
+}
+
 /// Exact scalar boundaries after BOM removal and CRLF/CR -> LF normalization.
 /// BOM interiors, CRLF interiors, encoded-scalar interiors and surrogate interiors have no mapping.
 public struct TXTOffsetMap: Sendable {
     public let documentVersion: String
-    public let boundaries: [TXTBoundary]
+    private let index: TXTOffsetIndex
+
+    init(documentVersion: String, index: TXTOffsetIndex) {
+        self.documentVersion = documentVersion
+        self.index = index
+    }
+
+    public var boundaryCount: Int { index.widths.count + 1 }
+    public var utf16Count: Int { index.utf16End }
+
+    /// Compatibility snapshot: O(scalars) time and a newly allocated full boundary array.
+    /// Normal lookup, document length, chapter splitting and pagination do not call this getter.
+    public var boundaries: [TXTBoundary] {
+        var result: [TXTBoundary] = []
+        result.reserveCapacity(boundaryCount)
+        var raw = index.checkpoints[0].rawByte.value, utf16 = 0
+        result.append(TXTBoundary(rawByte: RawByteOffset(raw), utf16: UTF16Offset(utf16)))
+        for width in index.widths {
+            raw += Int(width >> 1)
+            utf16 += Int(width & 1) + 1
+            result.append(TXTBoundary(rawByte: RawByteOffset(raw), utf16: UTF16Offset(utf16)))
+        }
+        return result
+    }
 
     public func utf16Offset(for raw: RawByteOffset) throws -> UTF16Offset {
-        guard let match = exact(raw.value, key: { $0.rawByte.value }) else { throw TXTError.invalidByteBoundary(raw) }
+        guard let match = exact(raw.value, rawCoordinates: true) else { throw TXTError.invalidByteBoundary(raw) }
         return match.utf16
     }
 
     public func rawByteOffset(for utf16: UTF16Offset) throws -> RawByteOffset {
-        guard let match = exact(utf16.value, key: { $0.utf16.value }) else { throw TXTError.invalidUTF16Boundary(utf16) }
+        guard let match = exact(utf16.value, rawCoordinates: false) else { throw TXTError.invalidUTF16Boundary(utf16) }
         return match.rawByte
     }
 
@@ -94,13 +143,32 @@ public struct TXTOffsetMap: Sendable {
         return try UTF16Range(location: start, length: end.value - start.value)
     }
 
-    private func exact(_ value: Int, key: (TXTBoundary) -> Int) -> TXTBoundary? {
-        var low = 0, high = boundaries.count
+    private func exact(_ value: Int, rawCoordinates: Bool) -> TXTBoundary? {
+        var low = 0, high = index.checkpoints.count
         while low < high {
             let middle = low + (high - low) / 2
-            if key(boundaries[middle]) < value { low = middle + 1 } else { high = middle }
+            let boundary = index.checkpoints[middle]
+            let coordinate = rawCoordinates ? boundary.rawByte.value : boundary.utf16.value
+            if coordinate <= value { low = middle + 1 } else { high = middle }
         }
-        return low < boundaries.count && key(boundaries[low]) == value ? boundaries[low] : nil
+        guard low > 0 else { return nil }
+        let checkpoint = low - 1
+        var raw = index.checkpoints[checkpoint].rawByte.value
+        var utf16 = index.checkpoints[checkpoint].utf16.value
+        if (rawCoordinates ? raw : utf16) == value {
+            return TXTBoundary(rawByte: RawByteOffset(raw), utf16: UTF16Offset(utf16))
+        }
+        let start = checkpoint * TXTOffsetIndex.checkpointStride
+        let end = start + min(TXTOffsetIndex.checkpointStride, index.widths.count - start)
+        for position in start..<end {
+            let width = index.widths[position]
+            raw += Int(width >> 1)
+            utf16 += Int(width & 1) + 1
+            let coordinate = rawCoordinates ? raw : utf16
+            if coordinate == value { return TXTBoundary(rawByte: RawByteOffset(raw), utf16: UTF16Offset(utf16)) }
+            if coordinate > value { return nil }
+        }
+        return nil
     }
 }
 
@@ -113,7 +181,7 @@ public struct TXTDocument: Sendable {
     public let bomByteCount: Int
     public let text: String
     public let offsets: TXTOffsetMap
-    public var utf16Count: Int { offsets.boundaries.last?.utf16.value ?? 0 }
+    public var utf16Count: Int { offsets.utf16Count }
     public static let normalizationVersion = "scalar-newline-lf-v1"
 }
 

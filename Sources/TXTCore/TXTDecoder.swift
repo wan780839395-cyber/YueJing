@@ -3,17 +3,51 @@ import CryptoKit
 import Foundation
 
 enum TXTDecoder {
-    private struct Unit {
+    private struct Decoded {
         let text: String
-        let start: Int
-        let length: Int
-        var end: Int { start + length }
+        let index: TXTOffsetIndex?
+    }
+
+    private struct Normalizer {
+        var text = ""
+        var index: TXTOffsetIndex?
+        var pendingCRLength: Int?
+
+        mutating func consume(_ scalar: Unicode.Scalar, rawLength: Int) {
+            if let crLength = pendingCRLength {
+                pendingCRLength = nil
+                if scalar.value == 0x0A {
+                    emit("\n", rawLength: crLength + rawLength)
+                    return
+                }
+                emit("\n", rawLength: crLength)
+            }
+            if scalar.value == 0x0D { pendingCRLength = rawLength }
+            else { emit(scalar, rawLength: rawLength) }
+        }
+
+        mutating func finish() -> Decoded {
+            if let length = pendingCRLength { emit("\n", rawLength: length); pendingCRLength = nil }
+            return Decoded(text: text, index: index)
+        }
+
+        private mutating func emit(_ scalar: Unicode.Scalar, rawLength: Int) {
+            text.unicodeScalars.append(scalar)
+            index?.append(rawLength: rawLength, utf16Length: scalar.value > 0xFFFF ? 2 : 1)
+        }
     }
 
     static func decode(_ data: Data, using requested: TXTEncoding?, chunkSize: Int) throws -> TXTDocument {
         guard chunkSize > 0 else { throw TXTError.invalidChunkSize }
-        let bytes = Array(data)
-        let prefix = Array(bytes.prefix(4))
+        // The borrowed buffer never escapes this synchronous decode call; original Data stays immutable.
+        return try data.withUnsafeBytes { buffer in
+            try decode(data, bytes: buffer.bindMemory(to: UInt8.self), using: requested, chunkSize: chunkSize)
+        }
+    }
+
+    private static func decode(_ data: Data, bytes: UnsafeBufferPointer<UInt8>,
+                               using requested: TXTEncoding?, chunkSize: Int) throws -> TXTDocument {
+        let prefix = bytes.prefix(4)
         if prefix.starts(with: [0xFF, 0xFE, 0, 0]) || prefix.starts(with: [0, 0, 0xFE, 0xFF]) {
             throw TXTError.unsupportedBOM
         }
@@ -26,61 +60,72 @@ enum TXTDecoder {
         if let requested {
             if let bom, bom.encoding != requested { throw TXTError.conflictingBOM }
             let start = bom?.length ?? 0
-            let units = try scan(bytes, encoding: requested, start: start, chunkSize: chunkSize)
-            return document(data, encoding: requested, compatible: [requested], start: start, units: units)
+            let decoded = try scan(bytes, encoding: requested, start: start, chunkSize: chunkSize, buildIndex: true)
+            return document(data, encoding: requested, compatible: [requested], start: start, decoded: decoded)
         }
         if let bom {
-            let units = try scan(bytes, encoding: bom.encoding, start: bom.length, chunkSize: chunkSize)
-            return document(data, encoding: bom.encoding, compatible: [bom.encoding], start: bom.length, units: units)
+            let decoded = try scan(bytes, encoding: bom.encoding, start: bom.length, chunkSize: chunkSize, buildIndex: true)
+            return document(data, encoding: bom.encoding, compatible: [bom.encoding], start: bom.length, decoded: decoded)
         }
 
-        var variants: [(encoding: TXTEncoding, units: [Unit], text: String)] = []
+        var selected: (encoding: TXTEncoding, decoded: Decoded)?
+        var compatible: [TXTEncoding] = []
+        var previews: [TXTEncodingPreview] = []
         for encoding in [TXTEncoding.utf8, .gb18030, .gbk] {
             do {
-                let units = try scan(bytes, encoding: encoding, start: 0, chunkSize: chunkSize)
-                variants.append((encoding, units, normalize(units, start: 0).text))
+                let decoded = try scan(bytes, encoding: encoding, start: 0, chunkSize: chunkSize, buildIndex: selected == nil)
+                if let selected {
+                    // Compare exact UTF-8 units, without canonical-equivalence merging or full Data copies.
+                    let same = decoded.text.utf8.elementsEqual(selected.decoded.text.utf8)
+                    if !same && previews.isEmpty {
+                        let firstPreview = String(selected.decoded.text.prefix(80))
+                        previews = compatible.map { TXTEncodingPreview(encoding: $0, text: firstPreview) }
+                    }
+                    if !previews.isEmpty {
+                        previews.append(TXTEncodingPreview(encoding: encoding,
+                            text: same ? previews[0].text : String(decoded.text.prefix(80))))
+                    }
+                } else {
+                    // Candidate order is the existing UTF-8, GB18030, GBK preference order.
+                    selected = (encoding, decoded)
+                }
+                compatible.append(encoding)
             } catch let error as TXTError {
                 if case .malformedInput = error { continue }
                 throw error
             }
         }
-        guard !variants.isEmpty else { throw TXTError.noSupportedEncoding }
-        // Data equality is scalar-exact; Swift String equality would merge canonical equivalents.
-        let distinctTexts = Set(variants.map { Data($0.text.utf8) })
-        guard distinctTexts.count == 1 else {
-            throw TXTError.ambiguousEncoding(variants.map { TXTEncodingPreview(encoding: $0.encoding, text: String($0.text.prefix(80))) })
-        }
-        let chosen = variants.first { $0.encoding == .utf8 } ?? variants[0]
-        return document(data, encoding: chosen.encoding, compatible: variants.map { $0.encoding }, start: 0, units: chosen.units)
+        guard let selected else { throw TXTError.noSupportedEncoding }
+        guard previews.isEmpty else { throw TXTError.ambiguousEncoding(previews) }
+        return document(data, encoding: selected.encoding, compatible: compatible, start: 0, decoded: selected.decoded)
     }
 
-    private static func scan(_ bytes: [UInt8], encoding: TXTEncoding, start: Int, chunkSize: Int) throws -> [Unit] {
-        var pending: [UInt8] = [], absolute = start, position = start, units: [Unit] = []
-        while position < bytes.count {
+    private static func scan(_ bytes: UnsafeBufferPointer<UInt8>, encoding: TXTEncoding,
+                             start: Int, chunkSize: Int, buildIndex: Bool) throws -> Decoded {
+        var position = start, limit = start
+        var normalized = Normalizer(index: buildIndex ? TXTOffsetIndex(rawStart: start) : nil)
+        while limit < bytes.count {
             try Task.checkCancellation()
-            let end = position + min(chunkSize, bytes.count - position)
-            pending.append(contentsOf: bytes[position..<end]); position = end
-            var consumed = 0
-            while consumed < pending.count {
-                guard let value = try next(pending, at: consumed, encoding: encoding, absolute: absolute + consumed) else { break }
-                units.append(Unit(text: value.text, start: absolute + consumed, length: value.length))
-                consumed += value.length
+            limit += min(chunkSize, bytes.count - limit)
+            while position < limit {
+                guard let value = try next(bytes, at: position, limit: limit, encoding: encoding, absolute: position) else { break }
+                normalized.consume(value.scalar, rawLength: value.length)
+                position += value.length
             }
-            if consumed > 0 { pending.removeFirst(consumed); absolute += consumed }
         }
-        guard pending.isEmpty else { throw TXTError.malformedInput(encoding: encoding, byteOffset: RawByteOffset(absolute)) }
-        return units
+        guard position == bytes.count else { throw TXTError.malformedInput(encoding: encoding, byteOffset: RawByteOffset(position)) }
+        return normalized.finish()
     }
 
     /// Nil means an incomplete scalar to carry to the next byte chunk, never a replacement character.
-    private static func next(_ bytes: [UInt8], at index: Int, encoding: TXTEncoding,
-                             absolute: Int) throws -> (text: String, length: Int)? {
-        let available = bytes.count - index, first = bytes[index]
+    private static func next(_ bytes: UnsafeBufferPointer<UInt8>, at index: Int, limit: Int, encoding: TXTEncoding,
+                             absolute: Int) throws -> (scalar: Unicode.Scalar, length: Int)? {
+        let available = limit - index, first = bytes[index]
         func invalid() -> TXTError { .malformedInput(encoding: encoding, byteOffset: RawByteOffset(absolute)) }
-        func scalar(_ value: UInt32, length: Int) throws -> (String, Int) {
+        func scalar(_ value: UInt32, length: Int) throws -> (Unicode.Scalar, Int) {
             // Embedded NUL is outside this TXT contract; BOM-less UTF16 requires an explicit choice.
             guard value != 0, let character = Unicode.Scalar(value) else { throw invalid() }
-            return (String(character), length)
+            return (character, length)
         }
         switch encoding {
         case .utf8:
@@ -136,38 +181,38 @@ enum TXTDecoder {
             let stringEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(identifier))
             let source = Data(bytes[index..<(index + length)])
             guard let text = String(data: source, encoding: stringEncoding), text.unicodeScalars.count == 1,
+                  let character = text.unicodeScalars.first,
                   text.data(using: stringEncoding, allowLossyConversion: false) == source else { throw invalid() }
-            return (text, length)
+            return (character, length)
         }
-    }
-
-    private static func normalize(_ units: [Unit], start: Int) -> (text: String, boundaries: [TXTBoundary]) {
-        var text = "", position = 0, index = 0
-        var boundaries = [TXTBoundary(rawByte: RawByteOffset(start), utf16: UTF16Offset(0))]
-        while index < units.count {
-            let unit = units[index]
-            var value = unit.text, end = unit.end
-            if value == "\r" {
-                value = "\n"
-                if index + 1 < units.count, units[index + 1].text == "\n" { index += 1; end = units[index].end }
-            }
-            text.append(contentsOf: value); position += value.utf16.count
-            boundaries.append(TXTBoundary(rawByte: RawByteOffset(end), utf16: UTF16Offset(position)))
-            index += 1
-        }
-        return (text, boundaries)
     }
 
     private static func document(_ data: Data, encoding: TXTEncoding, compatible: [TXTEncoding],
-                                 start: Int, units: [Unit]) -> TXTDocument {
-        let normalized = normalize(units, start: start)
+                                 start: Int, decoded: Decoded) -> TXTDocument {
+        guard let index = decoded.index else { preconditionFailure("Selected decode must have an offset index") }
         func digest(_ value: Data) -> String { SHA256.hash(data: value).map { String(format: "%02x", $0) }.joined() }
         let identity = digest(data)
-        var material = Data("\(identity)|\(encoding.rawValue)|\(TXTDocument.normalizationVersion)|".utf8)
-        material.append(contentsOf: normalized.text.utf8)
-        let version = digest(material)
+        var versionHash = SHA256()
+        versionHash.update(data: Data("\(identity)|\(encoding.rawValue)|\(TXTDocument.normalizationVersion)|".utf8))
+        updateUTF8(decoded.text, into: &versionHash)
+        let version = versionHash.finalize().map { String(format: "%02x", $0) }.joined()
         return TXTDocument(documentID: identity, versionID: version, originalBytes: data, encoding: encoding,
-            compatibleEncodings: compatible, bomByteCount: start, text: normalized.text,
-            offsets: TXTOffsetMap(documentVersion: version, boundaries: normalized.boundaries))
+            compatibleEncodings: compatible, bomByteCount: start, text: decoded.text,
+            offsets: TXTOffsetMap(documentVersion: version, index: index))
+    }
+
+    private static func updateUTF8(_ text: String, into hash: inout SHA256) {
+        if text.utf8.withContiguousStorageIfAvailable({ buffer in
+            hash.update(bufferPointer: UnsafeRawBufferPointer(buffer))
+            return true
+        }) == true { return }
+        // Non-contiguous strings use a bounded fallback, never a whole-book hash material buffer.
+        var chunk = Data()
+        chunk.reserveCapacity(64 * 1024)
+        for byte in text.utf8 {
+            chunk.append(byte)
+            if chunk.count == 64 * 1024 { hash.update(data: chunk); chunk.removeAll(keepingCapacity: true) }
+        }
+        if !chunk.isEmpty { hash.update(data: chunk) }
     }
 }
