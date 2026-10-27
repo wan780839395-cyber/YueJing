@@ -21,6 +21,11 @@ settings:
     CODE_SIGN_IDENTITY: ""
     DEVELOPMENT_TEAM: ""
 
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    exactVersion: "7.0.0"
+
 targets:
   YueJing:
     type: application
@@ -28,6 +33,13 @@ targets:
     deploymentTarget: "16.6"
     sources:
       - path: App
+        excludes:
+          - Resources
+      - path: App/Resources
+        buildPhase: resources
+    dependencies:
+      - target: ReaderDomain
+      - target: TXTCore
     settings:
       base:
         PRODUCT_NAME: YueJing
@@ -55,6 +67,40 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.txtcore
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
+
+  ReaderDomain:
+    type: framework
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Sources/ReaderDomain
+    dependencies:
+      - target: TXTCore
+      - package: GRDB
+        product: GRDB
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+
+  ReaderDomainTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Tests/ReaderDomainTests
+    dependencies:
+      - target: ReaderDomain
+      - target: TXTCore
+      - package: GRDB
+        product: GRDB
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
 
   TXTCoreTests:
     type: bundle.unit-test
@@ -88,6 +134,16 @@ targets:
         SWIFT_OPTIMIZATION_LEVEL: "-O"
 
 schemes:
+  ReaderDomain:
+    build:
+      targets:
+        ReaderDomain: all
+        ReaderDomainTests: [test]
+    test:
+      config: Debug
+      targets:
+        - ReaderDomainTests
+
   YueJing:
     build:
       targets:

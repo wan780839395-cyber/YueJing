@@ -1,0 +1,72 @@
+# Task 3：TXT 阅读闭环（源码冻结，首次云验证待执行）
+
+本批基线 `0886cfe9ff7e0955183ca56a16500be808853690`。Task 3 本地实现的25个文件已保存并核对哈希。用户随后明确批准必要云配置、提交推送至既有公开仓库及一次手动完整验证；原25+新增8项真实测试和实际 App 编译全通过后才打同提交未签名 IPA。此前目录只读检查不限制本批；任何失败停止，不自动修复/重跑。本批不改已完成业务源码或断言，旧 TXTCore、25项回归、性能样本/脚本/工作流保持原样。此前模拟器成绩不代表本批阅读 UI、GRDB 或真机成绩。
+
+## 文件与层次
+
+- `App/ContentView.swift`、`App/Library/`：SwiftUI 书架、文件选择、同段编码确认；细粒度 MainActor ObservableObject/Published，不使用 Observation。
+- `Sources/ReaderDomain/LibraryStore.swift`、`LibrarySchema.swift`：GRDB 迁移、书籍/实际编码/版本、原始字节锚点和设置；同步事务只在独立存储 actor 内执行。
+- `LibraryService.swift`：只读安全作用域与协调复制、严格解码/歧义预览、去重和打开。通过既有 TXTProcessor actor 工作，不改内核接口。
+- `ReadingLayoutEngine.swift`、`ReadingWindow.swift`：后台 actor 仅为当前锚点生成最多 7 段，目标每段 512 个 UTF-16 单元，使用最多 1024 单元的有界 look-ahead，以真实完整排版行结尾（实际段长不超过1024），不把缓冲末尾强制当作换行，也不在切片间新增间距/缩进；边界对齐字素。CoreText 负责断行/几何，跨 actor 只返回 String、数值与类型化范围，不返回 CF 对象。
+- `App/Reading/`：可复用 UITableView 单元绘制有限预断行文字；目录、上下滚动、字号/行距/背景。UI 线程仅绘制有限行，没有整书/整章 SwiftUI Text，也不预建全部视图。
+- `Tests/ReaderDomainTests/LibraryWorkflowTests.swift`：8 项非 UI 回归声明，独立 ReaderDomain scheme/target；原 TXTCore scheme 不塞入应用测试。
+
+## 固定依赖与兼容性
+
+仅官方 SPM `https://github.com/groue/GRDB.swift.git`，`exactVersion: 7.0.0`，未在 Windows 解析依赖。该版本官方 Package.swift 声明 Swift tools 6.0、语言 v6、最低 iOS13，符合当前 Xcode16.4 / Swift6.1.2、语言6.0、最低iOS16.6声明约束；这不是编译实测。官方未修改 MIT 正文在 `App/Resources/GRDB-LICENSE.txt`，明确加入资源构建阶段，设置页可查看。未给自有项目新增许可证。
+
+## 导入与提交约定
+
+文件选择后只协调读取并复制到 Application Support/YueJing/Imports；安全作用域覆盖输入、协调 URL 和复制后副本的普通文件检查，目录/符号链接明确拒绝，不把外部链接当永久副本。在复制完成/失败时立即释放安全作用域，不持久化外部 URL。解码只读应用副本。自动识别明确时直接处理；歧义时完整验证候选，定位首个差异附近的共同原始字节区间，同段展示可读预览和取消，确认后记录实际编码与文档版本。
+
+文件以原始 SHA-256 命名存入 Books，SQLite 存书架。提交与取消在存储 actor 串行裁决；取消先赢不提交，SQLite 提交先赢则 UI 显示已完成，不谎报取消。文件先移入、数据库事务失败则移除本次文件；意外进程退出产生的可识别孤立副本在下次数据库成功打开后清理。系统文件与原文件不删改。空/损坏/不支持输入不生成书架行，取消清理临时副本。
+
+重复原字节只返回既有书籍，保留既有编码/版本/进度。若应用副本缺失，同一原文件重导入会补回副本。已存在但损坏的副本只检测/阻止读取并保留记录，不承诺当前已实现覆盖修复、书籍删除或文件管理界面。
+
+## 位置、竞态与保存
+
+锚点为书籍 ID + 文档版本 + `raw-byte-v1` 原始 byte offset + 行内可见比例，不保存页码/百分比。打开先显式按已确认编码解码并核对原始 ID/版本；恢复还需通过 TXTCore 精确边界检查。旧版本/单位不匹配的位置不会应用或立即用零位置覆盖。
+
+滚动位置来自当前 viewport 与实际行的交集，不来自 willDisplay/预取/下一章。频繁滚动只改阅读 VM 私有值，700ms 合并保存；设置350ms合并。返回及场景 inactive/background 尽量及时 flush，不承诺系统强杀前未落盘的最后瞬间。重复字号/宽度重排保留语义原始锚点，未再次手动滚动时不改写为新换行的更早行首。
+
+存储检查会话 UUID、版本和单调序号，旧回调不能覆盖新序号或新会话。关闭先在 actor 内撤销旧会话后续写权限，即使最终锚点非法或数据库失败也不恢复权限；最终保存错误会显示，允许重试或明确保留已保存位置退出，不假装保存成功。旧 close 不关闭新会话。
+
+后台窗口结果同时核对请求 generation、可见位置 revision 和当前交互状态；滚动/目录等新意图使旧结果失效，交互结束按最新锚点重请求。界面真正移除时关闭会话，正常设置/目录 sheet 不触发关闭。
+
+## 边界与验证
+
+本地只能做范围/保护哈希/语法文本与小型 SQL 约定核验；没有 Swift/Xcode 原生编译、8 项业务测试执行或界面验收。正文暂不支持选字/全文搜索/左右翻页；极长单个字素无法装入有界段时明确报错，不拆坏字符。保留整本文本/精确索引和一个后台 NSString 视图，不宣称 UI 已具备常量内存或继承内核性能成绩。
+
+本批新增 `.github/workflows/task3-validate.yml` 与 `scripts/validate_task3.py`，复用既有 `scripts/package_ipa.py`，不改旧工作流或打包脚本。单次 attempt1 顺序：核对固定工具链和生成工程→解析官方 GRDB7.0.0 并记录实际 revision→发现已安装 arm64 iPhone 模拟器→原25项和新增8项分别运行且逐项核对实际通过记录/总数/未跳过→编译真实 Release iPhoneOS arm64 App→检查动态框架及 rpath 可达性、GRDB实际资源/许可与未签名状态→同提交 IPA 并逐文件比较打包字节。任何一步失败均不继续打包或重跑。原始日志、原始退出码、xcresult 和依赖记录以独立证据 artifact 保留；成功 IPA 单独 artifact，均保留3天。结果仅保存 ignored artifacts 与云端，不追加结果提交。
+
+随后用户沿既有签名安装流程在 iPhone13/iOS16.6.1 进行普通导入、滚动、目录、设置和重开验收。来源移除/撤销访问后的稳定副本验证只使用自造可丢弃测试TXT或临时副本，绝不删改个人原书。缺失应用副本、SQLite写入失败等故障由合成非UI测试或另行授权的受控验证覆盖，不要求用户操作应用目录或系统文件。只有设备实际结果能作为阅读闭环验收。
+
+## 本批完整文件清单
+
+- `.github/workflows/task3-validate.yml`
+- `scripts/validate_task3.py`
+- `AGENTS.md`
+- `App/ContentView.swift`
+- `App/Library/EncodingChoiceView.swift`
+- `App/Library/LibraryViewModel.swift`
+- `App/Reading/ReaderScreen.swift`
+- `App/Reading/ReaderSettingsView.swift`
+- `App/Reading/ReaderViewController.swift`
+- `App/Reading/ReaderViewModel.swift`
+- `App/Reading/ReaderViewport.swift`
+- `App/Reading/ReadingCell.swift`
+- `App/Resources/GRDB-LICENSE.txt`
+- `README.md`
+- `Sources/ReaderDomain/ImportModels.swift`
+- `Sources/ReaderDomain/LibraryBook.swift`
+- `Sources/ReaderDomain/LibraryError.swift`
+- `Sources/ReaderDomain/LibrarySchema.swift`
+- `Sources/ReaderDomain/LibraryService.swift`
+- `Sources/ReaderDomain/LibraryStore.swift`
+- `Sources/ReaderDomain/ReaderPreferences.swift`
+- `Sources/ReaderDomain/ReadingLayoutEngine.swift`
+- `Sources/ReaderDomain/ReadingPosition.swift`
+- `Sources/ReaderDomain/ReadingWindow.swift`
+- `Tests/ReaderDomainTests/LibraryWorkflowTests.swift`
+- `docs/TASK3_LOCAL_IMPLEMENTATION.md`
+- `project.yml`

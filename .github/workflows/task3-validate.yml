@@ -1,0 +1,161 @@
+name: Task 3 tests and conditional unsigned IPA
+run-name: Task 3 validate once · ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out this source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the selected native toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          test -d "$DEVELOPER_DIR"
+          {
+            printf 'Source: %s\n' "$GITHUB_SHA"
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun swift --version
+          } 2>&1 | tee artifacts/task3/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
+          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
+          test "$(uname -m)" = arm64
+
+      - name: Verify XcodeGen and generate the project
+        run: |
+          set -euo pipefail
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          test -x _tooling/xcodegen/bin/xcodegen
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
+          python3 -c 'import os, re, sys; from pathlib import Path; actual = re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", Path("artifacts/task3/xcodegen.log").read_text()); sys.exit(0 if actual == [os.environ["XCODEGEN_VERSION"]] else "Unexpected XcodeGen version")'
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
+            2>&1 | tee artifacts/task3/project-generation.log
+
+      - name: Resolve the official pinned GRDB dependency once
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -resolvePackageDependencies -project YueJing.xcodeproj -scheme YueJing \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            2>&1 | tee artifacts/task3/dependency-resolution.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/dependency-resolution-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 scripts/validate_task3.py resolved
+
+      - name: Select an installed arm64 iPhone simulator and verify test targets
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > artifacts/task3/devices.json
+          xcrun simctl list runtimes -j > artifacts/task3/runtimes.json
+          python3 scripts/validate_task3.py select-simulator
+          python3 scripts/validate_task3.py settings
+
+      - name: Run the original 25 TXTCore tests once
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme TXTCore -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/Task3Tests -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/TXTCoreTests.xcresult \
+            -parallel-testing-enabled NO -only-testing:TXTCoreTests \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/task3/TXTCoreTests.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/TXTCoreTests-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 scripts/validate_task3.py test-counts TXTCoreTests 25
+
+      - name: Run the new 8 ReaderDomain tests once
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme ReaderDomain -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/Task3Tests -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/ReaderDomainTests.xcresult \
+            -parallel-testing-enabled NO -only-testing:ReaderDomainTests \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/task3/ReaderDomainTests.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/ReaderDomainTests-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 scripts/validate_task3.py test-counts ReaderDomainTests 8
+
+      - name: Compile the actual unsigned iPhoneOS arm64 App
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
+      - name: Validate embedded dependencies and resources then package the same commit
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_task3.py package-gate 2>&1 | tee artifacts/task3/dependency-gate.log
+          python3 scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
+          python3 scripts/validate_task3.py verify-ipa 2>&1 | tee artifacts/task3/ipa-verification.log
+
+      - name: Preserve raw evidence from this single attempt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Publish the validated unsigned IPA separately
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/YueJing-unsigned.ipa
+            artifacts/manifest.json
+            artifacts/SHA256SUMS
+            artifacts/task3/app-dependency-gate.json
+            artifacts/task3/ipa-verification.json
+          retention-days: 3
+          if-no-files-found: error
