@@ -1,4 +1,11 @@
-# YueJing：当前文件选择入口桥接批次（2026-10-27）
+# YueJing：当前类型过滤单因素批次（2026-10-27）
+
+- 用户已批准本批单因素过滤、必要准入回归/计数与说明、公开push和一次完整验证IPA。唯一根为本仓库，基线d0d44cd已有43项及桥接IPA通过；真机导入根因仍未证实，本批不再读取或迁移旧项目。
+- 唯一生产改动为DocumentPickerBridge构造器plainText改data；asCopy=false、单选、plist/entitlements、delegate/session/route/呈现和后续LibraryService安全域/协调复制/解码/GRDB/排版完全不动。选后仍须fileURL与txt扩展名、普通文件/非符链、严格解码，不扩大到任意文件业务。
+- 原43项测试保持，新增1项选后准入回归覆盖非TXT和非file URL在源访问前拒绝且不入架；总计25+19=44项。固定工具链与依赖保持，唯一workflow_dispatch attempt1；任一步失败停止，不修补重推/重跑，不擅自追加asCopy/plist实验，结果仅存ignored artifacts。
+- 同一iPhone13/iOS16.6.1、同9.5MB TXT、同路径收到delegate选中才支持过滤因素；单元测试/编译/出包均不代表已复现或修好真机。固定无隐私诊断保留，不上传遥测。三个用户本地文件与Skills保持，不执行脚本、不安装/扩权/新增费用、不force、不触发旧CI、不关机。
+
+## 历史：文件选择入口桥接批次
 
 - 用户已批准本批显式UIDocumentPicker入口、必要路由回归/计数与范围文档、普通push及一次完整验证打包。唯一根为本仓库，不新建任务/替代目录。基线cb1ce89已有38项与诊断IPA通过，真机仍反馈点TXT无反应；旧可选attempt捕获有丢记录路径，不能据无记录推断系统没回调或iCloud无权限。
 - 仅替换文件选择入口：稳定非空不可变UUID、UIDocumentPickerDelegate选中/空结果/取消、明确owner确认dismiss后交接；关闭与delegate先后均处理，旧/重复回调不能覆盖或重复导入。不用onDisappear推断结果。

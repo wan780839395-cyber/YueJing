@@ -1,6 +1,16 @@
 # Task 3：TXT 阅读闭环与导入诊断
 
-## 当前：文件选择入口桥接批次
+## 当前：类型过滤单因素批次
+
+基线d0d44cd / run40524966144已有43项及真实App/IPA验证。真机同TXT在iCloud与本地均无法选中，根因未知。本批只将DocumentPickerBridge构造器的plainText改为data；asCopy=false、单选、所有plist/entitlements、delegate持有、Session/Route、呈现和后续生产链路均不改，不迁移或重读旧项目。
+
+现有LibraryService先检查fileURL及txt扩展名，再申请安全域/检查普通文件与符链/协调复制，随后只对应用副本严格解码。本批保留这些边界。原43项覆盖空/损坏、目录和符链，但没有非TXT选后拒绝的直接回归，因此仅新增1项合成测试，确认缺失bin及非file的txt URL均精确抛notTXT、没有源访问阶段、没有书架或暂存/Books文件。原断言保持，总计25+19=44项，最小同步现有手动workflow/helper。
+
+一次验证全部测试、真实App编译与IPA门通过才交付；任一步失败停，不修补重推/重跑，不同批改变copy/open模式或plist。此提交冻结时本批尚未原生验证；纯合成准入测试不代表真实FileProvider或iCloud选择成功。用户三个本地文件与Skills不改不发布，诊断不新增私有字段或遥测。
+
+真机仅安装新包后，在同手机同路径选同一9.5MB TXT；收到delegate选中才支持过滤因素，仍失败则关闭回书架反馈delegate/最后阶段，不提供书籍。此包用于单因素验证，不提前宣布修复。
+
+## 历史：文件选择入口桥接批次
 
 基线cb1ce89 / run40518279736已通过38项及诊断IPA；用户仍在真机点TXT无反应，截图只记录等待与关闭。旧ContentView的可选attempt捕获可跳过记录，故不能确定OS未回调或指认权限根因。本批只修入口与诊断交接。
 
