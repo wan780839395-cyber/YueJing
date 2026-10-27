@@ -1,0 +1,55 @@
+name: YueJing
+
+options:
+  minimumXcodeGenVersion: "2.46.0"
+  xcodeVersion: "16.4"
+  deploymentTarget:
+    iOS: "16.6"
+  developmentLanguage: zh-Hans
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    IPHONEOS_DEPLOYMENT_TARGET: "16.6"
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  YueJing:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: App
+    settings:
+      base:
+        PRODUCT_NAME: YueJing
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.app
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: 阅境
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+
+schemes:
+  YueJing:
+    build:
+      targets:
+        YueJing: all
+    run:
+      config: Debug
+    archive:
+      config: Release

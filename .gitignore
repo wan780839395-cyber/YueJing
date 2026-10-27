@@ -1,0 +1,23 @@
+# User-installed skills stay local.
+/.agents/
+/skills-lock.json
+
+# XcodeGen output; edit project.yml instead.
+/*.xcodeproj/
+/*.xcworkspace/
+
+# Local and cloud build output.
+/build/
+/artifacts/
+/_tooling/
+DerivedData/
+*.xcresult/
+*.ipa
+*.dSYM/
+
+# Local editor and Python cache files.
+.DS_Store
+xcuserdata/
+*.xcuserstate
+__pycache__/
+*.pyc

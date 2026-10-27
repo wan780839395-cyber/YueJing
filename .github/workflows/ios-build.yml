@@ -1,0 +1,89 @@
+name: YueJing Task 1 unsigned iOS build
+run-name: Task 1 unsigned iOS · ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out this source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the selected native toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          test -d "$DEVELOPER_DIR"
+          {
+            printf 'Source: %s\n' "$GITHUB_SHA"
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun swift --version
+          } 2>&1 | tee artifacts/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/toolchain.log
+
+      - name: Verify XcodeGen release and generate the project
+        run: |
+          set -euo pipefail
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          test -x _tooling/xcodegen/bin/xcodegen
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/xcodegen.log
+          python3 -c 'import os, re, sys; from pathlib import Path; actual = re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", Path("artifacts/xcodegen.log").read_text()); sys.exit(0 if actual == [os.environ["XCODEGEN_VERSION"]] else "Unexpected XcodeGen version output")'
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
+            2>&1 | tee artifacts/project-generation.log
+
+      - name: Build one unsigned iPhoneOS arm64 App
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project YueJing.xcodeproj \
+            -scheme YueJing \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            -resultBundlePath artifacts/build.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/build.log
+
+      - name: Validate the App and package an unsigned IPA
+        run: |
+          set -euo pipefail
+          python3 scripts/package_ipa.py 2>&1 | tee artifacts/package.log
+
+      - name: Preserve this attempt's products and raw evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: yuejing-task1-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/YueJing-unsigned.ipa
+            artifacts/manifest.json
+            artifacts/SHA256SUMS
+            artifacts/*.log
+            artifacts/build.xcresult
+          retention-days: 3
+          if-no-files-found: warn
