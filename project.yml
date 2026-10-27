@@ -44,6 +44,33 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
 
+  TXTCore:
+    type: framework
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Sources/TXTCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.txtcore
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+
+  TXTCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Tests/TXTCoreTests
+    dependencies:
+      - target: TXTCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.txtcore.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
+
 schemes:
   YueJing:
     build:
@@ -53,3 +80,13 @@ schemes:
       config: Debug
     archive:
       config: Release
+
+  TXTCore:
+    build:
+      targets:
+        TXTCore: all
+        TXTCoreTests: [test]
+    test:
+      config: Debug
+      targets:
+        - TXTCoreTests

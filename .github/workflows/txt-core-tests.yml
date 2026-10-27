@@ -1,0 +1,170 @@
+name: TXTCore native unit tests
+run-name: Task 2 TXTCore · ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out this source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify the selected native toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/txt-core-tests
+          test -d "$DEVELOPER_DIR"
+          {
+            printf 'Source: %s\n' "$GITHUB_SHA"
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun swift --version
+          } 2>&1 | tee artifacts/txt-core-tests/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/txt-core-tests/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/txt-core-tests/toolchain.log
+
+      - name: Verify XcodeGen and generate the project
+        run: |
+          set -euo pipefail
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          test -x _tooling/xcodegen/bin/xcodegen
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/txt-core-tests/xcodegen.log
+          python3 -c 'import os, re, sys; from pathlib import Path; actual = re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", Path("artifacts/txt-core-tests/xcodegen.log").read_text(encoding="utf-8")); sys.exit(0 if actual == [os.environ["XCODEGEN_VERSION"]] else "Unexpected XcodeGen version")'
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
+            2>&1 | tee artifacts/txt-core-tests/project-generation.log
+
+      - name: Select an already installed supported iOS simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > artifacts/txt-core-tests/devices.json
+          xcrun simctl list runtimes -j > artifacts/txt-core-tests/runtimes.json
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          out = Path("artifacts/txt-core-tests")
+          devices = json.loads((out / "devices.json").read_text(encoding="utf-8"))["devices"]
+          runtimes = json.loads((out / "runtimes.json").read_text(encoding="utf-8"))["runtimes"]
+          sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], text=True).strip()
+          def version(value):
+              return tuple((list(map(int, value.split("."))) + [0, 0, 0])[:3])
+          choices = []
+          for runtime in runtimes:
+              if not runtime.get("isAvailable") or not runtime["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-"):
+                  continue
+              if version(runtime["version"]) < version("16.6") or version(runtime["version"]) > version(sdk):
+                  continue
+              for device in devices.get(runtime["identifier"], []):
+                  if device.get("isAvailable") and device["name"].startswith("iPhone"):
+                      choices.append((version(runtime["version"]), device["name"], runtime, device))
+          if not choices:
+              raise SystemExit("No installed available iPhone simulator supported by the selected SDK; no runtime will be installed")
+          _, _, runtime, device = max(choices, key=lambda item: (item[0], item[1]))
+          architecture = platform.machine()
+          if architecture not in ("arm64", "x86_64"):
+              raise SystemExit("Unsupported simulator host architecture: " + architecture)
+          supported = runtime.get("supportedArchitectures")
+          if supported and architecture not in supported:
+              raise SystemExit("Selected installed runtime does not support the host architecture")
+          selection = dict(device_name=device["name"], udid=device["udid"], runtime=runtime["name"],
+                           runtime_version=runtime["version"], sdk=sdk, architecture=architecture, physical_device=False)
+          (out / "simulator-selection.json").write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(selection, indent=2))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write("SIMULATOR_UDID=" + device["udid"] + "\nSIMULATOR_ARCH=" + architecture + "\n")
+          PY
+
+      - name: Check the effective unit target settings
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          out = Path("artifacts/txt-core-tests")
+          args = ["xcodebuild", "-project", "YueJing.xcodeproj", "-target", "TXTCoreTests", "-configuration", "Debug",
+                  "-sdk", "iphonesimulator",
+                  "-showBuildSettings", "-json", "CODE_SIGNING_ALLOWED=NO", "ARCHS=" + os.environ["SIMULATOR_ARCH"]]
+          result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+          (out / "settings-diagnostics.log").write_text(result.stderr, encoding="utf-8")
+          if result.returncode:
+              print(result.stderr, file=sys.stderr)
+              raise SystemExit(result.returncode)
+          rows = json.loads(result.stdout)
+          keys = ["PRODUCT_TYPE", "SWIFT_VERSION", "SWIFT_STRICT_CONCURRENCY", "IPHONEOS_DEPLOYMENT_TARGET",
+                  "ARCHS", "TEST_HOST", "BUNDLE_LOADER", "TEST_TARGET_NAME"]
+          selected = {row["target"]: {key: row["buildSettings"].get(key, "") for key in keys}
+                      for row in rows if row.get("target") in ("TXTCore", "TXTCoreTests")}
+          (out / "effective-test-settings.json").write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(selected, indent=2))
+          tests = selected.get("TXTCoreTests", {})
+          if tests.get("PRODUCT_TYPE") != "com.apple.product-type.bundle.unit-test":
+              raise SystemExit("Expected an ordinary TXTCoreTests unit-test target")
+          if any(tests.get(key) for key in ("TEST_HOST", "BUNDLE_LOADER", "TEST_TARGET_NAME")):
+              raise SystemExit("TXTCoreTests unexpectedly binds an application host")
+          if tests.get("SWIFT_VERSION") != "6.0" or tests.get("IPHONEOS_DEPLOYMENT_TARGET") != "16.6":
+              raise SystemExit("Unexpected language mode or minimum deployment target")
+          PY
+
+      - name: Run TXTCoreTests once with the native simulator
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild \
+            -project YueJing.xcodeproj -scheme TXTCore -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/Task2DerivedData \
+            -resultBundlePath artifacts/txt-core-tests/native-tests.xcresult \
+            -parallel-testing-enabled NO -only-testing:TXTCoreTests \
+            CODE_SIGNING_ALLOWED=NO "ARCHS=${SIMULATOR_ARCH}" ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/txt-core-tests/xcodebuild-test.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/txt-core-tests/test-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
+      - name: Record actual native test counts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          out = Path("artifacts/txt-core-tests")
+          declared = sum(len(re.findall(r"@Test\s+func\s+", path.read_text(encoding="utf-8")))
+                         for path in Path("Tests/TXTCoreTests").glob("*.swift"))
+          log = (out / "xcodebuild-test.log").read_text(encoding="utf-8", errors="replace")
+          matches = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
+          report = dict(declared_tests=declared, native_summaries=[dict(executed=int(count), result=result) for count, result in matches])
+          (out / "test-counts.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          if len(matches) != 1 or int(matches[0][0]) != declared or matches[0][1] != "passed" or declared == 0:
+              raise SystemExit("Actual native test count/pass evidence does not match the declared test target")
+          PY
+
+      - name: Preserve raw native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: txt-core-tests-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/txt-core-tests/
+          retention-days: 3
+          if-no-files-found: warn
