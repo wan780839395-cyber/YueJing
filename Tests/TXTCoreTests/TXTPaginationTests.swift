@@ -38,7 +38,7 @@ struct TXTPaginationTests {
         for layout in [TXTPageLayout(width: 0, height: 100), TXTPageLayout(width: .nan, height: 100),
                        TXTPageLayout(width: 100, height: .infinity), TXTPageLayout(width: 100, height: 100, lineSpacing: -1),
                        TXTPageLayout(width: 1, height: 1, fontSize: 18)] {
-            #expect(throws: TXTError.self) { try await processor.paginate(document, layout: layout) }
+            await #expect(throws: TXTError.self) { try await processor.paginate(document, layout: layout) }
         }
         let empty = try await processor.decode(Data())
         #expect(try await processor.paginate(empty, layout: TXTPageLayout(width: 100, height: 100)).isEmpty)
