@@ -1,4 +1,11 @@
-# YueJing：当前类型过滤单因素批次（2026-10-27）
+# YueJing：当前源码会诊与复制导入批次（2026-10-28）
+
+- 用户新增批准在本地融合 ask_architect.py 的 idea/review 两模式，保留原配置与 idea 记录；review 仅发送指定问题和两份明确 Swift 源码，不自动附带看板或历史。先离线验证，再一次真实会诊。脚本、记录、看板、Skills 和私有评审证据均不公开提交。
+- 基线 8f5d5db 已有 25+19=44 项原生测试、App 编译与 IPA 通过，真机仍未通过。会诊完成后，唯一生产改动为 DocumentPickerBridge 使用 [.item]、asCopy=true，保持单选及现有 session/Coordinator 强持有、一次路由和退出交接；后续 fileURL/txt/普通文件非符链准入、安全域配对、协调私有复制、严格解码、GRDB 和排版保持。
+- Gemini 建议属于待审资料，不直接执行。未提供真机/系统回调证据，不能宣布根因或真机修复；复制模式也可能在云端物化时失败。保留安全诊断，不盲改 plist、不扩大权限或读取旧项目。
+- 保留原44项断言与工具链；普通提交/push，仅一次现有 task3-validate workflow_dispatch、attempt1，全部44项及真实设备目标编译、资源/依赖/arm64/iOS16.6/未签名 IPA 校验通过才交付同提交 IPA。任一步失败即停，不自动补丁重推或重跑；结果仅存 ignored artifacts。成功后停止等待真机，不关机。
+
+## 历史：类型过滤单因素批次（2026-10-27）
 
 - 用户已批准本批单因素过滤、必要准入回归/计数与说明、公开push和一次完整验证IPA。唯一根为本仓库，基线d0d44cd已有43项及桥接IPA通过；真机导入根因仍未证实，本批不再读取或迁移旧项目。
 - 唯一生产改动为DocumentPickerBridge构造器plainText改data；asCopy=false、单选、plist/entitlements、delegate/session/route/呈现和后续LibraryService安全域/协调复制/解码/GRDB/排版完全不动。选后仍须fileURL与txt扩展名、普通文件/非符链、严格解码，不扩大到任意文件业务。

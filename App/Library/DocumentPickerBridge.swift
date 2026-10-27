@@ -10,8 +10,8 @@ struct DocumentPickerBridge: UIViewControllerRepresentable {
     func makeCoordinator() -> Coordinator { session.coordinator }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Open the external security-scoped URL; LibraryService still makes the durable private copy.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false)
+        // Let the provider supply an imported copy; LibraryService still validates TXT and owns the durable copy.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker

@@ -1,6 +1,16 @@
 # Task 3：TXT 阅读闭环与导入诊断
 
-## 当前：类型过滤单因素批次
+## 当前：源码会诊与复制导入批次（2026-10-28）
+
+基线 `8f5d5db` / run `40533187004` 已有 25+19=44 项原生测试与真实 App/IPA 验证，真机导入仍未通过。本批先完成本地脚本双模式融合及离线边界验证，再仅向现有兼容接口发送指定问题、DocumentPickerBridge 和 LibraryService 的真实源码，获得一次实际会诊响应。未发送看板或 idea 历史；脚本、配置、记录与脱敏评审证据均不在公开提交范围。
+
+独立审查确认 session 强持有唯一 Coordinator，ViewModel 保留 session，原 route 对退出先后、旧/重复/冲突回调和一次消费已有回归。LibraryService 先作 URL/txt 准入，在源元数据与协调复制期间持有安全域，仅成功申请才释放；false 不直接报失败。Gemini 对协调前元数据检查的云端风险推断并非已证实根因，也不能证明选择器未回调的原因。本批不移除源非符链检查、不删除已有目标、不改变 delegate 或后续生产链路。
+
+唯一生产修改为 `UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)`。系统先交付导入副本，应用仍经原服务取得自己的持久副本；选后只接受 file URL、txt 扩展名、普通非符链文件并严格解码。此语义依据 Apple 的 [初始化接口](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller/init(foropeningcontenttypes:ascopy:)) 和 [文档导入说明](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/DocumentPickerProgrammingGuide/AccessingDocuments/AccessingDocuments.html)。复制模式不保证云端物化成功，不新增下载、账号权限或 plist 声明。
+
+本批不新增重复的纯路由测试，原44项声明与断言完整保留，包含本地 TXT 导入、非TXT/非file拒绝、目录/符链、编码/取消/持久化与路由先后。它们不覆盖 UIKit/FileProvider 真机行为。保留固定工具链及 workflow，仅一次 dispatch attempt1，44项全部真实通过、实际 iPhoneOS App 编译与现有 IPA 门通过后才交付。失败即停，不自动修复或重跑；此提交冻结时尚未验证，本地静检不代表编译/出包/真机验收。
+
+## 历史：类型过滤单因素批次
 
 基线d0d44cd / run40524966144已有43项及真实App/IPA验证。真机同TXT在iCloud与本地均无法选中，根因未知。本批只将DocumentPickerBridge构造器的plainText改为data；asCopy=false、单选、所有plist/entitlements、delegate持有、Session/Route、呈现和后续生产链路均不改，不迁移或重读旧项目。
 
