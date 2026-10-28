@@ -6,7 +6,10 @@ struct ReaderSettingsView: View {
     @Binding var preferences: ReaderPreferences
     let changed: @MainActor () -> Void
     var openingSummary: String?
-    @Environment(\.dismiss) private var dismiss
+    let isActive: @MainActor () -> Bool
+    let close: @MainActor () -> Void
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @AccessibilityFocusState private var doneFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -37,10 +40,21 @@ struct ReaderSettingsView: View {
                     NavigationLink("开源许可") { GRDBLicenseView() }
                 }
             }
+            .scrollContentBackground(.hidden)
             .navigationTitle("阅读设置")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-            .onChange(of: preferences) { _ in changed() }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.visible, for: .navigationBar)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("完成") { if isActive() { close() } }.frame(minHeight: 44).accessibilityFocused($doneFocused)
+            } }
+            .onChange(of: preferences) { _ in if isActive() { changed() } }
+            .task {
+                guard voiceOver else { return }
+                await Task.yield()
+                if !Task.isCancelled, isActive() { doneFocused = true }
+            }
         }
+        .accessibilityAction(.escape) { if isActive() { close() } }
     }
 }
 

@@ -16,6 +16,7 @@ final class ReadingCell: UITableViewCell {
         backgroundColor = preferences.theme.background
         canvas.render(slice, preferences: preferences)
     }
+    func setToolActions(_ actions: [UIAccessibilityCustomAction]) { canvas.accessibilityCustomActions = actions }
 }
 
 @MainActor

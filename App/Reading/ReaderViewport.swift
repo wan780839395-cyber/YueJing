@@ -21,6 +21,8 @@ struct ReaderViewport: UIViewControllerRepresentable {
     let onSettled: @MainActor (ReadingAnchor, UUID) -> Bool
     let onRemoved: @MainActor () -> Void
     let onApplied: @MainActor (UUID) -> Void
+    let toolIntent: @MainActor () -> UUID
+    let onToolsInteraction: @MainActor (ReadingToolsInteraction) -> Void
 
     func makeUIViewController(context: Context) -> ReaderViewController {
         let controller = ReaderViewController()
@@ -28,10 +30,12 @@ struct ReaderViewport: UIViewControllerRepresentable {
         controller.onAnchor = onAnchor; controller.onExtend = onExtend; controller.onWidth = onWidth
         controller.onSettled = onSettled
         controller.onRemoved = onRemoved
+        controller.toolIntent = toolIntent; controller.onToolsInteraction = onToolsInteraction
         return controller
     }
 
     func updateUIViewController(_ controller: ReaderViewController, context: Context) {
+        controller.toolIntent = toolIntent; controller.onToolsInteraction = onToolsInteraction
         controller.setTheme(preferences.theme)
         guard let window, controller.window?.id != window.id else { return }
         let navigation = handle.onNextRestoreIsNavigation

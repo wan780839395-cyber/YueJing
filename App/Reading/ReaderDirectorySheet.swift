@@ -9,11 +9,20 @@ struct ReaderDirectorySheet: View {
     let presentationID: UUID
     let isActive: @MainActor () -> Bool
     let currentAnchor: @MainActor () -> ReadingAnchor?
+    let close: @MainActor () -> Void
+    let appearance: ReaderToolAppearance
     let selected: @MainActor (TXTChapter) -> Void
-    @Environment(\.dismiss) private var dismiss
     @AccessibilityFocusState private var focusedChapterID: String?
+    @AccessibilityFocusState private var closeFocused: Bool
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            HStack {
+                Text("目录").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button { if active { close() } } label: { Label("关闭目录", systemImage: "xmark") }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    .accessibilityFocused($closeFocused)
+            }.padding(.horizontal, 16)
             ScrollViewReader { proxy in
             List {
                 if let message = model.state.message {
@@ -26,9 +35,10 @@ struct ReaderDirectorySheet: View {
                     if page.chapters.isEmpty { Text("暂无目录。") }
                     ForEach(Array(page.chapters.enumerated()), id: \.element.id) { item in
                         let current = page.currentIndex == page.start + item.offset
+                        let owner = model.ownerRevision
                         Button {
-                            guard active else { return }
-                            selected(item.element); dismiss()
+                            guard active, model.ownerRevision == owner else { return }
+                            selected(item.element)
                         } label: {
                             HStack(alignment: .top, spacing: 12) {
                                 Text(item.element.title ?? "正文开头")
@@ -41,6 +51,7 @@ struct ReaderDirectorySheet: View {
                         .accessibilityFocused($focusedChapterID, equals: item.element.id)
                         .accessibilityValue(current ? "当前章节" : "")
                         .accessibilityHint("阅读本章")
+                        .listRowBackground(current ? appearance.accent.opacity(0.08) : appearance.surface)
                     }
                 } else if !model.state.loading, model.state.message == nil {
                     Text("正文显示后会定位当前章节。")
@@ -62,22 +73,27 @@ struct ReaderDirectorySheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
             .task(id: model.state.reveal?.id) {
                 guard let reveal = model.state.reveal else { return }
                 await Task.yield()
                 guard !Task.isCancelled, active, model.state.reveal == reveal else { return }
                 proxy.scrollTo(reveal.chapterID, anchor: .center)
-                if UIAccessibility.isVoiceOverRunning { focusedChapterID = reveal.chapterID }
+                if UIAccessibility.isVoiceOverRunning { closeFocused = false; focusedChapterID = reveal.chapterID }
             }
             }
-            .navigationTitle("目录").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { if active { dismiss() } }.frame(minHeight: 44) } }
             .task(id: model.ownerRevision) {
                 guard isActive(), !Task.isCancelled else { return }
                 model.present(around: currentAnchor(), presentation: presentationID)
             }
-            .onDisappear { model.dismiss(presentation: presentationID); focusedChapterID = nil }
+            .task(id: model.state.presentationID) {
+                guard UIAccessibility.isVoiceOverRunning, active else { return }
+                await Task.yield()
+                if !Task.isCancelled, active, model.state.reveal == nil { closeFocused = true }
+            }
+            .onDisappear { model.dismiss(presentation: presentationID); focusedChapterID = nil; closeFocused = false }
         }
+        .accessibilityAction(.escape) { if active { close() } }
     }
     private var active: Bool { isActive() && model.state.ownsPresentation(presentationID) }
 }

@@ -1,8 +1,9 @@
 import ReaderDomain
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 @MainActor
-final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate {
+final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
     private(set) var window: ReadingWindow?
     var onAnchor: (@MainActor (ReadingAnchor, UUID) -> Void)?
@@ -10,10 +11,17 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     var onWidth: (@MainActor (Double) -> Void)?
     var onSettled: (@MainActor (ReadingAnchor, UUID) -> Bool)?
     var onRemoved: (@MainActor () -> Void)?
+    var toolIntent: (@MainActor () -> UUID)?
+    var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
     private var restoring = false
     private var userInputSinceRestore = false
     private var previousWidth = 0.0
+    private let toolsTap = ReadingToolsTapRecognizer()
+    private var tapIntent: UUID?
+    private var tapBeganDuringDeceleration = false
+    private var tapBeganDuringDragging = false
+    private var toolDecelerating = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -22,7 +30,21 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         table.showsVerticalScrollIndicator = false
         table.contentInset = UIEdgeInsets(top: 16, left: 0, bottom: 24, right: 0)
         table.register(ReadingCell.self, forCellReuseIdentifier: "text")
-        table.onUserIntent = { [weak self] in self?.userInputSinceRestore = true }
+        table.onUserIntent = { [weak self] in
+            self?.userInputSinceRestore = true; self?.onToolsInteraction?(.scrollingBegan)
+        }
+        toolsTap.addTarget(self, action: #selector(bodyTapped))
+        toolsTap.delegate = self
+        toolsTap.cancelsTouchesInView = false
+        toolsTap.delaysTouchesBegan = false
+        toolsTap.require(toFail: table.panGestureRecognizer)
+        toolsTap.onTouchBegan = { [weak self] in
+            guard let self else { return }
+            // Latch the beginning, not merely the eventual tap-up state after UIKit stops inertia.
+            tapBeganDuringDeceleration = tapBeganDuringDeceleration || table.isDecelerating || toolDecelerating
+            tapBeganDuringDragging = tapBeganDuringDragging || table.isDragging
+        }
+        table.addGestureRecognizer(toolsTap)
         view.addSubview(table)
     }
 
@@ -87,18 +109,53 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         guard let cell = tableView.dequeueReusableCell(withIdentifier: "text", for: indexPath) as? ReadingCell,
               let window, window.slices.indices.contains(indexPath.row) else { return UITableViewCell() }
         cell.render(window.slices[indexPath.row], preferences: window.preferences)
+        cell.setToolActions([
+            UIAccessibilityCustomAction(name: "显示阅读工具", target: self, selector: #selector(showToolsAccessibility)),
+            UIAccessibilityCustomAction(name: "退出阅读", target: self, selector: #selector(exitAccessibility))
+        ])
         return cell
     }
 
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { userInputSinceRestore = true }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === toolsTap, !UIAccessibility.isVoiceOverRunning else { return false }
+        let point = touch.location(in: table)
+        guard ReadingToolsGesturePolicy.central(x: Double(point.x), y: Double(point.y),
+            width: Double(table.bounds.width), height: Double(table.bounds.height),
+            originX: Double(table.bounds.minX), originY: Double(table.bounds.minY)) else { return false }
+        tapIntent = toolIntent?()
+        tapBeganDuringDeceleration = table.isDecelerating || toolDecelerating
+        tapBeganDuringDragging = table.isDragging
+        return true
+    }
+    @objc private func bodyTapped() {
+        guard toolsTap.state == .ended, let intent = tapIntent else { return }
+        let decision = ReadingToolsGesturePolicy.tap(beganDuringDeceleration: tapBeganDuringDeceleration,
+            dragging: tapBeganDuringDragging || table.isDragging, decelerating: table.isDecelerating,
+            voiceOver: UIAccessibility.isVoiceOverRunning)
+        // UIKit retains its stop-on-touch behavior. This bridge never adjusts the content offset.
+        onToolsInteraction?(.tap(intent, decision))
+    }
+    @objc private func showToolsAccessibility() -> Bool {
+        guard let onToolsInteraction else { return false }
+        onToolsInteraction(.showAccessibility); return true
+    }
+    @objc private func exitAccessibility() -> Bool {
+        guard let onToolsInteraction else { return false }
+        onToolsInteraction(.exitAccessibility); return true
+    }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        userInputSinceRestore = true; toolDecelerating = false
+        onToolsInteraction?(.scrollingBegan)
+    }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard !restoring, userInputSinceRestore, let window, let visible = actualVisibleAnchor() else { return }
         onAnchor?(visible, window.id)
     }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        toolDecelerating = decelerate
         if !decelerate { endedScrolling() }
     }
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { endedScrolling() }
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { toolDecelerating = false; endedScrolling() }
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { if userInputSinceRestore { endedScrolling() } }
 
     private func endedScrolling() {
@@ -108,6 +165,14 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         if (window.hasPrevious && (rows.min() ?? 9) == 0) || (window.hasNext && (rows.max() ?? 0) >= window.slices.count - 2) {
             onExtend?(visible, window.id)
         }
+    }
+}
+
+@MainActor
+private final class ReadingToolsTapRecognizer: UITapGestureRecognizer {
+    var onTouchBegan: (@MainActor () -> Void)?
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        onTouchBegan?(); super.touchesBegan(touches, with: event)
     }
 }
 
