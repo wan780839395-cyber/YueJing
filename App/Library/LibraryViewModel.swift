@@ -10,6 +10,8 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var importing = false
     @Published var encodingChoice: EncodingChoice?
     @Published var message: String?
+    @Published var notice: LibraryNotice?
+    @Published private(set) var importPresentation = LibraryImportPresentation()
     @Published private(set) var importDiagnostics = ImportDiagnosticState()
     @Published private(set) var fileSelection: FileSelectionSession?
     @Published private(set) var processingSummary: String?
@@ -44,6 +46,7 @@ final class LibraryViewModel: ObservableObject {
     func beginFileSelection() {
         guard canBeginFileSelection else { return }
         let id = UUID()
+        notice = nil
         selectionReceivedAt = nil; importMeasurements = []; processingSummary = nil
         importDiagnostics.begin(id)
         fileSelection = FileSelectionSession(id: id,
@@ -78,7 +81,7 @@ final class LibraryViewModel: ObservableObject {
         switch result {
         case .selected(let url): importFile(url, id: session.id)
         case .empty: showImportMessage("选择器返回了空结果，请重试。", id: session.id)
-        case .cancelled: showImportMessage("已取消文件选择，未开始导入。", id: session.id)
+        case .cancelled: notice = .selectionCancelled
         case .missingSelectedURL:
             importDiagnostics.record(.pickerHandoffMissing, for: session.id)
             showImportMessage("已收到选择回调，但待处理文件缺失，请重试。", id: session.id)
@@ -97,6 +100,7 @@ final class LibraryViewModel: ObservableObject {
             return
         }
         ticket = id; importing = true
+        importPresentation.begin(id)
         importDiagnostics.record(.accepted, for: id)
         importTask = Task {
             let observation = stageObservation(id: id)
@@ -127,7 +131,8 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func choose(_ encoding: TXTEncoding, for choice: EncodingChoice) {
-        guard let service, ticket == choice.id, encodingChoice?.id == choice.id else { return }
+        guard let service, ticket == choice.id, encodingChoice?.id == choice.id,
+              !importPresentation.stopRequested else { return }
         encodingChoice = nil
         importTask = Task {
             let observation = stageObservation(id: choice.id)
@@ -153,6 +158,7 @@ final class LibraryViewModel: ObservableObject {
 
     func cancelImport() async {
         guard let id = ticket, let service else { return }
+        guard importPresentation.requestStop(for: id) else { return }
         if let stageSink, stageSink.id == id { _ = stageSink.continuation.yield(.cancelRequested) }
         else { importDiagnostics.record(.cancelRequested, for: id) }
         importTask?.cancel()
@@ -162,16 +168,20 @@ final class LibraryViewModel: ObservableObject {
         case .alreadyCommitted(let receipt): await finish(receipt, id: id)
         case .cancelled:
             ticket = nil; importing = false; encodingChoice = nil
+            importPresentation.finish(id)
             importDiagnostics.record(.cancelled, for: id)
-            showImportMessage("已取消，未添加新书。", id: id)
+            notice = .cancelledBeforeCommit
             await reload()
         }
     }
 
     private func finish(_ receipt: ImportReceipt, id: UUID) async {
         guard ticket == id else { return }
+        let stopped = importPresentation.stopRequested
+        let deferred = importMeasurements.contains { $0.phase == .derivedDeferred }
+        importPresentation.finish(id)
         ticket = nil; importing = false; encodingChoice = nil
-        showImportMessage(receipt.duplicate ? "这本书已在书架，原阅读位置已保留。" : "已加入书架。", id: id)
+        notice = .committed(duplicate: receipt.duplicate, stopRequested: stopped, preparationDeferred: deferred)
         await reload()
         if importDiagnostics.attempt == id, let start = selectionReceivedAt {
             let elapsed = start.duration(to: ContinuousClock().now).components
@@ -198,6 +208,7 @@ final class LibraryViewModel: ObservableObject {
             await finish(receipt, id: id); return
         }
         ticket = nil; importing = false; encodingChoice = nil
+        importPresentation.finish(id)
         importDiagnostics.fail(error, for: id)
         showImportMessage("未能导入：\(ImportSafeFailure(error).summary)", id: id)
         await reload()
@@ -211,6 +222,7 @@ final class LibraryViewModel: ObservableObject {
             for await stage in pair.stream {
                 guard let self, self.ticket == id else { continue }
                 self.importDiagnostics.record(stage, for: id)
+                self.importPresentation.receive(stage, for: id)
             }
         }
         return (pair.continuation, task)
@@ -219,6 +231,7 @@ final class LibraryViewModel: ObservableObject {
     private func showImportMessage(_ value: String, id: UUID) {
         guard importDiagnostics.attempt == id else { return }
         importDiagnostics.record(.alertRequested, for: id)
+        notice = nil
         message = value
     }
 }

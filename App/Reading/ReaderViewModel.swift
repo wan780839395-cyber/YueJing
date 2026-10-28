@@ -6,11 +6,7 @@ import TXTCore
 @MainActor
 final class ReaderViewModel: ObservableObject {
     @Published private(set) var title = "正在打开"
-    @Published private(set) var chapters: [TXTChapter] = []
     @Published private(set) var chapterTotal = 0
-    @Published private(set) var chapterPageStart = 0
-    @Published private(set) var chaptersLoading = false
-    @Published private(set) var directoryRevision = UUID()
     @Published private(set) var window: ReadingWindow?
     @Published var preferences = ReaderPreferences()
     @Published private(set) var loading = true
@@ -18,7 +14,7 @@ final class ReaderViewModel: ObservableObject {
     @Published var message: String?
     @Published private(set) var openingPerformanceSummary: String?
     let viewport = ReaderViewportHandle()
-    let chapterPageSize = 32
+    let directory = ReaderDirectoryViewModel()
     private let bookID: String
     private let service: LibraryService
     private var reader: OpenedReader?
@@ -29,7 +25,6 @@ final class ReaderViewModel: ObservableObject {
     private var width = 0.0
     private var generation = UUID()
     private var lifecycle = UUID()
-    private var chapterGeneration = UUID()
     private var positionRevision: UInt64 = 0
     private var layoutNeedsRefresh = false
     private var closing = false
@@ -37,7 +32,6 @@ final class ReaderViewModel: ObservableObject {
     private var automaticRecoveryUsed = false
     private var navigationGate = ReadingNavigationGate()
     private var openTask: Task<OpenedReader, Error>?
-    private var chapterTask: Task<[TXTChapter], Error>?
     private var layoutTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
@@ -71,8 +65,8 @@ final class ReaderViewModel: ObservableObject {
             anchor = opened.reading.anchor ?? ReadingAnchor(bookID: bookID, versionID: opened.source.metadata.versionID,
                                                              rawByteOffset: opened.source.metadata.bomByteCount)
             userPosition = false; sequence = 0; preferencesSequence = 0
-            chapters = []; chapterPageStart = 0; chapterTotal = opened.source.metadata.chapterCount
-            directoryRevision = UUID(); openingMeasurements = measurements
+            chapterTotal = opened.source.metadata.chapterCount; directory.attach(opened)
+            openingMeasurements = measurements
             if opened.reading.ignoredIncompatibleProgress {
                 message = "旧位置与当前文字不匹配，已从开头显示；未覆盖旧记录。"
             }
@@ -129,22 +123,12 @@ final class ReaderViewModel: ObservableObject {
         anchor = ReadingAnchor(bookID: bookID, versionID: chapter.documentVersion, rawByteOffset: chapter.rawByteRange.location.value)
         requestWindow()
     }
-    func loadChapterPage(start: Int) async {
-        guard let reader, !closing, !suspended, !exitSaveFailed, start >= 0, start < chapterTotal else { return }
-        chapterTask?.cancel(); chapterGeneration = UUID()
-        let request = chapterGeneration, life = lifecycle
-        chaptersLoading = true
-        let limit = chapterPageSize
-        let task = Task { try await reader.chapterPage(start: start, limit: limit) }; chapterTask = task
-        do {
-            let values = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            guard request == chapterGeneration, life == lifecycle, !closing, !suspended, !Task.isCancelled else { return }
-            chapters = values; chapterPageStart = start; chaptersLoading = false; chapterTask = nil
-        } catch {
-            guard request == chapterGeneration, life == lifecycle, !closing else { return }
-            chaptersLoading = false; chapterTask = nil
-            if !(error is CancellationError) { await readFailed(error, owner: reader) }
-        }
+    func directoryAnchor() -> ReadingAnchor? {
+        guard let reader, !closing, !suspended, !exitSaveFailed,
+              let id = viewport.controller?.window?.id, navigationGate.isDisplayed(window: id),
+              let value = viewport.anchor(), value.bookID == reader.reading.session.bookID,
+              value.versionID == reader.reading.session.versionID else { return nil }
+        return value
     }
     func settingsChanged() {
         guard let reader, !closing, !suspended, !exitSaveFailed else { return }
@@ -174,10 +158,10 @@ final class ReaderViewModel: ObservableObject {
     }
     func suspend() async {
         guard !closing else { return }
-        suspended = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        suspended = true; lifecycle = UUID(); generation = UUID()
         let request = lifecycle, owner = reader
         openTask?.cancel(); openTask = nil
-        layoutTask?.cancel(); chapterTask?.cancel(); chapterTask = nil; chaptersLoading = false
+        layoutTask?.cancel(); directory.cancel()
         await flush()
         guard lifecycle == request, suspended, !closing else { return }
         await owner?.releasePageCache()
@@ -195,8 +179,8 @@ final class ReaderViewModel: ObservableObject {
     }
     func close() async -> Bool {
         guard !closing else { return false }
-        closing = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
-        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); chapterTask?.cancel()
+        closing = true; lifecycle = UUID(); generation = UUID()
+        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
         let reliable = userPosition ? viewport.anchor() : nil
         if let reliable { anchor = reliable }
@@ -205,7 +189,7 @@ final class ReaderViewModel: ObservableObject {
         do {
             if let old { try await old.close(anchor: reliable, sequence: sequence,
                                               preferences: preferences.validated, preferencesSequence: preferencesSequence) }
-            reader = nil; window = nil; chapters = []; chapterTotal = 0
+            reader = nil; window = nil; chapterTotal = 0; directory.detach()
             return true
         } catch {
             closing = false; exitSaveFailed = true
@@ -214,19 +198,19 @@ final class ReaderViewModel: ObservableObject {
         }
     }
     func leaveKeepingSavedPosition() async {
-        closing = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
-        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); chapterTask?.cancel()
+        closing = true; lifecycle = UUID(); generation = UUID()
+        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
         if let reader { try? await reader.close(sequence: sequence + 1) }
-        reader = nil; window = nil; chapters = []; chapterTotal = 0
+        reader = nil; window = nil; chapterTotal = 0; directory.detach()
     }
     func disappeared() { Task { _ = await close() } }
 
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
-        lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        lifecycle = UUID(); generation = UUID()
         let request = lifecycle, old = reader
-        openTask?.cancel(); openTask = nil; chapterTask?.cancel()
+        openTask?.cancel(); openTask = nil; directory.dismiss()
         layoutTask = nil; saveTask?.cancel(); settingsTask?.cancel()
         let reliable = userPosition ? viewport.anchor() : nil
         sequence += 1; preferencesSequence += 1; loading = true
@@ -234,7 +218,7 @@ final class ReaderViewModel: ObservableObject {
             if let old { try await old.close(anchor: reliable, sequence: sequence,
                                               preferences: preferences.validated, preferencesSequence: preferencesSequence) }
             guard lifecycle == request, !closing, !suspended else { return }
-            reader = nil; window = nil; chapters = []; chapterTotal = 0; userPosition = false
+            reader = nil; window = nil; chapterTotal = 0; directory.detach(); userPosition = false
             await load()
         } catch {
             guard lifecycle == request else { return }
@@ -279,7 +263,11 @@ final class ReaderViewModel: ObservableObject {
     /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
         guard !closing, !suspended, window?.id == id else { return }
-        if navigationGate.applied(window: id), let visible = viewport.anchor() { visibleChanged(visible, windowID: id) }
+        let navigationApplied = navigationGate.applied(window: id)
+        if let visible = directoryAnchor() {
+            if navigationApplied { visibleChanged(visible, windowID: id) }
+            directory.displayed(visible)
+        }
         guard navigationGate.navigation == nil else { return }
         guard let started = openingStarted else { return }
         openingStarted = nil

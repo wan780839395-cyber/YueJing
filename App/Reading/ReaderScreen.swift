@@ -4,7 +4,10 @@ import UIKit
 
 @MainActor
 struct ReaderScreen: View {
-    private enum Sheet: String, Identifiable { case chapters, settings, timing; var id: String { rawValue } }
+    private enum Sheet: Identifiable {
+        case chapters(UUID), settings(UUID)
+        var id: UUID { switch self { case .chapters(let id), .settings(let id): id } }
+    }
     @StateObject private var model: ReaderViewModel
     @State private var sheet: Sheet?
     @Environment(\.dismiss) private var dismiss
@@ -20,12 +23,19 @@ struct ReaderScreen: View {
                            onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
                            onSettled: model.scrollingEnded, onRemoved: model.disappeared, onApplied: model.windowApplied)
                 .allowsHitTesting(!model.exitSaveFailed)
-            if model.loading { ProgressView("正在打开书籍…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
+            if model.loading {
+                VStack(alignment: .leading, spacing: 12) {
+                    ProgressView("正在打开书籍…")
+                    Text("首次打开旧书或需要重新准备阅读内容时，可能需要稍等。可返回书架停止本次打开，书籍与已保存位置保留。")
+                        .font(.footnote).fixedSize(horizontal: false, vertical: true)
+                }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding().accessibilityElement(children: .combine)
+            }
             if !model.loading && model.window == nil {
                 VStack(spacing: 16) {
-                    Image(systemName: "book.closed").font(.largeTitle)
-                    Text("暂时无法显示正文")
-                    Button("重试打开") { Task { await model.retry() } }.buttonStyle(.borderedProminent)
+                    Image(systemName: "book.closed").font(.largeTitle).accessibilityHidden(true)
+                    Text("暂时无法显示正文").accessibilityAddTraits(.isHeader)
+                    Button("重试打开") { Task { await model.retry() } }.buttonStyle(.borderedProminent).frame(minHeight: 44)
                 }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
@@ -37,9 +47,8 @@ struct ReaderScreen: View {
                 Button { Task { if await model.close() { dismiss() } } } label: { Label("书架", systemImage: "chevron.left") }
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button { sheet = .timing } label: { Label("处理耗时", systemImage: "clock") }
-                Button { sheet = .chapters } label: { Label("目录", systemImage: "list.bullet") }.disabled(model.chapterTotal == 0 || model.exitSaveFailed)
-                Button { sheet = .settings } label: { Label("阅读设置", systemImage: "textformat.size") }.disabled(model.window == nil || model.exitSaveFailed)
+                Button { sheet = .chapters(UUID()) } label: { Label("目录", systemImage: "list.bullet") }.accessibilityHint("定位当前章节，分页浏览目录").disabled(model.chapterTotal == 0 || model.exitSaveFailed)
+                Button { sheet = .settings(UUID()) } label: { Label("阅读设置", systemImage: "textformat.size") }.accessibilityHint("调整文字和背景，或查看诊断与耗时").disabled(model.window == nil || model.exitSaveFailed)
             }
         }
         .task { await model.load() }
@@ -51,35 +60,15 @@ struct ReaderScreen: View {
         }
         .sheet(item: $sheet) { selected in
             switch selected {
-            case .chapters:
-                NavigationStack {
-                    List(model.chapters, id: \.id) { chapter in
-                        Button(chapter.title ?? "正文开头") { model.go(to: chapter); sheet = nil }
-                    }
-                    .navigationTitle("目录")
-                    .overlay { if model.chaptersLoading { ProgressView("读取目录…") } }
-                    .task(id: model.directoryRevision) { await model.loadChapterPage(start: 0) }
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("关闭") { sheet = nil } }
-                        ToolbarItemGroup(placement: .bottomBar) {
-                            Button("上一组") { Task { await model.loadChapterPage(start: max(0, model.chapterPageStart - model.chapterPageSize)) } }
-                                .disabled(model.chapterPageStart == 0 || model.chaptersLoading)
-                            Spacer()
-                            Text("\(model.chapterPageStart + 1)–\(min(model.chapterTotal, model.chapterPageStart + model.chapters.count)) / \(model.chapterTotal)").font(.caption)
-                            Spacer()
-                            Button("下一组") { Task { await model.loadChapterPage(start: model.chapterPageStart + model.chapterPageSize) } }
-                                .disabled(model.chapterPageStart + model.chapterPageSize >= model.chapterTotal || model.chaptersLoading)
-                        }
-                    }
+            case .chapters(let id):
+                ReaderDirectorySheet(model: model.directory, presentationID: id,
+                    isActive: { sheet?.id == id }, currentAnchor: model.directoryAnchor) { chapter in
+                    guard sheet?.id == id else { return }
+                    model.go(to: chapter); sheet = nil
                 }
             case .settings:
-                ReaderSettingsView(preferences: $model.preferences, changed: model.settingsChanged)
-            case .timing:
-                NavigationStack {
-                    ScrollView { Text(model.openingPerformanceSummary ?? "尚未应用首个正文窗口。").padding() }
-                        .navigationTitle("本次打开耗时")
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { sheet = nil } } }
-                }
+                ReaderSettingsView(preferences: $model.preferences, changed: model.settingsChanged,
+                                   openingSummary: model.openingPerformanceSummary)
             }
         }
         .alert("阅读提示", isPresented: Binding(get: { model.message != nil }, set: { if !$0 { model.message = nil } })) {
