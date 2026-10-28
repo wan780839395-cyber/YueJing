@@ -15,10 +15,10 @@ struct ReaderViewport: UIViewControllerRepresentable {
     let window: ReadingWindow?
     let preferences: ReaderPreferences
     let handle: ReaderViewportHandle
-    let onAnchor: @MainActor (ReadingAnchor) -> Void
-    let onExtend: @MainActor (ReadingAnchor) -> Void
+    let onAnchor: @MainActor (ReadingAnchor, UUID) -> Void
+    let onExtend: @MainActor (ReadingAnchor, UUID) -> Void
     let onWidth: @MainActor (Double) -> Void
-    let onSettled: @MainActor (ReadingAnchor) -> Bool
+    let onSettled: @MainActor (ReadingAnchor, UUID) -> Bool
     let onRemoved: @MainActor () -> Void
     let onApplied: @MainActor (UUID) -> Void
 

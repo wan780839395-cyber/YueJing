@@ -96,7 +96,7 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 scripts/validate_task3.py test-counts TXTCoreTests 25
 
-      - name: Run the 46 ReaderDomain tests once (26 existing plus 20 derived storage regressions)
+      - name: Run the 66 ReaderDomain tests once (46 existing plus 20 reading integration regressions)
         run: |
           set -uo pipefail
           set +e
@@ -113,7 +113,7 @@ jobs:
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/ReaderDomainTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts ReaderDomainTests 46
+          python3 scripts/validate_task3.py test-counts ReaderDomainTests 66
 
       - name: Run the 6 decoder differential tests and one timed pair in Release
         run: |

@@ -1,5 +1,6 @@
 import ReaderDomain
 import SwiftUI
+import UIKit
 
 @MainActor
 struct ReaderScreen: View {
@@ -37,12 +38,17 @@ struct ReaderScreen: View {
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button { sheet = .timing } label: { Label("处理耗时", systemImage: "clock") }
-                Button { sheet = .chapters } label: { Label("目录", systemImage: "list.bullet") }.disabled(model.chapters.isEmpty || model.exitSaveFailed)
+                Button { sheet = .chapters } label: { Label("目录", systemImage: "list.bullet") }.disabled(model.chapterTotal == 0 || model.exitSaveFailed)
                 Button { sheet = .settings } label: { Label("阅读设置", systemImage: "textformat.size") }.disabled(model.window == nil || model.exitSaveFailed)
             }
         }
         .task { await model.load() }
-        .onChange(of: scenePhase) { phase in if phase != .active { Task { await model.flush() } } }
+        .onChange(of: scenePhase) { phase in
+            Task { if phase == .active { await model.resume() } else { await model.suspend() } }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await model.releaseReaderMemory() }
+        }
         .sheet(item: $sheet) { selected in
             switch selected {
             case .chapters:
@@ -51,7 +57,20 @@ struct ReaderScreen: View {
                         Button(chapter.title ?? "正文开头") { model.go(to: chapter); sheet = nil }
                     }
                     .navigationTitle("目录")
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { sheet = nil } } }
+                    .overlay { if model.chaptersLoading { ProgressView("读取目录…") } }
+                    .task(id: model.directoryRevision) { await model.loadChapterPage(start: 0) }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("关闭") { sheet = nil } }
+                        ToolbarItemGroup(placement: .bottomBar) {
+                            Button("上一组") { Task { await model.loadChapterPage(start: max(0, model.chapterPageStart - model.chapterPageSize)) } }
+                                .disabled(model.chapterPageStart == 0 || model.chaptersLoading)
+                            Spacer()
+                            Text("\(model.chapterPageStart + 1)–\(min(model.chapterTotal, model.chapterPageStart + model.chapters.count)) / \(model.chapterTotal)").font(.caption)
+                            Spacer()
+                            Button("下一组") { Task { await model.loadChapterPage(start: model.chapterPageStart + model.chapterPageSize) } }
+                                .disabled(model.chapterPageStart + model.chapterPageSize >= model.chapterTotal || model.chaptersLoading)
+                        }
+                    }
                 }
             case .settings:
                 ReaderSettingsView(preferences: $model.preferences, changed: model.settingsChanged)

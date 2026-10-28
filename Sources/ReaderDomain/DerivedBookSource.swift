@@ -7,6 +7,7 @@ public actor DerivedBookSource {
     private let store: LibraryStore
     private let lease: DerivedLease
     private var reader: DerivedPackReader?
+    private var lastStatistics: DerivedReadStatistics
 
     init(url: URL, lease: DerivedLease, book: LibraryBook, budget: DerivedBookBudget, store: LibraryStore) throws {
         let value = try DerivedPackReader(url: url, pointer: lease.pointer, book: book, budget: budget)
@@ -14,7 +15,7 @@ public actor DerivedBookSource {
         metadata = DerivedBookMetadata(bookID: book.id, versionID: book.versionID, encoding: encoding,
             bomByteCount: value.manifest.bomBytes, byteCount: book.byteCount, utf16Count: book.utf16Count,
             chapterCount: value.manifest.chapters)
-        self.store = store; self.lease = lease; self.reader = value
+        self.store = store; self.lease = lease; self.reader = value; self.lastStatistics = value.statistics
     }
     deinit {
         // Explicit close is deterministic. This only releases a forgotten lease after actor destruction.
@@ -22,9 +23,15 @@ public actor DerivedBookSource {
         Task { await owner.releaseDerivedLease(token) }
     }
     public func close() async {
+        if let reader { lastStatistics = reader.statistics }
         reader?.close(); reader = nil; await store.releaseDerivedLease(lease)
     }
     public func releasePageCache() { reader?.clearCache() }
+    public func statistics() -> DerivedReadStatistics {
+        if let reader { return reader.statistics }
+        return DerivedReadStatistics(payloadBytesRead: lastStatistics.payloadBytesRead, pageLoads: lastStatistics.pageLoads,
+            cacheHits: lastStatistics.cacheHits, retainedLogicalBytes: 0, maximumWorkingBytes: lastStatistics.maximumWorkingBytes)
+    }
     public func text(in range: UTF16Range) async throws -> DerivedTextFragment {
         try await perform { try $0.text(range) }
     }
@@ -49,6 +56,7 @@ public actor DerivedBookSource {
             if let failure = error as? DerivedStorageError { invalidate = failure == .corruptArtifact }
             else { invalidate = error is CocoaError || error is POSIXError }
             if invalidate {
+                lastStatistics = reader.statistics
                 self.reader = nil; reader.close()
                 try? await store.invalidateDerived(lease.pointer)
                 await store.releaseDerivedLease(lease)

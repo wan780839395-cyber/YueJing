@@ -11,8 +11,16 @@ final class DerivedPackReader {
     private var cache: [Int: Data] = [:]
     private var recency: [Int] = []
     private var closed = false
+    private var payloadBytesRead = 0
+    private var pageLoads = 0
+    private var cacheHits = 0
     private var metadataBytes: Int { DerivedBookFormat.headerBytes + digests.count }
     private var cacheLimit: Int { budget.maximumWorkingBytes / 4 }
+    var statistics: DerivedReadStatistics {
+        DerivedReadStatistics(payloadBytesRead: payloadBytesRead, pageLoads: pageLoads, cacheHits: cacheHits,
+            retainedLogicalBytes: metadataBytes + cache.count * (2 * DerivedBookFormat.pageBytes + 256),
+            maximumWorkingBytes: budget.maximumWorkingBytes)
+    }
 
     init(url: URL, pointer: DerivedPointer, book: LibraryBook, budget: DerivedBookBudget) throws {
         let f = DerivedBookFormat.self
@@ -51,11 +59,13 @@ final class DerivedPackReader {
         guard !closed else { throw DerivedStorageError.closed }
         guard page >= 0, page < digests.count / 32 else { throw DerivedStorageError.corruptArtifact }
         if let value = cache[page] {
+            cacheHits += 1
             recency.removeAll { $0 == page }; recency.append(page); return value
         }
         let relative = try f.multiply(page, f.pageBytes)
         let count = min(f.pageBytes, manifest.payloadBytes - relative)
         let data = try f.read(file, offset: f.add(f.headerBytes, relative), count: count, maximumBytes: f.pageBytes)
+        payloadBytesRead = try f.add(payloadBytesRead, data.count); pageLoads += 1
         let expected = digests.subdata(in: (page * 32)..<(page * 32 + 32))
         guard Data(SHA256.hash(data: data)) == expected else { throw DerivedStorageError.corruptArtifact }
         // Charge twice the payload plus a fixed container allowance. This is accounting, not RSS.

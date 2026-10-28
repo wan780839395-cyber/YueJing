@@ -46,6 +46,14 @@ public struct DerivedTextFragment: Sendable {
     public let rawRange: RawByteRange
 }
 
+public struct DerivedReadStatistics: Sendable {
+    public let payloadBytesRead: Int
+    public let pageLoads: Int
+    public let cacheHits: Int
+    public let retainedLogicalBytes: Int
+    public let maximumWorkingBytes: Int
+}
+
 struct DerivedPointer: Sendable, Equatable {
     let bookID: String
     let versionID: String

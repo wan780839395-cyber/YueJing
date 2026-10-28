@@ -11,6 +11,8 @@ public actor LibraryStore {
     private var derivedBuilds: [String: String] = [:]
     private var derivedReservations: [String: Int] = [:]
     private var derivedLeases: [UUID: DerivedPointer] = [:]
+    private var readerOpens: [String: UUID] = [:]
+    private var readerPreferenceSequences: [String: Int64] = [:]
 
     public init(root: URL) throws {
         self.root = root
@@ -160,6 +162,48 @@ public actor LibraryStore {
 
 // Independent cache authority. Existing import/progress decision methods above are unchanged.
 extension LibraryStore {
+    func reserveReaderOpen(bookID: String) throws -> ReaderOpenPermit {
+        try Task.checkCancellation()
+        guard try book(id: bookID) != nil else { throw LibraryError.missingBook }
+        let permit = ReaderOpenPermit(bookID: bookID, id: UUID()); readerOpens[bookID] = permit.id
+        return permit
+    }
+    func beginReader(_ permit: ReaderOpenPermit, versionID: String) throws -> ReadingStart {
+        try Task.checkCancellation()
+        guard readerOpens[permit.bookID] == permit.id else { throw CancellationError() }
+        return try beginReading(bookID: permit.bookID, versionID: versionID)
+    }
+    func confirmReaderOpen(_ permit: ReaderOpenPermit, session: ReadingSession) throws {
+        try Task.checkCancellation()
+        guard readerOpens[permit.bookID] == permit.id,
+              let book = try book(id: permit.bookID), book.activeSession == session.id,
+              book.versionID == session.versionID else { throw CancellationError() }
+    }
+    func endReaderOpen(_ permit: ReaderOpenPermit) {
+        if readerOpens[permit.bookID] == permit.id { readerOpens.removeValue(forKey: permit.bookID) }
+    }
+    func activeDerivedLeaseCount() -> Int { derivedLeases.count }
+    func saveReaderPreferences(_ value: ReaderPreferences, session: ReadingSession, sequence: Int64) throws -> Bool {
+        try Task.checkCancellation()
+        guard !closedSessions.contains(session.id), sequence > (readerPreferenceSequences[session.id] ?? 0),
+              let book = try book(id: session.bookID), book.activeSession == session.id,
+              book.versionID == session.versionID else { return false }
+        try savePreferences(value); readerPreferenceSequences[session.id] = sequence; return true
+    }
+    func finishReader(session: ReadingSession, anchor: ReadingAnchor?, sequence: Int64,
+                      preferences: ReaderPreferences?, preferencesSequence: Int64) throws {
+        closedSessions.insert(session.id)
+        try queue.write { db in
+            guard let book = try LibraryBook.fetchOne(db, key: session.bookID), book.activeSession == session.id else { return }
+            if let anchor { _ = try Self.save(db, session: session, anchor: anchor, sequence: sequence) }
+            if let preferences, preferencesSequence > (readerPreferenceSequences[session.id] ?? 0) {
+                let data = try JSONEncoder().encode(preferences.validated)
+                try db.execute(sql: "INSERT INTO preferences(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", arguments: [data])
+            }
+            try db.execute(sql: "UPDATE books SET activeSession=NULL WHERE id=? AND activeSession=?", arguments: [session.bookID, session.id])
+        }
+        readerPreferenceSequences.removeValue(forKey: session.id)
+    }
     private var derivedRoot: URL { root.appendingPathComponent("Derived", isDirectory: true) }
 
     private func ensureDerivedRoot() throws {
@@ -184,7 +228,7 @@ extension LibraryStore {
               value.byteCount >= DerivedBookFormat.headerBytes else { throw DerivedStorageError.corruptArtifact }
         return value
     }
-    func reserveDerived(bookID: String, budget: DerivedBookBudget) throws -> DerivedBuildPermit {
+    func reserveDerived(bookID: String, budget: DerivedBookBudget, evictUnleased: Bool = false) throws -> DerivedBuildPermit {
         try Task.checkCancellation()
         guard let book = try book(id: bookID) else { throw LibraryError.missingBook }
         try ensureDerivedRoot()
@@ -206,12 +250,42 @@ extension LibraryStore {
             if chargedLeases.insert(lease.generation).inserted { occupied = try DerivedBookFormat.add(occupied, lease.byteCount) }
         }
         for bytes in derivedReservations.values { occupied = try DerivedBookFormat.add(occupied, bytes) }
-        guard try DerivedBookFormat.add(occupied, budget.maximumArtifactBytes) <= budget.maximumStoredBytes else {
-            throw DerivedStorageError.budgetExceeded
+        let required = try DerivedBookFormat.add(occupied, budget.maximumArtifactBytes)
+        if required > budget.maximumStoredBytes {
+            guard evictUnleased else { throw DerivedStorageError.budgetExceeded }
+            try evictReadingArtifacts(excluding: bookID, reclaim: required - budget.maximumStoredBytes)
+            return try reserveDerived(bookID: bookID, budget: budget, evictUnleased: false)
         }
         let generation = UUID().uuidString.lowercased()
         derivedBuilds[bookID] = generation; derivedReservations[generation] = budget.maximumArtifactBytes
         return DerivedBuildPermit(book: book, generation: generation, previousGeneration: previous)
+    }
+    private func evictReadingArtifacts(excluding bookID: String, reclaim bytes: Int) throws {
+        let candidates = try queue.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT d.bookID FROM derivedArtifacts d JOIN books b ON b.id=d.bookID
+                WHERE d.bookID<>? ORDER BY COALESCE(b.lastReadAt,b.addedAt),d.bookID
+                """, arguments: [bookID])
+        }
+        var reclaimed = 0
+        for id in candidates where reclaimed < bytes {
+            try Task.checkCancellation()
+            guard derivedBuilds[id] == nil,
+                  let value = try queue.read({ db in try pointer(db, bookID: id) }),
+                  !derivedLeases.values.contains(where: { $0.generation == value.generation }) else { continue }
+            let url = try derivedURL(generation: value.generation, staging: false)
+            var size = 0
+            if FileManager.default.fileExists(atPath: url.path) {
+                try DerivedBookFormat.regularFile(url)
+                guard let actual = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { throw DerivedStorageError.corruptArtifact }
+                size = actual
+            }
+            try invalidateDerived(value)
+            if size > 0 { try FileManager.default.removeItem(at: url) }
+            reclaimed = try DerivedBookFormat.add(reclaimed, size)
+        }
+        // Only cache pointers/recognized ordinary pack files above can be removed. No recursion,
+        // original/progress mutation or unlimited exemption for previously read books.
     }
     func derivedStagingURL(_ permit: DerivedBuildPermit) throws -> URL { try derivedURL(generation: permit.generation, staging: true) }
     func abandonDerived(_ permit: DerivedBuildPermit) {

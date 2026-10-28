@@ -7,60 +7,80 @@ import TXTCore
 final class ReaderViewModel: ObservableObject {
     @Published private(set) var title = "正在打开"
     @Published private(set) var chapters: [TXTChapter] = []
+    @Published private(set) var chapterTotal = 0
+    @Published private(set) var chapterPageStart = 0
+    @Published private(set) var chaptersLoading = false
+    @Published private(set) var directoryRevision = UUID()
     @Published private(set) var window: ReadingWindow?
     @Published var preferences = ReaderPreferences()
     @Published private(set) var loading = true
     @Published private(set) var exitSaveFailed = false
     @Published var message: String?
     @Published private(set) var openingPerformanceSummary: String?
-    private var openingStarted: ContinuousClock.Instant?
-    private var openingMeasurements: [ProcessingMeasurement] = []
     let viewport = ReaderViewportHandle()
+    let chapterPageSize = 32
     private let bookID: String
     private let service: LibraryService
-    private var engine: ReadingLayoutEngine?
-    private var session: ReadingSession?
+    private var reader: OpenedReader?
     private var anchor: ReadingAnchor?
     private var userPosition = false
     private var sequence: Int64 = 0
+    private var preferencesSequence: Int64 = 0
     private var width = 0.0
     private var generation = UUID()
+    private var lifecycle = UUID()
+    private var chapterGeneration = UUID()
     private var positionRevision: UInt64 = 0
     private var layoutNeedsRefresh = false
-    private var lifecycle = UUID()
     private var closing = false
-    private var preferencesLoaded = false
+    private var suspended = false
+    private var automaticRecoveryUsed = false
+    private var navigationGate = ReadingNavigationGate()
+    private var openTask: Task<OpenedReader, Error>?
+    private var chapterTask: Task<[TXTChapter], Error>?
     private var layoutTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
+    private var openingStarted: ContinuousClock.Instant?
+    private var openingMeasurements: [ProcessingMeasurement] = []
 
     init(bookID: String, service: LibraryService) { self.bookID = bookID; self.service = service }
 
     func load() async {
-        guard engine == nil, !closing else { return }
-        lifecycle = UUID(); loading = true
-        let request = lifecycle
-        openingStarted = ContinuousClock().now; openingMeasurements = []; openingPerformanceSummary = nil
-        let timing = ProcessingTrace()
-        defer { timing.end() }
+        guard reader == nil, openTask == nil, !closing, !suspended else { return }
+        lifecycle = UUID(); let request = lifecycle
+        loading = true; openingStarted = ContinuousClock().now
+        openingMeasurements = []; openingPerformanceSummary = nil
+        let timing = ProcessingTrace(); defer { timing.end() }
         do {
-            let opened = try await service.openBook(id: bookID, measure: timing.observer)
-            let measurements = await timing.finish()
-            guard lifecycle == request, !closing, !Task.isCancelled else {
-                try? await service.store.finishReading(session: opened.reading.session, anchor: nil, sequence: 1)
-                return
+            let budget = try ReaderStoragePolicy.budget(), service = service, id = bookID
+            let task = Task { try await service.openReader(id: id, budget: budget, measure: timing.observer) }
+            openTask = task
+            let opened = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            guard lifecycle == request, !closing, !suspended, !Task.isCancelled else {
+                try? await opened.close(); return
             }
-            title = opened.book.title; chapters = opened.chapters; session = opened.reading.session
-            openingMeasurements = measurements
-            anchor = opened.reading.anchor ?? ReadingAnchor(bookID: bookID, versionID: opened.document.versionID,
-                                                            rawByteOffset: opened.document.bomByteCount)
-            engine = ReadingLayoutEngine(bookID: bookID, document: opened.document)
-            preferences = try await service.store.preferences()
-            preferencesLoaded = true
-            if opened.reading.ignoredIncompatibleProgress { message = "旧位置与当前文字不匹配，已从开头显示；未覆盖旧记录。" }
+            let measurements = await timing.finish()
+            guard lifecycle == request, !closing, !suspended, !Task.isCancelled else {
+                try? await opened.close(); return
+            }
+            openTask = nil; reader = opened; title = opened.book.title
+            navigationGate.reset()
+            preferences = opened.preferences
+            automaticRecoveryUsed = automaticRecoveryUsed || opened.cacheDisposition == .rebuilt
+            anchor = opened.reading.anchor ?? ReadingAnchor(bookID: bookID, versionID: opened.source.metadata.versionID,
+                                                             rawByteOffset: opened.source.metadata.bomByteCount)
+            userPosition = false; sequence = 0; preferencesSequence = 0
+            chapters = []; chapterPageStart = 0; chapterTotal = opened.source.metadata.chapterCount
+            directoryRevision = UUID(); openingMeasurements = measurements
+            if opened.reading.ignoredIncompatibleProgress {
+                message = "旧位置与当前文字不匹配，已从开头显示；未覆盖旧记录。"
+            }
             requestWindow()
         } catch {
-            if !(error is CancellationError), lifecycle == request { message = error.localizedDescription; loading = false }
+            guard lifecycle == request else { return }
+            openTask = nil; loading = false
+            if !(error is CancellationError) { message = ReaderStoragePolicy.failureMessage(error) }
         }
     }
 
@@ -69,142 +89,205 @@ final class ReaderViewModel: ObservableObject {
         guard usable >= 80, abs(usable - width) > 0.5 else { return }
         width = usable; requestWindow()
     }
-
     func retry() async {
-        guard !closing else { return }
-        guard engine != nil else { await load(); return }
-        do {
-            if !preferencesLoaded { preferences = try await service.store.preferences(); preferencesLoaded = true }
-            loading = true
-            requestWindow()
-        } catch { loading = false; message = error.localizedDescription }
+        guard !closing, !exitSaveFailed else { return }
+        if reader == nil { await load() } else { await restartReader() }
     }
-
-    func visibleChanged(_ value: ReadingAnchor) {
-        guard !closing, let session, value.bookID == session.bookID, value.versionID == session.versionID else { return }
+    func visibleChanged(_ value: ReadingAnchor, windowID: UUID) {
+        guard !closing, !suspended, !exitSaveFailed, let reader,
+              navigationGate.accepts(window: windowID),
+              value.bookID == reader.reading.session.bookID, value.versionID == reader.reading.session.versionID else { return }
         anchor = value; userPosition = true; sequence += 1; positionRevision &+= 1
-        let serial = sequence
+        let serial = sequence, request = lifecycle
         saveTask?.cancel()
         saveTask = Task {
             do {
-                try await Task.sleep(for: .milliseconds(700))
-                try Task.checkCancellation()
-                _ = try await service.store.saveProgress(session: session, anchor: value, sequence: serial)
+                try await Task.sleep(for: .milliseconds(700)); try Task.checkCancellation()
+                _ = try await reader.saveProgress(value, sequence: serial)
             } catch is CancellationError { }
-            catch { message = "位置暂未保存：\(error.localizedDescription)" }
+            catch { if lifecycle == request, !closing { message = "位置暂未保存，原记录已保留。" } }
         }
     }
-
-    func extendWindow(_ visible: ReadingAnchor) {
-        guard !closing else { return }
+    func extendWindow(_ visible: ReadingAnchor, windowID: UUID) {
+        guard !closing, !suspended, !exitSaveFailed, navigationGate.accepts(window: windowID) else { return }
         anchor = visible; requestWindow()
     }
-
-    func scrollingEnded(_ visible: ReadingAnchor) -> Bool {
-        guard !closing, layoutNeedsRefresh else { return false }
-        anchor = visible; requestWindow()
-        return true
+    func scrollingEnded(_ visible: ReadingAnchor, windowID: UUID) -> Bool {
+        if navigationGate.navigation != nil, navigationGate.isDisplayed(window: windowID),
+           !closing, !suspended, !exitSaveFailed {
+            if layoutNeedsRefresh, !viewport.interacting { requestWindow() }
+            return true // Reschedule the jump, never adopt the old scroll position.
+        }
+        guard !closing, !suspended, layoutNeedsRefresh, !exitSaveFailed, navigationGate.accepts(window: windowID) else { return false }
+        anchor = visible; requestWindow(); return true
     }
-
     func go(to chapter: TXTChapter) {
-        guard let session, !closing else { return }
+        guard let reader, !closing, !suspended, !exitSaveFailed,
+              chapter.documentVersion == reader.reading.session.versionID else { return }
         positionRevision &+= 1
-        anchor = ReadingAnchor(bookID: bookID, versionID: session.versionID, rawByteOffset: chapter.rawByteRange.location.value)
-        requestWindow(userNavigation: true)
-    }
-
-    func settingsChanged() {
-        guard !closing else { return }
+        navigationGate.begin()
+        anchor = ReadingAnchor(bookID: bookID, versionID: chapter.documentVersion, rawByteOffset: chapter.rawByteRange.location.value)
         requestWindow()
-        settingsTask?.cancel()
-        let value = preferences.validated
-        settingsTask = Task {
-            do { try await Task.sleep(for: .milliseconds(350)); try Task.checkCancellation(); try await service.store.savePreferences(value) }
-            catch is CancellationError { }
-            catch { message = "阅读设置暂未保存：\(error.localizedDescription)" }
+    }
+    func loadChapterPage(start: Int) async {
+        guard let reader, !closing, !suspended, !exitSaveFailed, start >= 0, start < chapterTotal else { return }
+        chapterTask?.cancel(); chapterGeneration = UUID()
+        let request = chapterGeneration, life = lifecycle
+        chaptersLoading = true
+        let limit = chapterPageSize
+        let task = Task { try await reader.chapterPage(start: start, limit: limit) }; chapterTask = task
+        do {
+            let values = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            guard request == chapterGeneration, life == lifecycle, !closing, !suspended, !Task.isCancelled else { return }
+            chapters = values; chapterPageStart = start; chaptersLoading = false; chapterTask = nil
+        } catch {
+            guard request == chapterGeneration, life == lifecycle, !closing else { return }
+            chaptersLoading = false; chapterTask = nil
+            if !(error is CancellationError) { await readFailed(error, owner: reader) }
         }
     }
-
-    func flush() async {
-        guard !closing, let session else { return }
-        if userPosition, let visible = viewport.anchor() { anchor = visible }
-        saveTask?.cancel(); settingsTask?.cancel()
-        do {
-            if userPosition, let anchor { sequence += 1; _ = try await service.store.saveProgress(session: session, anchor: anchor, sequence: sequence) }
-            if preferencesLoaded { try await service.store.savePreferences(preferences) }
-        } catch { message = "保存未完成：\(error.localizedDescription)" }
+    func settingsChanged() {
+        guard let reader, !closing, !suspended, !exitSaveFailed else { return }
+        requestWindow(); settingsTask?.cancel(); preferencesSequence += 1
+        let value = preferences.validated, serial = preferencesSequence, request = lifecycle
+        settingsTask = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(350)); try Task.checkCancellation()
+                _ = try await reader.savePreferences(value, sequence: serial)
+            } catch is CancellationError { }
+            catch { if lifecycle == request, !closing { message = "阅读设置暂未保存。" } }
+        }
     }
-
+    func flush() async {
+        guard !closing, let reader else { return }
+        let request = lifecycle
+        let reliable = userPosition ? viewport.anchor() : nil
+        if let reliable, navigationGate.navigation == nil { anchor = reliable }
+        saveTask?.cancel(); settingsTask?.cancel()
+        sequence += 1; preferencesSequence += 1
+        let serial = sequence, settingsSerial = preferencesSequence, settings = preferences.validated
+        do {
+            if let reliable { _ = try await reader.saveProgress(reliable, sequence: serial) }
+            guard lifecycle == request, !closing else { return }
+            _ = try await reader.savePreferences(settings, sequence: settingsSerial)
+        } catch { if lifecycle == request, !closing { message = "保存未完成，已保存记录仍保留。" } }
+    }
+    func suspend() async {
+        guard !closing else { return }
+        suspended = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        let request = lifecycle, owner = reader
+        openTask?.cancel(); openTask = nil
+        layoutTask?.cancel(); chapterTask?.cancel(); chapterTask = nil; chaptersLoading = false
+        await flush()
+        guard lifecycle == request, suspended, !closing else { return }
+        await owner?.releasePageCache()
+    }
+    func resume() async {
+        guard !closing else { return }
+        suspended = false
+        if reader == nil { await load() } else { requestWindow() }
+    }
+    func releaseReaderMemory() async {
+        let request = lifecycle, owner = reader
+        await service.releaseProcessingCache()
+        guard lifecycle == request else { return }
+        await owner?.releasePageCache()
+    }
     func close() async -> Bool {
         guard !closing else { return false }
-        closing = true; lifecycle = UUID(); generation = UUID()
-        layoutTask?.cancel(); saveTask?.cancel(); settingsTask?.cancel()
-        if userPosition, let visible = viewport.anchor() { anchor = visible }
+        closing = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); chapterTask?.cancel()
+        saveTask?.cancel(); settingsTask?.cancel()
+        let reliable = userPosition ? viewport.anchor() : nil
+        if let reliable { anchor = reliable }
+        sequence += 1; preferencesSequence += 1
+        let old = reader
         do {
-            if preferencesLoaded { try await service.store.savePreferences(preferences) }
-            if let session {
-                sequence += 1
-                try await service.store.finishReading(session: session, anchor: userPosition ? anchor : nil, sequence: sequence)
-            }
-            session = nil; engine = nil; window = nil
+            if let old { try await old.close(anchor: reliable, sequence: sequence,
+                                              preferences: preferences.validated, preferencesSequence: preferencesSequence) }
+            reader = nil; window = nil; chapters = []; chapterTotal = 0
             return true
         } catch {
             closing = false; exitSaveFailed = true
-            message = "最后保存失败。可重试，或保留已保存的位置返回书架。\(error.localizedDescription)"
+            message = "最后保存失败。可重试，或保留已保存的位置返回书架。"
             return false
         }
     }
-
     func leaveKeepingSavedPosition() async {
-        closing = true; lifecycle = UUID(); generation = UUID()
-        layoutTask?.cancel(); saveTask?.cancel(); settingsTask?.cancel()
-        if let session { try? await service.store.finishReading(session: session, anchor: nil, sequence: sequence + 1) }
-        session = nil; engine = nil; window = nil
+        closing = true; lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        openTask?.cancel(); openTask = nil; layoutTask?.cancel(); chapterTask?.cancel()
+        saveTask?.cancel(); settingsTask?.cancel()
+        if let reader { try? await reader.close(sequence: sequence + 1) }
+        reader = nil; window = nil; chapters = []; chapterTotal = 0
     }
+    func disappeared() { Task { _ = await close() } }
 
-    func disappeared() {
-        Task { _ = await close() }
+    private func restartReader() async {
+        guard !closing, !suspended, !exitSaveFailed else { return }
+        lifecycle = UUID(); generation = UUID(); chapterGeneration = UUID()
+        let request = lifecycle, old = reader
+        openTask?.cancel(); openTask = nil; chapterTask?.cancel()
+        layoutTask = nil; saveTask?.cancel(); settingsTask?.cancel()
+        let reliable = userPosition ? viewport.anchor() : nil
+        sequence += 1; preferencesSequence += 1; loading = true
+        do {
+            if let old { try await old.close(anchor: reliable, sequence: sequence,
+                                              preferences: preferences.validated, preferencesSequence: preferencesSequence) }
+            guard lifecycle == request, !closing, !suspended else { return }
+            reader = nil; window = nil; chapters = []; chapterTotal = 0; userPosition = false
+            await load()
+        } catch {
+            guard lifecycle == request else { return }
+            loading = false; exitSaveFailed = true; message = "恢复前保存失败，未建立新会话或覆盖原位置。"
+        }
     }
-
-    private func requestWindow(userNavigation: Bool = false) {
-        guard !closing, let engine, let anchor, width >= 80 else { return }
-        layoutTask?.cancel(); generation = UUID()
-        layoutNeedsRefresh = true
-        let request = generation, settings = preferences, currentWidth = width, revision = positionRevision
+    private func readFailed(_ error: Error, owner: OpenedReader) async {
+        guard reader === owner, !closing, !suspended, !exitSaveFailed else { return }
+        if let failure = error as? DerivedStorageError,
+           [.corruptArtifact, .missingArtifact, .closed].contains(failure), !automaticRecoveryUsed {
+            automaticRecoveryUsed = true
+            await restartReader()
+        } else { message = ReaderStoragePolicy.failureMessage(error); loading = false }
+    }
+    private func requestWindow() {
+        guard let reader, let anchor, !closing, !suspended, !exitSaveFailed, width >= 80 else { return }
+        layoutTask?.cancel(); generation = UUID(); layoutNeedsRefresh = true
+        let request = generation, life = lifecycle, settings = preferences, currentWidth = width, revision = positionRevision
+        let navigation = navigationGate.navigation
         let timing = openingStarted == nil ? nil : ProcessingTrace()
         layoutTask = Task {
             defer { timing?.end() }
             do {
-                let rendered = try await engine.window(around: anchor, width: currentWidth, preferences: settings,
-                                                       measure: timing?.observer)
+                let rendered = try await reader.window(around: anchor, width: currentWidth, preferences: settings, measure: timing?.observer)
                 let measurements = await timing?.finish() ?? []
                 try Task.checkCancellation()
-                guard request == generation, !closing else { return }
+                guard request == generation, life == lifecycle, !closing, !suspended, self.reader === reader else { return }
                 guard revision == positionRevision, !viewport.interacting else {
-                    // The old window may still receive real scrolling while background layout runs.
-                    // Keep the newest visible anchor, and only re-request once interaction has settled.
-                    if !viewport.interacting { requestWindow() }
-                    return
+                    if !viewport.interacting { requestWindow() }; return
                 }
-                layoutNeedsRefresh = false
-                openingMeasurements.append(contentsOf: measurements)
-                viewport.onNextRestoreIsNavigation = userNavigation
-                window = rendered; loading = false
+                layoutNeedsRefresh = false; openingMeasurements.append(contentsOf: measurements)
+                let isNavigation = navigation != nil && navigationGate.navigation == navigation
+                if isNavigation, let navigation { navigationGate.expect(window: rendered.id, navigation: navigation) }
+                viewport.onNextRestoreIsNavigation = isNavigation; window = rendered; loading = false
             } catch is CancellationError { }
-            catch { if request == generation { layoutNeedsRefresh = false; loading = false; message = error.localizedDescription } }
+            catch {
+                guard request == generation, life == lifecycle, !closing else { return }
+                layoutNeedsRefresh = false; await readFailed(error, owner: reader)
+            }
         }
     }
-
-    /// Called after UIKit applies a window. Actual display/first paint is deliberately unmeasured.
+    /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
-        guard !closing, window?.id == id, let started = openingStarted else { return }
+        guard !closing, !suspended, window?.id == id else { return }
+        if navigationGate.applied(window: id), let visible = viewport.anchor() { visibleChanged(visible, windowID: id) }
+        guard navigationGate.navigation == nil else { return }
+        guard let started = openingStarted else { return }
         openingStarted = nil
         let elapsed = started.duration(to: ContinuousClock().now).components
         let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
-        let summary = String(format: "打开→窗口已应用 %.3fs\n", seconds)
-            + ProcessingMeasurement.summary(openingMeasurements) + "\n正文首绘未测；仅本地摘要。"
+        let summary = String(format: "打开请求→窗口已应用 %.3fs\n", seconds)
+            + ProcessingMeasurement.summary(openingMeasurements) + "\n进程重启/正文首绘未测；仅本地摘要。"
         let request = lifecycle
-        // Avoid publishing during a SwiftUI representable update.
         Task { if lifecycle == request, !closing { openingPerformanceSummary = summary } }
     }
 }

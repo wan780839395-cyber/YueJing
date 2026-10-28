@@ -18,13 +18,23 @@ public actor LibraryService {
     private var cancelled: Set<UUID> = []
     private var processed: ProcessedBookCache
     private var reuse = ProcessingReuseStatistics()
+    private var readingReuse = ReadingRouteStatistics()
+    private struct ReadingBuild: Sendable {
+        let id: UUID
+        let bookID: String
+        let versionID: String
+        let encoding: String
+        let task: Task<DerivedBookMetadata, Error>
+        var consumers: Set<UUID>
+    }
+    private var readingBuild: ReadingBuild?
 
     public init(store: LibraryStore, processingCacheLimit: Int = 64 * 1024 * 1024) {
         self.store = store; processed = ProcessedBookCache(limit: processingCacheLimit)
     }
 
     /// Drops the service's reference and invalidates in-flight publishers. Active readers may retain theirs.
-    public func releaseProcessingCache() { processed.invalidate() }
+    public func releaseProcessingCache() { processed.invalidate(); readingBuild?.task.cancel() }
 
     func processingReuseStatistics() -> ProcessingReuseStatistics {
         var value = reuse; value.retainedBytes = processed.estimatedBytes; return value
@@ -38,6 +48,15 @@ public actor LibraryService {
 
     public func prepareImport(url: URL, ticket: UUID, measure: ProcessingMeasurementObserver? = nil,
                               observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
+        try await prepareImportCore(url: url, ticket: ticket, derivedBudget: nil, measure: measure, observe: observe)
+    }
+    public func prepareReadingImport(url: URL, ticket: UUID, budget: DerivedBookBudget,
+                                    measure: ProcessingMeasurementObserver? = nil,
+                                    observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
+        try await prepareImportCore(url: url, ticket: ticket, derivedBudget: budget, measure: measure, observe: observe)
+    }
+    private func prepareImportCore(url: URL, ticket: UUID, derivedBudget: DerivedBookBudget?,
+                                  measure: ProcessingMeasurementObserver?, observe: ImportStageObserver?) async throws -> ImportPreparation {
         let generation = processed.begin()
         try await store.beginImport(ticket)
         let staging = await store.stagingURL(ticket: ticket)
@@ -59,6 +78,7 @@ public actor LibraryService {
             observe?(.duplicateFound)
             let receipt = try await store.commitImport(ticket: ticket, proposed: existing)
             observe?(.committed)
+            if let derivedBudget { await persistImported(receipt, document: nil, budget: derivedBudget, measure: measure) }
             return .completed(receipt)
         }
         let title = url.deletingPathExtension().lastPathComponent
@@ -69,8 +89,9 @@ public actor LibraryService {
             guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
             try check(ticket)
             let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: title))
-            if !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
+            if derivedBudget == nil, !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
             observe?(.committed)
+            if let derivedBudget { await persistImported(receipt, document: document, budget: derivedBudget, measure: measure) }
             return .completed(receipt)
         } catch TXTError.ambiguousEncoding(let candidates) {
             observe?(.ambiguityDetected)
@@ -85,6 +106,15 @@ public actor LibraryService {
 
     public func confirmImport(ticket: UUID, encoding: TXTEncoding, measure: ProcessingMeasurementObserver? = nil,
                               observe: ImportStageObserver? = nil) async throws -> ImportReceipt {
+        try await confirmImportCore(ticket: ticket, encoding: encoding, derivedBudget: nil, measure: measure, observe: observe)
+    }
+    public func confirmReadingImport(ticket: UUID, encoding: TXTEncoding, budget: DerivedBookBudget,
+                                     measure: ProcessingMeasurementObserver? = nil,
+                                     observe: ImportStageObserver? = nil) async throws -> ImportReceipt {
+        try await confirmImportCore(ticket: ticket, encoding: encoding, derivedBudget: budget, measure: measure, observe: observe)
+    }
+    private func confirmImportCore(ticket: UUID, encoding: TXTEncoding, derivedBudget: DerivedBookBudget?,
+                                  measure: ProcessingMeasurementObserver?, observe: ImportStageObserver?) async throws -> ImportReceipt {
         let generation = processed.begin()
         guard let candidate = pending.removeValue(forKey: ticket) else { throw CancellationError() }
         let staging = await store.stagingURL(ticket: ticket)
@@ -97,8 +127,9 @@ public actor LibraryService {
         guard document.utf16Count > 0 else { throw LibraryError.emptyFile }
         try check(ticket)
         let receipt = try await store.commitImport(ticket: ticket, proposed: Self.book(document, title: candidate.title))
-        if !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
+        if derivedBudget == nil, !receipt.duplicate, !Task.isCancelled { processed.retain(document, chapters: nil, book: receipt.book, token: generation) }
         observe?(.committed)
+        if let derivedBudget { await persistImported(receipt, document: document, budget: derivedBudget, measure: measure) }
         return receipt
     }
 
@@ -256,7 +287,7 @@ public actor LibraryService {
 }
 
 extension LibraryService {
-    /// Explicit opt-in only. The importer and current reader continue to use their original path.
+    /// Explicit construction also remains available as a regression/maintenance entry point.
     @discardableResult
     public func buildDerivedBook(id: String, budget: DerivedBookBudget) async throws -> DerivedBookMetadata {
         try await buildDerivedBook(id: id, budget: budget, inject: nil)
@@ -264,11 +295,19 @@ extension LibraryService {
 
     @discardableResult
     func buildDerivedBook(id: String, budget: DerivedBookBudget,
-                          inject: DerivedBuildInjection?) async throws -> DerivedBookMetadata {
-        let permit = try await store.reserveDerived(bookID: id, budget: budget)
+                          inject: DerivedBuildInjection?, imported: TXTDocument? = nil,
+                          measure: ProcessingMeasurementObserver? = nil,
+                          evictUnleased: Bool = false) async throws -> DerivedBookMetadata {
+        let began = ContinuousClock().now
+        defer { ProcessingMeasurement.finish(.derivedBuild, since: began, observe: measure) }
+        let permit = try await store.reserveDerived(bookID: id, budget: budget, evictUnleased: evictUnleased)
         do {
             let book = permit.book
             guard let encoding = book.encoding else { throw LibraryError.invalidEncoding }
+            let document: TXTDocument
+            if let imported {
+                document = imported; readingReuse.importedDocumentReuses += 1
+            } else {
             let url = try await store.fileURL(bookID: id)
             guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryError.missingFile }
             do { try DerivedBookFormat.regularFile(url) }
@@ -282,13 +321,17 @@ extension LibraryService {
             do { bytes = try DerivedBookFormat.read(input, offset: 0, count: book.byteCount, maximumBytes: book.byteCount) }
             catch DerivedStorageError.corruptArtifact { throw LibraryError.changedFile }
             guard try input.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
-            let document: TXTDocument
+            readingReuse.documentDecodes += 1
             do { document = try await processor.decode(bytes, using: encoding) }
             catch is CancellationError { throw CancellationError() }
             catch { throw LibraryError.changedFile }
+            }
             guard document.documentID == book.id else { throw LibraryError.changedFile }
             guard document.versionID == book.versionID else { throw DerivedStorageError.versionMismatch }
+            readingReuse.chapterBuilds += 1
+            let chapterStart = ContinuousClock().now
             let chapters = try await processor.chapters(in: document)
+            ProcessingMeasurement.finish(.chapters, since: chapterStart, observe: measure)
             let stage = try await store.derivedStagingURL(permit)
             let prepared = try await derivedStorage.stage(document: document, chapters: chapters, permit: permit,
                                                          url: stage, budget: budget, inject: inject)
@@ -311,7 +354,8 @@ extension LibraryService {
         }
     }
 
-    private func openDerivedOnce(id: String, budget: DerivedBookBudget) async throws -> DerivedBookSource {
+    private func openDerivedOnce(id: String, budget: DerivedBookBudget,
+                                 measure: ProcessingMeasurementObserver? = nil) async throws -> DerivedBookSource {
         guard let book = try await store.book(id: id) else { throw LibraryError.missingBook }
         let lease: DerivedLease?
         do { lease = try await store.leaseDerived(bookID: id) }
@@ -324,6 +368,7 @@ extension LibraryService {
             catch DerivedStorageError.corruptArtifact { throw LibraryError.notRegularFile }
             let file = try FileHandle(forReadingFrom: url)
             defer { try? file.close() }
+            let verificationStart = ContinuousClock().now
             guard book.byteCount > 0, try file.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
             try file.seek(toOffset: 0)
             var hash = SHA256()
@@ -338,6 +383,7 @@ extension LibraryService {
             let extra = try file.read(upToCount: 1)
             guard extra?.isEmpty != false, try file.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
             let identity = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            ProcessingMeasurement.finish(.sourceVerification, since: verificationStart, observe: measure)
             guard identity == book.id else { throw LibraryError.changedFile }
             guard let lease else { throw DerivedStorageError.missingArtifact }
             guard let current = try await store.book(id: id), current.versionID == book.versionID,
@@ -355,6 +401,146 @@ extension LibraryService {
                 await store.releaseDerivedLease(lease)
             }
             throw error
+        }
+    }
+}
+
+extension LibraryService {
+    func readingRouteStatistics() -> ReadingRouteStatistics { readingReuse }
+
+    private func persistImported(_ receipt: ImportReceipt, document: TXTDocument?, budget: DerivedBookBudget,
+                                 measure: ProcessingMeasurementObserver?) async {
+        guard !Task.isCancelled else { measure?(ProcessingMeasurement(phase: .derivedDeferred, seconds: 0)); return }
+        let reusable = document.flatMap { value -> TXTDocument? in
+            value.documentID == receipt.book.id && value.versionID == receipt.book.versionID &&
+                value.encoding.rawValue == receipt.book.encodingRaw ? value : nil
+        }
+        do {
+            if reusable == nil {
+                do {
+                    let ready = try await openDerivedOnce(id: receipt.book.id, budget: budget, measure: measure)
+                    await ready.close(); measure?(ProcessingMeasurement(phase: .diskHit, seconds: 0)); return
+                } catch let error as DerivedStorageError {
+                    guard Self.recoverableDerived(error) else { throw error }
+                }
+            }
+            _ = try await buildForReading(id: receipt.book.id, budget: budget, imported: reusable, measure: measure)
+        } catch { measure?(ProcessingMeasurement(phase: .derivedDeferred, seconds: 0)) }
+        // ImportReceipt is already committed truth. No derived error or late cancellation escapes.
+    }
+    private static func recoverableDerived(_ error: DerivedStorageError) -> Bool {
+        [.missingArtifact, .corruptArtifact, .incompatibleFormat, .versionMismatch].contains(error)
+    }
+    private func releaseReadingBuild(_ id: UUID, consumer: UUID) {
+        guard var current = readingBuild, current.id == id else { return }
+        guard current.consumers.remove(consumer) != nil else { return }
+        readingBuild = current
+        if current.consumers.isEmpty {
+            current.task.cancel()
+            let pending = current.task
+            Task { _ = try? await pending.value; self.finishReadingBuild(id) }
+        }
+    }
+    private func finishReadingBuild(_ id: UUID) {
+        if readingBuild?.id == id { readingBuild = nil }
+    }
+    private func buildForReading(id: String, budget: DerivedBookBudget, imported: TXTDocument?,
+                                 measure: ProcessingMeasurementObserver?,
+                                 inject: ReaderOpenInjection? = nil) async throws -> DerivedBookMetadata {
+        guard let book = try await store.book(id: id) else { throw LibraryError.missingBook }
+        var rechecked = false
+        let consumer = UUID()
+        let operation: ReadingBuild
+        while true {
+            try Task.checkCancellation()
+            if var previous = readingBuild {
+                if previous.bookID == id, previous.versionID == book.versionID,
+                   previous.encoding == book.encodingRaw, !previous.consumers.isEmpty, !previous.task.isCancelled {
+                    previous.consumers.insert(consumer); readingBuild = previous; operation = previous
+                    break
+                }
+                previous.task.cancel(); _ = try? await previous.task.value
+                if readingBuild?.id == previous.id { readingBuild = nil }
+                continue // Every suspension can install a different producer; match again.
+            }
+            if imported == nil, !rechecked {
+                rechecked = true
+                do {
+                    let ready = try await openDerivedOnce(id: id, budget: budget, measure: measure)
+                    let metadata = ready.metadata; await ready.close(); return metadata
+                } catch let error as DerivedStorageError { guard Self.recoverableDerived(error) else { throw error } }
+                continue
+            }
+            let token = UUID()
+            let task = Task {
+                try await inject?(.buildStarted)
+                try Task.checkCancellation()
+                try await self.store.recoverDerivedStorage()
+                return try await self.buildDerivedBook(id: id, budget: budget, inject: nil, imported: imported,
+                                                       measure: measure, evictUnleased: true)
+            }
+            operation = ReadingBuild(id: token, bookID: id, versionID: book.versionID, encoding: book.encodingRaw,
+                                     task: task, consumers: [consumer]); readingBuild = operation
+            break
+        }
+        defer { releaseReadingBuild(operation.id, consumer: consumer) }
+        return try await withTaskCancellationHandler {
+            try await inject?(.buildJoined)
+            try Task.checkCancellation()
+            let result = try await operation.task.value
+            try Task.checkCancellation(); return result
+        } onCancel: {
+            Task { await self.releaseReadingBuild(operation.id, consumer: consumer) }
+        }
+    }
+    public func openReader(id: String, budget: DerivedBookBudget,
+                           measure: ProcessingMeasurementObserver? = nil) async throws -> OpenedReader {
+        try await openReader(id: id, budget: budget, measure: measure, inject: nil)
+    }
+    func openReader(id: String, budget: DerivedBookBudget, measure: ProcessingMeasurementObserver? = nil,
+                    inject: ReaderOpenInjection?) async throws -> OpenedReader {
+        processed.invalidate() // The product path never retains the legacy full-document cache.
+        let permit = try await store.reserveReaderOpen(bookID: id)
+        var source: DerivedBookSource?, session: ReadingSession?
+        do {
+            let value: DerivedBookSource, disposition: ReaderCacheDisposition
+            do {
+                value = try await openDerivedOnce(id: id, budget: budget, measure: measure)
+                disposition = .diskHit; readingReuse.diskHits += 1
+                measure?(ProcessingMeasurement(phase: .diskHit, seconds: 0))
+            } catch let error as DerivedStorageError {
+                guard Self.recoverableDerived(error) else { throw error }
+                try Task.checkCancellation(); try await store.recoverDerivedStorage()
+                readingReuse.rebuilds += 1
+                _ = try await buildForReading(id: id, budget: budget, imported: nil, measure: measure, inject: inject)
+                try Task.checkCancellation()
+                value = try await openDerivedOnce(id: id, budget: budget, measure: measure); disposition = .rebuilt
+            }
+            source = value; try Task.checkCancellation()
+            try await inject?(.sourceReady); try Task.checkCancellation()
+            let start = try await store.beginReader(permit, versionID: value.metadata.versionID)
+            session = start.session
+            try await inject?(.sessionStarted); try Task.checkCancellation()
+            var valid = start.anchor
+            if let anchor = valid {
+                do { _ = try await value.utf16Offset(for: RawByteOffset(anchor.rawByteOffset)) }
+                catch is TXTError { valid = nil }
+            }
+            try Task.checkCancellation()
+            let preferences = try await store.preferences()
+            try await inject?(.preferencesLoaded); try Task.checkCancellation()
+            try await store.confirmReaderOpen(permit, session: start.session)
+            guard let book = try await store.book(id: id), book.versionID == value.metadata.versionID else { throw DerivedStorageError.versionMismatch }
+            try Task.checkCancellation(); try await store.confirmReaderOpen(permit, session: start.session)
+            let reading = ReadingStart(session: start.session, anchor: valid,
+                ignoredIncompatibleProgress: start.ignoredIncompatibleProgress || (start.anchor != nil && valid == nil))
+            await store.endReaderOpen(permit)
+            try Task.checkCancellation()
+            return OpenedReader(book: book, source: value, reading: reading, preferences: preferences, disposition: disposition, store: store)
+        } catch {
+            if let session { try? await store.finishReading(session: session, anchor: nil, sequence: 1) }
+            if let source { await source.close() }
+            await store.endReaderOpen(permit); throw error
         }
     }
 }

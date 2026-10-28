@@ -103,7 +103,7 @@ final class LibraryViewModel: ObservableObject {
             let timing = ProcessingTrace()
             defer { timing.end() }
             do {
-                let result = try await service.prepareImport(url: url, ticket: id, measure: timing.observer,
+                let result = try await service.prepareReadingImport(url: url, ticket: id, budget: ReaderStoragePolicy.budget(), measure: timing.observer,
                     observe: { _ = observation.continuation.yield($0) })
                 observation.continuation.finish()
                 await observation.task.value
@@ -134,7 +134,7 @@ final class LibraryViewModel: ObservableObject {
             let timing = ProcessingTrace()
             defer { timing.end() }
             do {
-                let receipt = try await service.confirmImport(ticket: choice.id, encoding: encoding, measure: timing.observer,
+                let receipt = try await service.confirmReadingImport(ticket: choice.id, encoding: encoding, budget: ReaderStoragePolicy.budget(), measure: timing.observer,
                     observe: { _ = observation.continuation.yield($0) })
                 observation.continuation.finish()
                 await observation.task.value

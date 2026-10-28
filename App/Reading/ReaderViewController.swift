@@ -5,10 +5,10 @@ import UIKit
 final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
     private(set) var window: ReadingWindow?
-    var onAnchor: (@MainActor (ReadingAnchor) -> Void)?
-    var onExtend: (@MainActor (ReadingAnchor) -> Void)?
+    var onAnchor: (@MainActor (ReadingAnchor, UUID) -> Void)?
+    var onExtend: (@MainActor (ReadingAnchor, UUID) -> Void)?
     var onWidth: (@MainActor (Double) -> Void)?
-    var onSettled: (@MainActor (ReadingAnchor) -> Bool)?
+    var onSettled: (@MainActor (ReadingAnchor, UUID) -> Bool)?
     var onRemoved: (@MainActor () -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
     private var restoring = false
@@ -56,7 +56,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         }
         restoring = false
         if userNavigation, let visible = actualVisibleAnchor() {
-            userInputSinceRestore = true; onAnchor?(visible)
+            userInputSinceRestore = true; onAnchor?(visible, value.id)
         }
     }
 
@@ -92,8 +92,8 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { userInputSinceRestore = true }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard !restoring, userInputSinceRestore, let visible = actualVisibleAnchor() else { return }
-        onAnchor?(visible)
+        guard !restoring, userInputSinceRestore, let window, let visible = actualVisibleAnchor() else { return }
+        onAnchor?(visible, window.id)
     }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         if !decelerate { endedScrolling() }
@@ -103,10 +103,10 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     private func endedScrolling() {
         guard !restoring, let window, let visible = actualVisibleAnchor(), let paths = table.indexPathsForVisibleRows else { return }
-        if onSettled?(visible) == true { return }
+        if onSettled?(visible, window.id) == true { return }
         let rows = paths.map(\.row)
         if (window.hasPrevious && (rows.min() ?? 9) == 0) || (window.hasNext && (rows.max() ?? 0) >= window.slices.count - 2) {
-            onExtend?(visible)
+            onExtend?(visible, window.id)
         }
     }
 }
