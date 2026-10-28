@@ -31,6 +31,15 @@ enum LibrarySchema {
                 t.column("data", .blob).notNull()
             }
         }
+        migrator.registerMigration("v3-derived-pointers") { db in
+            try db.create(table: "derivedArtifacts") { t in
+                t.primaryKey("bookID", .text).references("books", onDelete: .cascade)
+                t.column("versionID", .text).notNull()
+                t.column("generation", .text).notNull()
+                t.column("manifestSHA256", .text).notNull()
+                t.column("byteCount", .integer).notNull()
+            }
+        }
         return migrator
     }
 }

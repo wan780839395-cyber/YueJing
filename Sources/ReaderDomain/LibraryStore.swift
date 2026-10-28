@@ -8,6 +8,9 @@ public actor LibraryStore {
     private let root: URL
     private var tickets: [UUID: Ticket] = [:]
     private var closedSessions: Set<String> = []
+    private var derivedBuilds: [String: String] = [:]
+    private var derivedReservations: [String: Int] = [:]
+    private var derivedLeases: [UUID: DerivedPointer] = [:]
 
     public init(root: URL) throws {
         self.root = root
@@ -152,6 +155,155 @@ public actor LibraryStore {
 
     private static func isBookID(_ value: String) -> Bool {
         value.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
+// Independent cache authority. Existing import/progress decision methods above are unchanged.
+extension LibraryStore {
+    private var derivedRoot: URL { root.appendingPathComponent("Derived", isDirectory: true) }
+
+    private func ensureDerivedRoot() throws {
+        let files = FileManager.default
+        if files.fileExists(atPath: derivedRoot.path) {
+            let values = try derivedRoot.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw DerivedStorageError.corruptArtifact }
+        } else { try files.createDirectory(at: derivedRoot, withIntermediateDirectories: false) }
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        var url = derivedRoot; try url.setResourceValues(values)
+    }
+    private func derivedURL(generation: String, staging: Bool) throws -> URL {
+        guard DerivedBookFormat.isGeneration(generation) else { throw DerivedStorageError.corruptArtifact }
+        return derivedRoot.appendingPathComponent(generation + (staging ? ".stage" : ".pack"))
+    }
+    private func pointer(_ db: Database, bookID: String) throws -> DerivedPointer? {
+        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM derivedArtifacts WHERE bookID = ?", arguments: [bookID]) else { return nil }
+        let value = DerivedPointer(bookID: row["bookID"], versionID: row["versionID"], generation: row["generation"],
+                                   manifestSHA256: row["manifestSHA256"], byteCount: row["byteCount"])
+        guard DerivedBookFormat.isDigest(value.bookID), DerivedBookFormat.isDigest(value.versionID),
+              DerivedBookFormat.isGeneration(value.generation), DerivedBookFormat.isDigest(value.manifestSHA256),
+              value.byteCount >= DerivedBookFormat.headerBytes else { throw DerivedStorageError.corruptArtifact }
+        return value
+    }
+    func reserveDerived(bookID: String, budget: DerivedBookBudget) throws -> DerivedBuildPermit {
+        try Task.checkCancellation()
+        guard let book = try book(id: bookID) else { throw LibraryError.missingBook }
+        try ensureDerivedRoot()
+        let previous = try queue.read { db in try pointer(db, bookID: bookID)?.generation }
+        var occupied = 0, visiblePacks: Set<String> = []
+        for url in try FileManager.default.contentsOfDirectory(at: derivedRoot, includingPropertiesForKeys: nil) {
+            let generation = url.deletingPathExtension().lastPathComponent
+            guard DerivedBookFormat.isGeneration(generation), ["stage", "pack"].contains(url.pathExtension) else { continue }
+            // A live stage is already charged by its full reservation.
+            if url.pathExtension == "stage", derivedReservations[generation] != nil { continue }
+            try DerivedBookFormat.regularFile(url)
+            guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { throw DerivedStorageError.corruptArtifact }
+            occupied = try DerivedBookFormat.add(occupied, size)
+            if url.pathExtension == "pack" { visiblePacks.insert(generation) }
+        }
+        // Unlinked files can remain allocated while an old reader holds its descriptor.
+        var chargedLeases: Set<String> = []
+        for lease in derivedLeases.values where !visiblePacks.contains(lease.generation) {
+            if chargedLeases.insert(lease.generation).inserted { occupied = try DerivedBookFormat.add(occupied, lease.byteCount) }
+        }
+        for bytes in derivedReservations.values { occupied = try DerivedBookFormat.add(occupied, bytes) }
+        guard try DerivedBookFormat.add(occupied, budget.maximumArtifactBytes) <= budget.maximumStoredBytes else {
+            throw DerivedStorageError.budgetExceeded
+        }
+        let generation = UUID().uuidString.lowercased()
+        derivedBuilds[bookID] = generation; derivedReservations[generation] = budget.maximumArtifactBytes
+        return DerivedBuildPermit(book: book, generation: generation, previousGeneration: previous)
+    }
+    func derivedStagingURL(_ permit: DerivedBuildPermit) throws -> URL { try derivedURL(generation: permit.generation, staging: true) }
+    func abandonDerived(_ permit: DerivedBuildPermit) {
+        if derivedBuilds[permit.book.id] == permit.generation { derivedBuilds.removeValue(forKey: permit.book.id) }
+        derivedReservations.removeValue(forKey: permit.generation)
+        // Exact app-generated file only; no recursive delete and never a Books/Imports path.
+        if let url = try? derivedURL(generation: permit.generation, staging: true) { try? FileManager.default.removeItem(at: url) }
+    }
+    func publishDerived(_ prepared: PreparedDerivedBook, permit: DerivedBuildPermit,
+                        inject: DerivedBuildInjection?) throws -> DerivedPointer {
+        let value = prepared.pointer
+        guard derivedBuilds[permit.book.id] == permit.generation, value.generation == permit.generation,
+              value.bookID == permit.book.id, value.versionID == permit.book.versionID,
+              value.byteCount <= (derivedReservations[permit.generation] ?? 0) else { throw DerivedStorageError.staleBuild }
+        try Task.checkCancellation(); try inject?(.beforePublish); try Task.checkCancellation()
+        let stage = try derivedURL(generation: permit.generation, staging: true)
+        let destination = try derivedURL(generation: permit.generation, staging: false)
+        try DerivedBookFormat.regularFile(stage)
+        guard !FileManager.default.fileExists(atPath: destination.path) else { throw DerivedStorageError.staleBuild }
+        let file = try FileHandle(forReadingFrom: stage)
+        defer { try? file.close() }
+        guard try DerivedBookFormat.integer(file.seekToEnd()) == value.byteCount,
+              try DerivedBookFormat.digest(DerivedBookFormat.read(file, offset: 0, count: DerivedBookFormat.headerBytes,
+                  maximumBytes: DerivedBookFormat.headerBytes)) == value.manifestSHA256 else {
+            throw DerivedStorageError.corruptArtifact
+        }
+        // Same directory rename; no heavy export or awaits within this decision/transaction.
+        try FileManager.default.moveItem(at: stage, to: destination)
+        do {
+            try inject?(.renamed)
+            try queue.write { db in
+                guard let current = try LibraryBook.fetchOne(db, key: value.bookID), current.versionID == value.versionID,
+                      current.encodingRaw == permit.book.encodingRaw, current.byteCount == permit.book.byteCount,
+                      current.utf16Count == permit.book.utf16Count,
+                      try pointer(db, bookID: value.bookID)?.generation == permit.previousGeneration else {
+                    throw DerivedStorageError.staleBuild
+                }
+                try Task.checkCancellation()
+                try db.execute(sql: """
+                    INSERT INTO derivedArtifacts(bookID, versionID, generation, manifestSHA256, byteCount) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(bookID) DO UPDATE SET versionID=excluded.versionID, generation=excluded.generation,
+                        manifestSHA256=excluded.manifestSHA256, byteCount=excluded.byteCount
+                    """, arguments: [value.bookID, value.versionID, value.generation, value.manifestSHA256, value.byteCount])
+            }
+        } catch {
+            // If commit outcome cannot be inspected, leave an orphan for reconciliation rather than deleting uncertain truth.
+            let committed = try? queue.read { db in try pointer(db, bookID: value.bookID)?.generation == value.generation }
+            if committed == false {
+                try? FileManager.default.removeItem(at: destination)
+            }
+            throw error
+        }
+        derivedBuilds.removeValue(forKey: permit.book.id); derivedReservations.removeValue(forKey: permit.generation)
+        try? inject?(.published) // After commit, cancellation/fault must not report an uncommitted outcome.
+        return value
+    }
+    func leaseDerived(bookID: String) throws -> DerivedLease {
+        guard let value = try queue.read({ db in try pointer(db, bookID: bookID) }) else { throw DerivedStorageError.missingArtifact }
+        try ensureDerivedRoot()
+        let id = UUID(); derivedLeases[id] = value
+        return DerivedLease(id: id, pointer: value)
+    }
+    func derivedFileURL(_ lease: DerivedLease) throws -> URL {
+        guard derivedLeases[lease.id] == lease.pointer else { throw DerivedStorageError.closed }
+        return try derivedURL(generation: lease.pointer.generation, staging: false)
+    }
+    func releaseDerivedLease(_ lease: DerivedLease) { derivedLeases.removeValue(forKey: lease.id) }
+    func invalidateDerived(_ value: DerivedPointer) throws {
+        try queue.write { db in
+            try db.execute(sql: "DELETE FROM derivedArtifacts WHERE bookID = ? AND generation = ? AND manifestSHA256 = ?",
+                           arguments: [value.bookID, value.generation, value.manifestSHA256])
+        }
+    }
+    /// Explicit, bounded-to-recognized-files reconciliation. Does not run in the old opening path.
+    public func recoverDerivedStorage() throws {
+        guard FileManager.default.fileExists(atPath: derivedRoot.path) else { return }
+        try ensureDerivedRoot()
+        let values = try queue.read { db in try String.fetchAll(db, sql: "SELECT bookID FROM derivedArtifacts") }
+        var referenced: Set<String> = []
+        for id in values {
+            guard let value = try queue.read({ db in try pointer(db, bookID: id) }) else { continue }
+            let url = try derivedURL(generation: value.generation, staging: false)
+            if FileManager.default.fileExists(atPath: url.path) { referenced.insert(value.generation) }
+            else { try invalidateDerived(value) }
+        }
+        referenced.formUnion(derivedLeases.values.map(\.generation))
+        referenced.formUnion(derivedReservations.keys)
+        for url in try FileManager.default.contentsOfDirectory(at: derivedRoot, includingPropertiesForKeys: nil) {
+            let name = url.deletingPathExtension().lastPathComponent
+            guard ["stage", "pack"].contains(url.pathExtension), DerivedBookFormat.isGeneration(name), !referenced.contains(name) else { continue }
+            try DerivedBookFormat.regularFile(url); try FileManager.default.removeItem(at: url)
+        }
     }
 }
 

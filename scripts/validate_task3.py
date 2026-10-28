@@ -211,11 +211,11 @@ def unsigned(path):
 
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 26),
+    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 46),
                              ("TXTBlockDecoderTests", 6), ("ProcessingReuseMeasurementTests", 1)):
         counts = json.loads((OUT / (target + "-counts.json")).read_text())
         require(counts["native_exit"] == 0 and counts["expected"] == expected and len(counts["passed"]) == expected,
-                "All 58 real tests must pass before packaging")
+                "All 78 real tests must pass before packaging")
         require(counts["source_commit"] == os.environ["GITHUB_SHA"], "Test evidence commit mismatch")
     core = json.loads((OUT / "TXTCoreTests-counts.json").read_text())["declared"]
     block = json.loads((OUT / "TXTBlockDecoderTests-counts.json").read_text())["declared"]
@@ -223,6 +223,15 @@ def package_gate():
                 for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
     require(not set(core) & set(block) and sorted(core + block) == sorted(all_core) and len(all_core) == 31,
             "Debug/Release selection did not cover each of the 31 core tests exactly once")
+    domain = json.loads((OUT / "ReaderDomainTests-counts.json").read_text())["declared"]
+    measurement = json.loads((OUT / "ProcessingReuseMeasurementTests-counts.json").read_text())["declared"]
+    all_domain = [name for folder in ("ReaderDomainTests", "ProcessingReuseMeasurementTests")
+                  for path in (ROOT / "Tests" / folder).glob("*.swift")
+                  for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
+    require(not set(domain) & set(measurement) and sorted(domain + measurement) == sorted(all_domain)
+            and len(all_domain) == 47, "Debug/Release selection did not cover each of the 47 domain tests exactly once")
+    selected = core + domain + block + measurement
+    require(len(selected) == len(set(selected)) == 78, "Native test selection must contain exactly 78 unique tests")
     require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
             "Missing same-commit native decoder comparison")
     require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
@@ -309,7 +318,7 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=58, dependency_gate="app-dependency-gate.json"))
+           tests_passed=78, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ public struct OpenedBook: Sendable {
 public actor LibraryService {
     public nonisolated let store: LibraryStore
     private let processor = TXTProcessor()
+    private let derivedStorage = DerivedBookStorage()
     private struct Pending { let bytes: Data; let title: String; let encodings: [TXTEncoding] }
     private var pending: [UUID: Pending] = [:]
     private var cancelled: Set<UUID> = []
@@ -251,5 +252,109 @@ public actor LibraryService {
 
     private static func removeStaging(_ url: URL) {
         if FileManager.default.fileExists(atPath: url.path) { try? FileManager.default.removeItem(at: url) }
+    }
+}
+
+extension LibraryService {
+    /// Explicit opt-in only. The importer and current reader continue to use their original path.
+    @discardableResult
+    public func buildDerivedBook(id: String, budget: DerivedBookBudget) async throws -> DerivedBookMetadata {
+        try await buildDerivedBook(id: id, budget: budget, inject: nil)
+    }
+
+    @discardableResult
+    func buildDerivedBook(id: String, budget: DerivedBookBudget,
+                          inject: DerivedBuildInjection?) async throws -> DerivedBookMetadata {
+        let permit = try await store.reserveDerived(bookID: id, budget: budget)
+        do {
+            let book = permit.book
+            guard let encoding = book.encoding else { throw LibraryError.invalidEncoding }
+            let url = try await store.fileURL(bookID: id)
+            guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryError.missingFile }
+            do { try DerivedBookFormat.regularFile(url) }
+            catch DerivedStorageError.corruptArtifact { throw LibraryError.notRegularFile }
+            // Initial construction is deliberately the old complete decode/chapters algorithm.
+            guard book.byteCount > 0 else { throw LibraryError.changedFile }
+            let input = try FileHandle(forReadingFrom: url)
+            defer { try? input.close() }
+            guard try input.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
+            let bytes: Data
+            do { bytes = try DerivedBookFormat.read(input, offset: 0, count: book.byteCount, maximumBytes: book.byteCount) }
+            catch DerivedStorageError.corruptArtifact { throw LibraryError.changedFile }
+            guard try input.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
+            let document: TXTDocument
+            do { document = try await processor.decode(bytes, using: encoding) }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw LibraryError.changedFile }
+            guard document.documentID == book.id else { throw LibraryError.changedFile }
+            guard document.versionID == book.versionID else { throw DerivedStorageError.versionMismatch }
+            let chapters = try await processor.chapters(in: document)
+            let stage = try await store.derivedStagingURL(permit)
+            let prepared = try await derivedStorage.stage(document: document, chapters: chapters, permit: permit,
+                                                         url: stage, budget: budget, inject: inject)
+            _ = try await store.publishDerived(prepared, permit: permit, inject: inject)
+            return DerivedBookMetadata(bookID: id, versionID: book.versionID, encoding: encoding,
+                bomByteCount: document.bomByteCount, byteCount: book.byteCount, utf16Count: book.utf16Count,
+                chapterCount: chapters.count)
+        } catch { await store.abandonDerived(permit); throw error }
+    }
+
+    /// At most one rebuild on opening failure. Mid-read corruption invalidates that handle;
+    /// callers may explicitly reopen with rebuildIfNeeded, never silently loop or move progress.
+    public func openDerivedBook(id: String, budget: DerivedBookBudget,
+                                rebuildIfNeeded: Bool = false) async throws -> DerivedBookSource {
+        do { return try await openDerivedOnce(id: id, budget: budget) }
+        catch let failure as DerivedStorageError {
+            guard rebuildIfNeeded, [.missingArtifact, .corruptArtifact, .incompatibleFormat, .versionMismatch].contains(failure) else { throw failure }
+            _ = try await buildDerivedBook(id: id, budget: budget)
+            return try await openDerivedOnce(id: id, budget: budget)
+        }
+    }
+
+    private func openDerivedOnce(id: String, budget: DerivedBookBudget) async throws -> DerivedBookSource {
+        guard let book = try await store.book(id: id) else { throw LibraryError.missingBook }
+        let lease: DerivedLease?
+        do { lease = try await store.leaseDerived(bookID: id) }
+        catch DerivedStorageError.missingArtifact { lease = nil }
+        do {
+            // Even an absent/broken cache never masks a missing/changed original.
+            let url = try await store.fileURL(bookID: id)
+            guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryError.missingFile }
+            do { try DerivedBookFormat.regularFile(url) }
+            catch DerivedStorageError.corruptArtifact { throw LibraryError.notRegularFile }
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            guard book.byteCount > 0, try file.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
+            try file.seek(toOffset: 0)
+            var hash = SHA256()
+            var remaining = book.byteCount
+            while remaining > 0 {
+                try Task.checkCancellation()
+                let count = min(64 * 1024, remaining)
+                guard let block = try file.read(upToCount: count), !block.isEmpty, block.count <= count else { throw LibraryError.changedFile }
+                hash.update(data: block); remaining -= block.count
+            }
+            // Size checks only reject obvious change; every expected byte still participates in SHA.
+            let extra = try file.read(upToCount: 1)
+            guard extra?.isEmpty != false, try file.seekToEnd() == UInt64(book.byteCount) else { throw LibraryError.changedFile }
+            let identity = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            guard identity == book.id else { throw LibraryError.changedFile }
+            guard let lease else { throw DerivedStorageError.missingArtifact }
+            guard let current = try await store.book(id: id), current.versionID == book.versionID,
+                  current.encodingRaw == book.encodingRaw, current.byteCount == book.byteCount,
+                  current.utf16Count == book.utf16Count else { throw DerivedStorageError.versionMismatch }
+            let artifact = try await store.derivedFileURL(lease)
+            guard FileManager.default.fileExists(atPath: artifact.path) else { throw DerivedStorageError.missingArtifact }
+            return try DerivedBookSource(url: artifact, lease: lease, book: book, budget: budget, store: store)
+        } catch {
+            if let lease {
+                // Budget/caller cancellation does not make otherwise valid persistent data corrupt.
+                if !(error is CancellationError), (error as? DerivedStorageError) != .budgetExceeded {
+                    try? await store.invalidateDerived(lease.pointer)
+                }
+                await store.releaseDerivedLease(lease)
+            }
+            throw error
+        }
     }
 }

@@ -66,6 +66,7 @@ public enum TXTError: Error, Equatable, Sendable {
 public struct TXTBoundary: Equatable, Sendable {
     public let rawByte: RawByteOffset
     public let utf16: UTF16Offset
+    public init(rawByte: RawByteOffset, utf16: UTF16Offset) { self.rawByte = rawByte; self.utf16 = utf16 }
 }
 
 /// One width byte per normalized scalar, plus absolute coordinates every 256 scalars.
@@ -150,6 +151,22 @@ public struct TXTOffsetMap: Sendable {
         return try UTF16Range(location: start, length: end.value - start.value)
     }
 
+    /// Read-only bounded export. The packed width is (rawLength << 1) | (utf16Length - 1).
+    /// Never materializes `boundaries` or exposes the mutable backing index.
+    public func forEachWidthChunk(maximumScalars: Int = 256,
+        _ consume: (Int, TXTBoundary, [UInt8]) throws -> Void) throws {
+        guard maximumScalars > 0, maximumScalars <= 4096 else { throw TXTError.invalidChunkSize }
+        var raw = index.checkpoints[0].rawByte.value, utf16 = 0, position = 0
+        while position < index.widths.count {
+            try Task.checkCancellation()
+            let end = position + min(maximumScalars, index.widths.count - position)
+            let widths = Array(index.widths[position..<end])
+            try consume(position, TXTBoundary(rawByte: RawByteOffset(raw), utf16: UTF16Offset(utf16)), widths)
+            for width in widths { raw += Int(width >> 1); utf16 += Int(width & 1) + 1 }
+            position = end
+        }
+    }
+
     private func exact(_ value: Int, rawCoordinates: Bool) -> TXTBoundary? {
         var low = 0, high = index.checkpoints.count
         while low < high {
@@ -191,6 +208,31 @@ public struct TXTDocument: Sendable {
     public var utf16Count: Int { offsets.utf16Count }
     public static let normalizationVersion = "scalar-newline-lf-v1"
 
+    /// Explicit little-endian UTF-16 export, ending only between complete scalars.
+    /// This exports an already decoded document; it is not a streaming decoder.
+    public func forEachUTF16Chunk(maximumUnits: Int = 8192,
+        _ consume: (Data) throws -> Void) throws {
+        guard maximumUnits >= 2, maximumUnits <= 32768 else { throw TXTError.invalidChunkSize }
+        var bytes = Data(); bytes.reserveCapacity(maximumUnits * 2)
+        func append(_ unit: UInt16, to data: inout Data) {
+            data.append(UInt8(truncatingIfNeeded: unit)); data.append(UInt8(unit >> 8))
+        }
+        for scalar in text.unicodeScalars {
+            let count = scalar.value > 0xFFFF ? 2 : 1
+            if bytes.count / 2 + count > maximumUnits {
+                try Task.checkCancellation(); try consume(bytes); bytes.removeAll(keepingCapacity: true)
+            }
+            if count == 1 { append(UInt16(scalar.value), to: &bytes) }
+            else {
+                let value = scalar.value - 0x10000
+                append(UInt16(0xD800 + (value >> 10)), to: &bytes)
+                append(UInt16(0xDC00 + (value & 0x3FF)), to: &bytes)
+            }
+        }
+        try Task.checkCancellation()
+        if !bytes.isEmpty { try consume(bytes) }
+    }
+
     /// Conservative cache accounting, not process RSS or a promise about allocator overhead.
     public var estimatedRetainedBytes: Int {
         var result = 1024
@@ -211,6 +253,10 @@ public struct TXTChapter: Sendable {
     public let title: String?
     public let utf16Range: UTF16Range
     public let rawByteRange: RawByteRange
+    public init(id: String, documentVersion: String, title: String?, utf16Range: UTF16Range, rawByteRange: RawByteRange) {
+        self.id = id; self.documentVersion = documentVersion; self.title = title
+        self.utf16Range = utf16Range; self.rawByteRange = rawByteRange
+    }
 }
 
 public struct TXTPageLayout: Equatable, Sendable {
