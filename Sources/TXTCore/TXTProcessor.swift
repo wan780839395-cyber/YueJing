@@ -6,9 +6,12 @@ public actor TXTProcessor {
     public init() {}
 
     public func decode(_ bytes: Data, using encoding: TXTEncoding? = nil,
-                       chunkSize: Int = 4096) throws -> TXTDocument {
+                       chunkSize: Int = 4096, observe: TXTDecodeObserver? = nil) throws -> TXTDocument {
+        var metrics = TXTDecodeMetrics(requestedEncoding: encoding, enabled: observe != nil)
+        let started = metrics.start()
+        defer { metrics.processorSeconds = TXTDecodeMetrics.elapsed(started); observe?(metrics) }
         try Task.checkCancellation()
-        return try TXTDecoder.decode(bytes, using: encoding, chunkSize: chunkSize)
+        return try TXTDecoder.decode(bytes, using: encoding, chunkSize: chunkSize, metrics: &metrics)
     }
 
     public func chapters(in document: TXTDocument) throws -> [TXTChapter] {

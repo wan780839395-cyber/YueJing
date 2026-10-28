@@ -167,7 +167,10 @@ public actor LibraryService {
         reuse.decodeCalls += 1
         let start = ContinuousClock().now
         defer { ProcessingMeasurement.finish(.decode, since: start, observe: measure) }
-        return try await processor.decode(bytes, using: encoding)
+        let observer: TXTDecodeObserver?
+        if let measure { observer = { value in ProcessingMeasurement.decoder(value, observe: measure) } }
+        else { observer = nil }
+        return try await processor.decode(bytes, using: encoding, observe: observer)
     }
 
     private func previews(_ data: Data, encodings: [TXTEncoding], measure: ProcessingMeasurementObserver?) async throws -> [EncodingCard] {

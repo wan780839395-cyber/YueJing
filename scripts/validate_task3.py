@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -112,14 +113,14 @@ def settings():
     report("effective-test-settings.json", selected)
 
 
-def measurement_settings():
+def measurement_settings(targets=("TXTCore", "ReaderDomain", "ReaderDomainTests"), name="measurement-settings"):
     selected = {}
-    for target in ("TXTCore", "ReaderDomain", "ReaderDomainTests"):
+    for target in targets:
         result = subprocess.run(["xcodebuild", "-project", "YueJing.xcodeproj", "-target", target,
             "-configuration", "Release", "-sdk", "iphonesimulator", "-showBuildSettings", "-json",
             "-clonedSourcePackagesDirPath", "build/SourcePackages", "-disableAutomaticPackageResolution",
             "CODE_SIGNING_ALLOWED=NO", "ENABLE_TESTABILITY=YES", "ARCHS=arm64"], capture_output=True, text=True, timeout=120)
-        (OUT / (target + "-measurement-settings.log")).write_text(result.stderr, encoding="utf-8")
+        (OUT / (target + "-" + name + ".log")).write_text(result.stderr, encoding="utf-8")
         require(result.returncode == 0, "Measurement build settings failed")
         rows = [row["buildSettings"] for row in json.loads(result.stdout) if row.get("target") == target]
         require(len(rows) == 1, "Ambiguous measurement settings")
@@ -130,7 +131,37 @@ def measurement_settings():
                 "Unexpected measurement configuration")
         require(values["ENABLE_TESTABILITY"] == "YES", "Measurement testability is not enabled")
         selected[target] = values
-    report("measurement-settings.json", selected)
+    report(name + ".json", selected)
+
+
+def decoder_comparison():
+    log = (OUT / "TXTBlockDecoderTests.log").read_text(encoding="utf-8", errors="replace")
+    fields = ("bytes", "oldScalarConversions", "newBatchConversions", "newScalarConversions",
+              "oldReferenceSeconds", "newWrapperSeconds", "processorSeconds")
+    pattern = r"TXT_BLOCK_COMPARISON " + " ".join(key + r"=([0-9.eE+\-]+)" for key in fields)
+    matches = re.findall(pattern, log)
+    require(len(matches) == 1, "Expected exactly one synthetic timed comparison pair")
+    values = dict(zip(fields, matches[0]))
+    for key in fields[:4]:
+        values[key] = int(values[key])
+    for key in fields[4:]:
+        values[key] = float(values[key])
+        require(math.isfinite(values[key]) and values[key] >= 0, "Invalid decoder timing")
+    require(values["bytes"] == 16385 and values["oldScalarConversions"] == 8192
+            and 0 < values["newBatchConversions"] < 8192 // 100 and values["newScalarConversions"] == 0,
+            "Unexpected decoder sample or actual batch conversion counters")
+    require(values["processorSeconds"] <= values["newWrapperSeconds"] + 0.000001, "Nested timing exceeds wrapper")
+    report("decoder-comparison.json", dict(source_commit=os.environ["GITHUB_SHA"],
+           simulator=json.loads((OUT / "simulator-selection.json").read_text()),
+           configuration="Release/-O, ENABLE_TESTABILITY=YES", timed_pairs=1, encoding="GBK/CP936",
+           sample="8192 repeated synthetic U+4E2D as D6 D0 plus one LF; 16385 bytes",
+           ordering="timed frozen reference, timed new actor call, then one additional unmeasured old/new equality check",
+           old_count_scope="8192 is fixture/source-derived, not an instrumented old counter",
+           new_count_scope="actual TXTDecodeMetrics batch/scalar counters from the timed new decode",
+           timing_scope="old reference runs synchronously in test module; new wrapper includes actor scheduling; processor is nested",
+           warmup_scope="same process, serialized six-test suite; other tests may already have initialized converters; not cold start",
+           memory_scope="this 16KiB pair does not measure RSS; the separate existing 10MiB path records boundary RSS",
+           physical_device=False, values=values))
 
 
 def processing_measurements():
@@ -152,14 +183,19 @@ def processing_measurements():
 
 
 def test_counts(target, expected):
-    declared = [name for path in (ROOT / "Tests" / target).glob("*.swift")
+    folder = "TXTCoreTests" if target == "TXTBlockDecoderTests" else target
+    paths = sorted((ROOT / "Tests" / folder).glob("*.swift"))
+    if folder == "TXTCoreTests":
+        paths = [path for path in paths if (path.name == "TXTBlockDecoderTests.swift") == (target == "TXTBlockDecoderTests")]
+    declared = [name for path in paths
                 for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
     log = (OUT / (target + ".log")).read_text(encoding="utf-8", errors="replace")
     summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
     passed = re.findall(r"\bTest (\w+)\(\) passed after\b", log)
     skipped = re.findall(r"^.*\b(?:Test|Suite) [^\r\n]*\bskipped\b[^\r\n]*$", log, re.MULTILINE)
     native_exit = int((OUT / (target + "-exit-code.txt")).read_text())
-    report(target + "-counts.json", dict(expected=expected, declared=declared, passed=passed,
+    report(target + "-counts.json", dict(source_commit=os.environ["GITHUB_SHA"], expected=expected,
+           source_files=[str(path.relative_to(ROOT)) for path in paths], declared=declared, passed=passed,
            native_summaries=summaries, skipped=skipped, native_exit=native_exit))
     require(native_exit == 0 and len(declared) == expected and len(set(declared)) == expected,
             "Native exit or declared test inventory mismatch: " + target)
@@ -175,10 +211,20 @@ def unsigned(path):
 
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 25), ("ProcessingReuseMeasurementTests", 1)):
+    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 26),
+                             ("TXTBlockDecoderTests", 6), ("ProcessingReuseMeasurementTests", 1)):
         counts = json.loads((OUT / (target + "-counts.json")).read_text())
         require(counts["native_exit"] == 0 and counts["expected"] == expected and len(counts["passed"]) == expected,
-                "All 51 real tests must pass before packaging")
+                "All 58 real tests must pass before packaging")
+        require(counts["source_commit"] == os.environ["GITHUB_SHA"], "Test evidence commit mismatch")
+    core = json.loads((OUT / "TXTCoreTests-counts.json").read_text())["declared"]
+    block = json.loads((OUT / "TXTBlockDecoderTests-counts.json").read_text())["declared"]
+    all_core = [name for path in (ROOT / "Tests/TXTCoreTests").glob("*.swift")
+                for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
+    require(not set(core) & set(block) and sorted(core + block) == sorted(all_core) and len(all_core) == 31,
+            "Debug/Release selection did not cover each of the 31 core tests exactly once")
+    require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
+            "Missing same-commit native decoder comparison")
     require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
             "Missing same-commit processing evidence")
     require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
@@ -263,7 +309,7 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=51, dependency_gate="app-dependency-gate.json"))
+           tests_passed=58, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":
@@ -274,6 +320,8 @@ if __name__ == "__main__":
         else:
             {"select-simulator": select_simulator, "resolved": resolved, "settings": settings,
              "measurement-settings": measurement_settings, "processing-measurements": processing_measurements,
+             "decoder-comparison-settings": lambda: measurement_settings(("TXTCore", "TXTCoreTests"), "decoder-comparison-settings"),
+             "decoder-comparison": decoder_comparison,
              "package-gate": package_gate, "verify-ipa": verify_ipa}[command]()
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         print("Task 3 validation stopped: " + str(error), file=sys.stderr)
