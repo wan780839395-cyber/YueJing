@@ -112,10 +112,14 @@ struct ReaderScreen: View {
         let visible = tools.visible && tools.panel == nil
         return HStack(spacing: 6) {
             Button { exitReader() } label: {
-                if tools.exitRequest != nil { ProgressView() }
-                else { Image(systemName: "chevron.down").font(.system(size: 18, weight: .medium)) }
+                Group {
+                    if tools.exitRequest != nil { ProgressView() }
+                    else { Image(systemName: "chevron.down").font(.system(size: 18, weight: .medium)) }
+                }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
             }
-            .frame(minWidth: 44, minHeight: 44).disabled(!tools.canInteract)
+            .disabled(!tools.canInteract)
             .accessibilityLabel("返回书架").accessibilityIdentifier("reader.exit")
             .accessibilityFocused($focusedControl, equals: "back")
             Text(model.title).font(.headline).lineLimit(metrics.verticalButtons ? 2 : 1)

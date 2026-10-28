@@ -19,8 +19,10 @@ struct ReaderSettingsView: View {
             HStack {
                 Text("排版").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button("完成") { if isActive() { close() } }
-                    .frame(minWidth: 44, minHeight: 44).accessibilityFocused($closeFocused)
+                Button { if isActive() { close() } } label: {
+                    Text("完成").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                    .accessibilityFocused($closeFocused)
                     .accessibilityIdentifier("reader.panel.close")
             }.padding(.horizontal, 20)
             ScrollView {

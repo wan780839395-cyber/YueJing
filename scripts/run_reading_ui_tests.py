@@ -148,6 +148,69 @@ def stream_native(args, path, timeout_seconds):
     return code, timed_out.is_set()
 
 
+def export_ui_evidence(out, provenance, native_exit):
+    """Export native attachments once, including after failed tests; never rerun tests."""
+    bundle = out / "YueJingUITests.xcresult"
+    exported = out / "YueJingUITests-attachments"
+    help_args = ["xcrun", "xcresulttool", "export", "attachments", "--help"]
+    help_code, help_timeout = stream_native(help_args, out / "attachment-export-help.log", 30)
+    write_new(out / "attachment-export-help.json", {"command": help_args, "exit": help_code, "timed_out": help_timeout})
+    help_text = (out / "attachment-export-help.log").read_text(encoding="utf-8")
+    if help_code != 0 or help_timeout or not all(flag in help_text for flag in ("--path", "--output-path")):
+        raise ValueError("Pinned xcresulttool attachment export is unavailable; help preserved")
+    exported.mkdir()
+    args = ["xcrun", "xcresulttool", "export", "attachments", "--path", str(bundle), "--output-path", str(exported)]
+    code, timed_out = stream_native(args, out / "attachment-export.log", 120)
+    write_new(out / "attachment-export.json", {**provenance, "command": args, "native_exit": native_exit,
+        "export_exit": code, "timed_out": timed_out})
+    if code != 0 or timed_out:
+        raise ValueError("Native attachment export failed; original test exit and export log preserved")
+    manifests = list(exported.rglob("manifest.json"))
+    if len(manifests) != 1:
+        raise ValueError("Expected one native attachment manifest")
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    cases = {name: {"png": [], "ax": []} for name in declarations("YueJingUITests")}
+    files = {}
+    for path in sorted(exported.rglob("*")):
+        if path.is_symlink() or not path.resolve().is_relative_to(exported.resolve()):
+            raise ValueError("Unsafe exported attachment path")
+        if not path.is_file():
+            continue
+        if path.name in files:
+            raise ValueError("Duplicate exported attachment filename")
+        data = path.read_bytes()
+        item = {"path": path.relative_to(out).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        files[path.name] = {**item, "png": data.startswith(b"\x89PNG\r\n\x1a\n")}
+        if data.startswith(b"YueJing UI evidence\n"):
+            text = data.decode("utf-8")
+            name = re.search(r"^case: (test\w+)$", text, re.MULTILINE)
+            stage = re.search(r"^stage: ([\w-]+)$", text, re.MULTILINE)
+            if name and name[1] in cases:
+                cases[name[1]]["ax"].append({**item, "stage": stage[1] if stage else None,
+                    "full_app_available": "fullAppDebugDescription:\n" in text and "App is not running;" not in text})
+    def index_manifest(value, owner=None):
+        if isinstance(value, dict):
+            strings = [v for v in value.values() if isinstance(v, str)]
+            matched = [name for name in cases if any(name in v for v in strings)]
+            owner = matched[0] if len(matched) == 1 else owner
+            if owner:
+                for text in strings:
+                    item = files.get(Path(text).name)
+                    if item and item["png"] and item not in cases[owner]["png"]:
+                        cases[owner]["png"].append(item)
+            for child in value.values():
+                index_manifest(child, owner)
+        elif isinstance(value, list):
+            for child in value:
+                index_manifest(child, owner)
+    index_manifest(manifest)
+    write_new(out / "case-evidence-index.json", {**provenance, "native_exit": native_exit,
+        "native_manifest": manifests[0].relative_to(out).as_posix(), "cases": cases,
+        "exported_files": list(files.values())})
+    if native_exit == 0 and any(not row["png"] or not any(a["full_app_available"] and a["stage"] == "open" for a in row["ax"]) for row in cases.values()):
+        raise ValueError("A passed UI case lacks its PNG or full App AX from a visible-book opening")
+
+
 def run_native(destination, target=None, evidence_dir=None):
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         raise ValueError("Native execution not run: macOS and the pinned Xcode toolchain are required")
@@ -190,9 +253,14 @@ def run_native(destination, target=None, evidence_dir=None):
         write_new(out / (target + "-source-hashes.json"), {"source_commit": source_commit, "files": source})
         actual_settings(target, out, source_commit)
         print(json.dumps({"starting_target": target, "selected": declarations(target), "timeout_seconds": timeout_seconds}), flush=True)
-        code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds)
-        (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
-        write_new(out / (target + "-execution.json"), {**provenance, "native_exit": code, "timed_out": timed_out})
+        code = None
+        try:
+            code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds)
+            (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
+            write_new(out / (target + "-execution.json"), {**provenance, "native_exit": code, "timed_out": timed_out})
+        finally:
+            if target == "YueJingUITests":
+                export_ui_evidence(out, provenance, code)
         if timed_out:
             raise ValueError("Native target timed out; raw process exit preserved: " + target)
         counts = {**count_log(target, (out / (target + ".log")).read_text(encoding="utf-8", errors="replace"), code), **provenance}

@@ -76,7 +76,10 @@ struct ContentView: View {
                                     } else {
                                         Text("新加入 · 尚未阅读").font(.caption).foregroundStyle(.secondary)
                                     }
-                                }.padding(.vertical, 8)
+                                }
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityElement(children: .combine)

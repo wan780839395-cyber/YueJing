@@ -19,8 +19,10 @@ struct ReaderDirectorySheet: View {
             HStack {
                 Text("目录").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button { if active { close() } } label: { Label("关闭目录", systemImage: "xmark") }
-                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                Button { if active { close() } } label: {
+                    Label("关闭目录", systemImage: "xmark").labelStyle(.iconOnly)
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
                     .accessibilityFocused($closeFocused)
                     .accessibilityIdentifier("reader.panel.close")
             }.padding(.horizontal, 16)

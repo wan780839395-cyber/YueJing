@@ -19,7 +19,9 @@ struct ReaderAuxiliarySheet: View {
                 }
             }
             .toolbar { ToolbarItem(placement: .confirmationAction) {
-                Button("完成") { dismiss() }.frame(minHeight: 44).accessibilityIdentifier("reader.info.close")
+                Button { dismiss() } label: {
+                    Text("完成").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }.accessibilityIdentifier("reader.info.close")
             } }
         }
         .tint(appearance.accent).foregroundStyle(appearance.foreground)

@@ -2,9 +2,20 @@ import XCTest
 import UIKit
 
 final class ReadingFlowUITests: XCTestCase {
+    @MainActor private static var finalEvidenceCases: Set<String> = []
+
     override func setUpWithError() throws { continueAfterFailure = false }
     override func tearDown() async throws {
-        await MainActor.run { XCUIApplication().terminate() }
+        let testName = name
+        await MainActor.run {
+            let app = XCUIApplication()
+            let key = ReadingFlowUITests.evidenceCase(testName)
+            if !ReadingFlowUITests.finalEvidenceCases.contains(key) {
+                ReadingFlowUITests.captureEvidence(app, testName: key, stage: "teardown-fallback")
+                ReadingFlowUITests.finalEvidenceCases.insert(key)
+            }
+            app.terminate()
+        }
         try await super.tearDown()
     }
 
@@ -144,19 +155,70 @@ final class ReadingFlowUITests: XCTestCase {
         }
     }
 
-    @MainActor private func withFixture(largeText: Bool = false, _ run: (XCUIApplication) -> Void) {
+    @MainActor private func withFixture(largeText: Bool = false, testName: String = #function,
+                                      _ run: (XCUIApplication) -> Void) {
         let orientation = XCUIDevice.shared.orientation
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchEnvironment["YUEJING_UI_TEST_SESSION"] = UUID().uuidString
         if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
-        defer { app.terminate(); XCUIDevice.shared.orientation = orientation }
+        let key = Self.evidenceCase(testName)
+        Self.finalEvidenceCases.remove(key)
+        defer {
+            // Always collect while this App is alive, before either termination path.
+            Self.captureEvidence(app, testName: key, stage: "before-terminate")
+            Self.finalEvidenceCases.insert(key)
+            app.terminate(); XCUIDevice.shared.orientation = orientation
+        }
         app.launch(); run(app)
     }
     @MainActor private func open(_ title: String, _ app: XCUIApplication) {
         let book = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch
         waitHittable(book, timeout: 20); book.tap()
-        waitHittable(app.buttons["reader.tools.settings"], timeout: 20)
+        // Content and tools share the original 20-second post-tap budget.
+        let deadline = Date().addingTimeInterval(20)
+        let marker = title == "UITest-Long-A" ? "UI_A_C" : "UI-END-B"
+        let table = viewport(app)
+        let visibleBook = NSPredicate { _, _ in
+            guard table.exists, table.isHittable else { return false }
+            let bounds = table.frame.intersection(app.windows.firstMatch.frame)
+            guard !bounds.isNull, bounds.width >= 100, bounds.height >= 100 else { return false }
+            return table.cells.allElementsBoundByIndex.contains { cell in
+                let canvas = cell.staticTexts["reader.text.canvas"]
+                guard canvas.exists, canvas.label.contains(marker) else { return false }
+                let visible = canvas.frame.intersection(bounds)
+                return !visible.isNull && visible.width >= 100 && visible.height >= 44
+            }
+        }
+        let ready = XCTNSPredicateExpectation(predicate: visibleBook, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: max(0.01, deadline.timeIntervalSinceNow)), .completed,
+                       "The expected synthetic book must have content geometrically visible in the reader viewport")
+        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow))
+        Self.captureEvidence(app, testName: name, stage: "open", expectedBook: title)
+    }
+
+    private static func evidenceCase(_ value: String) -> String {
+        value.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" })
+            .last(where: { $0.hasPrefix("test") }).map(String.init) ?? "unknown-case"
+    }
+
+    @MainActor private static func captureEvidence(_ app: XCUIApplication, testName: String, stage: String,
+                                                   expectedBook: String? = nil) {
+        let key = evidenceCase(testName)
+        let state = app.state
+        let screenshot = state == .runningForeground ? app.screenshot() : XCUIScreen.main.screenshot()
+        let prefix = "YueJingUI--\(key)--\(stage)"
+        let image = XCTAttachment(data: screenshot.pngRepresentation, uniformTypeIdentifier: "public.png")
+        image.name = prefix + ".png"; image.lifetime = .keepAlways
+        XCTContext.runActivity(named: prefix) { activity in activity.add(image) }
+        // Persist the PNG before an AX query can fail or time out.
+        let description = state == .notRunning || state == .unknown
+            ? "App is not running; a full App AX hierarchy is unavailable."
+            : app.debugDescription
+        let descriptionText = "YueJing UI evidence\ncase: \(key)\nstage: \(stage)\nappState: \(state.rawValue)\nexpectedBook: \(expectedBook ?? "not specified")\nfullAppDebugDescription:\n\(description)"
+        let text = XCTAttachment(data: Data(descriptionText.utf8), uniformTypeIdentifier: "public.utf8-plain-text")
+        text.name = prefix + ".ax.txt"; text.lifetime = .keepAlways
+        XCTContext.runActivity(named: prefix + "--ax") { activity in activity.add(text) }
     }
     @MainActor private func viewport(_ app: XCUIApplication) -> XCUIElement { app.tables["reader.viewport"] }
     @MainActor private func openSettings(_ app: XCUIApplication) {
