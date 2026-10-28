@@ -5,9 +5,11 @@ import UIKit
 
 @MainActor
 struct ReaderScreen: View {
-    @StateObject private var model: ReaderViewModel
+    @ObservedObject var model: ReaderViewModel
+    let routeID: UUID
+    let onExit: @MainActor () -> Void
     @State private var tools = ReadingToolsPresentation()
-    @Environment(\.dismiss) private var dismiss
+    @State private var lastPanelControl: String?
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -15,11 +17,7 @@ struct ReaderScreen: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @ScaledMetric(relativeTo: .body) private var controlHeight: CGFloat = 44
     @ScaledMetric(relativeTo: .headline) private var titleLine: CGFloat = 22
-    @AccessibilityFocusState private var exitFocused: Bool
-
-    init(bookID: String, service: LibraryService) {
-        _model = StateObject(wrappedValue: ReaderViewModel(bookID: bookID, service: service))
-    }
+    @AccessibilityFocusState private var focusedControl: String?
 
     var body: some View {
         GeometryReader { geometry in
@@ -27,57 +25,64 @@ struct ReaderScreen: View {
                 titleLine: titleLine, accessibilityFont: dynamicType.isAccessibilitySize)
             let appearance = ReaderToolAppearance(theme: model.preferences.theme, reduceTransparency: reduceTransparency)
             ZStack {
+                // Safe-area-sized from the start. Tools never reserve or resize this viewport.
+                // UIKit retains the existing 16/24pt scroll-end insets and 20pt text side margins.
                 ReaderViewport(window: model.window, preferences: model.preferences, handle: model.viewport,
                     onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
-                    onSettled: model.scrollingEnded, onRemoved: model.disappeared, onApplied: model.windowApplied,
+                    onSettled: model.scrollingEnded, onApplied: model.windowApplied,
                     toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction)
-                    // Stable reading margins, independent of visibility/panel state. No moving anchor or fixed 84pt pad.
-                    .padding(.top, metrics.topClearance).padding(.bottom, metrics.bottomClearance)
                     .allowsHitTesting(!model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
                     .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
                     .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
                     .accessibilityAction(named: Text("退出阅读")) { exitReader() }
-                if model.loading {
+                if model.loading && tools.exitRequest == nil && tools.valid {
                     VStack(alignment: .leading, spacing: 12) {
                         ProgressView("正在打开书籍…")
-                        Text("首次打开旧书或需要重新准备阅读内容时，可能需要稍等。可返回书架停止本次打开，书籍与已保存位置保留。")
+                        Text("首次准备可能需要稍等。可返回书架停止本次打开，书籍与已保存位置保留。")
                             .font(.footnote).fixedSize(horizontal: false, vertical: true)
                     }
                     .padding().background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
                     .padding().accessibilityElement(children: .combine)
                     .accessibilityHidden(tools.panel != nil)
                 }
-                if !model.loading && model.window == nil {
+                if !model.loading && model.window == nil && tools.exitRequest == nil && tools.valid {
                     VStack(spacing: 16) {
                         Image(systemName: "book.closed").font(.largeTitle).accessibilityHidden(true)
                         Text("暂时无法显示正文").accessibilityAddTraits(.isHeader)
                         Button("重试打开") { Task { await model.retry() } }
                             .buttonStyle(.borderedProminent).frame(minHeight: 44)
                     }.padding().background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
-                        .accessibilityHidden(tools.panel != nil)
-                        .disabled(tools.exitRequest != nil)
-                }
-                if let id = tools.panelID {
-                    Button { closePanel(id) } label: { Color.black.opacity(model.preferences.theme == .dark ? 0.08 : 0.02) }
-                        .buttonStyle(.plain).accessibilityHidden(true)
+                        .accessibilityHidden(tools.panel != nil).disabled(tools.exitRequest != nil)
                 }
                 VStack(spacing: 0) {
-                    titleCapsule(metrics: metrics, appearance: appearance)
+                    titleBar(metrics: metrics, appearance: appearance)
                     Spacer(minLength: 0)
                 }
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    ReaderFloatingToolsView(model: model, state: tools, metrics: metrics, appearance: appearance,
-                        active: panelActive, open: openPanel, close: closePanel, selected: selectChapter)
+                    ReaderFloatingToolsView(model: model, state: tools, metrics: metrics,
+                        appearance: appearance, open: openPanel, focusedControl: $focusedControl)
                 }
-                .padding(.horizontal, 12).padding(.bottom, 6)
+                .padding(.horizontal, 16).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }
         .background(Color(uiColor: model.preferences.theme.background).ignoresSafeArea())
-        .navigationBarBackButtonHidden()
-        .toolbar(.hidden, for: .navigationBar)
-        .task { await model.load() }
+        // Environment flows down this presentation; no window color-scheme preference.
+        .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
+        .sheet(item: panelPresentation) { session in
+            ReaderPanelHost(session: session, model: model, active: panelActive,
+                close: closePanel, selected: selectChapter)
+        }
+        .task(id: routeID) { await model.load() }
+        .task(id: tools.intent) {
+            let intent = tools.intent
+            guard voiceOver, tools.visible, tools.panel == nil else { return }
+            await Task.yield()
+            if !Task.isCancelled, tools.intent == intent, tools.panel == nil {
+                focusedControl = lastPanelControl ?? "back"
+            }
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 mutateTools { $0.resume(); if model.loading || model.window == nil { $0.forceCompact() } }
@@ -92,7 +97,7 @@ struct ReaderScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             Task { await model.releaseReaderMemory() }
         }
-        .onDisappear { mutateTools { $0.invalidate() } }
+        // A sheet/temporary hierarchy change is not an exit. The route owner performs final close.
         .alert("阅读提示", isPresented: Binding(get: { model.message != nil }, set: { if !$0 { model.message = nil } })) {
             if model.exitSaveFailed {
                 Button("重试保存") { exitReader() }
@@ -103,35 +108,39 @@ struct ReaderScreen: View {
         } message: { Text(model.message ?? "") }
     }
 
-    private func titleCapsule(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
-        HStack(spacing: 8) {
+    private func titleBar(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
+        let visible = tools.visible && tools.panel == nil
+        return HStack(spacing: 6) {
             Button { exitReader() } label: {
                 if tools.exitRequest != nil { ProgressView() }
-                else { Label("返回书架", systemImage: "chevron.left").labelStyle(.iconOnly).font(.system(size: 18)) }
+                else { Image(systemName: "chevron.down").font(.system(size: 18, weight: .medium)) }
             }
             .frame(minWidth: 44, minHeight: 44).disabled(!tools.canInteract)
-            .accessibilityLabel("返回书架").accessibilityFocused($exitFocused)
-            Text(model.title).font(.headline).lineLimit(metrics.compactHeight ? 1 : 2)
+            .accessibilityLabel("返回书架").accessibilityIdentifier("reader.exit")
+            .accessibilityFocused($focusedControl, equals: "back")
+            Text(model.title).font(.headline).lineLimit(metrics.verticalButtons ? 2 : 1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityLabel("书名，\(model.title)")
         }
-        .padding(.horizontal, 12).frame(height: metrics.titleHeight)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(appearance.edge, lineWidth: 1) }
+        .padding(.horizontal, 8).frame(minHeight: metrics.titleHeight)
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
         .padding(.horizontal, 12).padding(.top, 6)
-        .opacity(tools.visible ? 1 : 0)
-        .offset(y: reduceMotion || tools.visible ? 0 : -8)
-        .allowsHitTesting(tools.visible && tools.canInteract)
-        .accessibilityHidden(!tools.visible || tools.panel != nil)
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .easeOut(duration: 0.20), value: tools.visible)
-        .task(id: tools.intent) {
-            let intent = tools.intent
-            guard voiceOver, tools.visible, tools.panel == nil else { return }
-            await Task.yield()
-            if !Task.isCancelled, tools.intent == intent, tools.panel == nil { exitFocused = true }
-        }
+        .opacity(visible ? 1 : 0).offset(y: reduceMotion || visible ? 0 : -8)
+        .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)
+        .animation(.easeOut(duration: reduceMotion ? 0.12 : 0.18), value: visible)
     }
 
+    private var panelPresentation: Binding<ReaderPanelSession?> {
+        let expected = tools.panelID
+        return Binding(get: {
+            guard let id = tools.panelID, let panel = tools.panel else { return nil }
+            return ReaderPanelSession(id: id, panel: panel)
+        }, set: { value in
+            guard value == nil, let expected else { return }
+            closePanel(expected)
+        })
+    }
     private func panelActive(_ panel: ReadingToolPanel, _ id: UUID) -> Bool {
         tools.owns(panel, id: id) && !model.exitSaveFailed
     }
@@ -145,6 +154,7 @@ struct ReaderScreen: View {
         guard !model.exitSaveFailed else { return }
         if panel == .directory, model.chapterTotal == 0 { return }
         if panel == .settings, model.window == nil { return }
+        lastPanelControl = panel == .directory ? "directory" : "settings"
         mutateTools { $0.open(panel) }
     }
     private func closePanel(_ id: UUID) { mutateTools { _ = $0.closePanel(id: id) } }
@@ -176,7 +186,7 @@ struct ReaderScreen: View {
             else { succeeded = await model.close() }
             var accepted = false
             mutateTools { accepted = $0.finishExit(request, succeeded: succeeded) }
-            if accepted, succeeded { dismiss() }
+            if accepted, succeeded { onExit() }
         }
     }
 }

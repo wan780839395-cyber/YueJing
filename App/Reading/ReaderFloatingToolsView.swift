@@ -1,6 +1,5 @@
 import ReaderDomain
 import SwiftUI
-import TXTCore
 
 @MainActor
 struct ReaderFloatingToolsView: View {
@@ -8,84 +7,45 @@ struct ReaderFloatingToolsView: View {
     let state: ReadingToolsPresentation
     let metrics: ReaderToolMetrics
     let appearance: ReaderToolAppearance
-    let active: @MainActor (ReadingToolPanel, UUID) -> Bool
     let open: @MainActor (ReadingToolPanel) -> Void
-    let close: @MainActor (UUID) -> Void
-    let selected: @MainActor (TXTChapter, UUID) -> Void
+    @AccessibilityFocusState.Binding var focusedControl: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var visible: Bool { state.visible && state.panel == nil }
+
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if let id = state.panelID {
-                    if state.panel == .directory {
-                        ReaderDirectorySheet(model: model.directory, presentationID: id,
-                            isActive: { active(.directory, id) }, currentAnchor: model.directoryAnchor,
-                            close: { close(id) }, appearance: appearance) { selected($0, id) }
-                            .id(id).transition(.opacity)
-                    } else {
-                        ReaderSettingsView(preferences: settingsBinding(id), changed: {
-                            if active(.settings, id) { model.settingsChanged() }
-                        }, openingSummary: model.openingPerformanceSummary,
-                            isActive: { active(.settings, id) }, close: { close(id) })
-                            .id(id).transition(.opacity)
-                    }
-                }
+        Group {
+            if metrics.verticalButtons {
+                VStack(spacing: 4) { directoryButton; settingsButton }
+            } else {
+                HStack(spacing: 8) { directoryButton; settingsButton }
             }
-            .frame(height: state.panel == nil ? 0 : max(0, metrics.panelHeight - metrics.dockHeight))
-            .clipped()
-            Group {
-                if metrics.verticalButtons {
-                    VStack(spacing: 8) { directoryButton; settingsButton }
-                } else {
-                    HStack(spacing: 8) { directoryButton; settingsButton }
-                }
-            }
-            .padding(8).frame(height: metrics.dockHeight)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: state.panel == nil ? metrics.dockHeight : metrics.panelHeight)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(appearance.edge, lineWidth: 1) }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .tint(appearance.accent).foregroundStyle(appearance.foreground)
-        .preferredColorScheme(model.preferences.theme == .dark ? .dark : .light)
-        // Reduced Motion switches geometry immediately; only the outer opacity may fade.
-        .transaction { transaction in if reduceMotion { transaction.animation = nil } }
-        .opacity(state.visible ? 1 : 0)
-        .offset(y: reduceMotion || state.visible ? 0 : 8)
-        .allowsHitTesting(state.visible && state.canInteract)
-        .accessibilityHidden(!state.visible)
-        // Only this tools container animates. No completion callback changes semantic state.
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .interactiveSpring(response: 0.32, dampingFraction: 0.90), value: state.mode)
+        .padding(6).frame(maxWidth: metrics.verticalButtons ? 280 : 340)
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
+        .foregroundStyle(appearance.foreground).tint(appearance.accent)
+        .opacity(visible ? 1 : 0).offset(y: reduceMotion || visible ? 0 : 8)
+        .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
+        .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.28, dampingFraction: 0.94), value: visible)
     }
+
     private var directoryButton: some View {
-        toolButton("目录", systemImage: "list.bullet", panel: .directory)
+        toolButton("目录", symbol: "list.bullet", panel: .directory, key: "directory")
             .disabled(model.chapterTotal == 0 || model.exitSaveFailed || !state.canInteract)
-            .accessibilityHint("显示当前章节并分页浏览目录")
     }
     private var settingsButton: some View {
-        toolButton("设置", systemImage: "textformat.size", panel: .settings)
+        toolButton("排版", symbol: "textformat.size", panel: .settings, key: "settings")
             .disabled(model.window == nil || model.exitSaveFailed || !state.canInteract)
-            .accessibilityHint("调整文字和背景，设置立即生效")
+            .accessibilityHint("调整字号、行距和阅读背景，立即应用并保存")
     }
-    private func toolButton(_ title: String, systemImage: String, panel: ReadingToolPanel) -> some View {
+    private func toolButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String) -> some View {
         Button { open(panel) } label: {
-            HStack(spacing: 8) {
-                Image(systemName: systemImage).font(.system(size: 20)).accessibilityHidden(true)
-                if !metrics.compactHeight { Text(title).font(.body) }
-            }
-            .frame(maxWidth: .infinity).frame(minHeight: metrics.controlHeight)
-            .background(state.panel == panel ? appearance.accent.opacity(0.10) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            Label(title, systemImage: symbol).font(.body.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: metrics.controlHeight)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityLabel(title)
-        .accessibilityValue(state.panel == panel ? "已展开" : "")
-    }
-    private func settingsBinding(_ id: UUID) -> Binding<ReaderPreferences> {
-        Binding(get: { model.preferences }, set: { value in
-            guard active(.settings, id), !model.exitSaveFailed else { return }
-            model.preferences = value
-        })
+        .buttonStyle(.plain).accessibilityIdentifier("reader.tools.\(key)")
+        .accessibilityFocused($focusedControl, equals: key)
     }
 }

@@ -26,6 +26,7 @@ private final class ReadingCanvas: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true; isAccessibilityElement = true; accessibilityTraits = .staticText
+        accessibilityIdentifier = "reader.text.canvas"
     }
     required init?(coder: NSCoder) { return nil }
     func render(_ value: ReadingSlice, preferences: ReaderPreferences) {

@@ -22,13 +22,18 @@ final class LibraryViewModel: ObservableObject {
     private var stageSink: (id: UUID, continuation: AsyncStream<ImportStage>.Continuation)?
     private var starting = false
     private var reloadGeneration = UUID()
+    private let makeService: @MainActor () async throws -> LibraryService
+
+    init(makeService: @escaping @MainActor () async throws -> LibraryService = { try await LibraryService.openDefault() }) {
+        self.makeService = makeService
+    }
 
     func start() async {
         guard !starting else { return }
         starting = true
         defer { starting = false }
         guard service == nil else { await reload(); return }
-        do { service = try await LibraryService.openDefault(); await reload() }
+        do { service = try await makeService(); await reload() }
         catch { message = "无法打开书架：\(ImportSafeFailure(error).summary)" }
     }
 

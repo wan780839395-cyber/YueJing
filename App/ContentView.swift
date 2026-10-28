@@ -4,11 +4,24 @@ import UIKit
 
 @MainActor
 struct ContentView: View {
-    @StateObject private var model = LibraryViewModel()
-    @State private var path: [String] = []
+    @StateObject private var model: LibraryViewModel
+    @StateObject private var readerRoutes = ReaderRouteOwner()
+
+    init() {
+        _model = StateObject(wrappedValue: LibraryViewModel(makeService: Self.makeLibraryService))
+    }
+
+    private static func makeLibraryService() async throws -> LibraryService {
+        #if DEBUG
+        if ReadingUITestFixture.isRequested {
+            return try await ReadingUITestFixture.makeService()
+        }
+        #endif
+        return try await LibraryService.openDefault()
+    }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             List {
                 if let notice = model.notice {
                     Section {
@@ -49,7 +62,9 @@ struct ContentView: View {
                 } else {
                     Section("最近阅读与新加入") {
                         ForEach(model.books) { book in
-                            NavigationLink(value: book.id) {
+                            Button {
+                                if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }
+                            } label: {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(book.title).font(.headline)
                                         .fixedSize(horizontal: false, vertical: true)
@@ -63,6 +78,7 @@ struct ContentView: View {
                                     }
                                 }.padding(.vertical, 8)
                             }
+                            .buttonStyle(.plain)
                             .accessibilityElement(children: .combine)
                             .accessibilityHint("打开正文，恢复已保存的阅读位置")
                         }
@@ -86,15 +102,24 @@ struct ContentView: View {
                         .disabled(!model.canBeginFileSelection)
                 }
             }
-            .navigationDestination(for: String.self) { id in
-                if let service = model.service { ReaderScreen(bookID: id, service: service) }
-            }
+        }
+        .accessibilityIdentifier("library.screen")
+        .overlay(alignment: .topLeading) {
+            #if DEBUG
+            if ReadingUITestFixture.isRequested { ReadingUITestSchemeProbe() }
+            #endif
+        }
+        .fullScreenCover(item: readerPresentation) { route in
+            ReaderScreen(model: route.model, routeID: route.id) { readerRoutes.finishExit(route.id) }
+                .id(route.id)
         }
         .task { await model.start() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             Task { await model.releaseProcessingCache() }
         }
-        .onChange(of: path) { value in if value.isEmpty { Task { await model.reload() } } }
+        .onChange(of: readerRoutes.presentation?.id) { id in
+            if id == nil { Task { await model.reload() } }
+        }
         .background {
             if let session = model.fileSelection {
                 DocumentPickerBridge.Presentation(session: session, onDismiss: model.documentPickerDismissed).id(session.id)
@@ -109,5 +134,13 @@ struct ContentView: View {
             set: { if !$0 && model.canPresentLibraryFeedback { model.message = nil } })) {
             Button("知道了", role: .cancel) { model.message = nil }
         } message: { Text(model.message ?? "") }
+    }
+
+    private var readerPresentation: Binding<ReaderPresentation?> {
+        let expected = readerRoutes.presentation
+        return Binding(get: { readerRoutes.presentation }, set: { value in
+            guard value == nil, let expected else { return }
+            readerRoutes.presentationEnded(expected)
+        })
     }
 }

@@ -204,8 +204,6 @@ final class ReaderViewModel: ObservableObject {
         if let reader { try? await reader.close(sequence: sequence + 1) }
         reader = nil; window = nil; chapterTotal = 0; directory.detach()
     }
-    func disappeared() { Task { _ = await close() } }
-
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
         lifecycle = UUID(); generation = UUID()

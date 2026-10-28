@@ -1,39 +1,46 @@
-# 阅读工具浮岛：本地候选（2026-10-28）
+# 阅读工具本地修复与界面验证（2026-10-28，未发布）
 
-基线为`1eaaaddae8b34f9101be8b15099db57108a8e8be`。本批只实现用户选定的“同色系浮岛＋沉浸显隐＋连续展开”，不照搬模型B提案；不提交、推送、调用Gemini、触发Actions、构建或安装。此前111项原生通过属于基线，本批新增源码不继承该验收。
+本批基线为 `69e4152eb7d39d521e1617b6ab45ab5d4196b3c6`。该基线的121项原生单测、设备App编译和IPA门槛曾通过，但用户在iPhone13/iOS16.6.1拒收界面：隐藏工具后仍留空，设置后返回书架、变色并无法重进书。本地修复批已完成。用户另行批准本次普通提交/push及唯一一次既有Task3 workflow_dispatch、attempt1，保留原121项并接入新增8项；任一步失败即停，不自动修补、追加提交或重跑。发布前静检不代表真机问题已解决。
 
-## 范围与状态
+## 已证实与尚未证实
 
-- 阅读页用暖白同色系工具面板、相近炭黑暗色面板与弱赤陶强调，实际明暗由阅读主题控制；不增加主题枚举、不改纸色/白色/深色背景设置语义，没有深绿强对比或光晕。
-- 顶部标题胶囊保留退出。底部紧凑Dock只有目录、设置。中央轻点显示/再点隐藏，开始主动滚动隐藏，停滚不自动出现；显隐时工具与装饰边线一起隐藏。
-- 目录与设置共用一个持续存在的浮动容器，正常动画只改变工具容器几何与透明度。关闭/完成回紧凑Dock，选章回沉浸；两个面板可直接切换。同面板重复点击不分配新会话。
-- ReadingToolsPresentation仅持有UI意图、面板UUID、挂起与退出状态，不持有阅读器/文档/位置/设置快照。每次新意图撤销旧触摸令牌；关闭、选章与退出完成都检查身份。没有延时动画完成回调重新写状态。挂起撤销面板，恢复不自动展开；读取/退出错误保留显式退出入口。
-- 目录保持原32项分页、真实当前语义锚点、已有reveal/request/owner/presentation门控。旧目录同步dismiss，迟到onDisappear仍按旧UUID关闭；行点击额外核对ownerRevision。设置仍即时应用并按原方式保存，旧面板的Binding写入/changed/关闭回调均需当前会话，完成不表示撤销。
+- 原正文外层始终按工具高度设置上下padding，普通字号各约72pt。隐藏只改变工具透明度，留位不释放；这是源码可证的空白原因。
+- 动态内嵌NavigationStack、主题偏好作用范围、临时拆卸触发close均是候选链。尚未复现iOS16.6.1那次触发顺序，不能宣称已定位/修好真机根因。
+- 原121项没有覆盖这条真实SwiftUI/UIKit交互链；其历史通过不构成本批验收。
 
-## 手势与视口边界
+## 本批行为边界
 
-- UIKit只新增中央单击桥：不取消既有触摸，等待原pan失败，不注册边缘上滑或Dock拖动，保留原正文滚动与已有选择/触摸处理。目录列表的滚动仍由自己的List处理。
-- 在shouldReceive及识别器touchesBegan阶段锁存减速/拖动状态，tap结束再判断时仍保留起始快照；减速中的第一次触摸只让UIKit原生停滚，不切换工具。桥接不setContentOffset，也不生成位置保存事件。真实UIKit事件顺序及选择竞争仍须原生验证。
-- touch.location(in: table)包含滚动bounds原点，生产helper先减originX/originY再判断中央区；新增非零offset回归。VoiceOver不走普通单击判定，正文可访问元素提供“显示阅读工具”“退出阅读”自定义动作。
-- 正文上下边距由几何、字体和紧凑工具所需空间决定，不依赖工具visible/panel状态；显隐、面板动画不会反复改viewport高度、contentInset、排版宽度或锚点。没有84pt固定padding，没有首帧/零白闪保证。目录/设置展开是工具覆盖层，覆盖区暂不交互，关闭后回到同一稳定阅读视口；不承诺展开面板时背景所有行都可见。
-- 大字模式可纵排两个Dock按钮，矮屏保留带无障碍名称的图标按钮，标题最多两行且完整书名可朗读。旋转/系统字体变化可按新几何重新布局，这不同于工具显隐；原宽度变化与位置恢复路径不改。正文末行、短/长章、横屏与最大辅助字号的可达性仍待原生/真机核对。
+- 正文从开始占据合理安全区内的完整视口；保留UIKit原16/24pt滚动首尾内边距和20pt文本侧边距。工具是叠加层，不再按工具高度缩小或反复改变正文视口。
+- 顶部保留书名/返回，底部仅目录/排版。轻微位移和淡变，减弱动态效果下纯淡变；降低透明度下实底。大字工具纵向排列，排版控件可滚动且避免横向溢出。
+- 目录/排版用独立原生sheet，背景阅读区不可交互或滑透。关闭、下拉和Escape只关闭面板；字号/行距/三种主题仍即时应用保存，没有取消事务。
+- 排版不再内嵌导航Form；诊断与许可在面板自己的辅助sheet中，NavigationStack只属于该独立呈现。阅读主题使用局部environment和显式颜色，不设置子Dock的preferredColorScheme。
+- 书架的ReaderRouteOwner是阅读路由唯一owner；每次打开有新UUID与模型。正常返回先完成原保存/关闭流程，再按相同route ID结束呈现；晚回不能清掉更新路由。
+- 临时onDisappear及representable拆卸不再关闭书籍。桥接替换前捕获一份有界临时UI恢复点；新控制器apply前仍有可靠锚点，同windowID恢复视觉位置。像素坐标仅用于同一UI窗口重建，绝不持久化或替代版本化文字锚点。
+- 新控制器先attach或旧控制器先dismantle均处理；旧回调立即清除，旧update/detach不能改新handle。明确用户跳章优先于旧视口恢复。
+- 正常退出过程中不显示“正文不可用/重试”错误占位；保存失败仍保留原显式错误处理。
+- 原32项目录分页、定位和迟到任务保护保持；TXTCore、ReaderDomain、派生存储、数据库和位置合同不改。无新增书签、搜索、慢滚、翻页、AI或书架设计。
 
-## 无障碍与动效
+## 新增实际App验证入口
 
-Reduce Motion时容器内部transaction清除尺寸/位置动画，只有外层工具透明度淡变；普通模式仅工具层使用iOS16已有interactiveSpring，不传播到正文。不使用iOS17动画API。Reduce Transparency时工具底色为实底，默认仅轻微透明、无动态模糊。目录打开可先聚焦关闭，reveal到达后聚焦当前章；设置聚焦完成，关闭回工具退出入口。设置的嵌套NavigationStack显式请求显示导航栏，保留完成、诊断/许可导航与返回；父阅读页只隐藏自己的工具栏，真实嵌套导航可发现性仍需原生验收。每个迟到焦点任务都检查取消与当前会话/意图。真实VoiceOver焦点顺序、系统提示竞争与动态效果表现未验收。
+`project.yml`新增：
+- `YueJingHostTests`：真实App-host单元target，2项Swift Testing UIKit桥接集成，覆盖两种重建先后、apply前锚点、同窗口滚后恢复、旧回调隔离。
+- `YueJingUITests`：XCTest UI target，6项真实App流程。
+- 独立 `YueJingUI` Debug scheme；原scheme保持；本次发布在既有Task3中接入新scheme的两个target，逐项串行执行。
 
-## 文件白名单与保护
+6项UI流程覆盖设置→关闭→滚动→退出→同书/另一书；主题相对书架环境隔离及持久化；32项分页/当前章/设置/重进；工具显隐与面板返回的viewport frame；长短书EOF尾部几何；连续面板和诊断/许可返回；最大辅助字体下关键控件可达。
 
-修改6份既有UI文件：App/Reading/ReaderScreen.swift、ReaderViewport.swift、ReaderViewController.swift、ReadingCell.swift、ReaderDirectorySheet.swift、ReaderSettingsView.swift。
+滚动断言只采样有限、与viewport相交的实际cell/canvas内容和frame，不对所有离屏CoreText静态元素求isHittable。长书经末章和有限滚动检查EOF尾部在viewport内，不只看marker存在。唤出工具helper最多两次点击：可能先停惯性，再明确显示；它不声称已验证惯性初触策略。
 
-新增5份：App/Reading/ReaderToolAppearance.swift、App/Reading/ReaderFloatingToolsView.swift、Sources/ReaderDomain/ReadingToolsPresentation.swift、Tests/ReaderDomainTests/ReadingToolsPresentationTests.swift、本说明。共11份。
+测试只在显式Debug UUID环境下，通过原导入/打开管线建立独立临时合成书库。无标志走原书库；非法测试标志失败关闭，不回退用户书库。夹具不读取或清空用户书库。Debug夹具里的可见小标记只读实际书架colorScheme和动态字体，供UI断言，不覆盖它们；Release不含夹具/标记。
 
-ReaderViewModel、ReaderDirectoryViewModel、既有ReadingDirectory、ReaderPreferences、TXTCore、派生格式/缓存/数据库/位置契约、书架、全部原111测试文件、工程/依赖/CI均保持。ask_architect.py保留已获准的timeout改动，三个用户本地文件、Skills/lock、私有会诊与工具记录保持，不执行脚本或读取小说。
+## 本地脚本与证据口径
 
-## 回归与验证口径
+`python -B scripts/run_reading_ui_tests.py --preflight --self-check`仅检查声明清单和12项合成日志计数器正反例，不运行App，不是Swift解析/编译或交互验收。
 
-新增10项Swift Testing声明，覆盖：触摸令牌、主动滚动与恢复不自动显示、关闭/选章语义、连点跨面板与迟到回调、挂起取消、退出单飞/失败/迟到、非零bounds坐标、触摸起始减速锁存、重复同面板意图。不新增App host、UI测试框架或截图依赖。
+未来具备固定macOS/Xcode及已准备的锁定依赖后，显式 `--run --destination "platform=iOS Simulator,id=<installed-UUID>"`才运行新2+6项。脚本不安装、解析依赖、重试或打包；逐组保留原始log、退出码、xcresult和源码哈希，任一失败立即停。合成计数器检查不计入原生通过数。
 
-声明计数为25 Core Debug＋89 Domain Debug＋6 Block Release＋1原测量Release＝121唯一测试。后续若另获一次原生验证授权，需同步`.github/workflows/task3-validate.yml`的Domain79→89，以及`scripts/validate_task3.py`的Domain79→89、Domain合集80→90、总数/产物报告111→121。当前这两配置仍按111，未修改、未运行，不能直接据此候选触发旧计数CI。
+当前Windows无Swift、XcodeGen或Xcode：本批原生执行0；生成/Swift编译、121项原回归、2项宿主、6项UI均未执行。真机设置故障、VoiceOver焦点、惯性初触、动态字体/旋转、真实末行、帧率与动效仍待验证。EOF frame与AX断言也不代替像素绘制/手机观感验收。
 
-Windows本轮只执行文本、词法、计数、范围及文件保护检查。Swift/Xcode编译、121项原生测试、模拟器、iPhone13/iOS16.6.1真机、帧率与实际手势/VoiceOver验收均not-run。词法检查不是Swift解析或类型检查，纯状态测试声明不能替代UIKit事件顺序、滚动/选择手势、短长章末行、动态字体和位置恢复的真实验收。静检证据仅存ignored artifacts/reading-tools-local-20261028，完成后本地idle，等待下一批发布批准。
+本次公开发布/云验证已获单独批准：原121项全部断言保持；既有Task3在原25/89/6/1项之后实际运行2项App-host和6项UI，再验证129项唯一通过、零失败/跳过/未执行，才进入设备App编译与IPA门槛。runner仅追加实时日志、明确超时、来源SHA/运行/选中清单及真实App/Debug隔离夹具设置核对；合成parser不计入原生数。失败原始证据始终上传，IPA仅成功上传。结果只存ignored artifacts，不为结果再提交。
+
+后续新增能力另列计划，本轮不因“可以再加”扩展产品功能。

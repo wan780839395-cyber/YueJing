@@ -209,6 +209,83 @@ def unsigned(path):
     require(result.returncode == 1 and "not signed at all" in result.stderr, "Product is not confirmed unsigned: " + path.name)
 
 
+def all_test_evidence():
+    """Read/reparse all six real suites. This gate never creates or repairs native evidence."""
+    import run_reading_ui_tests as ui
+    require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+            "Only the single authorized dispatch attempt is accepted")
+    groups, selected = [], []
+    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 89),
+                             ("TXTBlockDecoderTests", 6), ("ProcessingReuseMeasurementTests", 1)):
+        counts = json.loads((OUT / (target + "-counts.json")).read_text())
+        folder = "TXTCoreTests" if target == "TXTBlockDecoderTests" else target
+        paths = sorted((ROOT / "Tests" / folder).glob("*.swift"))
+        if folder == "TXTCoreTests":
+            paths = [p for p in paths if (p.name == "TXTBlockDecoderTests.swift") == (target == "TXTBlockDecoderTests")]
+        declared = [name for p in paths for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", p.read_text(encoding="utf-8"))]
+        log_path = OUT / (target + ".log")
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        passed = re.findall(r"\bTest (\w+)\(\) passed after\b", log)
+        summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
+        skipped = re.findall(r"^.*\b(?:Test|Suite) [^\r\n]*\bskipped\b[^\r\n]*$", log, re.MULTILINE)
+        require(counts["source_commit"] == os.environ["GITHUB_SHA"] and counts["expected"] == expected
+                and counts["native_exit"] == int((OUT / (target + "-exit-code.txt")).read_text()) == 0,
+                "Original native provenance/exit mismatch: " + target)
+        require(len(declared) == len(set(declared)) == expected and sorted(declared) == sorted(counts["declared"]) == sorted(counts["passed"]) == sorted(passed)
+                and summaries == [(str(expected), "passed")] and counts["native_summaries"] == [[str(expected), "passed"]]
+                and not skipped and not counts["skipped"], "Original native execution mismatch: " + target)
+        groups.append(dict(target=target, expected=expected, passed=passed, failed=0, skipped=0, unexecuted=0, log_sha256=digest(log_path)))
+        selected.extend(passed)
+    native = ROOT / "artifacts/reading-ui-native"
+    for target, expected in ui.GROUPS.items():
+        counts = json.loads((native / (target + "-counts.json")).read_text())
+        selection = json.loads((native / (target + "-selection.json")).read_text())
+        execution = json.loads((native / (target + "-execution.json")).read_text())
+        settings = json.loads((native / (target + "-settings.json")).read_text())
+        sources = json.loads((native / (target + "-source-hashes.json")).read_text())
+        for record in (counts, selection, execution):
+            require(record["source_commit"] == os.environ["GITHUB_SHA"] and record["run_id"] == os.environ["GITHUB_RUN_ID"]
+                    and record["run_attempt"] == "1" and record["target"] == target and record["expected"] == expected
+                    and record["scheme"] == "YueJingUI" and record["configuration"] == "Debug"
+                    and record["declared"] == ui.declarations(target), "App suite selection/provenance mismatch: " + target)
+        require(counts["command"] == selection["command"] == execution["command"]
+                and selection["command"].count("-only-testing:" + target) == 1
+                and not any(arg.startswith("-skip-testing") for arg in selection["command"]), "App suite filtering mismatch")
+        require(execution["native_exit"] == int((native / (target + "-exit-code.txt")).read_text()) == 0
+                and not execution["timed_out"], "App suite command failed or timed out")
+        require(settings["source_commit"] == sources["source_commit"] == os.environ["GITHUB_SHA"]
+                and settings["fixture_environment"] and set(settings["testables"]) == set(ui.GROUPS), "Missing isolated real App settings")
+        ui.uuid.UUID(settings["fixture_environment"])
+        require(settings["scheme_sha256"] == digest(ROOT / "YueJing.xcodeproj/xcshareddata/xcschemes/YueJingUI.xcscheme"), "Generated App test scheme changed")
+        app, test = settings["targets"]["YueJing"], settings["targets"][target]
+        require(all(values["SWIFT_VERSION"] == "6.0" and values["SWIFT_STRICT_CONCURRENCY"] == "complete"
+                    and values["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6" for values in (app, test)), "App suite settings changed")
+        require(app["PRODUCT_TYPE"] == "com.apple.product-type.application" and "DEBUG" in app["SWIFT_ACTIVE_COMPILATION_CONDITIONS"].split(), "Real App Debug fixture not enabled")
+        if target == "YueJingHostTests":
+            require(test["PRODUCT_TYPE"] == "com.apple.product-type.bundle.unit-test" and Path(test["TEST_HOST"]).name == "YueJing"
+                    and Path(test["TEST_HOST"]).parent.name == "YueJing.app" and test["BUNDLE_LOADER"] == test["TEST_HOST"], "Invalid actual App host")
+        else:
+            require(test["PRODUCT_TYPE"] == "com.apple.product-type.bundle.ui-testing" and test["TEST_TARGET_NAME"] == "YueJing", "Invalid real UI test target")
+        source_paths = sorted((ROOT / "App").rglob("*.swift")) + [ROOT / "project.yml"]
+        source_paths += [p for group in ui.GROUPS for p in sorted((ROOT / "Tests" / group).glob("*.swift"))]
+        require(set(sources["files"]) == {p.relative_to(ROOT).as_posix() for p in source_paths}
+                and all(digest(ROOT / name) == value for name, value in sources["files"].items()), "App/test source changed")
+        log_path = native / (target + ".log")
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        actual = ui.count_log(target, log, execution["native_exit"])
+        all_xctest = re.findall(r"Test Case '-\[[^\r\n]+\]' passed \(", log)
+        require(len(all_xctest) == (expected if target == "YueJingUITests" else 0), "Unexpected XCTest execution outside selection")
+        require(target != "YueJingUITests" or not re.findall(r"\bTest (\w+)\(\) passed after\b", log), "Unexpected Swift Testing execution in UI selection")
+        require(counts["native_exit"] == 0 and counts["passed"] == actual["passed"] and counts["log_sha256"] == digest(log_path)
+                and counts["failed"] == counts["skipped"] == counts["unexecuted"] == 0, "App suite native count mismatch")
+        groups.append(dict(target=target, expected=expected, passed=actual["passed"], failed=0, skipped=0, unexecuted=0,
+                           log_sha256=digest(log_path), selection=selection["command"]))
+        selected.extend(actual["passed"])
+    require(len(selected) == len(set(selected)) == 129, "All 129 unique native tests must actually pass")
+    return dict(source_commit=os.environ["GITHUB_SHA"], run_id=os.environ["GITHUB_RUN_ID"], run_attempt="1",
+                native_passed=129, failed=0, skipped=0, unexecuted=0, groups=groups)
+
+
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
     for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 89),
@@ -232,6 +309,8 @@ def package_gate():
             and len(all_domain) == 90, "Debug/Release selection did not cover each of the 90 domain tests exactly once")
     selected = core + domain + block + measurement
     require(len(selected) == len(set(selected)) == 121, "Native test selection must contain exactly 121 unique tests")
+    require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
+            "Same-run 129-test acceptance is required before packaging")
     require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
             "Missing same-commit native decoder comparison")
     require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
@@ -318,7 +397,7 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=121, dependency_gate="app-dependency-gate.json"))
+           tests_passed=129, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":
@@ -331,6 +410,7 @@ if __name__ == "__main__":
              "measurement-settings": measurement_settings, "processing-measurements": processing_measurements,
              "decoder-comparison-settings": lambda: measurement_settings(("TXTCore", "TXTCoreTests"), "decoder-comparison-settings"),
              "decoder-comparison": decoder_comparison,
+             "all-test-gate": lambda: report("native-test-gate.json", all_test_evidence()),
              "package-gate": package_gate, "verify-ipa": verify_ipa}[command]()
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         print("Task 3 validation stopped: " + str(error), file=sys.stderr)

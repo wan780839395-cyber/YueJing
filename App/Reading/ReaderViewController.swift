@@ -10,7 +10,6 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     var onExtend: (@MainActor (ReadingAnchor, UUID) -> Void)?
     var onWidth: (@MainActor (Double) -> Void)?
     var onSettled: (@MainActor (ReadingAnchor, UUID) -> Bool)?
-    var onRemoved: (@MainActor () -> Void)?
     var toolIntent: (@MainActor () -> UUID)?
     var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
@@ -28,6 +27,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         table.dataSource = self; table.delegate = self
         table.separatorStyle = .none; table.estimatedRowHeight = 0
         table.showsVerticalScrollIndicator = false
+        table.accessibilityIdentifier = "reader.viewport"
         table.contentInset = UIEdgeInsets(top: 16, left: 0, bottom: 24, right: 0)
         table.register(ReadingCell.self, forCellReuseIdentifier: "text")
         table.onUserIntent = { [weak self] in
@@ -60,7 +60,12 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         view.backgroundColor = theme.background; table.backgroundColor = theme.background
     }
 
-    func apply(_ value: ReadingWindow, userNavigation: Bool) {
+    func detachCallbacks() {
+        onAnchor = nil; onExtend = nil; onWidth = nil; onSettled = nil
+        toolIntent = nil; onToolsInteraction = nil
+    }
+
+    func apply(_ value: ReadingWindow, userNavigation: Bool, restoring point: ReaderViewportRestoration? = nil) {
         loadViewIfNeeded()
         restoring = true; userInputSinceRestore = false; window = value
         table.reloadData(); table.layoutIfNeeded()
@@ -76,6 +81,14 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             let maximum = max(minimum, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
             table.setContentOffset(CGPoint(x: 0, y: min(maximum, max(minimum, desired))), animated: false)
         }
+        if !userNavigation, let point, point.windowID == value.id,
+           point.anchor.bookID == value.anchor.bookID, point.anchor.versionID == value.anchor.versionID {
+            let minimum = -table.adjustedContentInset.top
+            let maximum = max(minimum, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
+            let desired = point.visibleTop - table.adjustedContentInset.top
+            table.setContentOffset(CGPoint(x: 0, y: min(maximum, max(minimum, desired))), animated: false)
+            userInputSinceRestore = point.userInputSinceRestore
+        }
         restoring = false
         if userNavigation, let visible = actualVisibleAnchor() {
             userInputSinceRestore = true; onAnchor?(visible, value.id)
@@ -85,6 +98,13 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     /// Preserve the semantic target across repeated reflows until a real scrolling action changes it.
     func restorableAnchor() -> ReadingAnchor? {
         userInputSinceRestore ? actualVisibleAnchor() : window?.anchor
+    }
+
+    func restorationPoint() -> ReaderViewportRestoration? {
+        guard let window, let anchor = restorableAnchor() else { return nil }
+        return ReaderViewportRestoration(windowID: window.id, anchor: anchor,
+            visibleTop: table.contentOffset.y + table.adjustedContentInset.top,
+            userInputSinceRestore: userInputSinceRestore)
     }
 
     private func actualVisibleAnchor() -> ReadingAnchor? {

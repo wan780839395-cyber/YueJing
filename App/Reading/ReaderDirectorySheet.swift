@@ -22,6 +22,7 @@ struct ReaderDirectorySheet: View {
                 Button { if active { close() } } label: { Label("关闭目录", systemImage: "xmark") }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                     .accessibilityFocused($closeFocused)
+                    .accessibilityIdentifier("reader.panel.close")
             }.padding(.horizontal, 16)
             ScrollViewReader { proxy in
             List {
@@ -48,6 +49,7 @@ struct ReaderDirectorySheet: View {
                             }.frame(minHeight: 44, alignment: .leading)
                         }
                         .id(item.element.id)
+                        .accessibilityIdentifier("reader.chapter.\(page.start + item.offset)")
                         .accessibilityFocused($focusedChapterID, equals: item.element.id)
                         .accessibilityValue(current ? "当前章节" : "")
                         .accessibilityHint("阅读本章")
