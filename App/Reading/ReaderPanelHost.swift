@@ -34,7 +34,6 @@ struct ReaderPanelHost: View {
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
         .presentationDetents(session.panel == .directory ? [.large] : [.medium, .large])
         .presentationDragIndicator(.visible)
-        .accessibilityIdentifier(session.panel == .directory ? "reader.panel.directory" : "reader.panel.settings")
     }
 
     private var settings: Binding<ReaderPreferences> {
