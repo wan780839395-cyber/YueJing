@@ -14,36 +14,36 @@ struct ReadingCanvasRenderingTests {
         let window = try makeWindow()
         defer { window.isHidden = true; window.rootViewController = nil }
         let pixels = try PixelOracle(scale: window.screen.scale)
+        try verifyCoverageOracle(pixels)
         let cell = try makeCell(theme: .paper)
         let canvas = try self.canvas(in: cell)
         let bounds = canvas.bounds
         // Deliberately asymmetric: a vertically flipped reader cannot pass by sampling the middle.
         let dirty = CGRect(x: 0, y: 8, width: bounds.width, height: 28)
-        let sentinel = try pixels.raster(size: bounds.size) { context in
-            context.setFillColor(UIColor.magenta.cgColor); context.fill(bounds)
-            context.setFillColor(UIColor.red.cgColor)
-            context.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 4))
-            context.setFillColor(UIColor.blue.cgColor)
-            context.fill(CGRect(x: 0, y: bounds.height - 8, width: bounds.width, height: 8))
-        }
+        let sentinel = try pixels.raster(size: bounds.size) { paintSentinel(in: $0, bounds: bounds) }
         for theme in [ReaderTheme.paper, .dark, .light, .paper] {
             cell.render(try slice(text: oldText), preferences: ReaderPreferences(theme: theme))
+            // The synthetic glyphs are well away from the right edge. Independently draw
+            // background-only coverage there; do not assume a particular fractional blend.
+            let edgeReference = try pixels.raster(size: bounds.size) { context in
+                paintSentinel(in: context, bounds: bounds)
+                context.clip(to: dirty)
+                context.setBlendMode(.copy)
+                context.setFillColor(theme.background.cgColor); context.fill(dirty)
+            }
             let sequence = cell.canvasDrawSequence
             let bitmap = try pixels.raster(size: bounds.size) { context in
-                context.setFillColor(UIColor.magenta.cgColor); context.fill(bounds)
-                context.setFillColor(UIColor.red.cgColor)
-                context.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 4))
-                context.setFillColor(UIColor.blue.cgColor)
-                context.fill(CGRect(x: 0, y: bounds.height - 8, width: bounds.width, height: 8))
+                paintSentinel(in: context, bounds: bounds)
                 context.clip(to: dirty)
                 // This calls the shared painter, NOT UIView.draw or a natural-display oracle.
                 cell.paintCanvasForTesting(dirty, in: context)
             }
             #expect(cell.canvasDrawSequence == sequence)
-            #expect(bitmap.matches(theme.background, x: Int(4 * pixels.scale), y: Int(12 * pixels.scale)))
-            #expect(bitmap.preservesOutside(dirty, from: sentinel, scale: pixels.scale))
-            #expect(bitmap.excludes(.magenta, in: dirty, scale: pixels.scale))
-            #expect(bitmap.hasInk(on: theme.background, in: dirty, scale: pixels.scale))
+            expectPixels(bitmap.matches(theme.background, x: Int(4 * pixels.scale), y: Int(12 * pixels.scale)), "Dirty background")
+            expectPixels(bitmap.preservesOutside(dirty, from: sentinel, scale: pixels.scale), "Fully outside pixels changed")
+            expectPixels(bitmap.matchesPartial(dirty, reference: edgeReference, scale: pixels.scale), "Partially covered edge differs from clipped background")
+            expectPixels(bitmap.excludes(.magenta, in: dirty, scale: pixels.scale), "Sentinel remains inside dirty region")
+            expectPixels(bitmap.hasInk(on: theme.background, in: dirty, scale: pixels.scale), "Missing glyph ink")
         }
     }
 
@@ -77,8 +77,8 @@ struct ReadingCanvasRenderingTests {
             try requireInvalidation(cell, after: beforeRender)
             try await waitForNaturalDraw(cell, after: beforeRender)
             let rendered = try sample(cell, pixels: pixels)
-            #expect(rendered.samePixels(as: reference), "A theme change must match a fresh canvas")
-            #expect(rendered.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale))
+            expectPixels(rendered.samePixels(as: reference), "A theme change must match a fresh canvas")
+            expectPixels(rendered.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale), "Theme lost glyph ink")
             #expect(canvas.accessibilityLabel == oldText)
 
             let beforeClear = cell.canvasDrawSequence
@@ -88,23 +88,23 @@ struct ReadingCanvasRenderingTests {
             #expect(canvas.accessibilityCustomActions?.isEmpty ?? true)
             try await waitForNaturalDraw(cell, after: beforeClear)
             let cleared = try sample(cell, pixels: pixels)
-            #expect(cleared.isUniform(theme.background, in: canvas.bounds, scale: pixels.scale))
+            expectPixels(cleared.isUniform(theme.background, in: canvas.bounds, scale: pixels.scale), "Reuse left old ink")
 
             let beforeNew = cell.canvasDrawSequence
             cell.render(try slice(text: "NEW"), preferences: ReaderPreferences(theme: theme))
             try requireInvalidation(cell, after: beforeNew)
             try await waitForNaturalDraw(cell, after: beforeNew)
             let restored = try sample(cell, pixels: pixels)
-            #expect(restored.samePixels(as: newInk))
-            #expect(restored.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale))
+            expectPixels(restored.samePixels(as: newInk), "New text differs from fresh canvas")
+            expectPixels(restored.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale), "New text has no ink")
             #expect(canvas.accessibilityLabel == "NEW")
 
             // No-action control shares every natural waiting phase and the same sampler.
             #expect(silent.canvasDrawSequence == silentSequence)
             let silentAfter = try sample(silent, pixels: pixels)
             #expect(silent.canvasDrawSequence == silentSequence)
-            #expect(silentAfter.samePixels(as: silentBefore))
-            #expect(silentAfter.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale))
+            expectPixels(silentAfter.samePixels(as: silentBefore), "No-action control pixels changed")
+            expectPixels(silentAfter.hasInk(on: theme.background, in: canvas.bounds, scale: pixels.scale), "No-action control lost ink")
         }
     }
 
@@ -140,16 +140,75 @@ struct ReadingCanvasRenderingTests {
         try await waitForNaturalDraw(cell, after: sequence)
         let resized = try sample(cell, pixels: pixels)
         #expect(resized.width > initial.width && resized.height > initial.height)
-        #expect(resized.samePixels(as: reference), "Resize must rerasterize, not stretch cached glyphs")
-        #expect(resized.hasInk(on: ReaderTheme.paper.background, in: canvas.bounds, scale: pixels.scale))
+        expectPixels(resized.samePixels(as: reference), "Resize must rerasterize, not stretch cached glyphs")
+        expectPixels(resized.hasInk(on: ReaderTheme.paper.background, in: canvas.bounds, scale: pixels.scale), "Resize lost ink")
 
         // The SAME sampler must expose the stale raster, not repair the disabled redraw.
         try #require(control.canvasDrawSequence == controlSequence, "The negative control naturally redrew; oracle is inconclusive")
         #expect(control.canvasLastDrawBounds != controlCanvas.bounds)
         let stale = try sample(control, pixels: pixels)
         #expect(control.canvasDrawSequence == controlSequence)
-        #expect(!stale.samePixels(as: reference), "Sampler concealed the missing resize redraw")
+        expectPixels(!stale.samePixels(as: reference), "Sampler concealed the missing resize redraw")
         print("Canvas resize negative control rejected: no new draw, stale bounds and pixels")
+    }
+
+    // Keep Bitmap (and its hundreds of thousands of bytes) outside assertion macro capture.
+    private func expectPixels(_ success: Bool, _ message: String) {
+        #expect(success, "\(message)")
+    }
+
+    private func paintSentinel(in context: CGContext, bounds: CGRect) {
+        context.setFillColor(UIColor.magenta.cgColor); context.fill(bounds)
+        context.setFillColor(UIColor.red.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 4))
+        context.setFillColor(UIColor.blue.cgColor)
+        context.fill(CGRect(x: 0, y: bounds.height - 8, width: bounds.width, height: 8))
+    }
+
+    private func verifyCoverageOracle(_ pixels: PixelOracle) throws {
+        // Pixel-space table: outside/touching, fully covered, half covered, quarter covered.
+        let cases: [(CGRect, Int)] = [
+            (CGRect(x: 1, y: 0, width: 1, height: 1), 0),
+            (CGRect(x: -1, y: 0, width: 1, height: 1), 0),
+            (CGRect(x: 0, y: 1, width: 1, height: 1), 0),
+            (CGRect(x: 0, y: -1, width: 1, height: 1), 0),
+            (CGRect(x: 0, y: 0, width: 1, height: 1), 1),
+            (CGRect(x: 0, y: 0, width: 0.5, height: 1), 2),
+            (CGRect(x: 0.5, y: 0, width: 1, height: 1), 2),
+            (CGRect(x: 0, y: 0, width: 1, height: 0.5), 2),
+            (CGRect(x: 0, y: 0.5, width: 1, height: 1), 2),
+            (CGRect(x: 0.5, y: 0.5, width: 1, height: 1), 2),
+        ]
+        for (rect, expected) in cases {
+            let actual = Bitmap.coverage(x: 0, y: 0, dirtyPixels: rect)
+            #expect(actual == expected, "Coverage classification for \(rect)")
+        }
+        let size = CGSize(width: 8, height: 8), bounds = CGRect(origin: .zero, size: CGSize(width: 8, height: 8))
+        let dirty = CGRect(x: 2, y: 2, width: 2 + 0.5 / pixels.scale, height: 2 + 0.5 / pixels.scale)
+        let sentinel = try pixels.raster(size: size) { context in
+            context.setFillColor(UIColor.magenta.cgColor); context.fill(bounds)
+        }
+        let filled = try pixels.raster(size: size) { context in
+            context.setFillColor(UIColor.magenta.cgColor); context.fill(bounds)
+            context.clip(to: dirty); context.setBlendMode(.copy)
+            context.setFillColor(UIColor.white.cgColor); context.fill(dirty)
+        }
+        expectPixels(filled.preservesOutside(dirty, from: sentinel, scale: pixels.scale), "Oracle positive: outside")
+        expectPixels(filled.matchesPartial(dirty, reference: filled, scale: pixels.scale), "Oracle positive: partial")
+        expectPixels(filled.excludes(.magenta, in: dirty, scale: pixels.scale), "Oracle positive: interior")
+        // Change one byte outside, on a partial edge, and restore sentinel inside.
+        for point in [(0, 0), (filled.width - 1, 0), (0, filled.height - 1), (filled.width - 1, filled.height - 1)] {
+            let bad = filled.changingByte(x: point.0, y: point.1)
+            expectPixels(!bad.preservesOutside(dirty, from: sentinel, scale: pixels.scale), "Oracle missed external one-byte change")
+        }
+        let edgeX = Int(floor(dirty.maxX * pixels.scale)), edgeY = Int(3 * pixels.scale)
+        let wrongEdge = filled.changingByte(x: edgeX, y: edgeY)
+        expectPixels(!wrongEdge.matchesPartial(dirty, reference: filled, scale: pixels.scale), "Oracle missed partial-edge change")
+        expectPixels(!sentinel.matchesPartial(dirty, reference: filled, scale: pixels.scale), "Oracle missed unpainted partial edge")
+        let inside = Int(3 * pixels.scale)
+        let uncleared = filled.replacingPixel(x: inside, y: inside, from: sentinel)
+        expectPixels(!uncleared.excludes(.magenta, in: dirty, scale: pixels.scale), "Oracle missed interior sentinel")
+        print("Coverage oracle: classification and outside/partial/interior fault controls completed")
     }
 
     private func makeWindow() throws -> UIWindow {
@@ -286,6 +345,10 @@ struct ReadingCanvasRenderingTests {
             bytes = Array(UnsafeBufferPointer(start: data, count: width * height * 4))
         }
 
+        private init(width: Int, height: Int, bytes: [UInt8], rowsAreTopDown: Bool) {
+            self.width = width; self.height = height; self.bytes = bytes; self.rowsAreTopDown = rowsAreTopDown
+        }
+
         func samePixels(as other: Bitmap) -> Bool {
             width == other.width && height == other.height && rowsAreTopDown == other.rowsAreTopDown && bytes == other.bytes
         }
@@ -338,15 +401,54 @@ struct ReadingCanvasRenderingTests {
             return covered && !allBackground
         }
 
+        // 0 = zero area, 1 = full pixel, 2 = partial pixel. Touching is not coverage.
+        static func coverage(x: Int, y: Int, dirtyPixels: CGRect) -> Int {
+            let left = max(CGFloat(x), dirtyPixels.minX), right = min(CGFloat(x + 1), dirtyPixels.maxX)
+            let top = max(CGFloat(y), dirtyPixels.minY), bottom = min(CGFloat(y + 1), dirtyPixels.maxY)
+            guard right > left, bottom > top else { return 0 }
+            return right - left == 1 && bottom - top == 1 ? 1 : 2
+        }
+
         func preservesOutside(_ dirty: CGRect, from reference: Bitmap, scale: CGFloat) -> Bool {
+            matchesCoverage(0, dirty: dirty, reference: reference, scale: scale)
+        }
+
+        func matchesPartial(_ dirty: CGRect, reference: Bitmap, scale: CGFloat) -> Bool {
+            matchesCoverage(2, dirty: dirty, reference: reference, scale: scale)
+        }
+
+        private func matchesCoverage(_ kind: Int, dirty: CGRect, reference: Bitmap, scale: CGFloat) -> Bool {
             guard width == reference.width, height == reference.height, rowsAreTopDown == reference.rowsAreTopDown else { return false }
+            let rect = CGRect(x: dirty.minX * scale, y: dirty.minY * scale,
+                              width: dirty.width * scale, height: dirty.height * scale)
+            var checked = 0, differences = 0, first: [String] = []
             for y in 0..<height {
-                for x in 0..<width where !dirty.contains(CGPoint(x: (CGFloat(x) + 0.5) / scale, y: (CGFloat(y) + 0.5) / scale)) {
+                for x in 0..<width where Self.coverage(x: x, y: y, dirtyPixels: rect) == kind {
+                    checked += 1
                     let a = offset(x: x, y: y), b = reference.offset(x: x, y: y)
-                    if (0..<4).contains(where: { bytes[a + $0] != reference.bytes[b + $0] }) { return false }
+                    if (0..<4).contains(where: { bytes[a + $0] != reference.bytes[b + $0] }) {
+                        differences += 1
+                        if first.count < 8 { first.append("(\(x),\(y))") }
+                    }
                 }
             }
-            return true
+            if differences > 0 || checked == 0 {
+                print("Coverage kind=\(kind) size=\(width)x\(height) scale=\(scale) dirty=\(dirty) checked=\(checked) differences=\(differences) first=\(first)")
+            }
+            return checked > 0 && differences == 0
+        }
+
+        func changingByte(x: Int, y: Int) -> Bitmap {
+            var modified = bytes
+            modified[offset(x: x, y: y)] ^= 1
+            return Bitmap(width: width, height: height, bytes: modified, rowsAreTopDown: rowsAreTopDown)
+        }
+
+        func replacingPixel(x: Int, y: Int, from reference: Bitmap) -> Bitmap {
+            var modified = bytes
+            let a = offset(x: x, y: y), b = reference.offset(x: x, y: y)
+            for channel in 0..<4 { modified[a + channel] = reference.bytes[b + channel] }
+            return Bitmap(width: width, height: height, bytes: modified, rowsAreTopDown: rowsAreTopDown)
         }
     }
 }

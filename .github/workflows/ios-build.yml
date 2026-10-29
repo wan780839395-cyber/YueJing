@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: ba6bac412c9aee6e6bdb738801735f81e479c0db
+      APPROVED_PARENT: 44c881afe05b7581c8d290054470210747bd63f7
     defaults:
       run:
         shell: bash
@@ -36,14 +36,15 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
-          allowed = [".github/workflows/ios-build.yml", "App/Reading/ReadingCell.swift", "Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift"]
+          allowed = [".github/workflows/ios-build.yml", "Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift"]
           changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
-          assert changed == sorted(allowed), "Source changes differ from the approved canvas-oracle batch"
+          assert changed == sorted(allowed), "Source changes differ from the approved pixel-coverage test batch"
           status = dict(purpose="independent physical-device verification only",
                         qualification="UI TESTS NOT ALL PASSED", full_test_gate="not passed",
                         source_commit=os.environ["GITHUB_SHA"], previous_candidate=os.environ["APPROVED_PARENT"],
-                        product_changes=["App/Reading/ReadingCell.swift"], approved_changed_files=allowed,
-                        product_change_scope="shared painter extraction; DEBUG-only draw observations and painter test entry",
+                        product_changes=[], approved_changed_files=allowed,
+                        product_change_scope="none; pixel-coverage test oracle and bounded diagnostics only",
+                        prior_shared_painter_commit="44c881afe05b7581c8d290054470210747bd63f7",
                         canvas_product_change_commit="c3353f3bcdd2053de30112cf63167aeb9dc96cec",
                         prior_canvas_compile_failures=[
                             dict(run_id=40825777552, source_commit="c3353f3bcdd2053de30112cf63167aeb9dc96cec",
@@ -55,6 +56,11 @@ jobs:
                             url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40828734793",
                             compilation="passed", passed=1, failed=2, skipped=0,
                             failure="test helper assumed CALayer.contents was a CGImage"),
+                        prior_pixel_coverage_failure=dict(
+                            run_id=40836744613, source_commit="44c881afe05b7581c8d290054470210747bd63f7",
+                            url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40836744613",
+                            compilation="passed", passed=2, failed=1, skipped=0,
+                            failure="test classified partially covered edge pixels as fully outside"),
                         prior_validation_source_commit="22e1ffb6f067bcab83e7021f14f3d75a11cb8f95",
                         prior_validation_run=40812776950, prior_validation_attempt=1,
                         prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40812776950",
@@ -69,9 +75,10 @@ jobs:
                            "Those 129 tests are not rerun here; three canvas regressions, including oracle controls, must pass before this device build. "
                            "The original Task3 gate remains unchanged. Physical-device acceptance is pending.\n\n"
                            "Build source: `" + status["source_commit"] + "`; previous candidate: `" +
-                           status["previous_candidate"] + "`. This batch extracts the shared painter and adds DEBUG-only observations. "
+                           status["previous_candidate"] + "`. No production code changes in this batch. "
                            "Canvas compilation failures remain recorded in runs 40825777552 and 40827205494; "
-                           "run 40828734793 compiled but had 1 passed / 2 failed / 0 skipped due to the backing-type assumption.\n")
+                           "run 40828734793 compiled but had 1 passed / 2 failed / 0 skipped due to the backing-type assumption. "
+                           "Run 40836744613 compiled and had 2 passed / 1 failed / 0 skipped due to the pixel-center coverage assumption.\n")
           PY
 
       - name: Verify the selected native toolchain
