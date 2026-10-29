@@ -1,5 +1,5 @@
-name: YueJing Task 1 unsigned iOS build
-run-name: Task 1 unsigned iOS · ${{ github.sha }}
+name: Independent device IPA (UI tests not all passed)
+run-name: Device verification only · UI NOT ALL PASSED · ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      PRODUCT_BASELINE: 22e1ffb6f067bcab83e7021f14f3d75a11cb8f95
     defaults:
       run:
         shell: bash
@@ -23,6 +24,36 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      - name: Freeze the approved candidate and disclose the failed UI gate
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD^)" = "$PRODUCT_BASELINE"
+          test "$(git diff --name-only "$PRODUCT_BASELINE" HEAD)" = .github/workflows/ios-build.yml
+          printf '%s\n' '::warning::UI TESTS NOT ALL PASSED. Independent device-verification IPA only; not full test acceptance.'
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          status = dict(purpose="independent physical-device verification only",
+                        qualification="UI TESTS NOT ALL PASSED", full_test_gate="not passed",
+                        source_commit=os.environ["GITHUB_SHA"], product_baseline=os.environ["PRODUCT_BASELINE"],
+                        prior_validation_run=40812776950, prior_validation_attempt=1,
+                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40812776950",
+                        prior_validation_passed=128, prior_validation_failed=1, prior_validation_skipped=0,
+                        tests_rerun=False, original_task3_gate="unchanged",
+                        physical_device_acceptance="not performed")
+          Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write("## UI TESTS NOT ALL PASSED\n\nIndependent device-verification IPA only. "
+                           "Prior Task3 run [40812776950](" + status["prior_validation_url"] +
+                           ") had 128 passed / 1 failed / 0 skipped. Tests are not rerun here. "
+                           "The original Task3 gate remains unchanged. Physical-device acceptance is pending.\n\n"
+                           "Build source: `" + status["source_commit"] + "`; unchanged product baseline: `" +
+                           status["product_baseline"] + "`.\n")
+          PY
 
       - name: Verify the selected native toolchain
         run: |
@@ -38,6 +69,8 @@ jobs:
           } 2>&1 | tee artifacts/toolchain.log
           grep -Fx 'Xcode 16.4' artifacts/toolchain.log
           grep -Fx 'Build version 16F6' artifacts/toolchain.log
+          grep -F 'Apple Swift version 6.1.2 ' artifacts/toolchain.log
+          test "$(uname -m)" = arm64
 
       - name: Verify XcodeGen release and generate the project
         run: |
@@ -54,9 +87,47 @@ jobs:
           _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
             2>&1 | tee artifacts/project-generation.log
 
-      - name: Build one unsigned iPhoneOS arm64 App
+      - name: Resolve and verify the official pinned GRDB dependency once
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -resolvePackageDependencies -project YueJing.xcodeproj -scheme YueJing \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            2>&1 | tee artifacts/dependency-resolution.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/dependency-resolution-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 scripts/validate_task3.py resolved
+
+      - name: Verify Release settings exclude the test-only diagnostics
         run: |
           set -euo pipefail
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO -showBuildSettings -json \
+            > artifacts/release-build-settings.json
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          selected = {item["target"]: item["buildSettings"] for item in json.loads(Path("artifacts/release-build-settings.json").read_text())
+                      if item["target"] == "YueJing"}
+          assert set(selected) == {"YueJing"}, "Missing App settings"
+          for target, values in selected.items():
+              assert values["CONFIGURATION"] == "Release" and values["SWIFT_VERSION"] == "6.0", target
+              assert values["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6" and values["CODE_SIGNING_ALLOWED"] == "NO", target
+              assert "DEBUG" not in values.get("SWIFT_ACTIVE_COMPILATION_CONDITIONS", "").split(), target
+              assert not re.search(r"(?:^|\s)-D\s*DEBUG(?:\s|$)", values.get("OTHER_SWIFT_FLAGS", "")), target
+          Path("artifacts/release-settings-verification.json").write_text(json.dumps(dict(configuration="Release", DEBUG=False, targets=sorted(selected)), indent=2) + "\n")
+          PY
+
+      - name: Build one unsigned iPhoneOS arm64 App for device verification only
+        run: |
+          set -uo pipefail
+          set +e
           xcodebuild \
             -project YueJing.xcodeproj \
             -scheme YueJing \
@@ -64,26 +135,135 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/build.xcresult \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
             build 2>&1 | tee artifacts/build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
 
-      - name: Validate the App and package an unsigned IPA
+      - name: Validate device dependencies and package an IPA marked UI NOT ALL PASSED
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, runpy
+          from pathlib import Path
+          g = runpy.run_path("scripts/validate_task3.py")
+          app, require, run, digest = g["APP"], g["require"], g["run"], g["digest"]
+          require(Path("artifacts/build-exit-code.txt").read_text().strip() == "0", "Device build failed")
+          g["unsigned"](app)
+          require(not list(app.rglob("embedded.mobileprovision")) and not list(app.rglob("_CodeSignature")), "Signing material present")
+          import plistlib
+          binaries = [app / "YueJing"]
+          for name, identity in (("TXTCore", "dev.yuejing.txtcore"), ("ReaderDomain", "dev.yuejing.reader-domain")):
+              framework = app / "Frameworks" / (name + ".framework")
+              require(framework.is_dir() and not framework.is_symlink(), "Missing embedded framework: " + name)
+              info = plistlib.loads((framework / "Info.plist").read_bytes())
+              require(info.get("CFBundleIdentifier") == identity and info.get("MinimumOSVersion") == "16.6"
+                      and info.get("CFBundleSupportedPlatforms") == ["iPhoneOS"], "Framework metadata mismatch")
+          for framework in (app / "Frameworks").glob("*.framework"):
+              info = plistlib.loads((framework / "Info.plist").read_bytes())
+              binaries.append(framework / info["CFBundleExecutable"])
+          binaries += list((app / "Frameworks").glob("*.dylib"))
+          images, rpaths, evidence = {}, {}, []
+          for binary in binaries:
+              require(binary.is_file() and not binary.is_symlink(), "Missing embedded binary")
+              require(run(["xcrun", "lipo", "-archs", str(binary)]).split() == ["arm64"], "Non-arm64 binary")
+              build = run(["xcrun", "vtool", "-show-build", str(binary)])
+              require(re.search(r"^\s*platform IOS\s*$", build, re.MULTILINE), "Not a device image")
+              minimum = re.search(r"^\s*minos (\d+)\.(\d+)(?:\.\d+)?\s*$", build, re.MULTILINE)
+              require(minimum and tuple(map(int, minimum.groups())) <= (16, 6), "Requires newer iOS")
+              g["unsigned"](binary)
+              load = run(["xcrun", "otool", "-l", str(binary)])
+              rpaths[binary] = re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.+?) \(offset \d+\)", load)
+              images[binary] = [line.strip().split(" (", 1)[0] for line in run(["xcrun", "otool", "-L", str(binary)]).splitlines()[1:] if line.strip()]
+          graph = {}
+          for binary, links in images.items():
+              edges = []
+              for link in links:
+                  if link.startswith(("/System/Library/", "/usr/lib/")):
+                      continue
+                  paths = []
+                  if link.startswith("@rpath/"):
+                      for base in rpaths[binary] + rpaths[binaries[0]]:
+                          base = base.replace("@executable_path", str(app)).replace("@loader_path", str(binary.parent))
+                          paths.append(Path(base) / link[len("@rpath/"):])
+                  elif link.startswith(("@executable_path/", "@loader_path/")):
+                      paths.append(Path(link.replace("@executable_path", str(app)).replace("@loader_path", str(binary.parent))))
+                  matches = [path.resolve() for path in paths if path.is_file() and path.resolve().is_relative_to(app.resolve())]
+                  require(matches and matches[0] in images, "Unresolved dependency: " + link)
+                  edges.append(matches[0])
+              graph[binary] = edges
+              evidence.append(dict(binary=str(binary.relative_to(app)), sha256=digest(binary), dependencies=links))
+          reached, pending = set(), [binaries[0]]
+          while pending:
+              binary = pending.pop()
+              if binary not in reached:
+                  reached.add(binary)
+                  pending.extend(graph[binary])
+          require(all(app / "Frameworks" / (name + ".framework") / name in reached for name in ("TXTCore", "ReaderDomain")), "Custom framework not loaded")
+          checkout = g["grdb_checkout"]()
+          privacy = checkout / "GRDB/PrivacyInfo.xcprivacy"
+          resources = [path for path in app.rglob("PrivacyInfo.xcprivacy") if digest(path) == digest(privacy)]
+          require(resources, "Missing or changed GRDB privacy resource")
+          license_path = app / "GRDB-LICENSE.txt"
+          require(license_path.is_file() and digest(license_path) == digest(Path("App/Resources/GRDB-LICENSE.txt"))
+                  and digest(license_path) == digest(checkout / "LICENSE"), "GRDB license mismatch")
+          report = dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence, signing="unsigned",
+                        grdb_privacy_resources=[str(path.relative_to(app)) for path in resources],
+                        grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path),
+                        full_test_gate="not passed", purpose="independent device verification only")
+          Path("artifacts/device-dependency-verification.json").write_text(json.dumps(report, indent=2) + "\n")
+          PY
           python3 scripts/package_ipa.py 2>&1 | tee artifacts/package.log
+          python3 - <<'PY'
+          import hashlib, json, zipfile
+          from pathlib import Path
+          out = Path("artifacts")
+          app = Path("build/DerivedData/Build/Products/Release-iphoneos/YueJing.app")
+          ipa = out / "YueJing-unsigned.ipa"
+          expected = {"Payload/YueJing.app/" + str(path.relative_to(app)): path for path in app.rglob("*") if path.is_file()}
+          with zipfile.ZipFile(ipa) as archive:
+              names = archive.namelist()
+              assert len(names) == len(set(names)) and archive.testzip() is None, "Duplicate/corrupt IPA entries"
+              assert all(name.startswith("Payload/") and ".." not in Path(name).parts for name in names), "Unexpected IPA layout"
+              assert {name for name in names if not name.endswith("/")} == set(expected), "Packaged file set differs"
+              assert all(archive.read(name) == path.read_bytes() for name, path in expected.items()), "Packaged bytes differ"
+          marked = out / "YueJing-device-verification-UI-NOT-ALL-PASSED.ipa"
+          assert not marked.exists(), "Refuse to overwrite an existing IPA"
+          ipa.rename(marked)
+          manifest = json.loads((out / "manifest.json").read_text())
+          status = json.loads((out / "verification-status.json").read_text())
+          manifest.update(status)
+          manifest.update(ipa_file=marked.name, verified_packaged_files=len(expected), device_build="passed",
+                          device_dependencies="passed", packaging="passed", tests_rerun=False)
+          assert manifest["ipa_sha256"] == hashlib.sha256(marked.read_bytes()).hexdigest(), "IPA hash mismatch"
+          (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          names = [marked.name, "manifest.json", "verification-status.json", "device-dependency-verification.json"]
+          (out / "SHA256SUMS").write_text("".join(hashlib.sha256((out / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in names))
+          print(json.dumps(manifest, indent=2))
+          PY
 
       - name: Preserve this attempt's products and raw evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: yuejing-task1-${{ github.run_id }}-${{ github.sha }}
+          name: device-ipa-UI-NOT-ALL-PASSED-${{ github.run_id }}-${{ github.sha }}
           path: |
-            artifacts/YueJing-unsigned.ipa
+            artifacts/YueJing-device-verification-UI-NOT-ALL-PASSED.ipa
             artifacts/manifest.json
+            artifacts/verification-status.json
+            artifacts/device-dependency-verification.json
+            artifacts/release-build-settings.json
+            artifacts/release-settings-verification.json
             artifacts/SHA256SUMS
             artifacts/*.log
+            artifacts/*-exit-code.txt
+            artifacts/task3/
             artifacts/build.xcresult
           retention-days: 3
           if-no-files-found: warn
