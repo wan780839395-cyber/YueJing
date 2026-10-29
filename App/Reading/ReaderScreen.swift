@@ -119,6 +119,7 @@ struct ReaderScreen: View {
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .disabled(!tools.canInteract)
             .accessibilityLabel("返回书架").accessibilityIdentifier("reader.exit")
             .accessibilityFocused($focusedControl, equals: "back")
