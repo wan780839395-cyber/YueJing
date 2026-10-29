@@ -13,6 +13,7 @@ import subprocess
 import sys
 import zipfile
 
+import task3_test_inventory as inventory
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "artifacts/task3"
 APP = ROOT / "build/DerivedData/Build/Products/Release-iphoneos/YueJing.app"
@@ -182,25 +183,66 @@ def processing_measurements():
            memory="test-host process RSS at boundaries, includes fixture/allocator; not a sampled peak or cache delta", rows=rows))
 
 
-def test_counts(target, expected):
-    folder = "TXTCoreTests" if target == "TXTBlockDecoderTests" else target
-    paths = sorted((ROOT / "Tests" / folder).glob("*.swift"))
-    if folder == "TXTCoreTests":
-        paths = [path for path in paths if (path.name == "TXTBlockDecoderTests.swift") == (target == "TXTBlockDecoderTests")]
-    declared = [name for path in paths
-                for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
-    log = (OUT / (target + ".log")).read_text(encoding="utf-8", errors="replace")
-    summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
-    passed = re.findall(r"\bTest (\w+)\(\) passed after\b", log)
-    skipped = re.findall(r"^.*\b(?:Test|Suite) [^\r\n]*\bskipped\b[^\r\n]*$", log, re.MULTILINE)
-    native_exit = int((OUT / (target + "-exit-code.txt")).read_text())
-    report(target + "-counts.json", dict(source_commit=os.environ["GITHUB_SHA"], expected=expected,
-           source_files=[str(path.relative_to(ROOT)) for path in paths], declared=declared, passed=passed,
-           native_summaries=summaries, skipped=skipped, native_exit=native_exit))
-    require(native_exit == 0 and len(declared) == expected and len(set(declared)) == expected,
-            "Native exit or declared test inventory mismatch: " + target)
-    require(summaries == [(str(expected), "passed")] and sorted(passed) == sorted(declared) and not skipped,
-            "Actual Swift Testing execution/count/pass evidence mismatch: " + target)
+def candidate_files():
+    paths = [ROOT / "project.yml"]
+    for folder in ("App", "Sources", "Tests", "scripts", ".github/workflows"):
+        paths += [p for p in (ROOT / folder).rglob("*") if p.is_file() and p.suffix in (".swift", ".py", ".yml", ".txt")]
+    return {p.relative_to(ROOT).as_posix(): digest(p) for p in sorted(paths)}
+
+
+def freeze_candidate():
+    inventory.validate_source()
+    require(run(["git", "rev-parse", "HEAD"]) == os.environ["GITHUB_SHA"], "Checkout SHA mismatch")
+    require(not run(["git", "status", "--porcelain", "--untracked-files=no"]), "CI requires a clean committed candidate")
+    require(set(candidate_files()) <= set(run(["git", "ls-files"]).splitlines()),
+            "Every candidate source and validation file must belong to the committed revision")
+    report("candidate-sources.json", dict(source_commit=os.environ["GITHUB_SHA"],
+           run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
+           files=candidate_files(), inventory=inventory.validate_source()))
+
+
+def check_candidate():
+    frozen = json.loads((OUT / "candidate-sources.json").read_text())
+    require(frozen["source_commit"] == os.environ["GITHUB_SHA"]
+            and frozen["run_id"] == os.environ["GITHUB_RUN_ID"] and frozen["run_attempt"] == "1"
+            and frozen["files"] == candidate_files() and frozen["inventory"] == inventory.validate_source(),
+            "Candidate source/inventory/run changed")
+
+
+def test_counts(target, expected=None):
+    check_candidate()
+    count = inventory.COUNTS[target]
+    require(expected is None or expected == count, "Caller expected count differs from reviewed inventory")
+    log_path = OUT / (target + ".log")
+    parsed = inventory.parse_swift_log(target, log_path.read_text(encoding="utf-8", errors="replace"),
+                                      int((OUT / (target + "-exit-code.txt")).read_text()))
+    report(target + "-counts.json", dict(source_commit=os.environ["GITHUB_SHA"],
+           run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
+           expected=count, inventory_sha256=digest(Path(inventory.__file__)),
+           source_files=["Tests/" + p for p in sorted(inventory.FILES) if inventory.group_for(p) == target],
+           selection=inventory.selection(target), log_sha256=digest(log_path), **parsed))
+
+
+def canvas_settings():
+    import xml.etree.ElementTree as ET
+    scheme = ROOT / "YueJing.xcodeproj/xcshareddata/xcschemes/YueJingCanvas.xcscheme"
+    xml = ET.parse(scheme).getroot()
+    targets = {n.find("BuildableReference").get("BlueprintName")
+               for n in xml.findall("./TestAction/Testables/TestableReference") if n.get("skipped") == "NO"}
+    require(targets == {"YueJingCanvasTests"}, "Canvas scheme selection mismatch")
+    values = json.loads(run(["xcodebuild", "-project", "YueJing.xcodeproj", "-target", "YueJingCanvasTests",
+        "-configuration", "Debug", "-sdk", "iphonesimulator", "-showBuildSettings", "-json",
+        "-clonedSourcePackagesDirPath", "build/SourcePackages", "-disableAutomaticPackageResolution",
+        "CODE_SIGNING_ALLOWED=NO", "ARCHS=arm64"]))
+    rows = [r["buildSettings"] for r in values if r.get("target") == "YueJingCanvasTests"]
+    require(len(rows) == 1, "Missing Canvas host settings")
+    s = rows[0]
+    require(s["PRODUCT_TYPE"] == "com.apple.product-type.bundle.unit-test"
+            and Path(s["TEST_HOST"]).name == "YueJing" and Path(s["TEST_HOST"]).parent.name == "YueJing.app"
+            and s["BUNDLE_LOADER"] == s["TEST_HOST"] and s["SWIFT_VERSION"] == "6.0"
+            and s["SWIFT_STRICT_CONCURRENCY"] == "complete" and s["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6",
+            "Canvas is not the fixed-toolchain real App-host target")
+    report("canvas-settings.json", dict(source_commit=os.environ["GITHUB_SHA"], scheme_sha256=digest(scheme), settings=s))
 
 
 def unsigned(path):
@@ -210,32 +252,30 @@ def unsigned(path):
 
 
 def all_test_evidence():
-    """Read/reparse all six real suites. This gate never creates or repairs native evidence."""
+    """Reparse all seven selected groups; never creates or repairs native evidence."""
     import run_reading_ui_tests as ui
     require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
             "Only the single authorized dispatch attempt is accepted")
+    check_candidate()
     groups, selected = [], []
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 89),
-                             ("TXTBlockDecoderTests", 6), ("ProcessingReuseMeasurementTests", 1)):
+    for target in inventory.SWIFT_GROUPS:
+        expected = inventory.COUNTS[target]
         counts = json.loads((OUT / (target + "-counts.json")).read_text())
-        folder = "TXTCoreTests" if target == "TXTBlockDecoderTests" else target
-        paths = sorted((ROOT / "Tests" / folder).glob("*.swift"))
-        if folder == "TXTCoreTests":
-            paths = [p for p in paths if (p.name == "TXTBlockDecoderTests.swift") == (target == "TXTBlockDecoderTests")]
-        declared = [name for p in paths for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", p.read_text(encoding="utf-8"))]
         log_path = OUT / (target + ".log")
-        log = log_path.read_text(encoding="utf-8", errors="replace")
-        passed = re.findall(r"\bTest (\w+)\(\) passed after\b", log)
-        summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
-        skipped = re.findall(r"^.*\b(?:Test|Suite) [^\r\n]*\bskipped\b[^\r\n]*$", log, re.MULTILINE)
-        require(counts["source_commit"] == os.environ["GITHUB_SHA"] and counts["expected"] == expected
-                and counts["native_exit"] == int((OUT / (target + "-exit-code.txt")).read_text()) == 0,
-                "Original native provenance/exit mismatch: " + target)
-        require(len(declared) == len(set(declared)) == expected and sorted(declared) == sorted(counts["declared"]) == sorted(counts["passed"]) == sorted(passed)
-                and summaries == [(str(expected), "passed")] and counts["native_summaries"] == [[str(expected), "passed"]]
-                and not skipped and not counts["skipped"], "Original native execution mismatch: " + target)
-        groups.append(dict(target=target, expected=expected, passed=passed, failed=0, skipped=0, unexecuted=0, log_sha256=digest(log_path)))
-        selected.extend(passed)
+        parsed = inventory.parse_swift_log(target, log_path.read_text(encoding="utf-8", errors="replace"),
+                                          int((OUT / (target + "-exit-code.txt")).read_text()))
+        require(counts["source_commit"] == os.environ["GITHUB_SHA"] and counts["run_id"] == os.environ["GITHUB_RUN_ID"]
+                and counts["run_attempt"] == "1" and counts["expected"] == expected
+                and counts["inventory_sha256"] == digest(Path(inventory.__file__))
+                and counts["selection"] == inventory.selection(target) and counts["log_sha256"] == digest(log_path),
+                "Native group provenance/selection mismatch: " + target)
+        require(all(counts[k] == json.loads(json.dumps(v)) for k, v in parsed.items()), "Native group evidence mismatch: " + target)
+        groups.append(dict(target=target, expected=expected, passed=parsed["passed"], failed=0, skipped=0, unexecuted=0,
+                           log_sha256=digest(log_path), selection=inventory.selection(target)))
+        selected.extend(parsed["passed"])
+    canvas = json.loads((OUT / "canvas-settings.json").read_text())
+    require(canvas["source_commit"] == os.environ["GITHUB_SHA"] and canvas["scheme_sha256"] == digest(
+        ROOT / "YueJing.xcodeproj/xcshareddata/xcschemes/YueJingCanvas.xcscheme"), "Canvas settings provenance mismatch")
     native = ROOT / "artifacts/reading-ui-native"
     for target, expected in ui.GROUPS.items():
         counts = json.loads((native / (target + "-counts.json")).read_text())
@@ -281,36 +321,19 @@ def all_test_evidence():
         groups.append(dict(target=target, expected=expected, passed=actual["passed"], failed=0, skipped=0, unexecuted=0,
                            log_sha256=digest(log_path), selection=selection["command"]))
         selected.extend(actual["passed"])
-    require(len(selected) == len(set(selected)) == 129, "All 129 unique native tests must actually pass")
+    require(sorted(selected) == sorted(n for g in inventory.COUNTS for n in inventory.expected_names(g))
+            and len(selected) == len(set(selected)) == inventory.TOTAL, "Selected native union must exactly match reviewed cases")
     return dict(source_commit=os.environ["GITHUB_SHA"], run_id=os.environ["GITHUB_RUN_ID"], run_attempt="1",
-                native_passed=129, failed=0, skipped=0, unexecuted=0, groups=groups)
+                native_passed=inventory.TOTAL, failed=0, skipped=0, unexecuted=0, groups=groups,
+                inventory_sha256=digest(Path(inventory.__file__)))
 
 
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    for target, expected in (("TXTCoreTests", 25), ("ReaderDomainTests", 89),
-                             ("TXTBlockDecoderTests", 6), ("ProcessingReuseMeasurementTests", 1)):
-        counts = json.loads((OUT / (target + "-counts.json")).read_text())
-        require(counts["native_exit"] == 0 and counts["expected"] == expected and len(counts["passed"]) == expected,
-                "All 121 real tests must pass before packaging")
-        require(counts["source_commit"] == os.environ["GITHUB_SHA"], "Test evidence commit mismatch")
-    core = json.loads((OUT / "TXTCoreTests-counts.json").read_text())["declared"]
-    block = json.loads((OUT / "TXTBlockDecoderTests-counts.json").read_text())["declared"]
-    all_core = [name for path in (ROOT / "Tests/TXTCoreTests").glob("*.swift")
-                for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
-    require(not set(core) & set(block) and sorted(core + block) == sorted(all_core) and len(all_core) == 31,
-            "Debug/Release selection did not cover each of the 31 core tests exactly once")
-    domain = json.loads((OUT / "ReaderDomainTests-counts.json").read_text())["declared"]
-    measurement = json.loads((OUT / "ProcessingReuseMeasurementTests-counts.json").read_text())["declared"]
-    all_domain = [name for folder in ("ReaderDomainTests", "ProcessingReuseMeasurementTests")
-                  for path in (ROOT / "Tests" / folder).glob("*.swift")
-                  for name in re.findall(r"@Test\s+func\s+(\w+)\s*\(\s*\)", path.read_text(encoding="utf-8"))]
-    require(not set(domain) & set(measurement) and sorted(domain + measurement) == sorted(all_domain)
-            and len(all_domain) == 90, "Debug/Release selection did not cover each of the 90 domain tests exactly once")
-    selected = core + domain + block + measurement
-    require(len(selected) == len(set(selected)) == 121, "Native test selection must contain exactly 121 unique tests")
+    # Reparse every selected group and exact identity union, including Canvas and new UI.
+    # A count-only check or a prior run's summary cannot authorize packaging.
     require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
-            "Same-run 129-test acceptance is required before packaging")
+            "Same-run reviewed-case acceptance is required before packaging")
     require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
             "Missing same-commit native decoder comparison")
     require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
@@ -385,10 +408,32 @@ def package_gate():
 
 
 def verify_ipa():
-    ipa = ROOT / "artifacts/YueJing-unsigned.ipa"
-    manifest = json.loads((ROOT / "artifacts/manifest.json").read_text())
-    require(manifest["source_commit"] == os.environ["GITHUB_SHA"] and manifest["ipa_sha256"] == digest(ipa), "IPA provenance mismatch")
-    expected = {"Payload/YueJing.app/" + str(path.relative_to(APP)): path for path in APP.rglob("*") if path.is_file()}
+    artifacts = ROOT / "artifacts"
+    manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
+    version = manifest.get("version")
+    build = manifest.get("build")
+    ipa_name = manifest.get("ipa_file")
+    require(isinstance(version, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?", version),
+            "Invalid version in manifest")
+    require(isinstance(build, str) and re.fullmatch(r"[1-9][0-9]*", build),
+            "Invalid numeric build in manifest")
+    require(ipa_name == f"YueJing-{version}.ipa" and "TESTS-NOT-RUN" not in ipa_name,
+            "Manifest ipa_file is not the expected short release filename")
+    with (APP / "Info.plist").open("rb") as source:
+        info = plistlib.load(source)
+    require(info.get("CFBundleShortVersionString") == version and info.get("CFBundleVersion") == build,
+            "Manifest version/build differs from the built App")
+    ipa = artifacts / ipa_name
+    require(ipa.is_file() and not ipa.is_symlink(), "Expected packaged IPA is missing")
+    require([path.name for path in artifacts.glob("*.ipa")] == [ipa_name], "Unexpected extra IPA in artifacts")
+    require(manifest["source_commit"] == os.environ["GITHUB_SHA"]
+            and manifest.get("signing") == "unsigned"
+            and manifest.get("ipa_bytes") == ipa.stat().st_size
+            and manifest["ipa_sha256"] == digest(ipa), "IPA provenance mismatch")
+    expected = {"Payload/YueJing.app/" + path.relative_to(APP).as_posix(): path for path in APP.rglob("*") if path.is_file()}
+    require("Payload/YueJing.app/Assets.car" in expected and manifest.get("app_icon_files")
+            and all("Payload/YueJing.app/" + name in expected for name in manifest["app_icon_files"]),
+            "Packaged App is missing compiled icon resources")
     with zipfile.ZipFile(ipa) as archive:
         names = archive.namelist()
         require(len(names) == len(set(names)) and archive.testzip() is None, "Duplicate/corrupt IPA entries")
@@ -397,16 +442,17 @@ def verify_ipa():
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
     report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=129, dependency_gate="app-dependency-gate.json"))
+           tests_passed=inventory.TOTAL, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":
     try:
         command = sys.argv[1]
         if command == "test-counts":
-            test_counts(sys.argv[2], int(sys.argv[3]))
+            test_counts(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else None)
         else:
-            {"select-simulator": select_simulator, "resolved": resolved, "settings": settings,
+            {"freeze-candidate": freeze_candidate, "canvas-settings": canvas_settings,
+             "select-simulator": select_simulator, "resolved": resolved, "settings": settings,
              "measurement-settings": measurement_settings, "processing-measurements": processing_measurements,
              "decoder-comparison-settings": lambda: measurement_settings(("TXTCore", "TXTCoreTests"), "decoder-comparison-settings"),
              "decoder-comparison": decoder_comparison,

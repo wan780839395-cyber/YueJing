@@ -165,6 +165,99 @@ final class ReadingFlowUITests: XCTestCase {
         }
     }
 
+    // New acceptance cases; the original six flows and budgets remain intact.
+    @MainActor func testTypographySliderPresetsAndConfirmedRestore() {
+        withFixture { app in
+            open("UITest-Long-A", app); openSettings(app)
+            let font = app.sliders["reader.font.slider"]
+            revealSetting(font, app); font.adjust(toNormalizedSliderPosition: 0)
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("14"))
+            XCTAssertFalse(app.buttons["reader.font.decrease"].isEnabled)
+            revealSetting(font, app); font.adjust(toNormalizedSliderPosition: 1)
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("36"))
+            XCTAssertFalse(app.buttons["reader.font.increase"].isEnabled)
+            let spacing = app.sliders["reader.spacing.slider"]
+            revealSetting(spacing, app); spacing.adjust(toNormalizedSliderPosition: 1)
+            XCTAssertTrue(app.staticTexts["reader.spacing.value"].label.contains("20"))
+            XCTAssertFalse(app.buttons["reader.spacing.increase"].isEnabled)
+            let dark = app.buttons["reader.theme.dark"]
+            revealSetting(dark, app); dark.tap()
+            for preset in ["compact", "standard", "relaxed"] {
+                let button = app.buttons["reader.preset.\(preset)"]
+                revealSetting(button, app); button.tap()
+                XCTAssertEqual(button.value as? String, "已选择")
+                XCTAssertEqual(dark.value as? String, "已选择")
+            }
+            let restore = app.buttons["reader.typography.restore"]
+            revealSetting(restore, app); restore.tap()
+            let cancel = app.buttons["取消"]
+            waitHittable(cancel); cancel.tap()
+            XCTAssertEqual(app.buttons["reader.preset.relaxed"].value as? String, "已选择")
+            restore.tap()
+            let confirm = app.buttons["恢复字号与行距"]
+            waitHittable(confirm); confirm.tap()
+            XCTAssertEqual(app.buttons["reader.preset.standard"].value as? String, "已选择")
+            XCTAssertEqual(dark.value as? String, "已选择")
+            let decrease = app.buttons["reader.font.decrease"]
+            revealSetting(decrease, app); decrease.tap()
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("19"))
+            let standard = app.buttons["reader.preset.standard"]
+            revealSetting(standard, app)
+            XCTAssertEqual(standard.value as? String, "未选择")
+            closePanel(app); exitReader(app)
+            open("UITest-Long-A", app); openSettings(app)
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("19"))
+            XCTAssertTrue(app.staticTexts["reader.spacing.value"].label.contains("7"))
+            closePanel(app)
+        }
+    }
+
+    @MainActor func testTypographyAndChapterSurviveProcessRelaunch() {
+        withFixture { app in
+            open("UITest-Long-A", app); openDirectory(app)
+            scrollTo(app.buttons["下一组"], in: app.tables.firstMatch)
+            app.buttons["下一组"].tap()
+            let chapter = app.buttons["reader.chapter.32"]
+            waitHittable(chapter); chapter.tap()
+            XCTAssertTrue(endMarker("UI_CHAPTER_33", app).waitForExistence(timeout: 10))
+            showTools(app); openSettings(app)
+            let dark = app.buttons["reader.theme.dark"]
+            revealSetting(dark, app); dark.tap()
+            let relaxed = app.buttons["reader.preset.relaxed"]
+            revealSetting(relaxed, app); relaxed.tap()
+            closePanel(app); exitReader(app)
+            open("UITest-Short-B", app); exitReader(app)
+            Self.captureEvidence(app, testName: name, stage: "before-relaunch")
+            // Retain this fixture UUID/database across process termination; never reset it.
+            app.terminate(); app.launch()
+            open("UITest-Long-A", app); openDirectory(app)
+            XCTAssertTrue(chapter.waitForExistence(timeout: 10))
+            XCTAssertEqual(chapter.value as? String, "当前章节")
+            closePanel(app); openSettings(app)
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("24"))
+            XCTAssertTrue(app.staticTexts["reader.spacing.value"].label.contains("10"))
+            revealSetting(dark, app)
+            XCTAssertEqual(dark.value as? String, "已选择")
+            revealSetting(relaxed, app)
+            XCTAssertEqual(relaxed.value as? String, "已选择")
+            closePanel(app)
+            Self.captureEvidence(app, testName: name, stage: "after-relaunch")
+        }
+    }
+
+    @MainActor private func revealSetting(_ element: XCUIElement, _ app: XCUIApplication) {
+        let scroll = app.scrollViews["reader.settings.scroll"]
+        for _ in 0..<12 {
+            if element.isHittable { break }
+            if element.exists && element.frame.midY < scroll.frame.midY {
+                scroll.swipeDown(velocity: .slow)
+            } else {
+                scroll.swipeUp(velocity: .slow)
+            }
+        }
+        waitHittable(element)
+    }
+
     @MainActor private func withFixture(largeText: Bool = false, testName: String = #function,
                                       _ run: (XCUIApplication) -> Void) {
         let orientation = XCUIDevice.shared.orientation

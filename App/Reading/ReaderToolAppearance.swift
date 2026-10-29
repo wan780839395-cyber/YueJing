@@ -6,19 +6,13 @@ import UIKit
 struct ReaderToolAppearance {
     let theme: ReaderTheme
     let reduceTransparency: Bool
-    var surface: Color {
-        Color(uiColor: theme == .dark ? UIColor(white: 0.13, alpha: 1)
-            : UIColor(red: 0.99, green: 0.98, blue: 0.95, alpha: 1))
-    }
+    var surface: Color { ReaderVisualStyle.surface(for: theme) }
     var foreground: Color { Color(uiColor: theme.foreground) }
-    var edge: Color { foreground.opacity(theme == .dark ? 0.16 : 0.10) }
-    var accent: Color {
-        theme == .dark ? Color(red: 0.80, green: 0.60, blue: 0.52)
-            : Color(red: 0.57, green: 0.34, blue: 0.28)
-    }
+    var edge: Color { ReaderVisualStyle.edge(for: theme) }
+    var accent: Color { ReaderVisualStyle.accent(for: theme) }
     var fill: Color { surface.opacity(reduceTransparency ? 1 : 0.97) }
     /// A quiet section surface, local to the settings sheet rather than the reading canvas.
-    var card: Color { theme == .dark ? Color.white.opacity(0.05) : Color.white.opacity(0.64) }
+    var card: Color { ReaderVisualStyle.sectionSurface(for: theme) }
 }
 
 /// Tools geometry only. Never reserves space in the reading viewport.

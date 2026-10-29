@@ -12,15 +12,15 @@ import sys
 import threading
 import uuid
 import xml.etree.ElementTree as ET
+import task3_test_inventory as inventory
 
 ROOT = Path(__file__).resolve().parents[1]
-GROUPS = {"YueJingHostTests": 2, "YueJingUITests": 6}
+GROUPS = {target: inventory.COUNTS[target] for target in ("YueJingHostTests", "YueJingUITests")}
 
 
 def declarations(target):
-    paths = sorted((ROOT / "Tests" / target).glob("*.swift"))
-    pattern = r"@Test\s+func\s+(\w+)\s*\(" if target == "YueJingHostTests" else r"\bfunc\s+(test\w+)\s*\("
-    return [name for p in paths for name in re.findall(pattern, p.read_text(encoding="utf-8"))]
+    inventory.validate_source()
+    return inventory.expected_names(target)
 
 
 def count_log(target, log, native_exit):
@@ -50,7 +50,7 @@ def self_check():
         names = declarations(target)
         if target == "YueJingHostTests":
             lines = ["Test " + n + "() passed after 0.1 seconds." for n in names]
-            tail = "Test run with 2 tests passed after 0.2 seconds.\n** TEST SUCCEEDED **"
+            tail = f"Test run with {GROUPS[target]} tests passed after 0.2 seconds.\n** TEST SUCCEEDED **"
         else:
             lines = ["Test Case '-[YueJingUITests.ReadingFlowUITests " + n + "]' passed (0.1 seconds)." for n in names]
             tail = "** TEST SUCCEEDED **"
@@ -75,7 +75,7 @@ def preflight():
     inventory = {target: declarations(target) for target in GROUPS}
     if any(len(inventory[t]) != n for t, n in GROUPS.items()):
         raise ValueError("Unexpected source inventory")
-    return {"platform": sys.platform, "inventory": inventory, "declared_new_tests": sum(GROUPS.values()),
+    return {"platform": sys.platform, "inventory": inventory, "selected_app_tests": sum(GROUPS.values()),
             "native_executions": 0, "xcodebuild": shutil.which("xcodebuild"),
             "limitations": "Source/count checks are not XcodeGen generation, Swift compilation, App interaction, or device acceptance."}
 

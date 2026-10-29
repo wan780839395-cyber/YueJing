@@ -10,6 +10,7 @@ struct ReaderFloatingToolsView: View {
     let open: @MainActor (ReadingToolPanel) -> Void
     @AccessibilityFocusState.Binding var focusedControl: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicType
 
     private var visible: Bool { state.visible && state.panel == nil }
 
@@ -18,16 +19,15 @@ struct ReaderFloatingToolsView: View {
             if metrics.verticalButtons {
                 VStack(spacing: 4) { directoryButton; settingsButton }
             } else {
-                HStack(spacing: 8) { directoryButton; settingsButton }
+                HStack(spacing: 4) { directoryButton; settingsButton }
             }
         }
-        .padding(6).frame(maxWidth: metrics.verticalButtons ? 280 : 340)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
+        .padding(4).frame(maxWidth: metrics.verticalButtons ? 280 : (metrics.compactHeight || dynamicType.isAccessibilitySize ? 340 : 300))
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
-        .opacity(visible ? 1 : 0).offset(y: reduceMotion || visible ? 0 : 8)
+        .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
         .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.28, dampingFraction: 0.94), value: visible)
     }
 
     private var directoryButton: some View {
@@ -41,7 +41,8 @@ struct ReaderFloatingToolsView: View {
     }
     private func toolButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String) -> some View {
         Button { open(panel) } label: {
-            Label(title, systemImage: symbol).font(.body.weight(.medium))
+            Label(title, systemImage: symbol)
+                .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
                 .frame(maxWidth: .infinity, minHeight: metrics.controlHeight)
                 .contentShape(Rectangle())
         }

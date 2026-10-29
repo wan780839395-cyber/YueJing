@@ -150,9 +150,8 @@ struct ReaderScreen: View {
         .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
         .padding(.horizontal, 12).padding(.top, 6)
-        .opacity(visible ? 1 : 0).offset(y: reduceMotion || visible ? 0 : -8)
+        .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: -ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
         .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)
-        .animation(.easeOut(duration: reduceMotion ? 0.12 : 0.18), value: visible)
     }
 
     private var panelPresentation: Binding<ReaderPanelSession?> {

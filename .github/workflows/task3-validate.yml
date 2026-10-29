@@ -77,82 +77,96 @@ jobs:
           python3 scripts/validate_task3.py select-simulator
           python3 scripts/validate_task3.py settings
 
+      - name: Freeze reviewed case inventory and this committed candidate
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          python3 -B scripts/task3_test_inventory.py --self-check > artifacts/task3/reviewed-inventory.json.log
+          python3 -B scripts/run_reading_ui_tests.py --preflight --self-check > artifacts/task3/app-parser-preflight.json.log
+          python3 -B scripts/validate_task3.py freeze-candidate
+
       - name: Run the original 25 TXTCore tests once
         run: |
           set -uo pipefail
+          selection_text="$(python3 -B scripts/task3_test_inventory.py --selection TXTCoreTests)" || exit "$?"
+          read -r -a selection <<< "$selection_text"
           set +e
           xcodebuild -project YueJing.xcodeproj -scheme TXTCore -configuration Debug \
             -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath build/Task3Tests -clonedSourcePackagesDirPath build/SourcePackages \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/task3/TXTCoreTests.xcresult \
-            -parallel-testing-enabled NO -only-testing:TXTCoreTests \
-            -skip-testing:TXTCoreTests/TXTBlockDecoderTests \
+            -parallel-testing-enabled NO "${selection[@]}" \
             CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             test 2>&1 | tee artifacts/task3/TXTCoreTests.log
           pipeline=("${PIPESTATUS[@]}")
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/TXTCoreTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts TXTCoreTests 25
+          python3 -B scripts/validate_task3.py test-counts TXTCoreTests
 
-      - name: Run the 89 ReaderDomain tests once (79 existing plus 10 reading tools regressions)
+      - name: Run 93 ReaderDomain cases (original 89 plus 4 typography cases)
         run: |
           set -uo pipefail
+          selection_text="$(python3 -B scripts/task3_test_inventory.py --selection ReaderDomainTests)" || exit "$?"
+          read -r -a selection <<< "$selection_text"
           set +e
           xcodebuild -project YueJing.xcodeproj -scheme ReaderDomain -configuration Debug \
             -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath build/Task3Tests -clonedSourcePackagesDirPath build/SourcePackages \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/task3/ReaderDomainTests.xcresult \
-            -parallel-testing-enabled NO -only-testing:ReaderDomainTests \
-            -skip-testing:ReaderDomainTests/ProcessingReuseMeasurementTests \
+            -parallel-testing-enabled NO "${selection[@]}" \
             CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             test 2>&1 | tee artifacts/task3/ReaderDomainTests.log
           pipeline=("${PIPESTATUS[@]}")
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/ReaderDomainTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts ReaderDomainTests 89
+          python3 -B scripts/validate_task3.py test-counts ReaderDomainTests
 
       - name: Run the 6 decoder differential tests and one timed pair in Release
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py decoder-comparison-settings || exit "$?"
+          selection_text="$(python3 -B scripts/task3_test_inventory.py --selection TXTBlockDecoderTests)" || exit "$?"
+          read -r -a selection <<< "$selection_text"
           set +e
           xcodebuild -project YueJing.xcodeproj -scheme TXTCore -configuration Release \
             -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath build/Task3DecoderComparison -clonedSourcePackagesDirPath build/SourcePackages \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/task3/TXTBlockDecoderTests.xcresult \
-            -parallel-testing-enabled NO -only-testing:TXTCoreTests/TXTBlockDecoderTests \
+            -parallel-testing-enabled NO "${selection[@]}" \
             CODE_SIGNING_ALLOWED=NO ENABLE_TESTABILITY=YES ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             test 2>&1 | tee artifacts/task3/TXTBlockDecoderTests.log
           pipeline=("${PIPESTATUS[@]}")
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/TXTBlockDecoderTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts TXTBlockDecoderTests 6 || exit "$?"
+          python3 -B scripts/validate_task3.py test-counts TXTBlockDecoderTests || exit "$?"
           python3 scripts/validate_task3.py decoder-comparison
 
       - name: Measure one sequential synthetic reuse path in Release
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py measurement-settings || exit "$?"
+          selection_text="$(python3 -B scripts/task3_test_inventory.py --selection ProcessingReuseMeasurementTests)" || exit "$?"
+          read -r -a selection <<< "$selection_text"
           set +e
           xcodebuild -project YueJing.xcodeproj -scheme ReaderDomain -configuration Release \
             -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath build/Task3Measurements -clonedSourcePackagesDirPath build/SourcePackages \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -resultBundlePath artifacts/task3/ProcessingReuseMeasurementTests.xcresult \
-            -parallel-testing-enabled NO -only-testing:ReaderDomainTests/ProcessingReuseMeasurementTests \
+            -parallel-testing-enabled NO "${selection[@]}" \
             CODE_SIGNING_ALLOWED=NO ENABLE_TESTABILITY=YES ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
             test 2>&1 | tee artifacts/task3/ProcessingReuseMeasurementTests.log
           pipeline=("${PIPESTATUS[@]}")
           printf '%s\n' "${pipeline[0]}" > artifacts/task3/ProcessingReuseMeasurementTests-exit-code.txt
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 scripts/validate_task3.py test-counts ProcessingReuseMeasurementTests 1 || exit "$?"
+          python3 -B scripts/validate_task3.py test-counts ProcessingReuseMeasurementTests || exit "$?"
           python3 scripts/validate_task3.py processing-measurements
 
       - name: Run the 2 real App-host UIKit tests once
@@ -163,7 +177,7 @@ jobs:
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             --evidence-dir artifacts/reading-ui-native
 
-      - name: Run the 6 real App UI flows once
+      - name: Run 8 real App UI flows (original 6 plus 2 typography and relaunch cases)
         timeout-minutes: 18
         run: |
           set -euo pipefail
@@ -171,7 +185,28 @@ jobs:
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             --evidence-dir artifacts/reading-ui-native
 
-      - name: Require all 129 unique native tests before device App compilation
+      - name: Run the 3 existing Canvas App-host regressions in the same attempt
+        run: |
+          set -uo pipefail
+          python3 -B scripts/validate_task3.py canvas-settings || exit "$?"
+          selection_text="$(python3 -B scripts/task3_test_inventory.py --selection YueJingCanvasTests)" || exit "$?"
+          read -r -a selection <<< "$selection_text"
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJingCanvas -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/Task3Canvas -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/YueJingCanvasTests.xcresult \
+            -parallel-testing-enabled NO "${selection[@]}" \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/task3/YueJingCanvasTests.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/YueJingCanvasTests-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 -B scripts/validate_task3.py test-counts YueJingCanvasTests
+
+      - name: Require the exact reviewed 138-case union before device App compilation
         run: |
           set -euo pipefail
           python3 scripts/validate_task3.py all-test-gate
@@ -194,11 +229,14 @@ jobs:
           exit "${pipeline[1]}"
 
       - name: Validate embedded dependencies and resources then package the same commit
+        id: package
         run: |
           set -euo pipefail
           python3 scripts/validate_task3.py package-gate 2>&1 | tee artifacts/task3/dependency-gate.log
           python3 scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
           python3 scripts/validate_task3.py verify-ipa 2>&1 | tee artifacts/task3/ipa-verification.log
+          ipa_file="$(python3 -c 'import json, re; from pathlib import Path; name = json.loads(Path("artifacts/manifest.json").read_text(encoding="utf-8"))["ipa_file"]; assert re.fullmatch(r"YueJing-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?\.ipa", name) and "TESTS-NOT-RUN" not in name and (Path("artifacts") / name).is_file(); print(name)')"
+          printf 'ipa_file=%s\nipa_path=artifacts/%s\n' "$ipa_file" "$ipa_file" >> "$GITHUB_OUTPUT"
 
       - name: Preserve raw evidence from this single attempt
         if: always()
@@ -217,7 +255,7 @@ jobs:
         with:
           name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
           path: |
-            artifacts/YueJing-unsigned.ipa
+            ${{ steps.package.outputs.ipa_path }}
             artifacts/manifest.json
             artifacts/SHA256SUMS
             artifacts/task3/app-dependency-gate.json

@@ -29,12 +29,13 @@ struct ReaderPanelHost: View {
                     isActive: { active(.settings, session.id) }, close: { close(session.id) }, appearance: appearance)
             }
         }
-        .padding(.top, 18)
+        .padding(.top, ReaderVisualStyle.panelTopInset)
         .background(appearance.surface.ignoresSafeArea())
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
         .presentationDetents(session.panel == .directory ? [.large] : [.medium, .large], selection: $selectedDetent)
         .presentationDragIndicator(.visible)
+        .presentationCornerRadius(ReaderVisualStyle.panelCornerRadius)
     }
 
     private var settings: Binding<ReaderPreferences> {

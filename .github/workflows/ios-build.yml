@@ -187,7 +187,8 @@ jobs:
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           exit "${pipeline[1]}"
 
-      - name: Validate device dependencies and package an IPA marked TESTS NOT RUN
+      - name: Validate device dependencies and package an IPA with TESTS NOT RUN manifest
+        id: package
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -262,35 +263,49 @@ jobs:
           PY
           python3 scripts/package_ipa.py 2>&1 | tee artifacts/package.log
           python3 - <<'PY'
-          import hashlib, json, zipfile
+          import hashlib, json, os, plistlib, re, zipfile
           from pathlib import Path
           out = Path("artifacts")
           app = Path("build/DerivedData/Build/Products/Release-iphoneos/YueJing.app")
-          ipa = out / "YueJing-unsigned.ipa"
-          expected = {"Payload/YueJing.app/" + str(path.relative_to(app)): path for path in app.rglob("*") if path.is_file()}
+          manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+          version = manifest.get("version")
+          build = manifest.get("build")
+          ipa_name = manifest.get("ipa_file")
+          assert isinstance(version, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?", version), "Invalid manifest version"
+          assert isinstance(build, str) and re.fullmatch(r"[1-9][0-9]*", build), "Invalid manifest build"
+          assert ipa_name == f"YueJing-{version}.ipa" and "TESTS-NOT-RUN" not in ipa_name, "Unexpected manifest IPA filename"
+          info = plistlib.loads((app / "Info.plist").read_bytes())
+          assert info.get("CFBundleShortVersionString") == version and info.get("CFBundleVersion") == build, "Manifest version/build differs from built App"
+          ipa = out / ipa_name
+          assert ipa.is_file() and not ipa.is_symlink(), "Expected packaged IPA is missing"
+          assert [path.name for path in out.glob("*.ipa")] == [ipa_name], "Unexpected extra IPA in artifacts"
+          expected = {"Payload/YueJing.app/" + path.relative_to(app).as_posix(): path for path in app.rglob("*") if path.is_file()}
+          assert "Payload/YueJing.app/Assets.car" in expected and manifest.get("app_icon_files"), "Missing compiled icon resources"
+          assert all("Payload/YueJing.app/" + name in expected for name in manifest["app_icon_files"]), "Missing referenced icon PNG"
           with zipfile.ZipFile(ipa) as archive:
               names = archive.namelist()
               assert len(names) == len(set(names)) and archive.testzip() is None, "Duplicate/corrupt IPA entries"
               assert all(name.startswith("Payload/") and ".." not in Path(name).parts for name in names), "Unexpected IPA layout"
               assert {name for name in names if not name.endswith("/")} == set(expected), "Packaged file set differs"
               assert all(archive.read(name) == path.read_bytes() for name, path in expected.items()), "Packaged bytes differ"
-          marked = out / "YueJing-reading-ui-TESTS-NOT-RUN.ipa"
-          assert not marked.exists(), "Refuse to overwrite an existing IPA"
-          ipa.rename(marked)
-          manifest = json.loads((out / "manifest.json").read_text())
-          status = json.loads((out / "verification-status.json").read_text())
+          status = json.loads((out / "verification-status.json").read_text(encoding="utf-8"))
           assert status["source_commit"] == manifest["source_commit"], "Package source differs from frozen status"
+          assert status["qualification"] == "TESTS NOT RUN"
           assert status["native_tests_this_run"] == dict(status="not run", executions=0, selection=[])
           assert status["typography_regressions"]["executions_this_run"] == 0
           manifest.update(status)
-          manifest.update(ipa_file=marked.name, verified_packaged_files=len(expected), device_build="passed",
+          manifest.update(ipa_file=ipa.name, verified_packaged_files=len(expected), device_build="passed",
                           device_dependencies="passed", packaging="passed",
                           prior_129_tests_rerun=False)
-          assert manifest["ipa_sha256"] == hashlib.sha256(marked.read_bytes()).hexdigest(), "IPA hash mismatch"
-          (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-          names = [marked.name, "manifest.json", "verification-status.json", "device-dependency-verification.json"]
-          (out / "SHA256SUMS").write_text("".join(hashlib.sha256((out / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in names))
-          print(json.dumps(manifest, indent=2))
+          assert manifest["ipa_bytes"] == ipa.stat().st_size, "IPA size mismatch"
+          assert manifest["ipa_sha256"] == hashlib.sha256(ipa.read_bytes()).hexdigest(), "IPA hash mismatch"
+          (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          names = [ipa.name, "manifest.json", "verification-status.json", "device-dependency-verification.json"]
+          (out / "SHA256SUMS").write_text("".join(hashlib.sha256((out / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in names), encoding="utf-8")
+          if os.environ.get("GITHUB_OUTPUT"):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write(f"ipa_file={ipa.name}\nipa_path=artifacts/{ipa.name}\n")
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
           PY
 
       - name: Preserve this attempt's products and raw evidence
@@ -299,7 +314,7 @@ jobs:
         with:
           name: reading-ui-TESTS-NOT-RUN-${{ github.run_id }}-${{ github.sha }}
           path: |
-            artifacts/YueJing-reading-ui-TESTS-NOT-RUN.ipa
+            ${{ steps.package.outputs.ipa_path || 'artifacts/YueJing-*.ipa' }}
             artifacts/manifest.json
             artifacts/verification-status.json
             artifacts/device-dependency-verification.json

@@ -26,20 +26,20 @@ struct ReaderSettingsView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            HStack {
-                Text("排版").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 8)
+            ReaderPanelHeader(title: "排版", appearance: appearance) {
                 Button(action: finish) {
-                    Text("完成").font(.body.weight(.semibold))
-                        .frame(minWidth: 60, minHeight: 44).contentShape(Rectangle())
+                    Text("完成").font(ReaderVisualStyle.panelActionFont)
+                        .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
+                               minHeight: ReaderVisualStyle.minimumControlHeight)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
-            }.padding(.horizontal, 20)
+            }
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     ReaderTypographyPreview(preferences: draft, appearance: appearance)
                     typographySection
                     themeSection
@@ -72,42 +72,39 @@ struct ReaderSettingsView: View {
     }
 
     private var typographySection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            sectionTitle("文字", detail: "滑动预览，松手应用并自动保存")
-            ReaderSettingAdjustment(title: "字号", key: "font", value: $draft.fontSize, range: 14...36,
-                isActive: isActive, commit: commitDraft)
-            Divider().overlay(appearance.edge)
-            ReaderSettingAdjustment(title: "行距", key: "spacing", value: $draft.lineSpacing, range: 0...20,
-                isActive: isActive, commit: commitDraft)
+        ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并自动保存", mark: "字", appearance: appearance) {
+            VStack(alignment: .leading, spacing: 4) {
+                ReaderSettingAdjustment(title: "字号", key: "font", value: $draft.fontSize, range: 14...36,
+                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+                Divider().overlay(appearance.edge)
+                ReaderSettingAdjustment(title: "行距", key: "spacing", value: $draft.lineSpacing, range: 0...20,
+                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+            }
         }
-        .padding(16).background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var themeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("阅读背景", detail: "仅影响阅读界面")
+        ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", mark: "色", appearance: appearance) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: dynamicType.isAccessibilitySize ? 130 : 76), spacing: 10)], spacing: 12) {
                 ForEach(ReaderTheme.allCases, id: \.rawValue) { theme in themeButton(theme) }
             }
         }
-        .padding(16).background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var presetsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("快捷排版", detail: "只调整字号和行距，保留当前背景")
+        ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", mark: "式", appearance: appearance) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: dynamicType.isAccessibilitySize ? 130 : 76), spacing: 8)], spacing: 10) {
                 ForEach(ReaderTypographyPreset.allCases, id: \.rawValue) { preset in
                     let selected = preset.matches(draft)
                     Button { apply(preset) } label: {
-                        VStack(spacing: 6) {
+                        VStack(spacing: 4) {
                             HStack(spacing: 4) {
                                 Text(preset.title).font(.subheadline.weight(.medium))
                                 if selected { Image(systemName: "checkmark").font(.caption).accessibilityHidden(true) }
                             }
                             Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))").font(.caption.monospacedDigit())
                         }
-                        .frame(maxWidth: .infinity, minHeight: 56).padding(4)
+                        .frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 4)
                         .background(selected ? appearance.accent.opacity(0.12) : Color.clear,
                                     in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 1.5 : 0.5) }
@@ -128,7 +125,6 @@ struct ReaderSettingsView: View {
             .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
             .accessibilityIdentifier("reader.typography.restore")
         }
-        .padding(16).background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var moreSection: some View {
@@ -140,14 +136,6 @@ struct ReaderSettingsView: View {
             .font(.footnote).disabled(!isActive())
             Text("预览为示例文字，实际断行以正文为准。加减和快捷排版立即应用；“完成”只关闭，不撤销已应用的设置。")
                 .font(.caption).foregroundStyle(appearance.foreground.opacity(0.7))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func sectionTitle(_ title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
-            Text(detail).font(.caption).foregroundStyle(appearance.foreground.opacity(0.7))
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -169,9 +157,9 @@ struct ReaderSettingsView: View {
             guard isActive() else { return }
             draft.theme = theme; commitDraft()
         } label: {
-            VStack(spacing: 7) {
-                Text("阅").font(.system(size: 24))
-                    .frame(maxWidth: .infinity, minHeight: 48)
+            VStack(spacing: 6) {
+                Text("阅").font(.system(size: 22))
+                    .frame(maxWidth: .infinity, minHeight: 40)
                     .foregroundStyle(Color(uiColor: theme.foreground))
                     .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(alignment: .topTrailing) {
@@ -182,7 +170,7 @@ struct ReaderSettingsView: View {
                     }
                     .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 2 : 0.5) }
                 Text(theme.title).font(.caption).fixedSize(horizontal: false, vertical: true)
-            }.frame(maxWidth: .infinity, minHeight: 72).contentShape(Rectangle())
+            }.frame(maxWidth: .infinity, minHeight: 64).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!isActive())
         .accessibilityLabel(theme.title).accessibilityValue(selected ? "已选择" : "未选择")

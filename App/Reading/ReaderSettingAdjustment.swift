@@ -6,6 +6,7 @@ struct ReaderSettingAdjustment: View {
     let key: String
     @Binding var value: Double
     let range: ClosedRange<Double>
+    let accent: Color
     let isActive: @MainActor () -> Bool
     let commit: @MainActor () -> Void
     @State private var dragging = false
@@ -37,22 +38,22 @@ struct ReaderSettingAdjustment: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             Button { step(-1) } label: {
-                Image(systemName: "minus").font(.system(size: 16, weight: .medium))
+                Image(systemName: "minus").font(.system(size: 14, weight: .medium))
                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(ReaderCompactButtonStyle(tint: accent))
             .disabled(!isActive() || value <= range.lowerBound)
             .accessibilityLabel("减小\(title)").accessibilityIdentifier("reader.\(key).decrease")
             Text("\(Int(value))").font(.body.monospacedDigit()).frame(minWidth: 30)
                 .accessibilityLabel("\(title)，\(Int(value))")
                 .accessibilityIdentifier("reader.\(key).value")
             Button { step(1) } label: {
-                Image(systemName: "plus").font(.system(size: 16, weight: .medium))
+                Image(systemName: "plus").font(.system(size: 14, weight: .medium))
                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(ReaderCompactButtonStyle(tint: accent))
             .disabled(!isActive() || value >= range.upperBound)
             .accessibilityLabel("增大\(title)").accessibilityIdentifier("reader.\(key).increase")
         }
