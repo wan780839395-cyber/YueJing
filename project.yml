@@ -148,6 +148,23 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: YueJing
 
+  YueJingCanvasTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Tests/YueJingCanvasTests
+    dependencies:
+      - target: YueJing
+      - target: ReaderDomain
+      - target: TXTCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.canvas-tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YueJing.app/YueJing"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
   TXTCorePerformanceTests:
     type: bundle.unit-test
     platform: iOS
@@ -219,3 +236,16 @@ schemes:
       config: Release
       targets:
         - TXTCorePerformanceTests
+
+  YueJingCanvas:
+    build:
+      targets:
+        YueJing: all
+        YueJingCanvasTests: [test]
+    test:
+      config: Debug
+      environmentVariables:
+        YUEJING_UI_TEST_SESSION: "D052AE4B-7823-447E-BE63-986028A7F54C"
+      targets:
+        - name: YueJingCanvasTests
+          parallelizable: false

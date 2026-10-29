@@ -14,6 +14,7 @@ final class ReadingCell: UITableViewCell {
     override func prepareForReuse() { super.prepareForReuse(); canvas.clear() }
     func render(_ slice: ReadingSlice, preferences: ReaderPreferences) {
         backgroundColor = preferences.theme.background
+        contentView.backgroundColor = preferences.theme.background
         canvas.render(slice, preferences: preferences)
     }
     func setToolActions(_ actions: [UIAccessibilityCustomAction]) { canvas.accessibilityCustomActions = actions }
@@ -26,6 +27,8 @@ private final class ReadingCanvas: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true; isAccessibilityElement = true; accessibilityTraits = .staticText
+        backgroundColor = preferences.theme.background
+        contentMode = .redraw
         accessibilityIdentifier = "reader.text.canvas"
     }
     required init?(coder: NSCoder) { return nil }
@@ -34,9 +37,19 @@ private final class ReadingCanvas: UIView {
         accessibilityLabel = value.lines.map(\.text).joined()
         setNeedsDisplay()
     }
-    func clear() { slice = nil; accessibilityLabel = nil; setNeedsDisplay() }
+    func clear() {
+        slice = nil; accessibilityLabel = nil; accessibilityCustomActions = nil
+        setNeedsDisplay()
+    }
     override func draw(_ rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext(), let slice else { return }
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        // Cover the dirty region even during the empty interval between cell uses.
+        context.saveGState()
+        context.setBlendMode(.copy)
+        context.setFillColor(preferences.theme.background.cgColor)
+        context.fill(rect)
+        context.restoreGState()
+        guard let slice else { return }
         let font = CTFontCreateWithName("PingFangSC-Regular" as CFString, CGFloat(preferences.fontSize), nil)
         context.saveGState(); defer { context.restoreGState() }
         context.textMatrix = .identity

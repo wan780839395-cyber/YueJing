@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      PRODUCT_BASELINE: 22e1ffb6f067bcab83e7021f14f3d75a11cb8f95
+      APPROVED_PARENT: 2bf93e51525b7959dd4bdf2898f15db302c86454
     defaults:
       run:
         shell: bash
@@ -31,28 +31,34 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/task3
           test "$GITHUB_RUN_ATTEMPT" = 1
-          test "$(git rev-parse HEAD^)" = "$PRODUCT_BASELINE"
-          test "$(git diff --name-only "$PRODUCT_BASELINE" HEAD)" = .github/workflows/ios-build.yml
+          test "$(git rev-parse HEAD^)" = "$APPROVED_PARENT"
           printf '%s\n' '::warning::UI TESTS NOT ALL PASSED. Independent device-verification IPA only; not full test acceptance.'
           python3 - <<'PY'
-          import json, os
+          import json, os, subprocess
           from pathlib import Path
+          allowed = [".github/workflows/ios-build.yml", "App/Reading/ReadingCell.swift",
+                     "Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift", "project.yml"]
+          changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
+          assert changed == sorted(allowed), "Source changes differ from the approved canvas batch"
           status = dict(purpose="independent physical-device verification only",
                         qualification="UI TESTS NOT ALL PASSED", full_test_gate="not passed",
-                        source_commit=os.environ["GITHUB_SHA"], product_baseline=os.environ["PRODUCT_BASELINE"],
+                        source_commit=os.environ["GITHUB_SHA"], previous_candidate=os.environ["APPROVED_PARENT"],
+                        product_changes=["App/Reading/ReadingCell.swift"], approved_changed_files=allowed,
+                        prior_validation_source_commit="22e1ffb6f067bcab83e7021f14f3d75a11cb8f95",
                         prior_validation_run=40812776950, prior_validation_attempt=1,
                         prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40812776950",
                         prior_validation_passed=128, prior_validation_failed=1, prior_validation_skipped=0,
-                        tests_rerun=False, original_task3_gate="unchanged",
+                        prior_129_tests_rerun=False, original_task3_gate="unchanged",
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
               output.write("## UI TESTS NOT ALL PASSED\n\nIndependent device-verification IPA only. "
                            "Prior Task3 run [40812776950](" + status["prior_validation_url"] +
-                           ") had 128 passed / 1 failed / 0 skipped. Tests are not rerun here. "
+                           ") had 128 passed / 1 failed / 0 skipped on the prior validation source. "
+                           "Those 129 tests are not rerun here; three new canvas regressions must pass before this device build. "
                            "The original Task3 gate remains unchanged. Physical-device acceptance is pending.\n\n"
-                           "Build source: `" + status["source_commit"] + "`; unchanged product baseline: `" +
-                           status["product_baseline"] + "`.\n")
+                           "Build source: `" + status["source_commit"] + "`; previous candidate: `" +
+                           status["previous_candidate"] + "`. Only ReadingCell is changed in the product.\n")
           PY
 
       - name: Verify the selected native toolchain
@@ -99,6 +105,67 @@ jobs:
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 scripts/validate_task3.py resolved
+
+      - name: Run the three new canvas App-host regressions once
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/canvas-tests
+          xcrun simctl list devices available -j > artifacts/task3/devices.json
+          xcrun simctl list runtimes -j > artifacts/task3/runtimes.json
+          python3 scripts/validate_task3.py select-simulator
+          SIMULATOR_UDID="$(python3 -c 'import json; from pathlib import Path; print(json.loads(Path("artifacts/task3/simulator-selection.json").read_text())["udid"])')"
+          printf '%s\n' "$SIMULATOR_UDID" > artifacts/canvas-tests/simulator-udid.txt
+          xcodebuild -project YueJing.xcodeproj -target YueJingCanvasTests -configuration Debug \
+            -sdk iphonesimulator -showBuildSettings -json -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO ARCHS=arm64 \
+            > artifacts/canvas-tests/build-settings.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = [row["buildSettings"] for row in json.loads(Path("artifacts/canvas-tests/build-settings.json").read_text())
+                  if row["target"] == "YueJingCanvasTests"]
+          assert len(rows) == 1, "Missing canvas target settings"
+          value = rows[0]
+          assert value["PRODUCT_TYPE"] == "com.apple.product-type.bundle.unit-test", "Not a unit-test bundle"
+          assert value["TEST_HOST"].endswith("YueJing.app/YueJing") and value["BUNDLE_LOADER"] == value["TEST_HOST"], "Not a real App-host target"
+          assert value["SWIFT_VERSION"] == "6.0" and value["SWIFT_STRICT_CONCURRENCY"] == "complete"
+          assert value["CONFIGURATION"] == "Debug" and value["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6"
+          PY
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJingCanvas -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath build/CanvasTests -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/canvas-tests/CanvasTests.xcresult \
+            -parallel-testing-enabled NO -only-testing:YueJingCanvasTests \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 180 \
+            -maximum-test-execution-time-allowance 180 \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            test 2>&1 | tee artifacts/canvas-tests/native.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/canvas-tests/native-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          out = Path("artifacts/canvas-tests")
+          declared = re.findall(r"@Test\s+func\s+(\w+)\s*\(", Path("Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift").read_text())
+          text = (out / "native.log").read_text()
+          passed = re.findall(r"\bTest (\w+)\(\) passed after\b", text)
+          summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", text)
+          assert len(declared) == len(set(declared)) == 3, "Unexpected canvas declarations"
+          assert sorted(passed) == sorted(declared) and len(passed) == 3, "Missing/duplicate/unexpected native execution"
+          assert summaries == [("3", "passed")] and "** TEST SUCCEEDED **" in text, "Native summary did not pass"
+          assert not re.search(r"^.*\b(?:Test|Suite)[^\r\n]*\b(?:skipped|failed)\b", text, re.MULTILINE), "Test failure or skip"
+          report = dict(source_commit=os.environ["GITHUB_SHA"], target="YueJingCanvasTests", configuration="Debug",
+                        expected=3, declared=declared, passed=passed, failed=0, skipped=0, unexecuted=0, native_exit=0,
+                        simulator_udid=(out / "simulator-udid.txt").read_text().strip(), prior_129_tests_rerun=False)
+          (out / "counts.json").write_text(json.dumps(report, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write("\nCanvas App-host regressions: 3 passed / 0 failed / 0 skipped. Prior 129 tests were not rerun.\n")
+          PY
 
       - name: Verify Release settings exclude the test-only diagnostics
         run: |
@@ -238,9 +305,13 @@ jobs:
           ipa.rename(marked)
           manifest = json.loads((out / "manifest.json").read_text())
           status = json.loads((out / "verification-status.json").read_text())
+          canvas = json.loads((out / "canvas-tests/counts.json").read_text())
+          assert canvas["source_commit"] == manifest["source_commit"] and len(canvas["passed"]) == 3
+          assert canvas["native_exit"] == canvas["failed"] == canvas["skipped"] == canvas["unexecuted"] == 0
           manifest.update(status)
           manifest.update(ipa_file=marked.name, verified_packaged_files=len(expected), device_build="passed",
-                          device_dependencies="passed", packaging="passed", tests_rerun=False)
+                          device_dependencies="passed", packaging="passed", canvas_regressions=canvas,
+                          prior_129_tests_rerun=False)
           assert manifest["ipa_sha256"] == hashlib.sha256(marked.read_bytes()).hexdigest(), "IPA hash mismatch"
           (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
           names = [marked.name, "manifest.json", "verification-status.json", "device-dependency-verification.json"]
@@ -264,6 +335,7 @@ jobs:
             artifacts/*.log
             artifacts/*-exit-code.txt
             artifacts/task3/
+            artifacts/canvas-tests/
             artifacts/build.xcresult
           retention-days: 3
           if-no-files-found: warn
