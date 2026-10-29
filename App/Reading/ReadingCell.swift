@@ -18,12 +18,25 @@ final class ReadingCell: UITableViewCell {
         canvas.render(slice, preferences: preferences)
     }
     func setToolActions(_ actions: [UIAccessibilityCustomAction]) { canvas.accessibilityCustomActions = actions }
+
+    #if DEBUG
+    var canvasDrawSequence: Int { canvas.drawSequence }
+    var canvasLastDrawBounds: CGRect { canvas.lastDrawBounds }
+    var canvasLastDirtyRect: CGRect { canvas.lastDirtyRect }
+    // Tests of the painter are separate from observations of UIKit's natural display cycle.
+    func paintCanvasForTesting(_ rect: CGRect, in context: CGContext) { canvas.paint(rect, in: context) }
+    #endif
 }
 
 @MainActor
 private final class ReadingCanvas: UIView {
     private var slice: ReadingSlice?
     private var preferences = ReaderPreferences()
+    #if DEBUG
+    private(set) var drawSequence = 0
+    private(set) var lastDrawBounds = CGRect.zero
+    private(set) var lastDirtyRect = CGRect.zero
+    #endif
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true; isAccessibilityElement = true; accessibilityTraits = .staticText
@@ -43,6 +56,12 @@ private final class ReadingCanvas: UIView {
     }
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
+        paint(rect, in: context)
+        #if DEBUG
+        drawSequence += 1; lastDrawBounds = bounds; lastDirtyRect = rect
+        #endif
+    }
+    fileprivate func paint(_ rect: CGRect, in context: CGContext) {
         // Cover the dirty region even during the empty interval between cell uses.
         context.saveGState()
         context.setBlendMode(.copy)
