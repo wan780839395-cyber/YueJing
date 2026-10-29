@@ -18,6 +18,9 @@ struct ReaderScreen: View {
     @ScaledMetric(relativeTo: .body) private var controlHeight: CGFloat = 44
     @ScaledMetric(relativeTo: .headline) private var titleLine: CGFloat = 22
     @AccessibilityFocusState private var focusedControl: String?
+    #if DEBUG
+    @State private var hitProbe = ReaderHitProbeStore()
+    #endif
 
     var body: some View {
         GeometryReader { geometry in
@@ -68,6 +71,14 @@ struct ReaderScreen: View {
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }
         .background(Color(uiColor: model.preferences.theme.background).ignoresSafeArea())
+        #if DEBUG
+        .overlay(alignment: .topLeading) {
+            if ReaderHitProbeStore.enabled {
+                ReaderHitProbeEndpoint(store: hitProbe, model: model, routeID: routeID, tools: tools)
+                    .frame(width: 1, height: 1).allowsHitTesting(false)
+            }
+        }
+        #endif
         // Environment flows down this presentation; no window color-scheme preference.
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
         .sheet(item: panelPresentation) { session in
@@ -123,6 +134,14 @@ struct ReaderScreen: View {
             .disabled(!tools.canInteract)
             .accessibilityLabel("返回书架").accessibilityIdentifier("reader.exit")
             .accessibilityFocused($focusedControl, equals: "back")
+            #if DEBUG
+            .background {
+                if ReaderHitProbeStore.enabled {
+                    ReaderHitProbeMarker(store: hitProbe)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
+                }
+            }
+            #endif
             Text(model.title).font(.headline).lineLimit(metrics.verticalButtons ? 2 : 1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityLabel("书名，\(model.title)")
@@ -195,3 +214,49 @@ struct ReaderScreen: View {
         }
     }
 }
+
+#if DEBUG
+// Test-only native geometry/AX bridge. Its added nodes may perturb SwiftUI/AX composition.
+@MainActor
+private struct ReaderHitProbeMarker: UIViewRepresentable {
+    let store: ReaderHitProbeStore
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear; view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false; view.accessibilityElementsHidden = true
+        store.exitMarker = view
+        return view
+    }
+    func updateUIView(_ view: UIView, context: Context) { store.exitMarker = view }
+}
+
+@MainActor
+private struct ReaderHitProbeEndpoint: UIViewRepresentable {
+    let store: ReaderHitProbeStore
+    let model: ReaderViewModel
+    let routeID: UUID
+    let tools: ReadingToolsPresentation
+    func makeUIView(context: Context) -> ReaderHitProbeValueView {
+        let view = ReaderHitProbeValueView(frame: .zero)
+        view.backgroundColor = .clear; view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = true; view.accessibilityTraits = .staticText
+        view.accessibilityIdentifier = "ui.fixture.reader.hitprobe"
+        view.accessibilityLabel = "合成测试只读取证"
+        view.store = store
+        store.update(model: model, routeID: routeID, tools: tools)
+        return view
+    }
+    func updateUIView(_ view: ReaderHitProbeValueView, context: Context) {
+        store.update(model: model, routeID: routeID, tools: tools)
+    }
+}
+
+@MainActor
+private final class ReaderHitProbeValueView: UIView {
+    var store: ReaderHitProbeStore?
+    override var accessibilityValue: String? {
+        get { store?.value(endpoint: self) }
+        set { /* The diagnostic endpoint does not accept commands or mutate reading state. */ }
+    }
+}
+#endif

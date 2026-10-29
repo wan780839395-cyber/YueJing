@@ -186,6 +186,76 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             onExtend?(visible, window.id)
         }
     }
+
+    #if DEBUG
+    func hitProbeSnapshot(exitRect: CGRect, actualWindow: UIWindow) -> [String: Any] {
+        guard ReaderHitProbeStore.enabled, viewIfLoaded?.window === actualWindow else {
+            return ["status": "unknown", "reason": "reader-window-mismatch"]
+        }
+        @MainActor func chain(_ hit: UIView?) -> [[String: Any]] {
+            var result: [[String: Any]] = [], next = hit
+            for _ in 0..<6 {
+                guard let view = next else { break }
+                let identifier = ["reader.viewport", "ui.fixture.reader.hitprobe"].contains(view.accessibilityIdentifier ?? "")
+                    ? view.accessibilityIdentifier! : "other-or-none"
+                result.append(["class": String(describing: type(of: view)), "identifier": identifier,
+                    "frameInParent": ReaderHitProbeStore.rect(view.frame), "bounds": ReaderHitProbeStore.rect(view.bounds),
+                    "hidden": view.isHidden, "alpha": Double(view.alpha), "interaction": view.isUserInteractionEnabled,
+                    "clipsToBounds": view.clipsToBounds, "inTable": view === table || view.isDescendant(of: table),
+                    "inReaderController": view === self.view || view.isDescendant(of: self.view)])
+                next = view.superview
+            }
+            return result
+        }
+        let topPoint = CGPoint(x: exitRect.midX, y: exitRect.midY)
+        var result: [String: Any] = ["status": "observed", "predictionOnlyNoTouchSent": true,
+            "tracking": table.isTracking, "dragging": table.isDragging, "decelerating": table.isDecelerating,
+            "offset": [Double(table.contentOffset.x), Double(table.contentOffset.y)],
+            "panState": table.panGestureRecognizer.state.rawValue, "tapState": toolsTap.state.rawValue,
+            "panEnabled": table.panGestureRecognizer.isEnabled, "tapEnabled": toolsTap.isEnabled,
+            "latchedDecelerating": tapBeganDuringDeceleration, "latchedDragging": tapBeganDuringDragging,
+            "toolDecelerating": toolDecelerating, "restoring": restoring,
+            "topPointInWindow": [Double(topPoint.x), Double(topPoint.y)],
+            "topHitChain": chain(actualWindow.hitTest(topPoint, with: nil))]
+        // Public AX lookup only; unsupported/truncated/ambiguous containers remain unknown.
+        let scope = parent?.viewIfLoaded ?? viewIfLoaded!
+        var queue: [(AnyObject, Int)] = [(scope, 0)], seen: Set<ObjectIdentifier> = []
+        var matches: [CGRect] = [], cursor = 0, truncated = false
+        while cursor < queue.count && seen.count < 128 {
+            let (object, depth) = queue[cursor]; cursor += 1
+            guard seen.insert(ObjectIdentifier(object)).inserted else { continue }
+            if let view = object as? UIView {
+                if view.accessibilityIdentifier == "ui.fixture.reader.hitprobe" { continue }
+                if view.accessibilityIdentifier == "reader.tools.settings" { matches.append(view.accessibilityFrame) }
+                guard depth < 8 else { truncated = true; continue }
+                let count = view.accessibilityElementCount()
+                if count > 0 && count <= 32 {
+                    for index in 0..<count {
+                        if let child = view.accessibilityElement(at: index) { queue.append((child as AnyObject, depth + 1)) }
+                    }
+                } else if count > 32 && count != NSNotFound { truncated = true }
+                if view.subviews.count > 32 { truncated = true }
+                queue += view.subviews.prefix(32).map { ($0 as AnyObject, depth + 1) }
+            } else if let element = object as? UIAccessibilityElement {
+                if element.accessibilityIdentifier == "reader.tools.settings" { matches.append(element.accessibilityFrame) }
+            }
+        }
+        truncated = truncated || cursor < queue.count
+        result["bottomAXSearch"] = ["visited": seen.count, "truncated": truncated, "matches": matches.count,
+            "scopeClass": String(describing: type(of: scope))]
+        if !truncated, matches.count == 1, ReaderHitProbeStore.valid(matches[0]) {
+            let screenRect = matches[0], rect = actualWindow.convert(screenRect, from: nil as UIWindow?)
+            if actualWindow.bounds.contains(rect) {
+                let point = CGPoint(x: rect.midX, y: rect.midY)
+                result["bottomStatus"] = "observed-public-AX-frame"
+                result["bottomScreenRect"] = ReaderHitProbeStore.rect(screenRect)
+                result["bottomWindowRect"] = ReaderHitProbeStore.rect(rect)
+                result["bottomHitChain"] = chain(actualWindow.hitTest(point, with: nil))
+            } else { result["bottomStatus"] = "unknown-outside-window" }
+        } else { result["bottomStatus"] = "unknown-unavailable-or-ambiguous" }
+        return result
+    }
+    #endif
 }
 
 @MainActor
@@ -204,3 +274,85 @@ private final class ReadingTableView: UITableView {
         return super.accessibilityScroll(direction)
     }
 }
+
+#if DEBUG
+@MainActor
+final class ReaderHitProbeStore {
+    static var enabled: Bool {
+        ReadingUITestFixture.isRequested && ProcessInfo.processInfo.environment["YUEJING_READER_HIT_PROBE"] == "1"
+            && UUID(uuidString: ProcessInfo.processInfo.environment["YUEJING_UI_TEST_SESSION"] ?? "") != nil
+    }
+    weak var exitMarker: UIView?
+    private weak var model: ReaderViewModel?
+    private var routeID: UUID?
+    private var tools: ReadingToolsPresentation?
+    private var contextUpdatedAt = 0.0
+    private var sequence = 0
+    private var getterCalls = 0
+    private var geometryRevision = 0
+    private var lastRect: CGRect?
+    private var lastWindow: ObjectIdentifier?
+    private var lastMarker: ObjectIdentifier?
+    private var sampling = false
+    func update(model: ReaderViewModel, routeID: UUID, tools: ReadingToolsPresentation) {
+        self.model = model; self.routeID = routeID; self.tools = tools
+        contextUpdatedAt = ProcessInfo.processInfo.systemUptime
+    }
+    static func valid(_ rect: CGRect) -> Bool {
+        [rect.minX, rect.minY, rect.width, rect.height].allSatisfy(\.isFinite) && rect.width > 0 && rect.height > 0
+    }
+    static func rect(_ rect: CGRect) -> [Any] {
+        [rect.minX, rect.minY, rect.width, rect.height].map { $0.isFinite ? Double($0) as Any : "nonfinite" as Any }
+    }
+    func value(endpoint: UIView) -> String {
+        guard Self.enabled, Thread.isMainThread else { return "{\"status\":\"unknown-disabled-or-thread\"}" }
+        getterCalls += 1
+        let started = ProcessInfo.processInfo.systemUptime
+        var data: [String: Any] = ["schema": 1, "status": "unknown", "appPID": ProcessInfo.processInfo.processIdentifier,
+            "bundle": Bundle.main.bundleIdentifier ?? "unknown", "nonce": ProcessInfo.processInfo.environment["YUEJING_UI_TEST_SESSION"] ?? "unknown",
+            "startedUptime": started, "maximumGetterSamples": 32, "implicitAXReadsPossible": true,
+            "getterCallNumber": getterCalls, "observationMayPerturbComposition": true, "contextUpdatedUptime": contextUpdatedAt]
+        @MainActor func encoded(_ reason: String? = nil) -> String {
+            if let reason { data["reason"] = reason }
+            data["sequence"] = sequence; data["endedUptime"] = ProcessInfo.processInfo.systemUptime
+            data["getterCallsAtEnd"] = getterCalls
+            guard let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]),
+                  let string = String(data: bytes, encoding: .utf8) else { return "{\"status\":\"unknown-encoding\"}" }
+            return string
+        }
+        guard !sampling else { return encoded("reentrant-AX-read") }
+        guard sequence < 32 else { return encoded("getter-sample-limit") }
+        sequence += 1; sampling = true
+        defer { sampling = false }
+        guard let model, let tools, let routeID, let controller = model.viewport.controller,
+              let actualWindow = controller.viewIfLoaded?.window, endpoint.window === actualWindow,
+              let marker = exitMarker, marker.window === actualWindow else { return encoded("missing-or-mismatched-native-window") }
+        data["routeID"] = routeID.uuidString; data["windowToken"] = String(describing: ObjectIdentifier(actualWindow))
+        data["sceneToken"] = actualWindow.windowScene?.session.persistentIdentifier ?? "unknown"
+        data["windowBounds"] = Self.rect(actualWindow.bounds); data["windowFrame"] = Self.rect(actualWindow.frame)
+        data["keyWindow"] = actualWindow.isKeyWindow; data["sceneWindowCount"] = actualWindow.windowScene?.windows.count ?? 0
+        data["intent"] = tools.intent.uuidString; data["canInteract"] = tools.canInteract; data["visible"] = tools.visible
+        data["valid"] = tools.valid; data["suspended"] = tools.suspended; data["hasPanel"] = tools.panel != nil
+        data["exitRequested"] = tools.exitRequest != nil; data["loading"] = model.loading; data["exitSaveFailed"] = model.exitSaveFailed
+        switch tools.mode { case .hidden: data["mode"] = "hidden"; case .compact: data["mode"] = "compact"; case .panel: data["mode"] = "panel" }
+        guard controller.toolIntent?() == tools.intent else { return encoded("stale-tools-context") }
+        data["modelReadingWindowID"] = model.window?.id.uuidString ?? "none"
+        data["controllerReadingWindowID"] = controller.window?.id.uuidString ?? "none"
+        guard let readingID = model.window?.id, controller.window?.id == readingID else { return encoded("reading-window-version-mismatch") }
+        data["readingWindowID"] = readingID.uuidString
+        let rect = marker.convert(marker.bounds, to: actualWindow)
+        guard Self.valid(rect), actualWindow.bounds.contains(rect) else { return encoded("invalid-marker-geometry") }
+        let windowToken = ObjectIdentifier(actualWindow), markerToken = ObjectIdentifier(marker)
+        if lastRect != rect || lastWindow != windowToken || lastMarker != markerToken {
+            geometryRevision += 1; lastRect = rect; lastWindow = windowToken; lastMarker = markerToken
+        }
+        let screenRect = actualWindow.convert(rect, to: nil as UIWindow?)
+        data["geometryRevision"] = geometryRevision; data["geometrySource"] = "native-button-background-marker-to-actual-window"
+        data["markerToken"] = String(describing: markerToken)
+        data["exitWindowRect"] = Self.rect(rect); data["exitScreenRect"] = Self.rect(screenRect)
+        data["hit"] = controller.hitProbeSnapshot(exitRect: rect, actualWindow: actualWindow)
+        data["status"] = "observed"
+        return encoded()
+    }
+}
+#endif

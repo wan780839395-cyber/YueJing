@@ -4,6 +4,11 @@ import UIKit
 final class ReadingFlowUITests: XCTestCase {
     @MainActor private static var finalEvidenceCases: Set<String> = []
     @MainActor private static var pendingExitEvidenceCases: Set<String> = []
+    @MainActor private static var hitProbeSessions: [String: String] = [:]
+    @MainActor private static var hitProbeSequences: [String: Int] = [:]
+    @MainActor private static var hitProbeRoutes: [String: String] = [:]
+    @MainActor private static var hitProbeWindows: [String: String] = [:]
+    @MainActor private static var hitProbePIDs: [String: Int] = [:]
 
     override func setUpWithError() throws { continueAfterFailure = false }
     override func tearDown() async throws {
@@ -29,12 +34,14 @@ final class ReadingFlowUITests: XCTestCase {
             app.buttons["reader.font.increase"].tap()
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("21"))
             closePanel(app)
+            Self.captureEvidence(app, testName: name, stage: "probe-baseline", includeExitReadiness: true)
             let before = visibleCanvases(app)
             XCTAssertFalse(before.isEmpty)
             viewport(app).swipeUp(velocity: .slow)
             let after = visibleCanvases(app)
             XCTAssertFalse(after.isEmpty)
             XCTAssertNotEqual(after, before)
+            Self.captureEvidence(app, testName: name, stage: "probe-after-scroll", includeExitReadiness: true)
             showTools(app); exitReader(app)
             open("UITest-Long-A", app); openSettings(app)
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("21"))
@@ -163,11 +170,21 @@ final class ReadingFlowUITests: XCTestCase {
         let orientation = XCUIDevice.shared.orientation
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchEnvironment["YUEJING_UI_TEST_SESSION"] = UUID().uuidString
+        let session = UUID().uuidString
+        app.launchEnvironment["YUEJING_UI_TEST_SESSION"] = session
         if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
         let key = Self.evidenceCase(testName)
         Self.finalEvidenceCases.remove(key)
         Self.pendingExitEvidenceCases.remove(key)
+        Self.hitProbeSessions.removeValue(forKey: key)
+        Self.hitProbeSequences.removeValue(forKey: key)
+        Self.hitProbeRoutes.removeValue(forKey: key)
+        Self.hitProbeWindows.removeValue(forKey: key)
+        Self.hitProbePIDs.removeValue(forKey: key)
+        if key == "testSettingsCloseThenScrollExitAndReopenSameAndOtherBook" {
+            app.launchEnvironment["YUEJING_READER_HIT_PROBE"] = "1"
+            Self.hitProbeSessions[key] = session
+        }
         defer {
             // Always collect while this App is alive, before either termination path.
             Self.captureEvidence(app, testName: key, stage: "before-terminate",
@@ -209,8 +226,11 @@ final class ReadingFlowUITests: XCTestCase {
     }
 
     @MainActor private static func captureEvidence(_ app: XCUIApplication, testName: String, stage: String,
-                                                   expectedBook: String? = nil, includeExitReadiness: Bool = false) {
+                                                   expectedBook: String? = nil, includeExitReadiness: Bool = false,
+                                                   probeDeadline: Date? = nil) {
         let key = evidenceCase(testName)
+        let evidenceStartedUptime = ProcessInfo.processInfo.systemUptime
+        let probeBudgetAtStart = probeDeadline.map { String($0.timeIntervalSinceNow) } ?? "not-applicable"
         let stateSampledAt = Date().timeIntervalSince1970
         let state = app.state
         let screenshotStartedAt = Date().timeIntervalSince1970
@@ -221,6 +241,9 @@ final class ReadingFlowUITests: XCTestCase {
         image.name = prefix + ".png"; image.lifetime = .keepAlways
         XCTContext.runActivity(named: prefix) { activity in activity.add(image) }
         // Persist the PNG before any subsequent AX query can fail or time out.
+        if includeExitReadiness, hitProbeSessions[key] != nil, state == .runningForeground {
+            captureHitProbe(app, key: key, prefix: prefix, deadline: probeDeadline)
+        }
         if includeExitReadiness, state != .notRunning, state != .unknown {
             // Each query has its own interval. These observations are not an atomic snapshot.
             @MainActor func sample(_ label: String, _ read: @MainActor () -> String) -> String {
@@ -236,6 +259,7 @@ final class ReadingFlowUITests: XCTestCase {
             observations += sample("reader.exit.frame") { exit.exists ? String(describing: exit.frame) : "unavailable: not found during this query" }
             observations += sample("reader.tools.settings.exists") { String(settings.exists) }
             observations += sample("reader.tools.settings.isHittable") { String(settings.isHittable) }
+            observations += sample("reader.tools.settings.frame") { settings.exists ? String(describing: settings.frame) : "unavailable: not found during this query" }
             observations += sample("reader.viewport.frame") { viewport.exists ? String(describing: viewport.frame) : "unavailable: not found during this query" }
             observations += sample("window.frame") { window.exists ? String(describing: window.frame) : "unavailable: not found during this query" }
             let properties = XCTAttachment(data: Data(observations.utf8), uniformTypeIdentifier: "public.utf8-plain-text")
@@ -247,10 +271,77 @@ final class ReadingFlowUITests: XCTestCase {
             ? "App is not running; a full App AX hierarchy is unavailable."
             : app.debugDescription
         let axEndedAt = Date().timeIntervalSince1970
-        let descriptionText = "YueJing UI evidence\ncase: \(key)\nstage: \(stage)\nappState: \(state.rawValue)\nexpectedBook: \(expectedBook ?? "not specified")\nstateSampledAtUnix: \(stateSampledAt)\nscreenshotStartedAtUnix: \(screenshotStartedAt)\nscreenshotEndedAtUnix: \(screenshotEndedAt)\naxStartedAtUnix: \(axStartedAt)\naxEndedAtUnix: \(axEndedAt)\nobservationsAreSequential: true\nfullAppDebugDescription:\n\(description)"
+        let probeBudgetAtEnd = probeDeadline.map { String($0.timeIntervalSinceNow) } ?? "not-applicable"
+        let evidenceDuration = ProcessInfo.processInfo.systemUptime - evidenceStartedUptime
+        let descriptionText = "YueJing UI evidence\ncase: \(key)\nstage: \(stage)\nappState: \(state.rawValue)\nexpectedBook: \(expectedBook ?? "not specified")\nstateSampledAtUnix: \(stateSampledAt)\nscreenshotStartedAtUnix: \(screenshotStartedAt)\nscreenshotEndedAtUnix: \(screenshotEndedAt)\naxStartedAtUnix: \(axStartedAt)\naxEndedAtUnix: \(axEndedAt)\nprobeBudgetAtStartSeconds: \(probeBudgetAtStart)\nprobeBudgetAtEndSeconds: \(probeBudgetAtEnd)\nevidenceDurationSeconds: \(evidenceDuration)\nobservationsAreSequential: true\nfullAppDebugDescription:\n\(description)"
         let text = XCTAttachment(data: Data(descriptionText.utf8), uniformTypeIdentifier: "public.utf8-plain-text")
         text.name = prefix + ".ax.txt"; text.lifetime = .keepAlways
         XCTContext.runActivity(named: prefix + "--ax") { activity in activity.add(text) }
+    }
+    @MainActor private static func captureHitProbe(_ app: XCUIApplication, key: String, prefix: String, deadline: Date?) {
+        var record: [String: Any] = ["validation": "unknown", "sequentialNotAtomic": true,
+            "runnerPID": ProcessInfo.processInfo.processIdentifier, "queryStartedUptime": ProcessInfo.processInfo.systemUptime,
+            "insideSharedFunctionalBudget": deadline != nil, "observationMayChangeTiming": true]
+        if let deadline { record["budgetRemainingAtStartSeconds"] = deadline.timeIntervalSinceNow }
+        var reasons: [String] = []
+        @MainActor func rectangle(_ element: XCUIElement) -> CGRect? { element.exists ? element.frame : nil }
+        if let deadline, deadline.timeIntervalSinceNow <= 0 { reasons.append("shared-budget-expired-no-probe-read") }
+        else {
+            let frameStarted = ProcessInfo.processInfo.systemUptime
+            let exitRect = rectangle(app.buttons["reader.exit"]), settingsRect = rectangle(app.buttons["reader.tools.settings"])
+            record["frameQueryStartedUptime"] = frameStarted
+            record["frameQueryEndedUptime"] = ProcessInfo.processInfo.systemUptime
+            if let rect = exitRect { record["testExitFrame"] = [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)] }
+            if let rect = settingsRect { record["testSettingsFrame"] = [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)] }
+            let started = ProcessInfo.processInfo.systemUptime
+            let endpoint = app.descendants(matching: .any).matching(identifier: "ui.fixture.reader.hitprobe").firstMatch
+            if let deadline, deadline.timeIntervalSinceNow <= 0 { reasons.append("shared-budget-expired-before-value") }
+            else if endpoint.exists, let raw = endpoint.value as? String, raw.utf8.count <= 65536,
+                    let payload = raw.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: payload),
+                    let value = object as? [String: Any] {
+                let ended = ProcessInfo.processInfo.systemUptime
+                record["valueQueryStartedUptime"] = started; record["valueQueryEndedUptime"] = ended
+                record["appSample"] = value
+                if value["schema"] as? Int != 1 { reasons.append("unsupported-probe-schema") }
+                if value["nonce"] as? String != hitProbeSessions[key] || value["bundle"] as? String != "dev.yuejing.app" {
+                    reasons.append("process-or-fixture-identity-mismatch")
+                }
+                if let pid = value["appPID"] as? Int, pid > 0, pid != Int(ProcessInfo.processInfo.processIdentifier) {
+                    if let expected = hitProbePIDs[key], expected != pid { reasons.append("app-process-changed") }
+                    if reasons.isEmpty { hitProbePIDs[key] = pid }
+                } else { reasons.append("missing-or-runner-process") }
+                if let from = value["startedUptime"] as? Double, let to = value["endedUptime"] as? Double {
+                    record["ageAtReadSeconds"] = ended - to
+                    if from < started || to > ended || to < from { reasons.append("cached-or-clock-mismatched-value") }
+                } else { reasons.append("missing-sample-time") }
+                if let sequence = value["sequence"] as? Int {
+                    if sequence <= (hitProbeSequences[key] ?? 0) { reasons.append("non-increasing-sequence") }
+                    hitProbeSequences[key] = max(sequence, hitProbeSequences[key] ?? 0)
+                } else { reasons.append("missing-sequence") }
+                if let route = value["routeID"] as? String, let window = value["windowToken"] as? String {
+                    if let expected = hitProbeRoutes[key], expected != route { reasons.append("route-mismatch") }
+                    if let expected = hitProbeWindows[key], expected != window { reasons.append("window-mismatch") }
+                    if reasons.isEmpty { hitProbeRoutes[key] = route; hitProbeWindows[key] = window }
+                } else { reasons.append("missing-route-or-window") }
+                @MainActor func matches(_ raw: Any?, _ expected: CGRect?) -> Bool {
+                    guard let actual = raw as? [Double], actual.count == 4, let expected else { return false }
+                    return zip(actual, [Double(expected.minX), Double(expected.minY), Double(expected.width), Double(expected.height)])
+                        .allSatisfy { $0.0.isFinite && abs($0.0 - $0.1) <= 0.5 }
+                }
+                if !matches(value["exitScreenRect"], exitRect) { reasons.append("marker-and-AX-geometry-unconfirmed") }
+                let hit = value["hit"] as? [String: Any]
+                record["bottomGeometryValidation"] = matches(hit?["bottomScreenRect"], settingsRect)
+                    ? "matched-sequentially-not-atomic" : "unknown-unavailable-or-mismatched"
+                if value["status"] as? String != "observed" { reasons.append("app-reported-unknown") }
+                if reasons.isEmpty { record["validation"] = "observed-within-read-interval-not-atomic" }
+            } else { reasons.append("probe-unavailable-or-unreadable-no-retry") }
+        }
+        record["unknownReasons"] = reasons; record["queryEndedUptime"] = ProcessInfo.processInfo.systemUptime
+        if let deadline { record["budgetRemainingAtEndSeconds"] = deadline.timeIntervalSinceNow }
+        let data = (try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])) ?? Data("{\"validation\":\"unknown-encoding\"}".utf8)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.utf8-plain-text")
+        attachment.name = prefix + ".hitprobe.json"; attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: prefix + "--hitprobe") { activity in activity.add(attachment) }
     }
     @MainActor private func viewport(_ app: XCUIApplication) -> XCUIElement { app.tables["reader.viewport"] }
     @MainActor private func openSettings(_ app: XCUIApplication) {
@@ -271,6 +362,9 @@ final class ReadingFlowUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         let key = Self.evidenceCase(name)
         Self.pendingExitEvidenceCases.insert(key)
+        if Self.hitProbeSessions[key] != nil {
+            Self.captureEvidence(app, testName: key, stage: "probe-after-show", includeExitReadiness: true, probeDeadline: deadline)
+        }
         let exit = app.buttons["reader.exit"], settings = app.buttons["reader.tools.settings"]
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             exit.exists && exit.isHittable && settings.exists && settings.isHittable
@@ -281,11 +375,17 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertEqual(result, .completed, "Both reading controls, including the exit target itself, must be hittable within the shared budget")
             return
         }
+        if Self.hitProbeSessions[key] != nil {
+            Self.captureEvidence(app, testName: key, stage: "exit-hittable", includeExitReadiness: true, probeDeadline: deadline)
+        }
         app.buttons["reader.exit"].tap()
         waitHittable(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "UITest-Long-A")).firstMatch,
                      timeout: max(0, deadline.timeIntervalSinceNow))
         XCTAssertFalse(app.staticTexts["暂时无法显示正文"].exists)
         Self.pendingExitEvidenceCases.remove(key)
+        Self.hitProbeSequences.removeValue(forKey: key)
+        Self.hitProbeRoutes.removeValue(forKey: key)
+        Self.hitProbeWindows.removeValue(forKey: key)
     }
     @MainActor private func showTools(_ app: XCUIApplication) {
         if !app.buttons["reader.tools.settings"].isHittable {
