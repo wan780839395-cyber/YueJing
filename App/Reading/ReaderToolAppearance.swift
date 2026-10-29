@@ -17,6 +17,8 @@ struct ReaderToolAppearance {
             : Color(red: 0.57, green: 0.34, blue: 0.28)
     }
     var fill: Color { surface.opacity(reduceTransparency ? 1 : 0.97) }
+    /// A quiet section surface, local to the settings sheet rather than the reading canvas.
+    var card: Color { theme == .dark ? Color.white.opacity(0.05) : Color.white.opacity(0.64) }
 }
 
 /// Tools geometry only. Never reserves space in the reading viewport.

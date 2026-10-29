@@ -7,6 +7,7 @@ struct ReaderPanelHost: View {
     let session: ReaderPanelSession
     @ObservedObject var model: ReaderViewModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var selectedDetent: PresentationDetent = .large
     let active: @MainActor (ReadingToolPanel, UUID) -> Bool
     let close: @MainActor (UUID) -> Void
     let selected: @MainActor (TXTChapter, UUID) -> Void
@@ -32,7 +33,7 @@ struct ReaderPanelHost: View {
         .background(appearance.surface.ignoresSafeArea())
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
-        .presentationDetents(session.panel == .directory ? [.large] : [.medium, .large])
+        .presentationDetents(session.panel == .directory ? [.large] : [.medium, .large], selection: $selectedDetent)
         .presentationDragIndicator(.visible)
     }
 

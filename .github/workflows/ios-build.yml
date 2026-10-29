@@ -1,5 +1,5 @@
-name: Independent device IPA (UI tests not all passed)
-run-name: Device verification only · UI NOT ALL PASSED · ${{ github.sha }}
+name: Device IPA only (tests not run)
+run-name: Reading UI device package · TESTS NOT RUN · ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: 44c881afe05b7581c8d290054470210747bd63f7
+      APPROVED_PARENT: edce5c2302563e228ad35d8e30dd2532389daf87
     defaults:
       run:
         shell: bash
@@ -26,24 +26,41 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Freeze the approved candidate and disclose the failed UI gate
+      - name: Freeze the approved reading UI candidate and disclose no test execution
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
           test "$GITHUB_RUN_ATTEMPT" = 1
           test "$(git rev-parse HEAD^)" = "$APPROVED_PARENT"
-          printf '%s\n' '::warning::UI TESTS NOT ALL PASSED. Independent device-verification IPA only; not full test acceptance.'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf '%s\n' '::warning::TESTS NOT RUN in this attempt. Device compilation and packaging only; not full test acceptance.'
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
-          allowed = [".github/workflows/ios-build.yml", "Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift"]
+          allowed = [
+              ".github/workflows/ios-build.yml",
+              "App/Reading/ReaderPanelHost.swift",
+              "App/Reading/ReaderSettingAdjustment.swift",
+              "App/Reading/ReaderSettingsView.swift",
+              "App/Reading/ReaderToolAppearance.swift",
+              "App/Reading/ReaderTypographyPreview.swift",
+              "Sources/ReaderDomain/ReaderTypographyPreset.swift",
+              "Tests/ReaderDomainTests/ReaderTypographyPresetTests.swift",
+              "docs/READING_CUSTOMIZATION_LOCAL_IMPLEMENTATION.md"]
           changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
-          assert changed == sorted(allowed), "Source changes differ from the approved pixel-coverage test batch"
-          status = dict(purpose="independent physical-device verification only",
-                        qualification="UI TESTS NOT ALL PASSED", full_test_gate="not passed",
+          assert changed == sorted(allowed), "Source changes differ from the approved nine-file reading UI delivery batch"
+          status = dict(purpose="reading UI physical-device verification only",
+                        qualification="TESTS NOT RUN", full_test_gate="not run; historical UI gate not passed",
                         source_commit=os.environ["GITHUB_SHA"], previous_candidate=os.environ["APPROVED_PARENT"],
-                        product_changes=[], approved_changed_files=allowed,
-                        product_change_scope="none; pixel-coverage test oracle and bounded diagnostics only",
+                        product_changes=[path for path in allowed if path.startswith(("App/", "Sources/"))],
+                        approved_changed_files=allowed,
+                        product_change_scope="typography preview, draft sliders, presets and theme-preserving default; no layout/storage/navigation changes",
+                        native_tests_this_run=dict(status="not run", executions=0, selection=[]),
+                        typography_regressions=dict(declarations=4, executions_this_run=0),
+                        prior_canvas_success=dict(
+                            run_id=40842995570, source_commit="edce5c2302563e228ad35d8e30dd2532389daf87",
+                            url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40842995570",
+                            passed=3, failed=0, skipped=0, applies_to_current_UI_candidate=False),
                         prior_shared_painter_commit="44c881afe05b7581c8d290054470210747bd63f7",
                         canvas_product_change_commit="c3353f3bcdd2053de30112cf63167aeb9dc96cec",
                         prior_canvas_compile_failures=[
@@ -65,20 +82,18 @@ jobs:
                         prior_validation_run=40812776950, prior_validation_attempt=1,
                         prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40812776950",
                         prior_validation_passed=128, prior_validation_failed=1, prior_validation_skipped=0,
-                        prior_129_tests_rerun=False, original_task3_gate="unchanged",
+                        prior_129_tests_rerun=False, original_task3_gate="unchanged in this batch; not executed",
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("## UI TESTS NOT ALL PASSED\n\nIndependent device-verification IPA only. "
+              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved reading UI candidate. "
+                           "No simulator, unit, UI or Canvas tests are executed. Four new typography tests remain unexecuted. "
                            "Prior Task3 run [40812776950](" + status["prior_validation_url"] +
-                           ") had 128 passed / 1 failed / 0 skipped on the prior validation source. "
-                           "Those 129 tests are not rerun here; three canvas regressions, including oracle controls, must pass before this device build. "
-                           "The original Task3 gate remains unchanged. Physical-device acceptance is pending.\n\n"
+                           ") had 128 passed / 1 failed / 0 skipped on its prior source. "
+                           "Prior Canvas run 40842995570 had 3 passed / 0 failed / 0 skipped on edce5c2, not on this UI candidate. "
+                           "All prior failures remain recorded separately. Physical-device acceptance is pending.\n\n"
                            "Build source: `" + status["source_commit"] + "`; previous candidate: `" +
-                           status["previous_candidate"] + "`. No production code changes in this batch. "
-                           "Canvas compilation failures remain recorded in runs 40825777552 and 40827205494; "
-                           "run 40828734793 compiled but had 1 passed / 2 failed / 0 skipped due to the backing-type assumption. "
-                           "Run 40836744613 compiled and had 2 passed / 1 failed / 0 skipped due to the pixel-center coverage assumption.\n")
+                           status["previous_candidate"] + "`. The original Task3 workflow is not run or modified in this batch.\n")
           PY
 
       - name: Verify the selected native toolchain
@@ -126,67 +141,6 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 scripts/validate_task3.py resolved
 
-      - name: Run the three new canvas App-host regressions once
-        timeout-minutes: 12
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/canvas-tests
-          xcrun simctl list devices available -j > artifacts/task3/devices.json
-          xcrun simctl list runtimes -j > artifacts/task3/runtimes.json
-          python3 scripts/validate_task3.py select-simulator
-          SIMULATOR_UDID="$(python3 -c 'import json; from pathlib import Path; print(json.loads(Path("artifacts/task3/simulator-selection.json").read_text())["udid"])')"
-          printf '%s\n' "$SIMULATOR_UDID" > artifacts/canvas-tests/simulator-udid.txt
-          xcodebuild -project YueJing.xcodeproj -target YueJingCanvasTests -configuration Debug \
-            -sdk iphonesimulator -showBuildSettings -json -clonedSourcePackagesDirPath build/SourcePackages \
-            -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO ARCHS=arm64 \
-            > artifacts/canvas-tests/build-settings.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          rows = [row["buildSettings"] for row in json.loads(Path("artifacts/canvas-tests/build-settings.json").read_text())
-                  if row["target"] == "YueJingCanvasTests"]
-          assert len(rows) == 1, "Missing canvas target settings"
-          value = rows[0]
-          assert value["PRODUCT_TYPE"] == "com.apple.product-type.bundle.unit-test", "Not a unit-test bundle"
-          assert value["TEST_HOST"].endswith("YueJing.app/YueJing") and value["BUNDLE_LOADER"] == value["TEST_HOST"], "Not a real App-host target"
-          assert value["SWIFT_VERSION"] == "6.0" and value["SWIFT_STRICT_CONCURRENCY"] == "complete"
-          assert value["CONFIGURATION"] == "Debug" and value["IPHONEOS_DEPLOYMENT_TARGET"] == "16.6"
-          PY
-          set +e
-          xcodebuild -project YueJing.xcodeproj -scheme YueJingCanvas -configuration Debug \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-            -derivedDataPath build/CanvasTests -clonedSourcePackagesDirPath build/SourcePackages \
-            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            -resultBundlePath artifacts/canvas-tests/CanvasTests.xcresult \
-            -parallel-testing-enabled NO -only-testing:YueJingCanvasTests \
-            -test-timeouts-enabled YES -default-test-execution-time-allowance 180 \
-            -maximum-test-execution-time-allowance 180 \
-            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
-            test 2>&1 | tee artifacts/canvas-tests/native.log
-          pipeline=("${PIPESTATUS[@]}")
-          printf '%s\n' "${pipeline[0]}" > artifacts/canvas-tests/native-exit-code.txt
-          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
-          if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
-          python3 - <<'PY'
-          import json, os, re
-          from pathlib import Path
-          out = Path("artifacts/canvas-tests")
-          declared = re.findall(r"@Test\s+func\s+(\w+)\s*\(", Path("Tests/YueJingCanvasTests/ReadingCanvasRenderingTests.swift").read_text())
-          text = (out / "native.log").read_text()
-          passed = re.findall(r"\bTest (\w+)\(\) passed after\b", text)
-          summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", text)
-          assert len(declared) == len(set(declared)) == 3, "Unexpected canvas declarations"
-          assert sorted(passed) == sorted(declared) and len(passed) == 3, "Missing/duplicate/unexpected native execution"
-          assert summaries == [("3", "passed")] and "** TEST SUCCEEDED **" in text, "Native summary did not pass"
-          assert not re.search(r"^.*\b(?:Test|Suite)[^\r\n]*\b(?:skipped|failed)\b", text, re.MULTILINE), "Test failure or skip"
-          report = dict(source_commit=os.environ["GITHUB_SHA"], target="YueJingCanvasTests", configuration="Debug",
-                        expected=3, declared=declared, passed=passed, failed=0, skipped=0, unexecuted=0, native_exit=0,
-                        simulator_udid=(out / "simulator-udid.txt").read_text().strip(), prior_129_tests_rerun=False)
-          (out / "counts.json").write_text(json.dumps(report, indent=2) + "\n")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("\nCanvas App-host regressions: 3 passed / 0 failed / 0 skipped. Prior 129 tests were not rerun.\n")
-          PY
-
       - name: Verify Release settings exclude the test-only diagnostics
         run: |
           set -euo pipefail
@@ -233,7 +187,7 @@ jobs:
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           exit "${pipeline[1]}"
 
-      - name: Validate device dependencies and package an IPA marked UI NOT ALL PASSED
+      - name: Validate device dependencies and package an IPA marked TESTS NOT RUN
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -320,17 +274,17 @@ jobs:
               assert all(name.startswith("Payload/") and ".." not in Path(name).parts for name in names), "Unexpected IPA layout"
               assert {name for name in names if not name.endswith("/")} == set(expected), "Packaged file set differs"
               assert all(archive.read(name) == path.read_bytes() for name, path in expected.items()), "Packaged bytes differ"
-          marked = out / "YueJing-device-verification-UI-NOT-ALL-PASSED.ipa"
+          marked = out / "YueJing-reading-ui-TESTS-NOT-RUN.ipa"
           assert not marked.exists(), "Refuse to overwrite an existing IPA"
           ipa.rename(marked)
           manifest = json.loads((out / "manifest.json").read_text())
           status = json.loads((out / "verification-status.json").read_text())
-          canvas = json.loads((out / "canvas-tests/counts.json").read_text())
-          assert canvas["source_commit"] == manifest["source_commit"] and len(canvas["passed"]) == 3
-          assert canvas["native_exit"] == canvas["failed"] == canvas["skipped"] == canvas["unexecuted"] == 0
+          assert status["source_commit"] == manifest["source_commit"], "Package source differs from frozen status"
+          assert status["native_tests_this_run"] == dict(status="not run", executions=0, selection=[])
+          assert status["typography_regressions"]["executions_this_run"] == 0
           manifest.update(status)
           manifest.update(ipa_file=marked.name, verified_packaged_files=len(expected), device_build="passed",
-                          device_dependencies="passed", packaging="passed", canvas_regressions=canvas,
+                          device_dependencies="passed", packaging="passed",
                           prior_129_tests_rerun=False)
           assert manifest["ipa_sha256"] == hashlib.sha256(marked.read_bytes()).hexdigest(), "IPA hash mismatch"
           (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -343,9 +297,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: device-ipa-UI-NOT-ALL-PASSED-${{ github.run_id }}-${{ github.sha }}
+          name: reading-ui-TESTS-NOT-RUN-${{ github.run_id }}-${{ github.sha }}
           path: |
-            artifacts/YueJing-device-verification-UI-NOT-ALL-PASSED.ipa
+            artifacts/YueJing-reading-ui-TESTS-NOT-RUN.ipa
             artifacts/manifest.json
             artifacts/verification-status.json
             artifacts/device-dependency-verification.json
@@ -355,7 +309,6 @@ jobs:
             artifacts/*.log
             artifacts/*-exit-code.txt
             artifacts/task3/
-            artifacts/canvas-tests/
             artifacts/build.xcresult
           retention-days: 3
           if-no-files-found: warn
