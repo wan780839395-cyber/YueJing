@@ -3,6 +3,7 @@ import UIKit
 
 final class ReadingFlowUITests: XCTestCase {
     @MainActor private static var finalEvidenceCases: Set<String> = []
+    @MainActor private static var pendingExitEvidenceCases: Set<String> = []
 
     override func setUpWithError() throws { continueAfterFailure = false }
     override func tearDown() async throws {
@@ -11,9 +12,11 @@ final class ReadingFlowUITests: XCTestCase {
             let app = XCUIApplication()
             let key = ReadingFlowUITests.evidenceCase(testName)
             if !ReadingFlowUITests.finalEvidenceCases.contains(key) {
-                ReadingFlowUITests.captureEvidence(app, testName: key, stage: "teardown-fallback")
+                ReadingFlowUITests.captureEvidence(app, testName: key, stage: "teardown-fallback",
+                    includeExitReadiness: ReadingFlowUITests.pendingExitEvidenceCases.contains(key))
                 ReadingFlowUITests.finalEvidenceCases.insert(key)
             }
+            ReadingFlowUITests.pendingExitEvidenceCases.remove(key)
             app.terminate()
         }
         try await super.tearDown()
@@ -164,10 +167,13 @@ final class ReadingFlowUITests: XCTestCase {
         if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
         let key = Self.evidenceCase(testName)
         Self.finalEvidenceCases.remove(key)
+        Self.pendingExitEvidenceCases.remove(key)
         defer {
             // Always collect while this App is alive, before either termination path.
-            Self.captureEvidence(app, testName: key, stage: "before-terminate")
+            Self.captureEvidence(app, testName: key, stage: "before-terminate",
+                includeExitReadiness: Self.pendingExitEvidenceCases.contains(key))
             Self.finalEvidenceCases.insert(key)
+            Self.pendingExitEvidenceCases.remove(key)
             app.terminate(); XCUIDevice.shared.orientation = orientation
         }
         app.launch(); run(app)
@@ -203,19 +209,45 @@ final class ReadingFlowUITests: XCTestCase {
     }
 
     @MainActor private static func captureEvidence(_ app: XCUIApplication, testName: String, stage: String,
-                                                   expectedBook: String? = nil) {
+                                                   expectedBook: String? = nil, includeExitReadiness: Bool = false) {
         let key = evidenceCase(testName)
+        let stateSampledAt = Date().timeIntervalSince1970
         let state = app.state
+        let screenshotStartedAt = Date().timeIntervalSince1970
         let screenshot = state == .runningForeground ? app.screenshot() : XCUIScreen.main.screenshot()
+        let screenshotEndedAt = Date().timeIntervalSince1970
         let prefix = "YueJingUI--\(key)--\(stage)"
         let image = XCTAttachment(data: screenshot.pngRepresentation, uniformTypeIdentifier: "public.png")
         image.name = prefix + ".png"; image.lifetime = .keepAlways
         XCTContext.runActivity(named: prefix) { activity in activity.add(image) }
-        // Persist the PNG before an AX query can fail or time out.
+        // Persist the PNG before any subsequent AX query can fail or time out.
+        if includeExitReadiness, state != .notRunning, state != .unknown {
+            // Each query has its own interval. These observations are not an atomic snapshot.
+            @MainActor func sample(_ label: String, _ read: @MainActor () -> String) -> String {
+                let startedAt = Date().timeIntervalSince1970
+                let value = read()
+                return "\(label): startedAtUnix=\(startedAt), endedAtUnix=\(Date().timeIntervalSince1970), value=\(value)\n"
+            }
+            let exit = app.buttons["reader.exit"], settings = app.buttons["reader.tools.settings"]
+            let viewport = app.tables["reader.viewport"], window = app.windows.firstMatch
+            var observations = "Sequential observations after the PNG; not atomic or proof of the tap-time state.\n"
+            observations += sample("reader.exit.exists") { String(exit.exists) }
+            observations += sample("reader.exit.isHittable") { String(exit.isHittable) }
+            observations += sample("reader.exit.frame") { exit.exists ? String(describing: exit.frame) : "unavailable: not found during this query" }
+            observations += sample("reader.tools.settings.exists") { String(settings.exists) }
+            observations += sample("reader.tools.settings.isHittable") { String(settings.isHittable) }
+            observations += sample("reader.viewport.frame") { viewport.exists ? String(describing: viewport.frame) : "unavailable: not found during this query" }
+            observations += sample("window.frame") { window.exists ? String(describing: window.frame) : "unavailable: not found during this query" }
+            let properties = XCTAttachment(data: Data(observations.utf8), uniformTypeIdentifier: "public.utf8-plain-text")
+            properties.name = prefix + ".readiness.txt"; properties.lifetime = .keepAlways
+            XCTContext.runActivity(named: prefix + "--readiness") { activity in activity.add(properties) }
+        }
+        let axStartedAt = Date().timeIntervalSince1970
         let description = state == .notRunning || state == .unknown
             ? "App is not running; a full App AX hierarchy is unavailable."
             : app.debugDescription
-        let descriptionText = "YueJing UI evidence\ncase: \(key)\nstage: \(stage)\nappState: \(state.rawValue)\nexpectedBook: \(expectedBook ?? "not specified")\nfullAppDebugDescription:\n\(description)"
+        let axEndedAt = Date().timeIntervalSince1970
+        let descriptionText = "YueJing UI evidence\ncase: \(key)\nstage: \(stage)\nappState: \(state.rawValue)\nexpectedBook: \(expectedBook ?? "not specified")\nstateSampledAtUnix: \(stateSampledAt)\nscreenshotStartedAtUnix: \(screenshotStartedAt)\nscreenshotEndedAtUnix: \(screenshotEndedAt)\naxStartedAtUnix: \(axStartedAt)\naxEndedAtUnix: \(axEndedAt)\nobservationsAreSequential: true\nfullAppDebugDescription:\n\(description)"
         let text = XCTAttachment(data: Data(descriptionText.utf8), uniformTypeIdentifier: "public.utf8-plain-text")
         text.name = prefix + ".ax.txt"; text.lifetime = .keepAlways
         XCTContext.runActivity(named: prefix + "--ax") { activity in activity.add(text) }
@@ -235,9 +267,25 @@ final class ReadingFlowUITests: XCTestCase {
         waitHittable(app.buttons["reader.tools.settings"])
     }
     @MainActor private func exitReader(_ app: XCUIApplication) {
+        // Readiness and return-to-shelf share the original ten-second shelf-wait budget.
+        let deadline = Date().addingTimeInterval(10)
+        let key = Self.evidenceCase(name)
+        Self.pendingExitEvidenceCases.insert(key)
+        let exit = app.buttons["reader.exit"], settings = app.buttons["reader.tools.settings"]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            exit.exists && exit.isHittable && settings.exists && settings.isHittable
+        }, object: nil)
+        let result = XCTWaiter.wait(for: [ready], timeout: max(0, deadline.timeIntervalSinceNow))
+        guard result == .completed else {
+            Self.captureEvidence(app, testName: key, stage: "exit-not-hittable", includeExitReadiness: true)
+            XCTAssertEqual(result, .completed, "Both reading controls, including the exit target itself, must be hittable within the shared budget")
+            return
+        }
         app.buttons["reader.exit"].tap()
-        waitHittable(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "UITest-Long-A")).firstMatch)
+        waitHittable(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "UITest-Long-A")).firstMatch,
+                     timeout: max(0, deadline.timeIntervalSinceNow))
         XCTAssertFalse(app.staticTexts["暂时无法显示正文"].exists)
+        Self.pendingExitEvidenceCases.remove(key)
     }
     @MainActor private func showTools(_ app: XCUIApplication) {
         if !app.buttons["reader.tools.settings"].isHittable {
