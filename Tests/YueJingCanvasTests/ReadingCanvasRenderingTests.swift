@@ -95,7 +95,7 @@ struct ReadingCanvasRenderingTests {
     private func backingImage(_ canvas: UIView) throws -> Bitmap {
         canvas.layer.displayIfNeeded()
         let contents = try #require(canvas.layer.contents) as AnyObject
-        try #require(CFGetTypeID(contents) == CGImageGetTypeID(), "The canvas backing content must be a CGImage")
+        try #require(CFGetTypeID(contents) == CGImage.typeID, "The canvas backing content must be a CGImage")
         // The CF type check above is required: Swift cannot conditionally downcast CF objects.
         return try Bitmap(contents as! CGImage)
     }
