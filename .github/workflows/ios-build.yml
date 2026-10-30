@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: 7a5753658e686a9c3ed7886136a79cdb23d99a49
+      APPROVED_PARENT: 96b540c45d886139df4a6c61620bf6628bd37316
     defaults:
       run:
         shell: bash
@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Freeze the approved reading UI candidate and disclose no test execution
+      - name: Freeze the approved import-entry fix and disclose no native test execution
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -39,22 +39,23 @@ jobs:
           from pathlib import Path
           allowed = [
               ".github/workflows/ios-build.yml",
-              "App/Reading/ReaderScreen.swift",
-              "docs/READING_EXIT_STROKE_BACKGROUND_LOCAL.md"]
+              "scripts/check_device_build_validation_entry.py"]
           changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
-          assert len(allowed) == 3 and len(changed) == 3 and changed == sorted(allowed), "Source changes differ from the approved three-file reading exit-stroke candidate batch"
+          assert len(allowed) == 2 and len(changed) == 2 and changed == sorted(allowed), "Source changes differ from the approved two-file workflow import-entry fix batch"
           assert all(Path(path).is_file() and not Path(path).is_symlink() for path in allowed), "Approved candidate file is missing or symlinked"
           status = dict(purpose="reading UI physical-device verification only",
                         qualification="TESTS NOT RUN",
                         tests_run=False,
-                        full_test_gate="not run; parent Task3 138-case gate not passed",
+                        full_test_gate="not run; historical Task3 138-case gate not passed",
                         source_commit=os.environ["GITHUB_SHA"],
                         previous_candidate=os.environ["APPROVED_PARENT"],
                         product_changes=[path for path in allowed if path.startswith(("App/", "Sources/"))],
                         approved_changed_files=allowed,
-                        product_change_scope="reader top titleBar decorative stroke moved from foreground .overlay before fill into .background; local falsifiable candidate only, no layout/state/storage/test changes",
+                        product_change_scope="no product changes; workflow-local runpy import path fix and offline entry regression only",
+                        carried_reader_candidate=dict(source_commit=os.environ["APPROVED_PARENT"], scope="reader titleBar decorative stroke .background candidate; unchanged in this batch", physical_device_acceptance="not performed"),
+                        prior_device_build=dict(source_commit=os.environ["APPROVED_PARENT"], run=41039839315, attempt=1, device_compile="passed", packaging="failed before dependency checks: ModuleNotFoundError task3_test_inventory", applies_to_current_candidate=False),
                         native_tests_this_run=dict(status="not run", executions=0, selection=[]),
-                        prior_validation_source_commit=os.environ["APPROVED_PARENT"],
+                        prior_validation_source_commit="7a5753658e686a9c3ed7886136a79cdb23d99a49",
                         prior_validation_run=41019503235,
                         prior_validation_attempt=1,
                         prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41019503235",
@@ -69,16 +70,18 @@ jobs:
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved three-file reading exit-stroke local candidate "
-                           "(moving the reader top titleBar decorative stroke from foreground `.overlay` into `.background` before fill). "
-                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`). "
-                           "Parent Task3 run [41019503235](" + status["prior_validation_url"] +
+              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved two-file workflow import-entry fix "
+                           "(workflow-local scripts path setup plus an offline loader regression); no product source changes. "
+                           "The reader titleBar stroke candidate is carried unchanged from the approved parent. Parent device run 41039839315 compiled successfully but packaging failed at the runpy import before dependency checks; this is historical, not validation of this new source. "
+                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`). The offline Python regression is not a native test. "
+                           "Historical Task3 run [41019503235](" + status["prior_validation_url"] +
                            ") on `" + status["prior_validation_source_commit"] +
                            "` had 134 passed / 1 failed / 3 unexecuted / 0 skipped out of 138 selected cases and does not apply as a pass for this candidate. "
                            "Physical-device acceptance is not performed.\n\n"
                            "Build source: `" + status["source_commit"] + "`; approved parent: `" +
                            status["previous_candidate"] + "`. The original Task3 workflow is not run or modified in this batch.\n")
           PY
+          python3 -B scripts/check_device_build_validation_entry.py
 
       - name: Verify the selected native toolchain
         run: |
@@ -176,8 +179,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re, runpy
+          import json, os, re, runpy, sys
           from pathlib import Path
+          sys.path.insert(0, str(Path("scripts").resolve()))
           g = runpy.run_path("scripts/validate_task3.py")
           app, require, run, digest = g["APP"], g["require"], g["run"], g["digest"]
           require(Path("artifacts/build-exit-code.txt").read_text().strip() == "0", "Device build failed")
