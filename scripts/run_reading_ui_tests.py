@@ -10,9 +10,11 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import xml.etree.ElementTree as ET
 import task3_test_inventory as inventory
+from reading_launch_diagnostics import LaunchDiagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
 GROUPS = {target: inventory.COUNTS[target] for target in ("YueJingHostTests", "YueJingUITests")}
@@ -68,7 +70,9 @@ def self_check():
                 checked.append(target + ":reject_" + label)
             else:
                 raise ValueError("Synthetic parser check incorrectly accepted " + target + ":" + label)
-    return {"kind": "SYNTHETIC_PARSER_NOT_NATIVE", "passed": len(checked), "failed": 0, "cases": checked, "native_executions": 0}
+    from check_reading_launch_diagnostics import self_check as launch_self_check
+    return {"kind": "SYNTHETIC_PARSER_NOT_NATIVE", "passed": len(checked), "failed": 0, "cases": checked,
+            "native_executions": 0, "launch_diagnostics": launch_self_check()}
 
 
 def preflight():
@@ -128,7 +132,16 @@ def actual_settings(target, out, source_commit):
         "scheme_sha256": hashlib.sha256(scheme.read_bytes()).hexdigest(), "testables": sorted(selected), "fixture_environment": variables["YUEJING_UI_TEST_SESSION"]})
 
 
-def stream_native(args, path, timeout_seconds):
+def _diagnostic_call(observer, method, *args):
+    # Observation must never replace the native exit, timeout or test gate.
+    try:
+        if observer is not None:
+            getattr(observer, method)(*args)
+    except Exception:
+        pass
+
+
+def stream_native(args, path, timeout_seconds, launch_diagnostics=None):
     timed_out = threading.Event()
     with path.open("x", encoding="utf-8") as stream:
         process = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
@@ -136,15 +149,19 @@ def stream_native(args, path, timeout_seconds):
             if process.poll() is None:
                 timed_out.set(); process.kill()
         timer = threading.Timer(timeout_seconds, expire)
+        observation_deadline = time.monotonic() + timeout_seconds if launch_diagnostics is not None else 0
         timer.start()
+        _diagnostic_call(launch_diagnostics, "start", process, observation_deadline)
         try:
             for line in process.stdout:
                 stream.write(line); stream.flush()
                 print(line, end="", flush=True)
+                _diagnostic_call(launch_diagnostics, "observe_line", line)
             code = process.wait()
         finally:
             timer.cancel()
             process.stdout.close()
+            _diagnostic_call(launch_diagnostics, "stop")
     return code, timed_out.is_set()
 
 
@@ -254,8 +271,15 @@ def run_native(destination, target=None, evidence_dir=None):
         actual_settings(target, out, source_commit)
         print(json.dumps({"starting_target": target, "selected": declarations(target), "timeout_seconds": timeout_seconds}), flush=True)
         code = None
+        launch_diagnostics = None
+        if target == "YueJingHostTests":
+            try:
+                launch_diagnostics = LaunchDiagnostics(out, destination, provenance)
+            except Exception:
+                pass  # Missing launch observations are unknown, not test acceptance.
         try:
-            code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds)
+            code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
+                                           launch_diagnostics=launch_diagnostics)
             (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
             write_new(out / (target + "-execution.json"), {**provenance, "native_exit": code, "timed_out": timed_out})
         finally:
