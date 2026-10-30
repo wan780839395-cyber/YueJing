@@ -188,10 +188,14 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     #if DEBUG
-    func hitProbeSnapshot(exitRect: CGRect, actualWindow: UIWindow) -> [String: Any] {
+    func hitProbeSnapshot(exitRect: CGRect, actualWindow: UIWindow, deadline: TimeInterval? = nil) -> [String: Any] {
         guard ReaderHitProbeStore.enabled, viewIfLoaded?.window === actualWindow else {
             return ["status": "unknown", "reason": "reader-window-mismatch"]
         }
+        @MainActor func expired() -> Bool {
+            deadline.map { ProcessInfo.processInfo.systemUptime >= $0 } ?? false
+        }
+        guard !expired() else { return ["status": "unknown", "reason": "entry-sample-deadline"] }
         @MainActor func chain(_ hit: UIView?) -> [[String: Any]] {
             var result: [[String: Any]] = [], next = hit
             for _ in 0..<6 {
@@ -221,16 +225,17 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         let scope = parent?.viewIfLoaded ?? viewIfLoaded!
         var queue: [(AnyObject, Int)] = [(scope, 0)], seen: Set<ObjectIdentifier> = []
         var matches: [CGRect] = [], cursor = 0, truncated = false
-        while cursor < queue.count && seen.count < 128 {
+        while cursor < queue.count && seen.count < 128 && !expired() {
             let (object, depth) = queue[cursor]; cursor += 1
             guard seen.insert(ObjectIdentifier(object)).inserted else { continue }
             if let view = object as? UIView {
-                if view.accessibilityIdentifier == "ui.fixture.reader.hitprobe" { continue }
+                if ["ui.fixture.reader.hitprobe", "ui.fixture.reader.entryprobe"].contains(view.accessibilityIdentifier ?? "") { continue }
                 if view.accessibilityIdentifier == "reader.tools.settings" { matches.append(view.accessibilityFrame) }
                 guard depth < 8 else { truncated = true; continue }
                 let count = view.accessibilityElementCount()
                 if count > 0 && count <= 32 {
                     for index in 0..<count {
+                        if expired() { truncated = true; break }
                         if let child = view.accessibilityElement(at: index) { queue.append((child as AnyObject, depth + 1)) }
                     }
                 } else if count > 32 && count != NSNotFound { truncated = true }
@@ -240,12 +245,12 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
                 if element.accessibilityIdentifier == "reader.tools.settings" { matches.append(element.accessibilityFrame) }
             }
         }
-        truncated = truncated || cursor < queue.count
+        truncated = truncated || cursor < queue.count || expired()
         result["bottomAXSearch"] = ["visited": seen.count, "truncated": truncated, "matches": matches.count,
             "scopeClass": String(describing: type(of: scope))]
         if !truncated, matches.count == 1, ReaderHitProbeStore.valid(matches[0]) {
             let screenRect = matches[0], rect = actualWindow.convert(screenRect, from: nil as UIWindow?)
-            if actualWindow.bounds.contains(rect) {
+            if actualWindow.bounds.contains(rect), !expired() {
                 let point = CGPoint(x: rect.midX, y: rect.midY)
                 result["bottomStatus"] = "observed-public-AX-frame"
                 result["bottomScreenRect"] = ReaderHitProbeStore.rect(screenRect)
@@ -253,6 +258,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
                 result["bottomHitChain"] = chain(actualWindow.hitTest(point, with: nil))
             } else { result["bottomStatus"] = "unknown-outside-window" }
         } else { result["bottomStatus"] = "unknown-unavailable-or-ambiguous" }
+        if expired() { result["status"] = "unknown"; result["reason"] = "entry-sample-deadline" }
         return result
     }
     #endif
@@ -278,7 +284,8 @@ private final class ReadingTableView: UITableView {
 #if DEBUG
 @MainActor
 final class ReaderHitProbeStore {
-    static var enabled: Bool {
+    static var enabled: Bool { legacyEnabled || ReaderEntryProbe.enabled }
+    static var legacyEnabled: Bool {
         ReadingUITestFixture.isRequested && ProcessInfo.processInfo.environment["YUEJING_READER_HIT_PROBE"] == "1"
             && UUID(uuidString: ProcessInfo.processInfo.environment["YUEJING_UI_TEST_SESSION"] ?? "") != nil
     }
@@ -305,24 +312,43 @@ final class ReaderHitProbeStore {
         [rect.minX, rect.minY, rect.width, rect.height].map { $0.isFinite ? Double($0) as Any : "nonfinite" as Any }
     }
     func value(endpoint: UIView) -> String {
+        sample(endpoint: endpoint, entrySequence: nil)
+    }
+    func entryValue(endpoint: UIView, requestSequence: Int) -> String {
+        guard ReaderEntryProbe.enabled, (1...2).contains(requestSequence) else {
+            return "{\"status\":\"unknown-entry-disabled-or-sequence\"}"
+        }
+        return sample(endpoint: endpoint, entrySequence: requestSequence)
+    }
+    private func sample(endpoint: UIView, entrySequence: Int?) -> String {
         guard Self.enabled, Thread.isMainThread else { return "{\"status\":\"unknown-disabled-or-thread\"}" }
-        getterCalls += 1
+        if entrySequence == nil { getterCalls += 1 }
         let started = ProcessInfo.processInfo.systemUptime
         var data: [String: Any] = ["schema": 1, "status": "unknown", "appPID": ProcessInfo.processInfo.processIdentifier,
             "bundle": Bundle.main.bundleIdentifier ?? "unknown", "nonce": ProcessInfo.processInfo.environment["YUEJING_UI_TEST_SESSION"] ?? "unknown",
-            "startedUptime": started, "maximumGetterSamples": 32, "implicitAXReadsPossible": true,
-            "getterCallNumber": getterCalls, "observationMayPerturbComposition": true, "contextUpdatedUptime": contextUpdatedAt]
+            "startedUptime": started, "implicitAXReadsPossible": true,
+            "observationMayPerturbComposition": true, "contextUpdatedUptime": contextUpdatedAt]
+        let deadline = entrySequence == nil ? nil : Optional(started + 0.25)
+        if entrySequence == nil {
+            data["maximumGetterSamples"] = 32; data["getterCallNumber"] = getterCalls
+        } else {
+            data["sampleKind"] = "explicit-entry-request"; data["maximumRequestedSamples"] = 2
+            data["cooperativeBudgetSeconds"] = 0.25; data["automaticAXReadsTriggerSampling"] = false
+        }
         @MainActor func encoded(_ reason: String? = nil) -> String {
             if let reason { data["reason"] = reason }
-            data["sequence"] = sequence; data["endedUptime"] = ProcessInfo.processInfo.systemUptime
-            data["getterCallsAtEnd"] = getterCalls
+            data["sequence"] = entrySequence ?? sequence; data["endedUptime"] = ProcessInfo.processInfo.systemUptime
+            if entrySequence == nil { data["getterCallsAtEnd"] = getterCalls }
             guard let bytes = try? JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]),
                   let string = String(data: bytes, encoding: .utf8) else { return "{\"status\":\"unknown-encoding\"}" }
             return string
         }
         guard !sampling else { return encoded("reentrant-AX-read") }
-        guard sequence < 32 else { return encoded("getter-sample-limit") }
-        sequence += 1; sampling = true
+        if entrySequence == nil {
+            guard sequence < 32 else { return encoded("getter-sample-limit") }
+            sequence += 1
+        }
+        sampling = true
         defer { sampling = false }
         guard let model, let tools, let routeID, let controller = model.viewport.controller,
               let actualWindow = controller.viewIfLoaded?.window, endpoint.window === actualWindow,
@@ -350,7 +376,11 @@ final class ReaderHitProbeStore {
         data["geometryRevision"] = geometryRevision; data["geometrySource"] = "native-button-background-marker-to-actual-window"
         data["markerToken"] = String(describing: markerToken)
         data["exitWindowRect"] = Self.rect(rect); data["exitScreenRect"] = Self.rect(screenRect)
-        data["hit"] = controller.hitProbeSnapshot(exitRect: rect, actualWindow: actualWindow)
+        let hit = controller.hitProbeSnapshot(exitRect: rect, actualWindow: actualWindow, deadline: deadline)
+        data["hit"] = hit
+        if let deadline, ProcessInfo.processInfo.systemUptime >= deadline {
+            return encoded("entry-sample-deadline")
+        }
         data["status"] = "observed"
         return encoded()
     }

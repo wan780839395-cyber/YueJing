@@ -73,8 +73,12 @@ struct ReaderScreen: View {
         .background(Color(uiColor: model.preferences.theme.background).ignoresSafeArea())
         #if DEBUG
         .overlay(alignment: .topLeading) {
-            if ReaderHitProbeStore.enabled {
+            if ReaderHitProbeStore.legacyEnabled {
                 ReaderHitProbeEndpoint(store: hitProbe, model: model, routeID: routeID, tools: tools)
+                    .frame(width: 1, height: 1).allowsHitTesting(false)
+            }
+            if ReaderEntryProbe.enabled {
+                ReaderEntryProbeEndpoint(store: hitProbe, model: model, routeID: routeID, tools: tools)
                     .frame(width: 1, height: 1).allowsHitTesting(false)
             }
         }

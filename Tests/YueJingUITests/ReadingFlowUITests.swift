@@ -267,6 +267,7 @@ final class ReadingFlowUITests: XCTestCase {
         app.launchEnvironment["YUEJING_UI_TEST_SESSION"] = session
         if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
         let key = Self.evidenceCase(testName)
+        ReadingEntryEvidence.prepare(app, key: key, session: session)
         Self.finalEvidenceCases.remove(key)
         Self.pendingExitEvidenceCases.remove(key)
         Self.hitProbeSessions.removeValue(forKey: key)
@@ -309,7 +310,11 @@ final class ReadingFlowUITests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: visibleBook, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: max(0.01, deadline.timeIntervalSinceNow)), .completed,
                        "The expected synthetic book must have content geometrically visible in the reader viewport")
-        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow))
+        let key = Self.evidenceCase(name)
+        let entryDiagnostic = ReadingEntryEvidence.beforeSettings(app, key: key, sharedDeadline: deadline)
+        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow), onFailure: {
+            if entryDiagnostic { ReadingEntryEvidence.settingsFailed(app, key: key) }
+        })
         Self.captureEvidence(app, testName: name, stage: "open", expectedBook: title)
     }
 
@@ -514,9 +519,12 @@ final class ReadingFlowUITests: XCTestCase {
         for _ in 0..<12 { if element.isHittable { break }; scroll.swipeUp(velocity: .slow) }
         waitHittable(element)
     }
-    @MainActor private func waitHittable(_ element: XCUIElement, timeout: TimeInterval = 10) {
+    @MainActor private func waitHittable(_ element: XCUIElement, timeout: TimeInterval = 10,
+                                       onFailure: (@MainActor () -> Void)? = nil) {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: timeout), .completed)
+        let result = XCTWaiter.wait(for: [ready], timeout: timeout)
+        if result != .completed { onFailure?() }
+        XCTAssertEqual(result, .completed)
     }
     private func assertSameFrame(_ actual: CGRect, _ expected: CGRect) {
         XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.5); XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.5)
