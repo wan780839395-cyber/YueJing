@@ -151,16 +151,8 @@ struct ReaderScreen: View {
                 .accessibilityLabel("书名，\(model.title)")
         }
         .padding(.horizontal, 8).frame(minHeight: metrics.titleHeight)
-        .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(appearance.fill)
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(appearance.edge, lineWidth: 0.5)
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
         .padding(.horizontal, 12).padding(.top, 6)
         .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: -ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
         .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)

@@ -23,16 +23,8 @@ struct ReaderFloatingToolsView: View {
             }
         }
         .padding(4).frame(maxWidth: metrics.verticalButtons ? 280 : (metrics.compactHeight || dynamicType.isAccessibilitySize ? 340 : 300))
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(appearance.fill)
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(appearance.edge, lineWidth: 0.5)
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
         .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
