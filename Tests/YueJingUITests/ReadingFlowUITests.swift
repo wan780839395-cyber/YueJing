@@ -161,7 +161,7 @@ final class ReadingFlowUITests: XCTestCase {
             openSettings(app)
             let close = app.buttons["reader.panel.close"]
             XCTAssertGreaterThanOrEqual(close.frame.height, 44)
-            closePanel(app); exitReader(app)
+            closePanel(app); exitReader(app, shelfBook: "UITest-Short-B")
         }
     }
 
@@ -450,7 +450,7 @@ final class ReadingFlowUITests: XCTestCase {
         app.buttons["reader.panel.close"].tap()
         waitHittable(app.buttons["reader.tools.settings"])
     }
-    @MainActor private func exitReader(_ app: XCUIApplication) {
+    @MainActor private func exitReader(_ app: XCUIApplication, shelfBook title: String = "UITest-Long-A") {
         // Readiness and return-to-shelf share the original ten-second shelf-wait budget.
         let deadline = Date().addingTimeInterval(10)
         let key = Self.evidenceCase(name)
@@ -472,7 +472,8 @@ final class ReadingFlowUITests: XCTestCase {
             Self.captureEvidence(app, testName: key, stage: "exit-hittable", includeExitReadiness: true, probeDeadline: deadline)
         }
         app.buttons["reader.exit"].tap()
-        waitHittable(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "UITest-Long-A")).firstMatch,
+        // Verify the expected visible row, not a fixed book that can be offscreen at large text sizes.
+        waitHittable(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch,
                      timeout: max(0, deadline.timeIntervalSinceNow))
         XCTAssertFalse(app.staticTexts["暂时无法显示正文"].exists)
         Self.pendingExitEvidenceCases.remove(key)
