@@ -14,7 +14,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import task3_test_inventory as inventory
-from reading_launch_diagnostics import LaunchDiagnostics
+from reading_launch_diagnostics import LaunchDiagnostics, ProcessLifecycleDiagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
 GROUPS = {target: inventory.COUNTS[target] for target in ("YueJingHostTests", "YueJingUITests")}
@@ -141,28 +141,83 @@ def _diagnostic_call(observer, method, *args):
         pass
 
 
-def stream_native(args, path, timeout_seconds, launch_diagnostics=None):
+def _lifecycle_snapshot(observer):
+    try:
+        value = observer.snapshot()
+        if not isinstance(value, dict) or value.get("acceptance_role") != "none":
+            raise ValueError("non-gate metadata missing")
+        encoded = json.dumps(value, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 16384:
+            raise ValueError("lifecycle snapshot over cap")
+        return json.loads(encoded)
+    except Exception:
+        return {"kind": "NON_GATE_NATIVE_PROCESS_LIFECYCLE", "acceptance_role": "none",
+                "status": "unknown", "reason": "snapshot-unavailable-or-over-cap"}
+
+
+def stream_native(args, path, timeout_seconds, launch_diagnostics=None, process_lifecycle=None):
     timed_out = threading.Event()
     with path.open("x", encoding="utf-8") as stream:
-        process = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        _diagnostic_call(process_lifecycle, "record", "popen_requested")
+        try:
+            process = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        except Exception as error:
+            _diagnostic_call(process_lifecycle, "record", "popen_failed", type(error).__name__)
+            _diagnostic_call(process_lifecycle, "finish")
+            raise
+        _diagnostic_call(process_lifecycle, "record", "popen_returned", process.pid)
         def expire():
-            if process.poll() is None:
-                timed_out.set(); process.kill()
+            _diagnostic_call(process_lifecycle, "record", "timer_callback")
+            try:
+                poll_result = process.poll()  # The same single poll controls the original timeout action.
+            except Exception as error:
+                _diagnostic_call(process_lifecycle, "record", "timer_poll_failed", type(error).__name__)
+                raise
+            _diagnostic_call(process_lifecycle, "record", "timer_poll", poll_result)
+            if poll_result is None:
+                timed_out.set()
+                _diagnostic_call(process_lifecycle, "record", "kill_requested")
+                try:
+                    process.kill()
+                except Exception as error:
+                    _diagnostic_call(process_lifecycle, "record", "kill_failed", type(error).__name__)
+                    raise
+                _diagnostic_call(process_lifecycle, "record", "kill_returned")
         timer = threading.Timer(timeout_seconds, expire)
-        observation_deadline = time.monotonic() + timeout_seconds if launch_diagnostics is not None else 0
+        observation_deadline = time.monotonic() + timeout_seconds if launch_diagnostics is not None or process_lifecycle is not None else 0
         timer.start()
+        _diagnostic_call(process_lifecycle, "record", "timer_started")
+        _diagnostic_call(process_lifecycle, "start", process, observation_deadline)
         _diagnostic_call(launch_diagnostics, "start", process, observation_deadline)
+        completed = False
         try:
             for line in process.stdout:
+                _diagnostic_call(process_lifecycle, "observe_line", line)
                 stream.write(line); stream.flush()
                 print(line, end="", flush=True)
                 _diagnostic_call(launch_diagnostics, "observe_line", line)
+            _diagnostic_call(process_lifecycle, "record", "stdout_eof")
+            _diagnostic_call(process_lifecycle, "record", "wait_started")
             code = process.wait()
+            _diagnostic_call(process_lifecycle, "record", "wait_returned", code)
+            completed = True
+        except Exception as error:
+            _diagnostic_call(process_lifecycle, "record", "stream_error", type(error).__name__)
+            raise
         finally:
             timer.cancel()
+            _diagnostic_call(process_lifecycle, "record", "timer_cancelled")
             process.stdout.close()
+            _diagnostic_call(process_lifecycle, "record", "stdout_closed")
             _diagnostic_call(launch_diagnostics, "stop")
-    return code, timed_out.is_set()
+            if not completed:
+                _diagnostic_call(process_lifecycle, "record", "stream_unwound")
+                _diagnostic_call(process_lifecycle, "finish")
+    result = (code, timed_out.is_set())
+    _diagnostic_call(process_lifecycle, "record", "stream_returned", code)
+    _diagnostic_call(process_lifecycle, "record", "returned_timed_out", result[1])
+    _diagnostic_call(process_lifecycle, "finish")
+    return result
 
 
 def export_ui_evidence(out, provenance, native_exit):
@@ -272,16 +327,24 @@ def run_native(destination, target=None, evidence_dir=None):
         print(json.dumps({"starting_target": target, "selected": declarations(target), "timeout_seconds": timeout_seconds}), flush=True)
         code = None
         launch_diagnostics = None
+        process_lifecycle = None
         if target == "YueJingHostTests":
             try:
                 launch_diagnostics = LaunchDiagnostics(out, destination, provenance)
             except Exception:
                 pass  # Missing launch observations are unknown, not test acceptance.
+            try:
+                process_lifecycle = ProcessLifecycleDiagnostics(out, provenance)
+            except Exception:
+                pass  # Lifecycle observations never authorize or replace a native result.
         try:
             code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
-                                           launch_diagnostics=launch_diagnostics)
+                                           launch_diagnostics=launch_diagnostics, process_lifecycle=process_lifecycle)
             (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
-            write_new(out / (target + "-execution.json"), {**provenance, "native_exit": code, "timed_out": timed_out})
+            execution = {**provenance, "native_exit": code, "timed_out": timed_out}
+            if process_lifecycle is not None:
+                execution["process_lifecycle_observation"] = _lifecycle_snapshot(process_lifecycle)
+            write_new(out / (target + "-execution.json"), execution)
         finally:
             if target == "YueJingUITests":
                 export_ui_evidence(out, provenance, code)
