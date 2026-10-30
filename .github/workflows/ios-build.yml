@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: edce5c2302563e228ad35d8e30dd2532389daf87
+      APPROVED_PARENT: 7a5753658e686a9c3ed7886136a79cdb23d99a49
     defaults:
       run:
         shell: bash
@@ -39,60 +39,44 @@ jobs:
           from pathlib import Path
           allowed = [
               ".github/workflows/ios-build.yml",
-              "App/Reading/ReaderPanelHost.swift",
-              "App/Reading/ReaderSettingAdjustment.swift",
-              "App/Reading/ReaderSettingsView.swift",
-              "App/Reading/ReaderToolAppearance.swift",
-              "App/Reading/ReaderTypographyPreview.swift",
-              "Sources/ReaderDomain/ReaderTypographyPreset.swift",
-              "Tests/ReaderDomainTests/ReaderTypographyPresetTests.swift",
-              "docs/READING_CUSTOMIZATION_LOCAL_IMPLEMENTATION.md"]
+              "App/Reading/ReaderScreen.swift",
+              "docs/READING_EXIT_STROKE_BACKGROUND_LOCAL.md"]
           changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
-          assert changed == sorted(allowed), "Source changes differ from the approved nine-file reading UI delivery batch"
+          assert len(allowed) == 3 and len(changed) == 3 and changed == sorted(allowed), "Source changes differ from the approved three-file reading exit-stroke candidate batch"
+          assert all(Path(path).is_file() and not Path(path).is_symlink() for path in allowed), "Approved candidate file is missing or symlinked"
           status = dict(purpose="reading UI physical-device verification only",
-                        qualification="TESTS NOT RUN", full_test_gate="not run; historical UI gate not passed",
-                        source_commit=os.environ["GITHUB_SHA"], previous_candidate=os.environ["APPROVED_PARENT"],
+                        qualification="TESTS NOT RUN",
+                        tests_run=False,
+                        full_test_gate="not run; parent Task3 138-case gate not passed",
+                        source_commit=os.environ["GITHUB_SHA"],
+                        previous_candidate=os.environ["APPROVED_PARENT"],
                         product_changes=[path for path in allowed if path.startswith(("App/", "Sources/"))],
                         approved_changed_files=allowed,
-                        product_change_scope="typography preview, draft sliders, presets and theme-preserving default; no layout/storage/navigation changes",
+                        product_change_scope="reader top titleBar decorative stroke moved from foreground .overlay before fill into .background; local falsifiable candidate only, no layout/state/storage/test changes",
                         native_tests_this_run=dict(status="not run", executions=0, selection=[]),
-                        typography_regressions=dict(declarations=4, executions_this_run=0),
-                        prior_canvas_success=dict(
-                            run_id=40842995570, source_commit="edce5c2302563e228ad35d8e30dd2532389daf87",
-                            url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40842995570",
-                            passed=3, failed=0, skipped=0, applies_to_current_UI_candidate=False),
-                        prior_shared_painter_commit="44c881afe05b7581c8d290054470210747bd63f7",
-                        canvas_product_change_commit="c3353f3bcdd2053de30112cf63167aeb9dc96cec",
-                        prior_canvas_compile_failures=[
-                            dict(run_id=40825777552, source_commit="c3353f3bcdd2053de30112cf63167aeb9dc96cec",
-                                 url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40825777552"),
-                            dict(run_id=40827205494, source_commit="04254a4f3eb6bd5c85eedf1f6ce8feba5beff168",
-                                 url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40827205494")],
-                        prior_canvas_runtime_failure=dict(
-                            run_id=40828734793, source_commit="ba6bac412c9aee6e6bdb738801735f81e479c0db",
-                            url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40828734793",
-                            compilation="passed", passed=1, failed=2, skipped=0,
-                            failure="test helper assumed CALayer.contents was a CGImage"),
-                        prior_pixel_coverage_failure=dict(
-                            run_id=40836744613, source_commit="44c881afe05b7581c8d290054470210747bd63f7",
-                            url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40836744613",
-                            compilation="passed", passed=2, failed=1, skipped=0,
-                            failure="test classified partially covered edge pixels as fully outside"),
-                        prior_validation_source_commit="22e1ffb6f067bcab83e7021f14f3d75a11cb8f95",
-                        prior_validation_run=40812776950, prior_validation_attempt=1,
-                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/40812776950",
-                        prior_validation_passed=128, prior_validation_failed=1, prior_validation_skipped=0,
-                        prior_129_tests_rerun=False, original_task3_gate="unchanged in this batch; not executed",
+                        prior_validation_source_commit=os.environ["APPROVED_PARENT"],
+                        prior_validation_run=41019503235,
+                        prior_validation_attempt=1,
+                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41019503235",
+                        prior_validation_selected=138,
+                        prior_validation_passed=134,
+                        prior_validation_failed=1,
+                        prior_validation_unexecuted=3,
+                        prior_validation_skipped=0,
+                        prior_validation_applies_to_current_candidate=False,
+                        prior_task3_tests_rerun=False,
+                        original_task3_gate="unchanged in this batch; not executed",
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved reading UI candidate. "
-                           "No simulator, unit, UI or Canvas tests are executed. Four new typography tests remain unexecuted. "
-                           "Prior Task3 run [40812776950](" + status["prior_validation_url"] +
-                           ") had 128 passed / 1 failed / 0 skipped on its prior source. "
-                           "Prior Canvas run 40842995570 had 3 passed / 0 failed / 0 skipped on edce5c2, not on this UI candidate. "
-                           "All prior failures remain recorded separately. Physical-device acceptance is pending.\n\n"
-                           "Build source: `" + status["source_commit"] + "`; previous candidate: `" +
+              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved three-file reading exit-stroke local candidate "
+                           "(moving the reader top titleBar decorative stroke from foreground `.overlay` into `.background` before fill). "
+                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`). "
+                           "Parent Task3 run [41019503235](" + status["prior_validation_url"] +
+                           ") on `" + status["prior_validation_source_commit"] +
+                           "` had 134 passed / 1 failed / 3 unexecuted / 0 skipped out of 138 selected cases and does not apply as a pass for this candidate. "
+                           "Physical-device acceptance is not performed.\n\n"
+                           "Build source: `" + status["source_commit"] + "`; approved parent: `" +
                            status["previous_candidate"] + "`. The original Task3 workflow is not run or modified in this batch.\n")
           PY
 
@@ -290,13 +274,12 @@ jobs:
               assert all(archive.read(name) == path.read_bytes() for name, path in expected.items()), "Packaged bytes differ"
           status = json.loads((out / "verification-status.json").read_text(encoding="utf-8"))
           assert status["source_commit"] == manifest["source_commit"], "Package source differs from frozen status"
-          assert status["qualification"] == "TESTS NOT RUN"
+          assert status["qualification"] == "TESTS NOT RUN" and status["tests_run"] is False
           assert status["native_tests_this_run"] == dict(status="not run", executions=0, selection=[])
-          assert status["typography_regressions"]["executions_this_run"] == 0
+          assert status["physical_device_acceptance"] == "not performed"
           manifest.update(status)
           manifest.update(ipa_file=ipa.name, verified_packaged_files=len(expected), device_build="passed",
-                          device_dependencies="passed", packaging="passed",
-                          prior_129_tests_rerun=False)
+                          device_dependencies="passed", packaging="passed")
           assert manifest["ipa_bytes"] == ipa.stat().st_size, "IPA size mismatch"
           assert manifest["ipa_sha256"] == hashlib.sha256(ipa.read_bytes()).hexdigest(), "IPA hash mismatch"
           (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
