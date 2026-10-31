@@ -326,5 +326,125 @@ def main():
         native_compilations=0, native_executions=0, native_touch_tests=0, fps_measurements=0), ensure_ascii=False, indent=2))
 
 
+# Device-feedback phase: opt-in, leaving original source/hash functions intact.
+def device_contracts(sources):
+    d=sources[DOCK]; appearance=sources[METRICS]; style=sources[COMPACT_STYLE]
+    checks=[]
+    def need(ok,name):
+        assert ok,name
+        checks.append(name)
+    lexical.check_balanced_delimiters(DOCK,lexical.strip_swift_comments_and_strings(d))
+    need(not any(x in d for x in ('@AppStorage','UserDefaults','AppAppearance','LibraryService','@StateObject','onTapGesture','DragGesture','withAnimation','safeAreaInset','safeAreaPadding','Timer','Task {','.task','asyncAfter','matchedGeometry','zIndex','scaleEffect','Material','.blur(','.drawingGroup(','.compositingGroup(')),
+         'device-dock:no-new-owner-task-gesture-inset-heavy-paint')
+    need(re.findall(r'@State\s+private var (\w+)\s*=',d)==['trayExpanded'] and
+         d.count('trayExpanded = false')==3 and d.count('trayExpanded = true')==1,
+         'device-dock:only-original-immediate-local-expansion-state')
+    need('.allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)' in d and
+         'private var visible: Bool { state.visible && state.panel == nil }' in d and
+         '.onChange(of: visible)' not in d and '.onChange(of: state' not in d,
+         'device-dock:original-hidden-panel-gates-no-hidden-reset')
+    need('case .direct: floatingCapsule' in d and 'case .tabs: edgeBar' in d and 'case .sidebar: edgeDock' in d,
+         'device-dock:abc-branches-preserved')
+    a=member(d,'    private var floatingCapsule:','    private var edgeBar:')
+    b=member(d,'    private var edgeBar:','    private var edgeDock:')
+    c=member(d,'    private var edgeDock:','    private var collapseButton:')
+    need('340' not in d and '.shadow(' not in d,
+         'device-real-preedit:reject-fixed-wide-shell-and-extra-shadow-paint')
+    surface=member(d,'    private func dockSurface<','\n}')
+    need('dockSurface(cornerRadius: 26) {\n                        HStack(spacing: 4) { directoryButton; settingsButton }\n                            .fixedSize(horizontal: true, vertical: false)' in a and
+         '.frame(maxWidth: .infinity, alignment: .center)' in a and '.background' not in a and
+         '340' not in d and '280 : 340' not in d,
+         'device-A:surface-owned-by-content-candidate-not-expanded-outer-shell')
+    need('HStack(spacing: 0) {\n                        Spacer(minLength: 0)\n                        dockSurface(cornerRadius: 24)' in c and
+         'HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }' in c and
+         '.frame(maxWidth: .infinity, alignment: .trailing)' in c,
+         'device-C:fixed-right-anchor-content-driven-tray')
+    need('directoryButton.fixedSize(horizontal: true, vertical: false)\n                        Spacer(minLength: 24).accessibilityHidden(true)\n                        settingsButton.fixedSize(horizontal: true, vertical: false)' in b and
+         all(x not in b for x in ('Text(','Label(','Button(','model.')) and '.frame(maxWidth: .infinity)' in b,
+         'device-B:two-edge-controls-real-empty-middle')
+    need('.padding(4)' in surface and surface.count('.background {')==1 and
+         'RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)' in surface and
+         '.fill(appearance.fill).allowsHitTesting(false).accessibilityHidden(true)' in surface and
+         '.frame(' not in surface and '.contentShape(' not in surface,
+         'device-surface:single-inbounds-decorative-paint-no-empty-shell-or-extra-hit')
+    need('.shadow(' not in d and '.stroke' not in d and 'appearance.shadow' not in d and
+         d.count('.fill(appearance.fill)')==2 and
+         '.fill(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1))' in c,
+         'device-paint:remove-three-shadow-backing-shapes-not-zero-surface')
+    fill=member(appearance,'    var fill: Color {','    /// A quiet section surface')
+    need(all(x in fill for x in ('case .paper:','case .light:','case .dark:')) and
+         fill.count('opacity: 1)')==3 and '.opacity(' not in fill and 'reduceTransparency ? 1 : 0.97' not in appearance,
+         'device-paint:three-opaque-reader-theme-tones-no-canvas-transmission')
+    need('.frame(minWidth: 44, minHeight: metrics.controlHeight)' in d and
+         '.frame(maxWidth: .infinity, minHeight: metrics.controlHeight)' not in d and
+         '.frame(minWidth: 44, minHeight: 44)' in style and
+         'controlHeight = compactHeight ? 44 : max(44, scaledControl)' in appearance,
+         'device-controls:intrinsic-independent44-targets-not-row-stretch')
+    need(d.count('ViewThatFits(in: .horizontal)')==3 and d.count('ScrollView(.vertical)')==2 and
+         'metrics.controlHeight * 2 + 4' in d and 'metrics.controlHeight * 3 + 8' in c and
+         'fixedSize(horizontal: false, vertical: true)' in d,
+         'device-fallback:original-bounded-scroll-large-type-no-shrink')
+    label=c[c.index('} label: {'):c.index('.buttonStyle(')]
+    need('.background' not in label and c.index('.buttonStyle(')<c.index('.background {') and
+         '.contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))' in label,
+         'device-F1:collapsed-content-then-press-then-base-no-label-occlusion')
+    need('Button { open(panel) } label:' in d and
+         '.disabled(model.chapterTotal == 0 || model.exitSaveFailed || !state.canInteract)' in d and
+         '.disabled(model.window == nil || model.exitSaveFailed || !state.canInteract)' in d and
+         d.count('guard visible, state.canInteract, !model.exitSaveFailed else { return }')==2 and
+         'ReaderCompactButtonStyle(tint: appearance.secondary)' in d,
+         'device-actions:original-panel-toggles-disabled-guards-secondary-collapse')
+    checks.extend(d1_focus_contracts(sources))
+    return checks
+
+
+def device_negatives(sources, preedit=None):
+    if preedit is None:
+        from check_ui_control_cohesion import DEVICE_EVIDENCE
+        preedit={p:(DEVICE_EVIDENCE/'before'/p).read_text(encoding='utf8') for p in (DOCK,METRICS)}
+    cases=[('real-preedit-dock',DOCK,preedit[DOCK]),
+           ('real-preedit-paint',METRICS,preedit[METRICS])]
+    rejected=[]
+    combined=dict(sources)
+    for p in (DOCK,METRICS):
+        combined[p]=preedit[p]
+    try: device_contracts(combined)
+    except (AssertionError,ValueError) as error: rejected.append(dict(name='real-preedit-dock-and-paint-composition',by=str(error)))
+    else: raise AssertionError('Accepted real preedit dock/paint composition')
+    for name,p,text in cases:
+        altered=dict(sources);altered[p]=text
+        try: device_contracts(altered)
+        except (AssertionError,ValueError) as error: rejected.append(dict(name=name,by=str(error)))
+        else: raise AssertionError('Accepted real previous source: '+name)
+    mutations=[('B-center-action',DOCK,'Spacer(minLength: 24).accessibilityHidden(true)','Button("middle") { open(.settings) }'),
+               ('C-parent-focus',DOCK,'        rememberFocus(target)\n',''),
+               ('C-wrong-collapse-target',DOCK,'restoreFocus(to: "dock.expand")','restoreFocus(to: "settings")'),
+               ('C-delayed-state',DOCK,'trayExpanded = true','Task { trayExpanded = true }'),
+               ('under44',METRICS,'compactHeight ? 44 : max(44, scaledControl)','compactHeight ? 32 : max(32, scaledControl)'),
+               ('transparent-paint',METRICS,'opacity: 1)','opacity: 0.97)'),
+               ('old-wide-shell',DOCK,'.frame(maxWidth: .infinity, alignment: .center)','.frame(maxWidth: 340, alignment: .center)'),
+               ('invisible-surface-hit',DOCK,'            .padding(4)','            .padding(4).contentShape(Rectangle())')]
+    for name,p,a,b in mutations:
+        assert a in sources[p],name
+        altered=dict(sources);altered[p]=altered[p].replace(a,b,1)
+        try: device_contracts(altered)
+        except (AssertionError,ValueError) as error: rejected.append(dict(name=name,by=str(error)))
+        else: raise AssertionError('Accepted device regression '+name)
+    return rejected
+
+
+def device_main():
+    from check_ui_control_cohesion import device_sources,device_exact,device_protection
+    s=device_sources();checks=device_contracts(s);negative=device_negatives(s)
+    print(json.dumps(dict(kind='DEVICE_DOCK_SOURCE_NOT_NATIVE',checks=checks,negative_controls=negative,
+                         exact=device_exact(s),protection=device_protection(),d1_source_rows=d1_focus_specifications(s),
+                         native_executions=0,touch_executions=0),ensure_ascii=False,indent=2))
+
+
 if __name__ == '__main__':
-    main()
+    import sys
+    if sys.argv[1:]==['--device-release-ci']:
+        from check_ui_control_cohesion import dock_release_ci
+        print(json.dumps(dock_release_ci('dock'),ensure_ascii=False,indent=2))
+    elif sys.argv[1:]==['--device-feedback']: device_main()
+    else: main()

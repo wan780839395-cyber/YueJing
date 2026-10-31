@@ -10,7 +10,15 @@ struct ReaderToolAppearance {
     var foreground: Color { Color(uiColor: theme.foreground) }
     var edge: Color { ReaderVisualStyle.edge(for: theme) }
     var accent: Color { ReaderVisualStyle.accent(for: theme) }
-    var fill: Color { surface.opacity(reduceTransparency ? 1 : 0.97) }
+    // Opaque local tool paint: softness comes from tone, not canvas text showing through.
+    // Shared by the existing header; this changes its paint only, never its geometry.
+    var fill: Color {
+        switch theme {
+        case .paper: Color(.sRGB, red: 239.0 / 255, green: 236.0 / 255, blue: 226.0 / 255, opacity: 1)
+        case .light: Color(.sRGB, red: 241.0 / 255, green: 244.0 / 255, blue: 238.0 / 255, opacity: 1)
+        case .dark: Color(.sRGB, red: 45.0 / 255, green: 53.0 / 255, blue: 47.0 / 255, opacity: 1)
+        }
+    }
     /// A quiet section surface, local to the settings sheet rather than the reading canvas.
     var card: Color { ReaderVisualStyle.sectionSurface(for: theme) }
     var secondary: Color { foreground.opacity(0.76) }

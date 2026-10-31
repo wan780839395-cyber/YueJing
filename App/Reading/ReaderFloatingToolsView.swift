@@ -47,21 +47,19 @@ struct ReaderFloatingToolsView: View {
 
     private var floatingCapsule: some View {
         Group {
-            if metrics.verticalButtons { verticalPair }
-            else {
+            if metrics.verticalButtons {
+                dockSurface(cornerRadius: 26) { verticalPair }
+            } else {
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 4) { directoryButton; settingsButton }
-                        .fixedSize(horizontal: true, vertical: false)
-                    verticalPair
+                    dockSurface(cornerRadius: 26) {
+                        HStack(spacing: 4) { directoryButton; settingsButton }
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    dockSurface(cornerRadius: 26) { verticalPair }
                 }
             }
         }
-        .padding(8).frame(maxWidth: metrics.verticalButtons ? 280 : 340)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .background {
-            RoundedRectangle(cornerRadius: 28, style: .continuous).fill(appearance.shadow)
-                .shadow(color: appearance.shadow, radius: 8, y: 3).allowsHitTesting(false)
-        }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var edgeBar: some View {
@@ -80,10 +78,9 @@ struct ReaderFloatingToolsView: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 4)
         .frame(maxWidth: .infinity)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous).fill(appearance.shadow)
-                .shadow(color: appearance.shadow, radius: 6, y: -2).allowsHitTesting(false)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(appearance.fill).allowsHitTesting(false).accessibilityHidden(true)
         }
     }
 
@@ -91,19 +88,24 @@ struct ReaderFloatingToolsView: View {
         Group {
             if trayExpanded {
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
-                        .fixedSize(horizontal: true, vertical: false)
-                    ScrollView(.vertical) {
-                        VStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        dockSurface(cornerRadius: 24) {
+                            HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
-                    .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
+                    dockSurface(cornerRadius: 24) {
+                        ScrollView(.vertical) {
+                            VStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
+                        }
+                        .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
+                    }
                 }
-                .padding(8).frame(maxWidth: 340)
-                .background(appearance.fill, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .background {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous).fill(appearance.shadow)
-                        .shadow(color: appearance.shadow, radius: 8, y: 3).allowsHitTesting(false)
-                }
+                .allowsHitTesting(trayExpanded && visible && state.canInteract)
+                .accessibilityHidden(!trayExpanded || !visible)
+                .transaction { $0.animation = nil }
+                .transition(reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .identity))
             } else {
                 Button {
                     guard visible, state.canInteract, !model.exitSaveFailed else { return }
@@ -119,14 +121,25 @@ struct ReaderFloatingToolsView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 }
                 .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(model.exitSaveFailed || !state.canInteract)
-                .background(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .background {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1))
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
                 .accessibilityIdentifier("reader.tools.expand")
                 .accessibilityHint("展开目录和排版工具")
                 .accessibilityFocused($focusedControl, equals: "dock.expand")
+                .allowsHitTesting(!trayExpanded && visible && state.canInteract)
+                .accessibilityHidden(trayExpanded || !visible)
+                .transaction { $0.animation = nil }
+                .transition(reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .identity))
             }
         }
+        .animation(reduceMotion ? nil : ReaderMotion.dockPresentation, value: reduceMotion ? 0 : (trayExpanded ? 1 : 2))
+        .transaction { if reduceMotion { $0.animation = nil } }
         .frame(maxWidth: .infinity, alignment: .trailing)
-        // Expansion is immediate. Only the existing ReaderToolVisibility animates visibility.
+        // Only insertion opacity presents the new branch. Removal is immediate;
+        // actions/focus update synchronously, with no frame or layout animation.
         // Hidden tools / panels preserve expansion so lastPanelControl can regain its button.
     }
 
@@ -169,9 +182,18 @@ struct ReaderFloatingToolsView: View {
                 .imageScale(.medium)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 12).padding(.vertical, 4)
-                .frame(maxWidth: .infinity, minHeight: metrics.controlHeight)
+                .frame(minWidth: 44, minHeight: metrics.controlHeight)
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground)).accessibilityIdentifier("reader.tools.\(key)")
         .accessibilityFocused($focusedControl, equals: key)
+    }
+
+    private func dockSurface<Content: View>(cornerRadius: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(4)
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(appearance.fill).allowsHitTesting(false).accessibilityHidden(true)
+            }
     }
 }

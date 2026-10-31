@@ -776,9 +776,249 @@ def soft_main(release_args=None):
                          inventory=inv,native_compilations=0,native_executions=0,touch_tests=0),ensure_ascii=False,indent=2))
 
 
+# Explicit new local device-feedback batch. All older phases remain unchanged.
+DEVICE_HEAD = 'fc3fe1e4818dba7143148a4e781e73c804215d84'
+DEVICE_EVIDENCE = ROOT/'artifacts/reader-dock-device-feedback-local-20261031T105402093527Z'
+DEVICE_FREEZE_SHA = '05c99b71581971be2203626890ba495f9e6382903af8d2207cccaf1c59a61b0f'
+DEVICE_PAINT_SHA = '85a20b5caf3d67d3fc00a9af204a114a120c1bb6498e96ae80d60badcfcee284'
+DEVICE_ALLOWED = {'App/Reading/ReaderFloatingToolsView.swift','App/Reading/ReaderToolAppearance.swift',
+                  'App/Reading/ReaderToolVisibility.swift','App/Reading/ReaderMotion.swift',
+                  'scripts/check_reader_dock_schemes.py','scripts/check_ui_motion_polish.py',
+                  'scripts/check_ui_control_cohesion.py','docs/READER_DOCK_DEVICE_FEEDBACK_LOCAL.md'}
+
+
+def device_base():
+    assert digest_file(DEVICE_EVIDENCE/'preedit.json')['sha256']==DEVICE_FREEZE_SHA, 'Device preedit drift'
+    b=json.loads((DEVICE_EVIDENCE/'preedit.json').read_text(encoding='utf8'))
+    assert b['head']==DEVICE_HEAD and set(b['allowed'])==DEVICE_ALLOWED and len(b['allowed'])==8
+    return b
+
+
+def device_sources():
+    b=device_base()
+    paths=b['production']+[dock.SCREEN,dock.COMPACT_STYLE,dock.LAYOUT,dock.VISIBILITY]
+    return {p:(ROOT/p).read_text(encoding='utf8') for p in set(paths)}
+
+
+def device_exact(s):
+    b=device_base();raw=(DEVICE_EVIDENCE/'paint-contract.json').read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==DEVICE_PAINT_SHA,'Device paint ledger drift'
+    ledger=json.loads(raw);assert ledger['head']==DEVICE_HEAD
+    checks=[]
+    for p in b['production']:
+        oldraw=(DEVICE_EVIDENCE/'before'/p).read_bytes()
+        assert digest_bytes(oldraw)==b['files'][p] and git('show',DEVICE_HEAD+':'+p)==oldraw, 'Not actual fc3 preedit: '+p
+        before=oldraw.decode('utf8');live=s[p];a=before.splitlines(keepends=True);z=live.splitlines(keepends=True)
+        actual=[(i,j,k,l) for op,i,j,k,l in difflib.SequenceMatcher(None,a,z,autojunk=False).get_opcodes() if op!='equal']
+        patches=ledger['files'][p]
+        assert actual==[tuple(x['old']+x['new']) for x in patches], 'Non-approved device paint delta: '+p
+        for x in patches:
+            i,j=x['old'];k,l=x['new'];u,v=x['anchor_lines']
+            assert hashlib.sha256(''.join(a[i:j]).encode()).hexdigest()==x['old_sha256']
+            assert hashlib.sha256(''.join(z[k:l]).encode()).hexdigest()==x['new_sha256']
+            assert live.count(x['anchor'])==1 and ''.join(z[u:v])==x['anchor'],'Nonunique device anchor'
+        for x in reversed(patches):
+            i,j=x['old'];k,l=x['new'];z[k:l]=a[i:j]
+        assert ''.join(z)==before,'Business drift beyond bounded device fragments'
+        checks.append(dict(path=p,paint_fragments=len(patches),remaining_text_equal=True,unchanged=not patches))
+    d=s[dock.DOCK];old=(DEVICE_EVIDENCE/'before'/dock.DOCK).read_text(encoding='utf8')
+    # Independent from the paint ledger: original action closures and all
+    # disable/guard/focus/id/state/lifecycle lines remain byte-for-byte bound.
+    import re
+    for pattern in (r'\.accessibility(?:Identifier|Focused|Label|Value|Hint)\([^\n]*',r'\.disabled\([^\n]*',
+                    r'^\s*guard [^\n]*',r'^\s*trayExpanded = [^\n]*',r'\.onChange\([^\n]*'):
+        assert re.findall(pattern,d,re.M)==re.findall(pattern,old,re.M),'Device behavioral line changed: '+pattern
+    for marker in ('Button {\n                    guard visible','Button {\n            guard visible','Button { open(panel) }',
+                   '    private func restoreFocus(','        .onChange(of: layout)'):
+        # First simple Button marker begins its action closure. Others include
+        # a function/onChange opening brace; these blocks have no literal braces.
+        assert _press_block(d,marker)==_press_block(old,marker),'Original device action/focus block drift: '+marker
+    a=s['App/Reading/ReaderToolAppearance.swift'];oa=(DEVICE_EVIDENCE/'before/App/Reading/ReaderToolAppearance.swift').read_text(encoding='utf8')
+    assert a[a.index('struct ReaderToolMetrics'):]==oa[oa.index('struct ReaderToolMetrics'):], 'Metrics changed'
+    return checks
+
+
+def device_freeze_check(b,hashes,head,index,staged,status,pycache):
+    assert b['head']==head==DEVICE_HEAD,'Device HEAD changed'
+    assert index==b['index'] and not staged,'Device index/staged changed'
+    assert set(hashes)==set(b['files']),'Device freeze path set changed'
+    changed=[p for p,h in b['files'].items() if hashes[p]!=h]
+    assert set(changed)<=DEVICE_ALLOWED,'Outside exact8 device whitelist: '+str(set(changed)-DEVICE_ALLOWED)
+    expected=set(b['status'])|{' M '+p for p in changed}|{'?? '+b['new_doc']}
+    assert status==expected,'Device status outside exact8'
+    assert pycache==set(b['groups']['pycache']),'Device pycache path delta'
+    return dict(frozen=len(b['files']),changed=changed,protected_unchanged=len(b['files'])-len(changed),
+                head_index_staged_unchanged=True,allowed_exact8=sorted(DEVICE_ALLOWED),
+                groups={k:dict(total=len(v),unchanged=sum(p not in changed for p in v)) for k,v in b['groups'].items()})
+
+
+def device_protection():
+    b=device_base()
+    return device_freeze_check(b,{p:digest_file(ROOT/p) for p in b['files']},git('rev-parse','HEAD').decode().strip(),
+                               digest_file(ROOT/'.git/index'),git('diff','--cached','--binary'),
+                               set(git('status','--short','--untracked-files=all').decode().splitlines()),
+                               {p.relative_to(ROOT).as_posix() for p in (ROOT/'scripts').rglob('*.pyc')})
+
+
+def device_scope_negatives(s):
+    cases=[('wrong-panel-action',dock.DOCK,'Button { open(panel) }','Button { open(.directory) }'),
+           ('C-parent-memory-lost',dock.DOCK,'        rememberFocus(target)\n',''),
+           ('wrong-AX',dock.DOCK,'reader.tools.expand','reader.tools.wrong'),
+           ('new-body-animation',dock.DOCK,'.tint(appearance.accent)','.tint(appearance.accent).animation(.linear, value: trayExpanded)')]
+    rejected=[]
+    for name,p,a,z in cases:
+        assert a in s[p],name
+        alt=dict(s);alt[p]=alt[p].replace(a,z,1)
+        try:device_exact(alt)
+        except AssertionError as error:rejected.append(dict(name=name,by=str(error)))
+        else:raise AssertionError('Accepted exact-scope negative '+name)
+    # This tests frozen business bytes, independently of source/paint contracts.
+    import copy
+    b=device_base();h={p:digest_file(ROOT/p) for p in b['files']};status=set(b['status'])|{' M '+p for p in h if h[p]!=b['files'][p]}|{'?? '+b['new_doc']}
+    for p in ('App/Reading/ReaderScreen.swift','Sources/ReaderDomain/ReaderPreferences.swift','Tests/YueJingUITests/ReadingFlowUITests.swift','.github/workflows/ios-build.yml'):
+        alt=copy.deepcopy(h);alt[p]=dict(bytes=1,sha256='0'*64)
+        try:device_freeze_check(b,alt,b['head'],b['index'],b'',status,set(b['groups']['pycache']))
+        except AssertionError:rejected.append(dict(name='freeze-reject:'+p,by='protected-byte drift'))
+        else:raise AssertionError('Freeze accepted '+p)
+    for name,head,index,staged in [('head','0'*40,b['index'],b''),('index',b['head'],dict(bytes=1,sha256='0'*64),b''),('staged',b['head'],b['index'],b'diff')]:
+        try:device_freeze_check(b,h,head,index,staged,status,set(b['groups']['pycache']))
+        except AssertionError:rejected.append(dict(name='freeze-reject:'+name,by='metadata scope drift'))
+        else:raise AssertionError('Freeze accepted '+name)
+    return rejected
+
+
+def device_main():
+    import check_ui_motion_polish as motion
+    s=device_sources();checks=dock.device_contracts(s)+motion.device_motion_contracts(s)
+    negative=dock.device_negatives(s)+motion.device_motion_negatives(s)
+    scope=device_scope_negatives(s);inv=inventory.validate_source();assert inv['selected']==138 and inv['all_declared']==139
+    print(json.dumps(dict(kind='DEVICE_FEEDBACK_NEW_LOCAL_PHASE_NOT_NATIVE',checks=checks,source_negative_controls=negative,
+                         exact_scope_and_freeze_negatives=scope,exact=device_exact(s),protection=device_protection(),
+                         inventory=inv,native_compilations=0,native_executions=0,FPS_measurements=0),ensure_ascii=False,indent=2))
+
+
+# This release is separate from the preserved local device-feedback freeze.
+DOCK_RELEASE_PARENT = 'fc3fe1e4818dba7143148a4e781e73c804215d84'
+DOCK_RELEASE_FIXED = {
+    'App/Reading/ReaderFloatingToolsView.swift': dict(sha256='7f88084e0471181630b2cfaf2ac360b5f9cfdccf5da187929b5d68f631e123d9',bytes=9648),
+    'App/Reading/ReaderToolAppearance.swift': dict(sha256='98582f56f432346a152067507eb5fc84cf0b107b9936fb42c9237079d0babfab',bytes=1875),
+    'App/Reading/ReaderMotion.swift': dict(sha256='f2b33dfda693e39313d8746431b822258193f54cac3d677757251e0cff56be4a',bytes=838),
+}
+DOCK_RELEASE_ALLOWED = set(DOCK_RELEASE_FIXED) | {
+    'scripts/check_reader_dock_schemes.py','scripts/check_ui_motion_polish.py',
+    'scripts/check_ui_control_cohesion.py','docs/READER_DOCK_DEVICE_FEEDBACK_LOCAL.md',
+    '.github/workflows/ios-build.yml',
+}
+
+
+def dock_release_ci(kind='cohesion'):
+    """Clean-checkout source/negative checks; only tracked source and fixed-parent Git blobs."""
+    import check_ui_motion_polish as motion
+    assert kind in ('dock','motion','cohesion')
+    paths=set(DOCK_RELEASE_FIXED)|{dock.SCREEN,dock.COMPACT_STYLE,dock.LAYOUT,dock.VISIBILITY}
+    s={p:(ROOT/p).read_text(encoding='utf8') for p in paths}
+    assert {p:digest_file(ROOT/p) for p in DOCK_RELEASE_FIXED}==DOCK_RELEASE_FIXED,'Fixed three Swift candidates changed'
+    before={p:git('show',DOCK_RELEASE_PARENT+':'+p).decode('utf8') for p in DOCK_RELEASE_FIXED}
+    checks=[];negative=[]
+    if kind in ('dock','cohesion'):
+        checks+=dock.device_contracts(s);negative+=dock.device_negatives(s,before)
+    if kind in ('motion','cohesion'):
+        checks+=motion.device_motion_contracts(s);negative+=motion.device_motion_negatives(s,before)
+    assert len(checks)==dict(dock=19,motion=8,cohesion=27)[kind]
+    assert len(negative)==dict(dock=11,motion=13,cohesion=24)[kind]
+    return dict(kind='DEVICE_RELEASE_CLEAN_CI_SOURCE_NOT_NATIVE',checks=checks,negative_controls=negative,
+                preedit_source=DOCK_RELEASE_PARENT,fixed_swift=DOCK_RELEASE_FIXED,
+                d1_source_rows=dock.d1_focus_specifications(s),tests_run=False,native_executions=0,
+                selection=[],execution=[],physical_device_acceptance='not performed')
+
+
+def dock_release_gate_state(env,state):
+    assert env['APPROVED_PARENT']==DOCK_RELEASE_PARENT,'Approved parent binding changed'
+    assert env['GITHUB_RUN_ATTEMPT']=='1' and env['GITHUB_EVENT_NAME']=='workflow_dispatch','Only authorized manual attempt1'
+    assert env['GITHUB_REF']=='refs/heads/main' and env['GITHUB_REF_NAME']=='main','Only main accepted'
+    assert state['head']==env['GITHUB_SHA'] and state['parents']==[state['head'],DOCK_RELEASE_PARENT],'SHA/single-parent mismatch'
+    assert not state['dirty'],'Tracked candidate dirty'
+    assert len(state['changed'])==8 and set(state['changed'])==DOCK_RELEASE_ALLOWED,'Not approved exact8'
+    assert state['regular']==DOCK_RELEASE_ALLOWED,'Missing/symlinked candidate'
+    assert state['fixed']==DOCK_RELEASE_FIXED,'Fixed three Swift bytes changed'
+    return True
+
+
+def dock_release_gate():
+    state=dict(head=git('rev-parse','HEAD').decode().strip(),
+               parents=git('rev-list','--parents','-n','1','HEAD').decode().split(),
+               dirty=git('status','--porcelain','--untracked-files=no').decode().strip(),
+               changed=git('diff','--name-only',DOCK_RELEASE_PARENT,'HEAD').decode().splitlines(),
+               regular={p for p in DOCK_RELEASE_ALLOWED if (ROOT/p).is_file() and not (ROOT/p).is_symlink()},
+               fixed={p:digest_file(ROOT/p) for p in DOCK_RELEASE_FIXED})
+    dock_release_gate_state(os.environ,state)
+    return sorted(DOCK_RELEASE_ALLOWED),{p:digest_file(ROOT/p)['sha256'] for p in DOCK_RELEASE_ALLOWED}
+
+
+def dock_release_phase_state(r,phase,s,source_sha=None):
+    assert phase in ('precommit','staged','committed')
+    assert r['parent']==DOCK_RELEASE_PARENT and set(r['final'])==DOCK_RELEASE_ALLOWED,'Receipt parent/path mismatch'
+    assert {p:r['final'][p] for p in DOCK_RELEASE_FIXED}==DOCK_RELEASE_FIXED,'Receipt fixed3 drift'
+    assert set(r['protected']).isdisjoint(DOCK_RELEASE_ALLOWED),'Protected/allowed overlap'
+    assert s['final']==r['final'] and s['protected']==r['protected'],'Candidate/protected byte drift'
+    assert s['regular']==DOCK_RELEASE_ALLOWED,'Candidate not regular'
+    assert s['tracked_outside']==set(r['tracked_outside']),'Outside tracked path set drift'
+    private={'?? '+p for p in ('.architect_memory.json','PROJECT_STATE.md','ask_architect.py')}
+    doc='docs/READER_DOCK_DEVICE_FEEDBACK_LOCAL.md'
+    if phase=='precommit':
+        assert s['head']==DOCK_RELEASE_PARENT and s['index']==r['initial_index'],'Precommit HEAD/index drift'
+        assert not s['staged'] and not s['staged_hashes'],'Precommit staged delta'
+        expected=private|{'?? '+doc}|{' M '+p for p in DOCK_RELEASE_ALLOWED-{doc}}
+    elif phase=='staged':
+        assert s['head']==DOCK_RELEASE_PARENT,'Staged HEAD drift'
+        assert len(s['staged'])==8 and set(s['staged'])==DOCK_RELEASE_ALLOWED,'Staged set not exact8'
+        assert s['staged_hashes']==r['final'],'Staged blobs differ from final freeze'
+        expected=private|{'A  '+doc}|{'M  '+p for p in DOCK_RELEASE_ALLOWED-{doc}}
+    else:
+        assert source_sha and s['head']==source_sha and s['parents']==[source_sha,DOCK_RELEASE_PARENT],'Committed SHA/parent drift'
+        assert len(s['changed'])==8 and set(s['changed'])==DOCK_RELEASE_ALLOWED,'Committed set not exact8'
+        assert not s['staged'] and not s['staged_hashes'],'Committed index dirty'
+        expected=private
+    assert s['status']==expected,'Phase status mismatch'
+    return dict(phase=phase,protected_unique=len(r['protected']),final_candidates=8,head=s['head'],index=s['index'])
+
+
+def dock_release_phase(receipt_path,receipt_sha256,phase,source_sha=None):
+    raw=receipt_path.read_bytes();assert hashlib.sha256(raw).hexdigest()==receipt_sha256,'Receipt hash mismatch'
+    r=json.loads(raw)
+    staged=git('diff','--cached','--name-only').decode().splitlines()
+    s=dict(head=git('rev-parse','HEAD').decode().strip(),index=digest_file(ROOT/'.git/index'),
+           parents=git('rev-list','--parents','-n','1','HEAD').decode().split(),
+           changed=git('diff','--name-only',DOCK_RELEASE_PARENT,'HEAD').decode().splitlines(),
+           staged=staged,staged_hashes={p:digest_bytes(git('show',':'+p)) for p in staged},
+           final={p:digest_file(ROOT/p) for p in DOCK_RELEASE_ALLOWED},
+           protected={p:digest_file(ROOT/p) for p in r['protected']},
+           regular={p for p in DOCK_RELEASE_ALLOWED if (ROOT/p).is_file() and not (ROOT/p).is_symlink()},
+           tracked_outside=set(git('ls-files').decode().splitlines())-DOCK_RELEASE_ALLOWED,
+           status=set(git('status','--porcelain=v1','--untracked-files=all').decode().splitlines()))
+    protection=dock_release_phase_state(r,phase,s,source_sha)
+    result=dock_release_ci()
+    # Retain the original 17-fragment normalization and independent behavioral comparisons locally.
+    paths=set(DOCK_RELEASE_FIXED)|{dock.SCREEN,dock.COMPACT_STYLE,dock.LAYOUT,dock.VISIBILITY}
+    result.update(protection=protection,exact=device_exact({p:(ROOT/p).read_text(encoding='utf8') for p in paths}))
+    return result
+
+
 if __name__ == '__main__':
     import sys
-    if '--historical-baseline' in sys.argv or '--baseline' in sys.argv:
+    if sys.argv[1:]==['--device-release-ci']:
+        print(json.dumps(dock_release_ci(),ensure_ascii=False,indent=2))
+    elif '--dock-release-receipt' in sys.argv:
+        parser=argparse.ArgumentParser(description='Explicit exact8 dock release phases; no historical freeze bypass')
+        parser.add_argument('--dock-release-receipt',type=Path,required=True)
+        parser.add_argument('--dock-receipt-sha256',required=True)
+        parser.add_argument('--dock-release-stage',choices=('precommit','staged','committed'),required=True)
+        parser.add_argument('--source-sha')
+        args=parser.parse_args()
+        print(json.dumps(dock_release_phase(args.dock_release_receipt,args.dock_receipt_sha256,args.dock_release_stage,args.source_sha),ensure_ascii=False,indent=2))
+    elif sys.argv[1:]==['--device-feedback']:
+        device_main()
+    elif '--historical-baseline' in sys.argv or '--baseline' in sys.argv:
         historical_main()
     elif '--release-receipt' in sys.argv:
         parser = argparse.ArgumentParser(description='Explicit release31 phase: full current UI contracts plus pinned release protection')

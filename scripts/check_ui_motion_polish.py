@@ -648,5 +648,94 @@ def main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def device_motion_contracts(s):
+    d=s['App/Reading/ReaderFloatingToolsView.swift'];v=s['App/Reading/ReaderToolVisibility.swift'];m=s['App/Reading/ReaderMotion.swift']
+    checks=[]
+    def need(ok,name):
+        assert ok,name
+        checks.append(name)
+    need('static let toolVisibilityDuration: Double = 0.16' in m and
+         'static let hiddenTravel: CGFloat = 6' in m and
+         'static let dockPresentationDuration: Double = 0.10' in m and
+         'static var dockPresentation: Animation { .easeOut(duration: dockPresentationDuration) }' in m,
+         'device-motion:unchanged-show-hide-duration-travel-no-lengthening-as-optimization')
+    need('.transaction { transaction in transaction.animation = nil }' in v and
+         '.opacity(visible ? 1 : 0)' in v and '.offset(y: reduceMotion || visible ? 0 : hiddenOffset)' in v and
+         '.animation(reduceMotion ? nil : ReaderMotion.toolVisibility,' in v and
+         'value: reduceMotion ? 0 : (visible ? 1 : 2)' in v and
+         'if reduceMotion { transaction.animation = nil }' in v and
+         v.index('transaction.animation = nil')<v.index('.opacity(')<v.index('.animation('),
+         'device-motion:visibility-child-isolation-opacity-small-transform-only-RM-immediate')
+    screen=s['App/Reading/ReaderScreen.swift']
+    need('.animation(' not in screen and 'withAnimation' not in screen and
+         'onAnchor: model.visibleChanged' in screen and
+         '.padding(.horizontal, layout == .tabs ? 0 : 16).padding(.bottom, layout == .tabs ? 0 : 8)' in screen,
+         'device-motion:body-viewport-header-layout-not-in-animation-scope')
+    c=d[d.index('    private var edgeDock:'):d.index('    private var collapseButton:')]
+    transition='.transition(reduceMotion ? .identity : .asymmetric(insertion: .opacity, removal: .identity))'
+    need(c.count(transition)==2 and c.count('.transaction { $0.animation = nil }')==2 and
+         c.count('.transaction { $0.animation = nil }\n                '+transition)==2,
+         'device-C:new-branch-opacity-only-immediate-removal-no-frame-or-layout-morph')
+    need('.allowsHitTesting(trayExpanded && visible && state.canInteract)' in c and
+         '.accessibilityHidden(!trayExpanded || !visible)' in c and
+         '.allowsHitTesting(!trayExpanded && visible && state.canInteract)' in c and
+         '.accessibilityHidden(trayExpanded || !visible)' in c,
+         'device-C:leaving-branch-immediately-noninteractive-AX-inert')
+    need(c.count('.animation(')==1 and
+         '.animation(reduceMotion ? nil : ReaderMotion.dockPresentation, value: reduceMotion ? 0 : (trayExpanded ? 1 : 2))' in c and
+         '.transaction { if reduceMotion { $0.animation = nil } }' in c and
+         c.index('.animation(')<c.index('.frame(maxWidth: .infinity, alignment: .trailing)'),
+         'device-C:local-existing-state-value-animation-before-nonanimated-anchor')
+    need(d.count('.animation(')==1 and '.animation(' not in d[:d.index('    private var edgeDock:')] and
+         all(x not in d+v+m for x in ('withAnimation','Task {','.task','Timer','asyncAfter','completion:','matchedGeometry','scaleEffect','repeatForever','.spring(','.blur(','.drawingGroup(','.compositingGroup(')),
+         'device-motion:no-global-animation-new-task-delay-lock-or-heavy-effect')
+    need('trayExpanded = true\n                    restoreFocus(to:' in c and
+         'trayExpanded = false\n            restoreFocus(to: "dock.expand")' in d and
+         'rememberFocus(target)\n        focusedControl = target' in d and
+         c.count('.accessibilityIdentifier("reader.tools.expand")')==1 and d.count('.accessibilityIdentifier("reader.tools.collapse")')==1,
+         'device-C:state-focus-actions-immediate-unique-IDs-no-completion-lock')
+    return checks
+
+
+def device_motion_negatives(s, preedit=None):
+    d='App/Reading/ReaderFloatingToolsView.swift';v='App/Reading/ReaderToolVisibility.swift';m='App/Reading/ReaderMotion.swift'
+    if preedit is None:
+        from check_ui_control_cohesion import DEVICE_EVIDENCE
+        preedit={p:(DEVICE_EVIDENCE/'before'/p).read_text(encoding='utf8') for p in (d,m)}
+    mutations=[('real-preedit-instant-C',d,None,preedit[d]),
+               ('real-preedit-motion-no-presentation',m,None,preedit[m]),
+               ('visibility-animates-child-layout',v,'.transaction { transaction in transaction.animation = nil }','.transaction { _ in }'),
+               ('reduce-motion-still-animates',v,'reduceMotion ? nil : ReaderMotion.toolVisibility','ReaderMotion.toolVisibility'),
+               ('C-reduce-motion-still-animates',d,'reduceMotion ? nil : ReaderMotion.dockPresentation','ReaderMotion.dockPresentation'),
+               ('C-child-layout-animated',d,'.transaction { $0.animation = nil }','.transaction { _ in }'),
+               ('C-old-leaving-branch-fades',d,'removal: .identity','removal: .opacity'),
+               ('C-old-branch-interactive',d,'.allowsHitTesting(trayExpanded && visible && state.canInteract)','.allowsHitTesting(true)'),
+               ('C-old-branch-AX-leak',d,'.accessibilityHidden(!trayExpanded || !visible)','.accessibilityHidden(false)'),
+               ('C-delayed-state',d,'trayExpanded = true','Task { trayExpanded = true }'),
+               ('new-root-layout-animation',d,'.foregroundStyle(appearance.foreground).tint(appearance.accent)','.foregroundStyle(appearance.foreground).tint(appearance.accent).animation(.linear, value: trayExpanded)'),
+               ('body-viewport-animation','App/Reading/ReaderScreen.swift','.sheet(item: panelPresentation)', '.animation(.linear, value: tools.visible).sheet(item: panelPresentation)'),
+               ('too-much-travel',m,'hiddenTravel: CGFloat = 6','hiddenTravel: CGFloat = 20')]
+    rejected=[]
+    for name,p,a,b in mutations:
+        if a is not None: assert a in s[p],name
+        alt=dict(s);alt[p]=s[p].replace(a,b,1) if a is not None else b
+        try: device_motion_contracts(alt)
+        except (AssertionError,ValueError) as error: rejected.append(dict(name=name,by=str(error)))
+        else: raise AssertionError('Accepted device motion regression '+name)
+    return rejected
+
+
+def device_motion_main():
+    from check_ui_control_cohesion import device_sources,device_exact,device_protection
+    s=device_sources()
+    print(json.dumps(dict(kind='DEVICE_DOCK_MOTION_SOURCE_NOT_NATIVE',checks=device_motion_contracts(s),
+                         negative_controls=device_motion_negatives(s),exact=device_exact(s),protection=device_protection(),
+                         native_compilations=0,native_executions=0,FPS_measurements=0),ensure_ascii=False,indent=2))
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:]==['--device-release-ci']:
+        from check_ui_control_cohesion import dock_release_ci
+        print(json.dumps(dock_release_ci('motion'),ensure_ascii=False,indent=2))
+    elif sys.argv[1:]==['--device-feedback']: device_motion_main()
+    else: main()

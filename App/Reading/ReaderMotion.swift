@@ -7,8 +7,11 @@ enum ReaderMotion {
     static let selectionFeedbackDuration: Double = 0.14
     static let pressFeedbackDuration: Double = 0.10
     static let hiddenTravel: CGFloat = 6
+    // C changes structure immediately; only the incoming branch fades, no morph.
+    static let dockPresentationDuration: Double = 0.10
 
     static var toolVisibility: Animation { .easeOut(duration: toolVisibilityDuration) }
     static var selectionFeedback: Animation { .easeOut(duration: selectionFeedbackDuration) }
     static var pressFeedback: Animation { .easeOut(duration: pressFeedbackDuration) }
+    static var dockPresentation: Animation { .easeOut(duration: dockPresentationDuration) }
 }
