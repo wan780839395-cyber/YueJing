@@ -87,7 +87,7 @@ def check_balanced_delimiters(rel_path: str, code_only: str) -> None:
         raise AssertionError(f"{rel_path}: unclosed delimiter {stack[-1][0]!r}")
 
 
-def verify_source_contracts() -> list[str]:
+def verify_source_contracts(sources=None) -> list[str]:
     checks: list[str] = []
 
     def require(condition: bool, name: str) -> None:
@@ -95,7 +95,7 @@ def verify_source_contracts() -> list[str]:
             raise AssertionError("Contract failed: " + name)
         checks.append(name)
 
-    sources = {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in TOUCHED_SWIFT_FILES}
+    sources = sources if sources is not None else {rel: (ROOT / rel).read_text(encoding="utf-8") for rel in TOUCHED_SWIFT_FILES}
     stripped = {rel: strip_swift_comments_and_strings(text) for rel, text in sources.items()}
 
     # 1. Lexical & deployment-target hygiene across all 9 touched Swift files.
@@ -165,15 +165,21 @@ def verify_source_contracts() -> list[str]:
 
     # 3. Shared ReaderCompactButtonStyle contracts.
     style = sources["App/Reading/ReaderCompactButtonStyle.swift"]
-    require("var surfaceInset: CGFloat = 6" in style and "var outlined: Bool = false" in style,
-            "button-style:default-inset6-no-outline-preserves-icon-buttons")
-    require(".inset(by: surfaceInset)" in style and "shape.strokeBorder(" in style,
-            "button-style:opt-in-non-inset-strokeBorder-inside-background")
+    require("var outlined: Bool = true" in style and ".inset(" not in style and
+            '.frame(minWidth: 44, minHeight: 44)' in style,
+            "button-style:visible-surface-itself-44-not-inset32")
+    require('.contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))' in style and
+            'let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)' in style and
+            'shape.strokeBorder(' in style and
+            style.index('.frame(minWidth: 44') < style.index('.contentShape(') < style.index('.background {'),
+            "button-style:same-rounded-bounds-for-surface-stroke-hit-shape")
     require("ReaderMotion.pressFeedback" in style and "if !animatePress { transaction.animation = nil }" in style
             and ".opacity(isEnabled ? 1 : 0.4)" in style,
             "button-style:pressed-disabled-reduceMotion-retained")
-    require("allowsHitTesting" not in style and "accessibilityHidden" not in style,
-            "button-style:no-global-hitTesting-or-ax-override")
+    require(style.count('.allowsHitTesting(false)') == 1 and 'accessibilityHidden' not in style and
+            style.index('.background {') < style.index('.allowsHitTesting(false)') < style.index('.animation(') and
+            '.clipShape(' not in style and '.padding(' not in style,
+            "button-style:only-decoration-noninteractive-no-global-hit-or-ax-override")
 
     # 4. Typography Settings & Adjustment contracts.
     adj = sources["App/Reading/ReaderSettingAdjustment.swift"]
@@ -181,7 +187,7 @@ def verify_source_contracts() -> list[str]:
     preset_domain = (ROOT / "Sources/ReaderDomain/ReaderTypographyPreset.swift").read_text(encoding="utf-8")
 
     require(adj.count(".buttonStyle(ReaderCompactButtonStyle(tint: accent))") == 2,
-            "adjustment:plus-minus-keep-default-inset6-style")
+            "adjustment:plus-minus-use-shared-visible-44-style")
     require("VStack(alignment: .leading, spacing: 8)" in adj, "adjustment:consistent-8pt-vertical-spacing")
     require(".frame(minWidth: 34, alignment: .center)" in adj and ".monospacedDigit()" in adj,
             "adjustment:centered-monospaced-value-slot")
@@ -209,7 +215,7 @@ def verify_source_contracts() -> list[str]:
     restore_fn = settings[settings.index("private var restoreTypographyButton"):settings.index("private var moreSection")]
     require(".padding(.horizontal, 14)" in restore_fn
             and ".frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)" in restore_fn
-            and "ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true)" in restore_fn
+            and "ReaderCompactButtonStyle(tint: appearance.accent, outlined: true)" in restore_fn
             and '!isActive() || ReaderTypographyPreset.standard.matches(draft)' in restore_fn
             and '.accessibilityIdentifier("reader.typography.restore")' in restore_fn,
             "settings:restore-centered-outlined-and-gated")
@@ -221,6 +227,14 @@ def verify_source_contracts() -> list[str]:
             and "case .compact: 5; case .standard: 7; case .relaxed: 10" in preset_domain,
             "domain:preset-values-17-5-20-7-24-10-unchanged")
 
+    for start, end in [('private func presetButton', 'private var restoreTypographyButton'),
+                       ('private func themeButton', 'private func apply(')]:
+        card = settings[settings.index(start):settings.index(end, settings.index(start))]
+        shape = 'RoundedRectangle(cornerRadius: 12, style: .continuous)'
+        require(card.index('.frame(minWidth: 84') < card.index('.background {') < card.index('.contentShape('+shape+')') and
+                'let shape = '+shape in card and 'shape.fill(selected ?' in card and 'shape.strokeBorder(selected ?' in card and
+                card.count('.allowsHitTesting(false)') == 2 and '.inset(' not in card and '.clipShape(' not in card,
+                'settings:'+start+':whole-card-surface-stroke-shape-no-inner-clip-mismatch')
     # 5. Directory Sheet header, ChapterRow ordinal column, and Footer button enclosures.
     sheet = sources["App/Reading/ReaderDirectorySheet.swift"]
     row = sources["App/Reading/ReaderDirectoryChapterRow.swift"]
@@ -253,7 +267,7 @@ def verify_source_contracts() -> list[str]:
             and ".layoutPriority(1)" in row,
             "chapter-row:stacked-fallback-for-gt6-digits-or-accessibility-preserves-title-width")
 
-    require(footer.count("ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true)") == 2,
+    require(footer.count("ReaderCompactButtonStyle(tint: appearance.accent, outlined: true)") == 2,
             "directory-footer:all-buttons-use-non-inset-outlined-enclosure")
     for fn_name in ("private func currentButton", "private func pagingButton"):
         segment = footer[footer.index(fn_name):]
@@ -396,13 +410,49 @@ def verify_synthetic_specifications() -> list[str]:
     return cases
 
 
+def verify_negative_controls():
+    sources = {p: (ROOT / p).read_text(encoding='utf8') for p in TOUCHED_SWIFT_FILES}
+    controls = [
+        ('visible-inset32', 'App/Reading/ReaderCompactButtonStyle.swift', 'shape\n                    .fill(', 'shape.inset(by: 6)\n                    .fill('),
+        ('under44', 'App/Reading/ReaderCompactButtonStyle.swift', '.frame(minWidth: 44, minHeight: 44)', '.frame(minWidth: 32, minHeight: 32)'),
+        ('shape-mismatch', 'App/Reading/ReaderCompactButtonStyle.swift', 'contentShape(RoundedRectangle(cornerRadius: 10', 'contentShape(RoundedRectangle(cornerRadius: 8'),
+        ('preset-whole-card-mismatch', 'App/Reading/ReaderSettingsView.swift', 'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8'),
+        ('lost-release-commit', 'App/Reading/ReaderSettingAdjustment.swift', 'if !dragging { commit() }', 'if dragging { commit() }'),
+        ('lost-restore-gate', 'App/Reading/ReaderSettingsView.swift', '!isActive() || ReaderTypographyPreset.standard.matches(draft)', '!isActive()'),
+    ]
+    rejected = []
+    for name, p, old, new in controls:
+        assert old in sources[p], name
+        altered = dict(sources); altered[p] = altered[p].replace(old, new, 1)
+        try:
+            verify_source_contracts(altered)
+        except (AssertionError, ValueError):
+            rejected.append(name)
+        else:
+            raise AssertionError('Accepted negative control: '+name)
+    p = 'App/Reading/ReaderSettingsView.swift'
+    begin = sources[p].index('private func themeButton')
+    altered = dict(sources)
+    altered[p] = sources[p][:begin] + sources[p][begin:].replace(
+        'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8', 1)
+    try:
+        verify_source_contracts(altered)
+    except (AssertionError, ValueError):
+        rejected.append('theme-only-whole-card-mismatch')
+    else:
+        raise AssertionError('Accepted theme-only whole-card mismatch')
+    return rejected
+
+
 def main() -> None:
     source_checks = verify_source_contracts()
     synthetic_cases = verify_synthetic_specifications()
+    negative_controls = verify_negative_controls()
     report = {
         "kind": "OFFLINE_SOURCE_AND_SYNTHETIC_SPEC_NOT_NATIVE",
         "source_contract_checks_passed": len(source_checks),
         "synthetic_specification_cases_passed": len(synthetic_cases),
+        "in_memory_negative_controls_rejected": negative_controls,
         "native_executions": 0,
         "ui_touch_executions": 0,
         "pixel_render_executions": 0,

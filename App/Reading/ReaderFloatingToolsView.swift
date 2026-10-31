@@ -110,18 +110,21 @@ struct ReaderFloatingToolsView: View {
                     restoreFocus(to: model.chapterTotal > 0 ? "directory" : (model.window != nil ? "settings" : "dock.collapse"))
                 } label: {
                     Label("阅读工具", systemImage: "slider.horizontal.3")
-                        .font(.subheadline.weight(.medium))
+                        .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+                        .imageScale(.medium)
                         .fixedSize(horizontal: false, vertical: true)
-                        .frame(minWidth: 44, minHeight: metrics.controlHeight).padding(.horizontal, 12)
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .frame(minWidth: 44, minHeight: metrics.controlHeight)
+                        .background {
+                            Capsule().strokeBorder(appearance.edge, lineWidth: 0.8).allowsHitTesting(false)
+                        }
+                        .background(appearance.fill, in: Capsule())
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain).disabled(model.exitSaveFailed || !state.canInteract)
                 .accessibilityIdentifier("reader.tools.expand")
                 .accessibilityHint("展开目录和排版工具")
                 .accessibilityFocused($focusedControl, equals: "dock.expand")
-                .background {
-                    Capsule().stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)
-                }
-                .background(appearance.fill, in: Capsule())
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -136,11 +139,13 @@ struct ReaderFloatingToolsView: View {
             restoreFocus(to: "dock.expand")
         } label: {
             Label("收起", systemImage: "chevron.right")
-                .font(.subheadline.weight(.medium))
+                .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+                .imageScale(.medium)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(minWidth: 44, minHeight: metrics.controlHeight).padding(.horizontal, 8)
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                .frame(minWidth: 44, minHeight: metrics.controlHeight)
         }
-        .buttonStyle(.plain).disabled(model.exitSaveFailed || !state.canInteract)
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent)).disabled(model.exitSaveFailed || !state.canInteract)
         .accessibilityIdentifier("reader.tools.collapse")
         .accessibilityFocused($focusedControl, equals: "dock.collapse")
     }
@@ -163,10 +168,12 @@ struct ReaderFloatingToolsView: View {
         Button { open(panel) } label: {
             Label(title, systemImage: symbol)
                 .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+                .imageScale(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12).padding(.vertical, 4)
                 .frame(maxWidth: .infinity, minHeight: metrics.controlHeight)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityIdentifier("reader.tools.\(key)")
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent)).accessibilityIdentifier("reader.tools.\(key)")
         .accessibilityFocused($focusedControl, equals: key)
     }
 }

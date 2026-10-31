@@ -43,8 +43,8 @@ struct ReaderSettingAdjustment: View {
     private var controls: some View {
         HStack(alignment: .center, spacing: 6) {
             Button { step(-1) } label: {
-                Image(systemName: "minus").font(.system(size: 14, weight: .medium))
-                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                Image(systemName: "minus").font(.body.weight(.medium)).imageScale(.medium)
+                    .frame(minWidth: 44, minHeight: 44)
             }
             .buttonStyle(ReaderCompactButtonStyle(tint: accent))
             .disabled(!isActive() || value <= range.lowerBound)
@@ -56,8 +56,8 @@ struct ReaderSettingAdjustment: View {
                 .accessibilityLabel("\(title)，\(Int(value))")
                 .accessibilityIdentifier("reader.\(key).value")
             Button { step(1) } label: {
-                Image(systemName: "plus").font(.system(size: 14, weight: .medium))
-                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                Image(systemName: "plus").font(.body.weight(.medium)).imageScale(.medium)
+                    .frame(minWidth: 44, minHeight: 44)
             }
             .buttonStyle(ReaderCompactButtonStyle(tint: accent))
             .disabled(!isActive() || value >= range.upperBound)

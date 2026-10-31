@@ -20,6 +20,7 @@ LAYOUT = 'App/Library/LibraryLayout.swift'
 METRICS = 'App/Reading/ReaderToolAppearance.swift'
 VISIBILITY = 'App/Reading/ReaderToolVisibility.swift'
 EXISTING = [CONTENT, SCREEN, DOCK]
+COMPACT_STYLE = 'App/Reading/ReaderCompactButtonStyle.swift'
 NEW = ['scripts/check_reader_dock_schemes.py', 'docs/READER_DOCK_SCHEMES_LOCAL.md']
 
 
@@ -113,8 +114,22 @@ def source_contracts(sources):
          'ScrollView(.vertical)' in edge and 'VStack(spacing: 4) { directoryButton; settingsButton }' in d and
          'metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8' in edge,
          'width-fallbacks-and-bounded-scroll-for-large-font-short-height')
-    need('.overlay' not in d and d.count('.stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)') == 3,
-         'dock-decoration-is-noninteractive-background-not-foreground-hit-cover')
+    # A/C tray enclosures are noninteractive backgrounds; the C capsule surface
+    # belongs to its Button label, not a transparent outer button rectangle.
+    need('.overlay' not in d and all('.stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)' in region
+                                   for region in (a, edge)) and
+         'Capsule().strokeBorder(appearance.edge, lineWidth: 0.8).allowsHitTesting(false)' in edge and
+         '.background(appearance.fill, in: Capsule())\n                        .contentShape(Capsule())' in edge and
+         edge.index('.frame(minWidth: 44, minHeight: metrics.controlHeight)') < edge.index('Capsule().strokeBorder(') < edge.index('.contentShape(Capsule())') and
+         '.contentShape(Rectangle())' not in d and
+         d.count('.buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))') == 2,
+         'dock-label-capsule-and-tray-decorations-noninteractive-coincident-bounds')
+    style = sources[COMPACT_STYLE]
+    need('.frame(minWidth: 44, minHeight: 44)' in style and '.inset(' not in style and
+         '.contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))' in style and
+         'let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)' in style and
+         'shape.strokeBorder(' in style and '.allowsHitTesting(false)' in style,
+         'dock-shared-tool-visible-44-matching-rounded-surface-not-inset32')
     header = member(s, '    private func titleBar(', '    private var panelPresentation:')
     stroke = '.background { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }'
     fill = '.background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))'
@@ -252,6 +267,10 @@ def negative_controls(sources, snapshots):
         ('D1-reexpand-stale-target', DOCK, 'restoreFocus(to: model.chapterTotal > 0 ?', 'focusedControl = model.chapterTotal > 0 ?'),
         ('D1-lost-panel-return', SCREEN, 'lastPanelControl = panel == .directory ? "directory" : "settings"', 'lastPanelControl = "dock.expand"'),
         ('D1-layout-reset-stale-target', DOCK, '            rememberFocus(layout == .sidebar ? "dock.expand" : "back")\n', ''),
+        ('b-middle-button-intrusion', DOCK, 'Spacer(minLength: 24).accessibilityHidden(true)', 'Button("middle") { open(.settings) }'),
+        ('c-capsule-shape-mismatch', DOCK, '.contentShape(Capsule())', '.contentShape(Rectangle())'),
+        ('tool-visible-inset', COMPACT_STYLE, 'shape\n                    .fill(', 'shape.inset(by: 6)\n                    .fill('),
+        ('tool-under44', COMPACT_STYLE, '.frame(minWidth: 44, minHeight: 44)', '.frame(minWidth: 32, minHeight: 32)'),
     ]
     rejected = []
     for name, path, before, after in controls:
@@ -293,7 +312,7 @@ def main():
     args = parser.parse_args()
     if bool(args.baseline) != bool(args.snapshot_root):
         parser.error('--baseline and --snapshot-root must be supplied together')
-    paths = EXISTING + [LAYOUT, METRICS, VISIBILITY]
+    paths = EXISTING + [LAYOUT, METRICS, VISIBILITY, COMPACT_STYLE]
     sources = {p: (ROOT/p).read_text(encoding='utf8') for p in paths}
     d1_checks = d1_focus_contracts(sources)
     checks = source_contracts(sources) + d1_checks

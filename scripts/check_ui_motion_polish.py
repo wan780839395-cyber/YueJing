@@ -206,23 +206,29 @@ def verify_source_contracts(sources: dict[str, str]) -> list[str]:
     require(preset_fn.count(".accessibilityHidden(true)") == 1 and theme_fn.count(".accessibilityHidden(true)") == 1,
             "settings:decorative-checkmarks-remain-ax-hidden")
 
-    # Ensure preset animation stays inside .background and .overlay(alignment: .topTrailing), never after .contentShape / Button.
-    preset_bg = preset_fn[preset_fn.index(".background {"):preset_fn.index(".overlay(alignment: .topTrailing)")]
-    preset_ov = preset_fn[preset_fn.index(".overlay(alignment: .topTrailing)"):preset_fn.index(".contentShape(Rectangle())")]
-    preset_tail = preset_fn[preset_fn.index(".contentShape(Rectangle())"):]
-    require(preset_bg.count(".animation(selectionAnimation, value: selectionMotionKey)") == 1
-            and "shape.fill(" in preset_bg and "shape.strokeBorder(" in preset_bg,
-            "settings:preset-background-fill-and-stroke-animated-locally")
-    require(preset_ov.count(".animation(selectionAnimation, value: selectionMotionKey)") == 1
-            and ".opacity(selected ? 1 : 0)" in preset_ov,
-            "settings:preset-checkmark-opacity-animated-locally")
-    require(".animation(" not in preset_tail, "settings:no-animation-on-preset-button-or-label-frame")
-
-    # Ensure theme animation stays strictly inside the two decorative overlays, never on Text("阅") swatch or outer VStack.
-    theme_swatch_head = theme_fn[:theme_fn.index(".overlay(alignment: .topTrailing)")]
-    theme_tail = theme_fn[theme_fn.index("Text(theme.title)"):]
-    require(".animation(" not in theme_swatch_head and ".animation(" not in theme_tail,
-            "settings:no-animation-on-theme-swatch-glyph-or-outer-button")
+    # V2: the rounded whole-card surface contains the title as well as the swatch.
+    # Only background/overlay subtrees animate, never the label frame or action.
+    shape = 'RoundedRectangle(cornerRadius: 12, style: .continuous)'
+    hit = '.contentShape('+shape+')'
+    for name, card in [('preset', preset_fn), ('theme', theme_fn)]:
+        require(hit in card, 'settings:'+name+'-exact-rounded-content-shape')
+        background = card[card.index('.background {'):card.index('.overlay(alignment: .topTrailing)')]
+        mark = card[card.index('.overlay(alignment: .topTrailing)'):card.index(hit)]
+        tail = card[card.index(hit):]
+        head = card[:card.index('.background {')]
+        require('let shape = '+shape in background and 'shape.fill(selected ?' in background and
+                'shape.strokeBorder(selected ?' in background and
+                background.count('.animation(selectionAnimation, value: selectionMotionKey)') == 1 and
+                '.allowsHitTesting(false)' in background,
+                'settings:'+name+'-whole-card-fill-stroke-local-animation')
+        require(mark.count('.animation(selectionAnimation, value: selectionMotionKey)') == 1 and
+                '.opacity(selected ? 1 : 0)' in mark and '.allowsHitTesting(false)' in mark,
+                'settings:'+name+'-noninteractive-checkmark-opacity-local-animation')
+        require('.animation(' not in head+tail and '.inset(' not in card and '.clipShape(' not in card and
+                '.frame(minWidth: 84, maxWidth: .infinity, minHeight:' in head,
+                'settings:'+name+'-no-glyph-frame-action-or-external-animation')
+    require(theme_fn.index('Text(theme.title)') < theme_fn.index('.frame(minWidth: 84') < theme_fn.index('.background {'),
+            'settings:theme-title-inside-selected-whole-card-boundary')
 
     # Preserved settings submission, isolation, ranges, and AX contracts.
     commit_fn = settings[settings.index("private func apply("):]
@@ -439,6 +445,24 @@ def verify_negative_controls(live_sources: dict[str, str], baseline: dict | None
         ".opacity(selected ? 1 : 0).symbolEffect(.bounce, value: selected)",
     )
 
+    expect_source_rejection('reject:card-shape-mismatch', 'App/Reading/ReaderSettingsView.swift',
+                            'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8')
+    expect_source_rejection('reject:selected-stroke-on-wrong-shape', 'App/Reading/ReaderSettingsView.swift',
+                            'shape.strokeBorder(selected ?', 'Circle().strokeBorder(selected ?')
+    expect_source_rejection('reject:inset-card-visible-boundary', 'App/Reading/ReaderSettingsView.swift',
+                            'shape.fill(selected ?', 'shape.inset(by: 6).fill(selected ?')
+    theme_start = live_sources['App/Reading/ReaderSettingsView.swift'].index('private func themeButton')
+    altered = dict(live_sources)
+    altered['App/Reading/ReaderSettingsView.swift'] = (live_sources['App/Reading/ReaderSettingsView.swift'][:theme_start] +
+        live_sources['App/Reading/ReaderSettingsView.swift'][theme_start:].replace(
+            'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8', 1))
+    try:
+        verify_source_contracts(altered)
+    except (AssertionError, ValueError):
+        rejected_cases.append('reject:theme-only-whole-card-shape-mismatch')
+    else:
+        raise AssertionError('Accepted theme-only shape mismatch')
+
     # Group 3: Slider release-to-apply, preset theme isolation, or active guard regressions.
     expect_source_rejection(
         "reject:slider-commits-on-every-drag-step",
@@ -588,8 +612,8 @@ def verify_git_and_protection(baseline_path: Path | None) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", type=Path, default=default_baseline_path(),
-                        help="Optional actual-worktree 214-path baseline.json from diagnosis")
+    parser.add_argument("--baseline", type=Path, default=None,
+                        help="Explicit historical 214-path motion-batch freeze only; not current reconciliation protection")
     args = parser.parse_args()
 
     live_sources = load_live_sources()
@@ -602,6 +626,8 @@ def main() -> None:
     ast.parse(Path(__file__).read_text(encoding="utf-8"))
 
     report = {
+        "contract_version": "control-cohesion-v2-live-source",
+        "historical_protection": "explicit --baseline only; never auto-load an unrelated scratch batch",
         "kind": "OFFLINE_MOTION_SOURCE_CONTRACTS_AND_NEGATIVE_CONTROLS_NOT_NATIVE",
         "scope_notice": (
             "Lexical/structural source contracts, in-memory negative controls, and SHA256 baseline protection only. "

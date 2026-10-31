@@ -35,9 +35,8 @@ struct ReaderSettingsView: View {
                         .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
@@ -149,6 +148,7 @@ struct ReaderSettingsView: View {
                         shape.strokeBorder(selected ? appearance.accent : appearance.edge,
                                            lineWidth: selected ? 1.5 : 0.8)
                     }
+                    .allowsHitTesting(false)
                     .animation(selectionAnimation, value: selectionMotionKey)
                     .transaction { transaction in
                         if reduceMotion { transaction.animation = nil }
@@ -165,8 +165,9 @@ struct ReaderSettingsView: View {
                         if reduceMotion { transaction.animation = nil }
                     }
                     .accessibilityHidden(true)
+                    .allowsHitTesting(false)
             }
-            .contentShape(Rectangle())
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isActive())
@@ -185,9 +186,8 @@ struct ReaderSettingsView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
         .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
         .accessibilityIdentifier("reader.typography.restore")
     }
@@ -226,31 +226,40 @@ struct ReaderSettingsView: View {
         } label: {
             VStack(spacing: 6) {
                 Text("阅").font(.system(size: 22))
-                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .foregroundStyle(Color(uiColor: theme.foreground))
-                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(alignment: .topTrailing) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(appearance.accent)
-                            .padding(4)
-                            .opacity(selected ? 1 : 0)
-                            .animation(selectionAnimation, value: selectionMotionKey)
-                            .transaction { transaction in
-                                if reduceMotion { transaction.animation = nil }
-                            }
-                            .accessibilityHidden(true)
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 2 : 0.5)
-                            .animation(selectionAnimation, value: selectionMotionKey)
-                            .transaction { transaction in
-                                if reduceMotion { transaction.animation = nil }
-                            }
-                    }
+                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 Text(theme.title).font(.caption).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            }.frame(minWidth: 84, maxWidth: .infinity, minHeight: 64).contentShape(Rectangle())
+            }
+            .padding(10)
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 64)
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                shape.fill(selected ? appearance.accent.opacity(0.12) : appearance.card)
+                    .overlay {
+                        shape.strokeBorder(selected ? appearance.accent : appearance.edge,
+                                           lineWidth: selected ? 1.5 : 0.8)
+                    }
+                    .allowsHitTesting(false)
+                    .animation(selectionAnimation, value: selectionMotionKey)
+                    .transaction { transaction in
+                        if reduceMotion { transaction.animation = nil }
+                    }
+            }
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(appearance.accent)
+                    .padding(6)
+                    .opacity(selected ? 1 : 0)
+                    .animation(selectionAnimation, value: selectionMotionKey)
+                    .transaction { transaction in
+                        if reduceMotion { transaction.animation = nil }
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain).disabled(!isActive())
         .accessibilityLabel(theme.title).accessibilityValue(selected ? "已选择" : "未选择")

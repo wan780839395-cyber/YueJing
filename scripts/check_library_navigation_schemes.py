@@ -106,10 +106,35 @@ def contracts(src):
     need('LibraryPlannedFeatureView(feature: plannedNavigation.displayedFeature, appearance: appearance)' in c and
          'let appearance: LibraryAppearance' in detail and 'LibraryAppearance(colorScheme:' not in detail and
          '.toolbarColorScheme(appearance.controlColorScheme, for: .navigationBar)' in detail, 'details-follow-explicit-current-app-appearance')
-    need(c.count('Button { model.beginFileSelection() }') == 1 and 'Label("导入书籍", systemImage: "plus")' in c and
+    import_control = c[c.index('Button { model.beginFileSelection() } label:'):c.index('.accessibilityHint("当前仅支持 TXT')]
+    need(c.count('Button { model.beginFileSelection() }') == 1 and
+         'Label("导入", systemImage: "plus")' in import_control and
+         '.accessibilityLabel("导入书籍")' in import_control and
+         '.disabled(!model.canBeginFileSelection || !canChangeManagement)' in import_control and
          '当前仅支持 TXT；EPUB 规划中，未接入' in c and
          'if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }' in c,
-         'one-unified-import-still-original-txt-action-and-bookid-open')
+         'one-unified-import-original-action-complete-ax-name-and-bookid-open')
+    need('.frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)' in import_control and
+         'let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)' in import_control and
+         'shape.fill(appearance.accent.opacity(0.08))' in import_control and
+         'shape.strokeBorder(appearance.accent.opacity(0.3), lineWidth: 0.8)' in import_control and
+         '.contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))' in import_control and
+         '.allowsHitTesting(false)' in import_control and '.inset(' not in import_control and '.clipShape(' not in import_control and
+         import_control.index('.frame(minWidth: 44') < import_control.index('.background {') < import_control.index('.contentShape(') and
+         '.padding(' not in import_control[import_control.index('.contentShape('):],
+         'import-visible-44-surface-border-shape-coincident-no-external-padding')
+    options = block(management, '    private func optionLabel(')
+    need(management.count('.buttonStyle(.plain)') == 2 and
+         management.count('.listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))') == 2 and
+         '.listRowBackground(Color.clear)' in management and
+         '.frame(minWidth: 44, maxWidth: .infinity, minHeight: 44, alignment: .leading)' in options and
+         'let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)' in options and
+         'shape.fill(appearance.surface)' in options and 'shape.strokeBorder(appearance.edge, lineWidth: 0.8)' in options and
+         '.contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))' in options and
+         '.allowsHitTesting(false)' in options and '.inset(' not in options and '.clipShape(' not in options and
+         options.index('.padding(12)') < options.index('.frame(minWidth: 44') < options.index('.background {') < options.index('.contentShape(') and
+         '.padding(' not in options[options.index('.contentShape('):],
+         'management-menu-one-step-explicit-visible-card-not-auto-list-row')
     need('ReaderDiagnosticsView(importState: model.importDiagnostics, importSummary: model.processingSummary)' in c and
          'Bundle.main.url(forResource: "GRDB-LICENSE", withExtension: "txt")' in management and
          'Text(Self.text)' in management and 'try? String(contentsOf: url, encoding: .utf8)' in management,
@@ -172,6 +197,12 @@ def main():
         ('background-ax-leak', FILES[2], '.accessibilityHidden(drawerPresented)', '.accessibilityHidden(false)'),
         ('child-service-owner', FILES[2], 'let layout: LibraryLayout', 'let model: LibraryViewModel\n    let layout: LibraryLayout'),
         ('lost-format-group', FILES[4], 'features: [.epub, .cover]', 'features: [.comics, .aiStory]'),
+        ('wrong-import-action', CONTENT, 'Button { model.beginFileSelection() }', 'Button { model.cancelImport() }'),
+        ('wrong-import-ax-name', CONTENT, '.accessibilityLabel("导入书籍")', '.accessibilityLabel("打开")'),
+        ('import-under44', CONTENT, 'minHeight: LibraryAppearance.minimumControlHeight', 'minHeight: 32'),
+        ('import-visible-inset', CONTENT, 'shape.fill(appearance.accent.opacity(0.08))', 'shape.inset(by: 6).fill(appearance.accent.opacity(0.08))'),
+        ('menu-auto-list-row', FILES[4], '.buttonStyle(.plain)', '.buttonStyle(.automatic)'),
+        ('menu-mismatched-shape', FILES[4], 'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8'),
     ]
     rejected = []
     for label, path, old, new in controls:

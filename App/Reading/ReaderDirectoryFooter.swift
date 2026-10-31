@@ -124,9 +124,8 @@ struct ReaderDirectoryFooter: View {
             .padding(.vertical, 8)
             .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                    minHeight: ReaderVisualStyle.minimumControlHeight)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
         .accessibilityLabel("回到当前章节")
     }
 
@@ -149,9 +148,8 @@ struct ReaderDirectoryFooter: View {
                 .padding(.vertical, 8)
                 .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                        minHeight: ReaderVisualStyle.minimumControlHeight)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
         .disabled(disabled)
     }
 

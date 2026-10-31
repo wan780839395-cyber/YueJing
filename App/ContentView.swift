@@ -64,20 +64,42 @@ struct ContentView: View {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Menu { managementOptions(asMenu: true) } label: {
                             Label("更多", systemImage: "ellipsis")
+                                .labelStyle(.iconOnly)
+                                .font(AppVisualStyle.actionFont).imageScale(.medium)
+                                .foregroundStyle(appearance.accent)
                                 .frame(minWidth: 44, minHeight: 44)
-                                .background(appearance.surface, in: Capsule())
+                                .background {
+                                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    shape.fill(appearance.surface)
+                                        .overlay { shape.strokeBorder(appearance.edge, lineWidth: 0.8) }
+                                        .allowsHitTesting(false)
+                                }
+                                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        .buttonStyle(.plain)
                         .disabled(!canChangeManagement)
                     }
                 }
                 if layout == .direct || selectedSection == .shelf {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button { model.beginFileSelection() } label: {
-                            Label("导入书籍", systemImage: "plus")
+                            Label("导入", systemImage: "plus")
+                                .labelStyle(.titleAndIcon)
+                                .font(AppVisualStyle.actionFont).imageScale(.medium)
+                                .foregroundStyle(appearance.accent)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 12)
                                 .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
-                                .padding(.horizontal, layout == .direct ? 12 : 0)
-                                .background(appearance.surface, in: Capsule())
+                                .background {
+                                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    shape.fill(appearance.accent.opacity(0.08))
+                                        .overlay { shape.strokeBorder(appearance.accent.opacity(0.3), lineWidth: 0.8) }
+                                        .allowsHitTesting(false)
+                                }
+                                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("导入书籍")
                         .disabled(!model.canBeginFileSelection || !canChangeManagement)
                         .accessibilityHidden(drawerPresented)
                         .accessibilityHint("当前仅支持 TXT；EPUB 规划中，未接入")
