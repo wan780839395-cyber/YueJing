@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: fdbdca0938b60cd2a3cc60389e8bffa9e04f3a89
+      APPROVED_PARENT: 7d55aa5795abcb692af50f37c54c3a51bd841ac3
     defaults:
       run:
         shell: bash
@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Freeze the approved 16-file UI package and disclose no native test execution
+      - name: Freeze the approved 31-file soft-editorial package and disclose no native test execution
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -35,9 +35,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s\n' '::warning::TESTS NOT RUN in this attempt. Device compilation and packaging only; not full test acceptance.'
           python3 - <<'PY'
-          import json, os, subprocess
+          import hashlib, json, os, subprocess
           from pathlib import Path
-          approved_parent = "fdbdca0938b60cd2a3cc60389e8bffa9e04f3a89"
+          approved_parent = "7d55aa5795abcb692af50f37c54c3a51bd841ac3"
           assert os.environ["APPROVED_PARENT"] == approved_parent, "Approved parent binding changed"
           assert os.environ["GITHUB_RUN_ATTEMPT"] == "1" and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch", "Only the single authorized manual attempt is accepted"
           assert os.environ["GITHUB_REF"] == "refs/heads/main" and os.environ["GITHUB_REF_NAME"] == "main", "Only the approved main ref is accepted"
@@ -47,15 +47,30 @@ jobs:
           assert not subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], text=True).strip(), "Tracked candidate is dirty"
           allowed = [
               ".github/workflows/ios-build.yml",
+              "App/AppVisualStyle.swift",
               "App/ContentView.swift",
+              "App/Library/LibraryAppearance.swift",
+              "App/Library/LibraryBookRow.swift",
+              "App/Library/LibraryCoverPlaceholder.swift",
               "App/Library/LibraryExploreSettings.swift",
+              "App/Library/LibraryHeaderView.swift",
               "App/Library/LibraryNavigationShell.swift",
+              "App/Library/LibraryPlannedEntriesView.swift",
+              "App/Library/LibraryShelfContent.swift",
               "App/Reading/ReaderCompactButtonStyle.swift",
+              "App/Reading/ReaderDirectoryChapterRow.swift",
               "App/Reading/ReaderDirectoryFooter.swift",
+              "App/Reading/ReaderDirectorySheet.swift",
               "App/Reading/ReaderFloatingToolsView.swift",
+              "App/Reading/ReaderPanelHeader.swift",
+              "App/Reading/ReaderScreen.swift",
               "App/Reading/ReaderSettingAdjustment.swift",
+              "App/Reading/ReaderSettingsSection.swift",
               "App/Reading/ReaderSettingsView.swift",
-              "docs/UI_CONTROL_COHESION_LOCAL.md",
+              "App/Reading/ReaderToolAppearance.swift",
+              "App/Reading/ReaderTypographyPreview.swift",
+              "App/Reading/ReaderVisualStyle.swift",
+              "docs/SOFT_EDITORIAL_UI_LOCAL.md",
               "scripts/check_app_visual_foundation.py",
               "scripts/check_library_navigation_schemes.py",
               "scripts/check_navigation_panel_layout.py",
@@ -64,9 +79,42 @@ jobs:
               "scripts/check_ui_motion_polish.py",
           ]
           changed = subprocess.check_output(["git", "diff", "--name-only", approved_parent, "HEAD"], text=True).splitlines()
-          assert len(allowed) == len(set(allowed)) == 16 and len(changed) == 16 and sorted(changed) == sorted(allowed), "Source changes differ from the approved exact 16-file UI package"
+          assert len(allowed) == len(set(allowed)) == 31 and len(changed) == 31 and sorted(changed) == sorted(allowed), "Source changes differ from the approved exact 31-file soft-editorial package"
           assert all(Path(path).is_file() and not Path(path).is_symlink() for path in allowed), "Approved candidate file is missing or symlinked"
-          status = dict(purpose="UI control-cohesion device compilation and unsigned packaging for physical-device validation",
+          frozen_candidates = {
+              'App/AppVisualStyle.swift': '16cf61341f3715f7f68f63183e60a5bb7e262a844b51057764d1e2ebd54d12dd',
+              'App/ContentView.swift': '9e2a174e3cc90817c3d4f07e0c4bd2bb4014b02c9cc7360ecf4b0c7340830b80',
+              'App/Library/LibraryAppearance.swift': '108f3bdb37a8bce0629e5aeb441a33736204463838d744e731bfaaa29e803e28',
+              'App/Library/LibraryBookRow.swift': 'd9bc717900536f14d764efa95f86a37de43e001179ad1e57eebc056496a00b7d',
+              'App/Library/LibraryCoverPlaceholder.swift': 'de23c8212a8fdf2bfb2f3f24444fe134c12a06722ca7f39b6fc35107e007f26d',
+              'App/Library/LibraryExploreSettings.swift': 'bfffceeef45f379326db2bec129d35d18e9f0702becd0469e887d49c31568a5c',
+              'App/Library/LibraryHeaderView.swift': 'a5c65ab2da024c2faf5af1244ce0ad4690cb9024b89eff528c0b18b22b6d216b',
+              'App/Library/LibraryNavigationShell.swift': 'b4252e275fb98b7c9b74e7a384f8031b3b172854b5bca7f343c5aca52573f9ad',
+              'App/Library/LibraryPlannedEntriesView.swift': 'cbdd46d4deeb4ecbc45311b84b48c0b72c2206d3bde96e5224386928fa9941f1',
+              'App/Library/LibraryShelfContent.swift': '26bfc70278e90bb717ab3ca460787914806105e40d2c32c66e672b9e1beaf04d',
+              'App/Reading/ReaderCompactButtonStyle.swift': '4164058535c95ed2c38a186c33d4c3ba67bb6278e6be7017534dabc01f881be8',
+              'App/Reading/ReaderDirectoryChapterRow.swift': 'b66e05fda86173a5274a9395068c8df91aac99932f548a8109a325fb35c9c50d',
+              'App/Reading/ReaderDirectoryFooter.swift': '9f030d7d7e81aaa4e47a234d69710bd3de8c6e77b81dd8cb570b48672cf9624a',
+              'App/Reading/ReaderDirectorySheet.swift': '100bc762d4b88247c299071090627bce1aee6cbb9ca47907c5b4f99c08350140',
+              'App/Reading/ReaderFloatingToolsView.swift': '075e244b5f6ab22189d0a51a54433378ebf644a96fa7aebd85a1da6e0953bc11',
+              'App/Reading/ReaderPanelHeader.swift': 'ff6c3835019843b18a0763e4ac222650884684deafd9a0889f34f5a8f5ee0d4c',
+              'App/Reading/ReaderScreen.swift': 'e0477e10a2352c2e4102295f3ed2c570fc29bf5a3f5ea273e1fff075f4725ac2',
+              'App/Reading/ReaderSettingAdjustment.swift': 'ab2d95afe2cbd2062370bbc00bfc4148c9abf2d4d1b8ffd5b5540aa5b9c66845',
+              'App/Reading/ReaderSettingsSection.swift': '840b7e3ebe5cfb1be746fd6f26cd6019a470b6dda66cec581dc864805f7a925f',
+              'App/Reading/ReaderSettingsView.swift': '14ca66403e550eb49af0a670ff7b732012405a29e6669cae554daa9da8b472c7',
+              'App/Reading/ReaderToolAppearance.swift': 'a8914dd82ef673245a3c5295e6d6cdb5f535cff964f44bf1159ad319287e69c9',
+              'App/Reading/ReaderTypographyPreview.swift': '353aeeae89ecdc9ae64963f791edfaaa342bcfab3542c420b45a7206b40200e3',
+              'App/Reading/ReaderVisualStyle.swift': '2c2b95410e7300169d294ea078855cc25a7e8403ea07766700adaca6bc9c2883',
+              'scripts/check_app_visual_foundation.py': 'a95c45a3160cfbedf24cb57c4d1ab726fa3be94aaea791ba7c1c0880603a8b03',
+              'scripts/check_library_navigation_schemes.py': '0eba68feb8aa50000b147d5c983dfeca8370f4cedacf19c3829c6e2fccb0c2f2',
+              'scripts/check_navigation_panel_layout.py': '3de95bf7492847ce7bcd248c60c694b9ce240f614c9b05c872895b5b78093dc3',
+              'scripts/check_reader_dock_schemes.py': '276254fcd8343db06bb3ed3d246ff5f41556c79cf3a596e8b35c72162515f63d',
+              'scripts/check_ui_motion_polish.py': 'd93cdf6fb2c1df5fd59b07b02a2de63fc5d0317559b88f8276ee0e85cf87eeb7',
+          }
+          assert len(frozen_candidates) == 28 and set(frozen_candidates) == set(allowed) - {'.github/workflows/ios-build.yml', 'scripts/check_ui_control_cohesion.py', 'docs/SOFT_EDITORIAL_UI_LOCAL.md'}, "Frozen candidate scope mismatch"
+          assert all(hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected for path, expected in frozen_candidates.items()), "Approved F1/source candidate bytes changed"
+          candidate_hashes = {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in allowed}
+          status = dict(purpose="soft-editorial UI and F1 press-layer device compilation with unsigned packaging",
                         qualification="TESTS NOT RUN",
                         tests_run=False,
                         full_test_gate="not run for this candidate; historical different-source Task3 gate failed",
@@ -74,9 +122,12 @@ jobs:
                         previous_candidate=approved_parent,
                         product_changes=[path for path in allowed if path.startswith(("App/", "Sources/"))],
                         approved_changed_files=allowed,
-                        product_change_scope="8 App presentation files refined; 6 source checkers, 1 scope document and this workflow updated; Core, Domain, native tests, project and dependencies unchanged",
-                        ui_candidate=dict(source_commit=os.environ["GITHUB_SHA"], approved_parent=approved_parent, scope="visible controls and hit-shape cohesion; no claim of native UI or physical-device acceptance", physical_device_acceptance="not performed"),
+                        product_change_scope="23 App presentation files implement accepted soft-editorial UI, including F1 press-layer source fix; 6 source checkers, 1 scope document and this workflow updated; Core, Domain, native tests, project and dependencies unchanged",
+                        candidate_sha256=candidate_hashes,
+                        frozen_f1_candidates=frozen_candidates,
+                        ui_candidate=dict(source_commit=os.environ["GITHUB_SHA"], approved_parent=approved_parent, scope="accepted soft-editorial UI and source-closed F1; no claim of native UI, touch or physical-device acceptance", physical_device_acceptance="not performed"),
                         native_tests_this_run=dict(status="not run", executions=0, selection=[]),
+                        native_execution=[],
                         prior_validation_source_commit="3b72b9031e62f29a510e603a75f0d5f73744d67e",
                         prior_validation_run=41162425493,
                         prior_validation_attempt=1,
@@ -96,9 +147,9 @@ jobs:
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved exact 16-file UI control-cohesion candidate for physical-device validation. "
-                           "Eight App presentation files changed; six source checkers, one scope document and workflow eligibility/disclosure also changed. Core, Domain, native tests, project and dependencies are unchanged. "
-                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`, selection: `[]`). Offline Python source checks are not native tests. "
+              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved exact 31-file soft-editorial UI candidate. "
+                           "Twenty-three App presentation files implement the accepted soft-editorial design and source-closed F1 press-layer fix; six source checkers, one scope document and workflow eligibility/disclosure also changed. Core, Domain, native tests, project and dependencies are unchanged. "
+                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`, selection: `[]`, execution: `[]`). Offline source checks and F1 source closure are not native acceptance. "
                            "Historical different-App-source Task3 run [41162425493](" + status["prior_validation_url"] +
                            ") on `" + status["prior_validation_source_commit"] +
                            "` declared 139 / selected 138 cases, with 135 started and finished: 134 passed / 1 failed / 3 unexecuted / 0 native skipped. This failed history is preserved, not a pass for this new UI candidate. "

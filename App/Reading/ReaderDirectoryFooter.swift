@@ -18,9 +18,6 @@ struct ReaderDirectoryFooter: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Rectangle().fill(appearance.edge)
-                .frame(height: ReaderVisualStyle.panelDividerHeight)
-                .accessibilityHidden(true)
             if verticalSizeClass == .compact {
                 compactLayout
             } else {
@@ -28,10 +25,10 @@ struct ReaderDirectoryFooter: View {
             }
         }
         .font(.footnote)
-        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-        .background(appearance.surface)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 12).padding(.bottom, 12)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -125,7 +122,7 @@ struct ReaderDirectoryFooter: View {
             .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                    minHeight: ReaderVisualStyle.minimumControlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
         .accessibilityLabel("回到当前章节")
     }
 
@@ -149,7 +146,7 @@ struct ReaderDirectoryFooter: View {
                 .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                        minHeight: ReaderVisualStyle.minimumControlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
         .disabled(disabled)
     }
 

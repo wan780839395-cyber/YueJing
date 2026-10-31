@@ -62,13 +62,6 @@ struct ReaderDirectoryChapterRow: View {
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
         .contentShape(Rectangle())
-        .overlay(alignment: .leading) {
-            if isCurrent {
-                Capsule().fill(appearance.accent)
-                    .frame(width: ReaderVisualStyle.headingMarkWidth, height: ReaderVisualStyle.headingMarkHeight)
-                    .accessibilityHidden(true)
-            }
-        }
     }
 
     private var measuredOrdinalColumn: some View {
@@ -87,15 +80,15 @@ struct ReaderDirectoryChapterRow: View {
         Text("\(ordinal)")
             .font(ordinalFont)
             .monospacedDigit()
-            .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground.opacity(0.7))
+            .foregroundStyle(isCurrent ? appearance.foreground : appearance.secondary)
             .fixedSize(horizontal: true, vertical: false)
             .accessibilityHidden(true)
     }
 
     private var titleText: some View {
         Text(title)
-            .font(.body)
-            .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground)
+            .font(.system(.body, design: .serif))
+            .foregroundStyle(appearance.foreground)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
@@ -106,7 +99,7 @@ struct ReaderDirectoryChapterRow: View {
         if isCurrent {
             Image(systemName: "checkmark")
                 .font(.subheadline)
-                .foregroundStyle(appearance.accent)
+                .foregroundStyle(appearance.secondary)
                 .accessibilityHidden(true)
         }
     }

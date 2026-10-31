@@ -34,17 +34,11 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                         Label("菜单", systemImage: "line.3.horizontal")
                             .labelStyle(.iconOnly)
                             .font(AppVisualStyle.actionFont).imageScale(.medium)
-                            .foregroundStyle(appearance.accent)
+                            .foregroundStyle(appearance.foreground)
                             .frame(minWidth: 44, minHeight: 44)
-                            .background {
-                                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                shape.fill(appearance.surface)
-                                    .overlay { shape.strokeBorder(appearance.edge, lineWidth: 0.8) }
-                                    .allowsHitTesting(false)
-                            }
                             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
                     .disabled(!canNavigate || drawerPresented)
                     .accessibilityHidden(drawerPresented)
                     .accessibilityFocused($focusedControl, equals: .menu)
@@ -92,24 +86,17 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                                 Label("关闭菜单", systemImage: "xmark")
                                     .font(AppVisualStyle.actionFont).imageScale(.medium)
                                     .padding(.horizontal, 12).frame(minHeight: 44)
-                                    .background {
-                                        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        shape.fill(appearance.page)
-                                            .overlay { shape.strokeBorder(appearance.edge, lineWidth: 0.8) }
-                                            .allowsHitTesting(false)
-                                    }
                                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(AppControlButtonStyle(foreground: appearance.secondary, cornerRadius: 12))
                             .keyboardShortcut(.cancelAction)
                             .accessibilityFocused($focusedControl, equals: .close)
-                            Text("阅境 · 工作区").font(.title2).accessibilityAddTraits(.isHeader)
+                            Text("阅境 · 工作区").font(.system(.title2, design: .serif)).padding(.vertical, 12).accessibilityAddTraits(.isHeader)
                             ForEach(LibrarySection.allCases, id: \.self) { item in
                                 Button { onDrawerSection(item) } label: {
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                                         Label(item.title, systemImage: item.symbol)
                                         Spacer(minLength: 4)
-                                        if item == section { Text("当前").font(.caption) }
                                     }
                                     .font(AppVisualStyle.actionFont).imageScale(.medium)
                                     .padding(.horizontal, 12).padding(.vertical, 4)
@@ -117,13 +104,12 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                                     .fixedSize(horizontal: false, vertical: true)
                                     .background {
                                         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        shape.fill(item == section ? appearance.accent.opacity(0.1) : appearance.surface)
-                                            .overlay { shape.strokeBorder(item == section ? appearance.accent : appearance.edge, lineWidth: 0.8) }
+                                        shape.fill(item == section ? appearance.softSelection : .clear)
                                             .allowsHitTesting(false)
                                     }
                                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
                                 .disabled(!canNavigate)
                                 .accessibilityValue(item == section ? "当前" : "未选中")
                             }

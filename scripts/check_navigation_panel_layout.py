@@ -128,7 +128,7 @@ def verify_source_contracts(sources=None) -> list[str]:
             "entries:zero-inline-destination-construction")
     require("let onOpenFeature: (LibraryPlannedFeature) -> Void" in entries, "entries:explicit-action-callback")
     require(entries.count("onOpenFeature(feature)") == 2, "entries:module-and-info-buttons-forward-feature")
-    require(entries.count(".buttonStyle(.plain)") == 2, "entries:plain-button-style-prevents-list-row-coalescing")
+    require(entries.count('.buttonStyle(AppControlButtonStyle(') == 2, "entries:explicit-style-prevents-list-row-coalescing")
     require('.disabled(!canOpenFeatures)' in entries, "entries:disabled-gate-retained")
     require('if dynamicType.isAccessibilitySize' in entries, "entries:accessibility-vertical-branch-retained")
     require(entries.count('.accessibilityIdentifier("library.planned.entry.\\(feature.rawValue)")') == 2,
@@ -165,14 +165,14 @@ def verify_source_contracts(sources=None) -> list[str]:
 
     # 3. Shared ReaderCompactButtonStyle contracts.
     style = sources["App/Reading/ReaderCompactButtonStyle.swift"]
-    require("var outlined: Bool = true" in style and ".inset(" not in style and
-            '.frame(minWidth: 44, minHeight: 44)' in style,
-            "button-style:visible-surface-itself-44-not-inset32")
-    require('.contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))' in style and
-            'let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)' in style and
-            'shape.strokeBorder(' in style and
+    require('var role: ReaderControlRole = .quiet' in style and '.inset(' not in style and
+            '.frame(minWidth: 44, minHeight: 44)' in style and 'surfaceInset' not in style,
+            'button-style:quiet-paint-independent-of-44-targets-no-ignored-parameter')
+    require('.contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))' in style and
+            'RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)' in style and '.stroke' not in style and
+            'role == .primary ? 0.06 : 0)))' in style and
             style.index('.frame(minWidth: 44') < style.index('.contentShape(') < style.index('.background {'),
-            "button-style:same-rounded-bounds-for-surface-stroke-hit-shape")
+            'button-style:same-local-pressed-surface-and-hit-geometry-no-permanent-outline')
     require("ReaderMotion.pressFeedback" in style and "if !animatePress { transaction.animation = nil }" in style
             and ".opacity(isEnabled ? 1 : 0.4)" in style,
             "button-style:pressed-disabled-reduceMotion-retained")
@@ -189,7 +189,7 @@ def verify_source_contracts(sources=None) -> list[str]:
     require(adj.count(".buttonStyle(ReaderCompactButtonStyle(tint: accent))") == 2,
             "adjustment:plus-minus-use-shared-visible-44-style")
     require("VStack(alignment: .leading, spacing: 8)" in adj, "adjustment:consistent-8pt-vertical-spacing")
-    require(".frame(minWidth: 34, alignment: .center)" in adj and ".monospacedDigit()" in adj,
+    require(".frame(minWidth: 42, alignment: .center)" in adj and ".monospacedDigit()" in adj,
             "adjustment:centered-monospaced-value-slot")
     require("if !editing, isActive() { commit() }" in adj and "if !dragging { commit() }" in adj
             and "func step(_ delta: Double)" in adj,
@@ -204,18 +204,16 @@ def verify_source_contracts(sources=None) -> list[str]:
     require("ViewThatFits(in: .horizontal)" in settings and "if dynamicType.isAccessibilitySize" in settings,
             "settings:narrow-and-accessibility-vertical-fallback")
     preset_fn = settings[settings.index("private func presetButton"):settings.index("private var restoreTypographyButton")]
-    require(".overlay(alignment: .topTrailing)" in preset_fn
-            and 'Image(systemName: "checkmark.circle.fill")' in preset_fn
-            and "HStack" not in preset_fn,
-            "settings:preset-checkmark-overlay-does-not-shift-centered-title")
-    require(preset_fn.index(".padding(.horizontal, 14)") < preset_fn.index(".padding(.vertical, 10)")
-            < preset_fn.index(".frame(minWidth: 84, maxWidth: .infinity, minHeight: 56)")
-            < preset_fn.index(".background {"),
-            "settings:preset-padding-inside-enclosing-strokeBorder")
+    require('checkmark' not in preset_fn and 'selected ? .semibold : .regular' in preset_fn and 'HStack' not in preset_fn,
+            'settings:preset-single-selection-surface-with-noncolor-weight-not-triple-feedback')
+    require(preset_fn.index('.padding(.horizontal, 10)') < preset_fn.index('.padding(.vertical, 10)')
+            < preset_fn.index('.frame(minWidth: 84, maxWidth: .infinity, minHeight: 68)')
+            < preset_fn.index('.contentShape(') < preset_fn.index('.buttonStyle(') < preset_fn.index('.background {'),
+            'settings:preset-target-and-press-in-front-of-selected-base')
     restore_fn = settings[settings.index("private var restoreTypographyButton"):settings.index("private var moreSection")]
     require(".padding(.horizontal, 14)" in restore_fn
             and ".frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)" in restore_fn
-            and "ReaderCompactButtonStyle(tint: appearance.accent, outlined: true)" in restore_fn
+            and "ReaderCompactButtonStyle(tint: appearance.secondary)" in restore_fn
             and '!isActive() || ReaderTypographyPreset.standard.matches(draft)' in restore_fn
             and '.accessibilityIdentifier("reader.typography.restore")' in restore_fn,
             "settings:restore-centered-outlined-and-gated")
@@ -230,11 +228,12 @@ def verify_source_contracts(sources=None) -> list[str]:
     for start, end in [('private func presetButton', 'private var restoreTypographyButton'),
                        ('private func themeButton', 'private func apply(')]:
         card = settings[settings.index(start):settings.index(end, settings.index(start))]
-        shape = 'RoundedRectangle(cornerRadius: 12, style: .continuous)'
-        require(card.index('.frame(minWidth: 84') < card.index('.background {') < card.index('.contentShape('+shape+')') and
-                'let shape = '+shape in card and 'shape.fill(selected ?' in card and 'shape.strokeBorder(selected ?' in card and
-                card.count('.allowsHitTesting(false)') == 2 and '.inset(' not in card and '.clipShape(' not in card,
-                'settings:'+start+':whole-card-surface-stroke-shape-no-inner-clip-mismatch')
+        shape = 'RoundedRectangle(cornerRadius: 16, style: .continuous)'
+        paint_order = (card.index('.frame(minWidth: 84') < card.index('.contentShape('+shape+')') < card.index('.buttonStyle(') < card.index('.background {')) if 'presetButton' in start else (card.index('.frame(minWidth: 84') < card.index('.background {') < card.index('.contentShape('+shape+')'))
+        require('.contentShape('+shape+')' in card and shape in card and paint_order and
+                '.fill(selected ?' in card and '.stroke' not in card and
+                card.count('.allowsHitTesting(false)') == (1 if 'presetButton' in start else 2) and '.inset(' not in card,
+                'settings:'+start+':whole-option-hit-and-selected-paint-without-nested-outlines')
     # 5. Directory Sheet header, ChapterRow ordinal column, and Footer button enclosures.
     sheet = sources["App/Reading/ReaderDirectorySheet.swift"]
     row = sources["App/Reading/ReaderDirectoryChapterRow.swift"]
@@ -244,8 +243,8 @@ def verify_source_contracts(sources=None) -> list[str]:
     require("if let page = model.state.page, page.total > 0 {\n                directorySummaryHeader(page: page)\n            }" in sheet,
             "directory-sheet:dedicated-total-chapters-subheader")
     require('Text("共 \\(total) 章")' in sheet and ".monospacedDigit()" in sheet
-            and "shape.strokeBorder(" in sheet and '.accessibilityIdentifier("reader.directory.total")' in sheet,
-            "directory-sheet:outlined-monospaced-total-badge")
+            and '.stroke' not in sheet and '.accessibilityIdentifier("reader.directory.total")' in sheet,
+            "directory-sheet:quiet-real-monospaced-total")
     require("HStack(alignment: .center, spacing: 12)" in sheet and "Spacer(minLength: 12)" in sheet
             and "ViewThatFits(in: .horizontal)" in sheet,
             "directory-sheet:total-count-separated-and-wraps-when-narrow-or-large")
@@ -267,8 +266,8 @@ def verify_source_contracts(sources=None) -> list[str]:
             and ".layoutPriority(1)" in row,
             "chapter-row:stacked-fallback-for-gt6-digits-or-accessibility-preserves-title-width")
 
-    require(footer.count("ReaderCompactButtonStyle(tint: appearance.accent, outlined: true)") == 2,
-            "directory-footer:all-buttons-use-non-inset-outlined-enclosure")
+    require(footer.count("ReaderCompactButtonStyle(tint: appearance.foreground)") == 2,
+            "directory-footer:quiet-actions-in-single-group-surface")
     for fn_name in ("private func currentButton", "private func pagingButton"):
         segment = footer[footer.index(fn_name):]
         segment = segment[:segment.index("\n    }\n") + 6]
@@ -293,6 +292,8 @@ def verify_source_contracts(sources=None) -> list[str]:
         require(token in project_yml, f"project.yml:{token}")
 
     ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    from check_ui_control_cohesion import f1_press_layers
+    checks.extend(f1_press_layers(sources, callers=('preset',))['checks'])
     checks.append("checker-python-ast-valid")
     return checks
 
@@ -413,10 +414,10 @@ def verify_synthetic_specifications() -> list[str]:
 def verify_negative_controls():
     sources = {p: (ROOT / p).read_text(encoding='utf8') for p in TOUCHED_SWIFT_FILES}
     controls = [
-        ('visible-inset32', 'App/Reading/ReaderCompactButtonStyle.swift', 'shape\n                    .fill(', 'shape.inset(by: 6)\n                    .fill('),
+        ('quiet-paint-regression', 'App/Reading/ReaderCompactButtonStyle.swift', 'role == .primary ? 0.06 : 0', 'role == .primary ? 0.06 : 0.08'),
         ('under44', 'App/Reading/ReaderCompactButtonStyle.swift', '.frame(minWidth: 44, minHeight: 44)', '.frame(minWidth: 32, minHeight: 32)'),
-        ('shape-mismatch', 'App/Reading/ReaderCompactButtonStyle.swift', 'contentShape(RoundedRectangle(cornerRadius: 10', 'contentShape(RoundedRectangle(cornerRadius: 8'),
-        ('preset-whole-card-mismatch', 'App/Reading/ReaderSettingsView.swift', 'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8'),
+        ('shape-mismatch', 'App/Reading/ReaderCompactButtonStyle.swift', 'contentShape(RoundedRectangle(cornerRadius: cornerRadius', 'contentShape(RoundedRectangle(cornerRadius: 8'),
+        ('preset-whole-card-mismatch', 'App/Reading/ReaderSettingsView.swift', 'contentShape(RoundedRectangle(cornerRadius: 16', 'contentShape(RoundedRectangle(cornerRadius: 8'),
         ('lost-release-commit', 'App/Reading/ReaderSettingAdjustment.swift', 'if !dragging { commit() }', 'if dragging { commit() }'),
         ('lost-restore-gate', 'App/Reading/ReaderSettingsView.swift', '!isActive() || ReaderTypographyPreset.standard.matches(draft)', '!isActive()'),
     ]
@@ -434,7 +435,7 @@ def verify_negative_controls():
     begin = sources[p].index('private func themeButton')
     altered = dict(sources)
     altered[p] = sources[p][:begin] + sources[p][begin:].replace(
-        'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8', 1)
+        'contentShape(RoundedRectangle(cornerRadius: 16', 'contentShape(RoundedRectangle(cornerRadius: 8', 1)
     try:
         verify_source_contracts(altered)
     except (AssertionError, ValueError):
@@ -446,6 +447,9 @@ def verify_negative_controls():
 
 def main() -> None:
     source_checks = verify_source_contracts()
+    from check_ui_control_cohesion import current_exact
+    current_exact({p:(ROOT/p).read_text(encoding='utf8') for p in TOUCHED_SWIFT_FILES})
+    source_checks.append('current-exact-paint-deltas-directory-task-footer-order-preserved')
     synthetic_cases = verify_synthetic_specifications()
     negative_controls = verify_negative_controls()
     report = {

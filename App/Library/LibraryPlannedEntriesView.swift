@@ -10,23 +10,25 @@ struct LibraryPlannedEntriesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Rectangle().fill(appearance.edge).frame(height: 0.5)
-                .accessibilityHidden(true)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(features.contains(.comics) ? "更多故事" : "格式与书籍显示").font(.footnote).accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
                 Text("入口预留").font(.caption)
             }
             .foregroundStyle(appearance.secondary)
-            if dynamicType.isAccessibilitySize {
-                VStack(spacing: 10) {
-                    ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
-                }
-            } else {
-                HStack(alignment: .top, spacing: 10) {
-                    ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
+            Group {
+                if dynamicType.isAccessibilitySize {
+                    VStack(spacing: 10) {
+                        ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
+                    }
                 }
             }
+            .padding(features.contains(where: { LibraryPlannedFeature.modules.contains($0) }) ? 4 : 0)
+            .background(appearance.groupSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             VStack(spacing: 0) {
                 ForEach(features.filter { !LibraryPlannedFeature.modules.contains($0) }) { feature in informationButton(feature) }
             }
@@ -34,7 +36,7 @@ struct LibraryPlannedEntriesView: View {
                 .font(.caption).foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.top, 8)
+        .padding(.top, 24)
         .disabled(!canOpenFeatures)
     }
 
@@ -56,10 +58,9 @@ struct LibraryPlannedEntriesView: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
-            .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.entryCornerRadius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: LibraryAppearance.entryCornerRadius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: LibraryAppearance.entryCornerRadius))
         .accessibilityLabel("\(feature.title)，规划中，未接入")
         .accessibilityHint("查看静态规划说明，不启动服务")
         .accessibilityIdentifier("library.planned.entry.\(feature.rawValue)")
@@ -76,11 +77,11 @@ struct LibraryPlannedEntriesView: View {
                 Image(systemName: "chevron.right").font(.caption)
                     .accessibilityHidden(true)
             }
-            .foregroundStyle(appearance.accent)
+            .foregroundStyle(appearance.foreground)
             .frame(maxWidth: .infinity, minHeight: LibraryAppearance.minimumControlHeight, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0))
         .accessibilityLabel("\(feature.title)，规划中，未接入")
         .accessibilityHint("查看静态规划说明，不启动服务")
         .accessibilityIdentifier("library.planned.entry.\(feature.rawValue)")

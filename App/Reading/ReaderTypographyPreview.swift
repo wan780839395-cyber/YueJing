@@ -34,14 +34,13 @@ struct ReaderTypographyPreview: View {
                 .foregroundStyle(Color(uiColor: preferences.theme.foreground))
                 .accessibilityHidden(true)
         }
-        .padding(14)
-        .background(Color(uiColor: preferences.theme.background), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }
-        .overlay(alignment: .leading) {
-            Capsule().fill(appearance.accent).frame(width: 3)
-                .padding(.vertical, 12)
-                .accessibilityHidden(true)
+        .padding(.horizontal, 20).padding(.vertical, 16)
+        .background(Color(uiColor: preferences.theme.background), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(appearance.shadow)
+                .shadow(color: appearance.shadow, radius: 6, y: 3).allowsHitTesting(false)
         }
+        .padding(.bottom, 12)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("排版示例，字号 \(Int(preferences.fontSize))，行距 \(Int(preferences.lineSpacing))，\(preferences.theme.title)背景")
         .accessibilityIdentifier("reader.typography.preview")

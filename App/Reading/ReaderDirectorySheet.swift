@@ -25,9 +25,8 @@ struct ReaderDirectorySheet: View {
                         .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
                 .accessibilityLabel("关闭目录")
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
@@ -62,8 +61,9 @@ struct ReaderDirectorySheet: View {
                                 .accessibilityFocused($focusedChapterID, equals: item.element.id)
                                 .accessibilityValue(current ? "当前章节" : "")
                                 .accessibilityHint("阅读本章")
-                                .listRowBackground(current ? appearance.accent.opacity(0.08) : appearance.surface)
-                                .listRowSeparatorTint(appearance.edge)
+                                .buttonStyle(.plain)
+                                .listRowBackground(current ? appearance.selection : appearance.surface)
+                                .listRowSeparator(.hidden)
                             }
                         } else if !model.state.loading, model.state.message == nil {
                             Text("正文显示后会定位当前章节。")
@@ -146,18 +146,9 @@ struct ReaderDirectorySheet: View {
 
     private func totalCountBadge(total: Int) -> some View {
         Text("共 \(total) 章")
-            .font(.footnote.weight(.medium).monospacedDigit())
-            .foregroundStyle(appearance.accent)
+            .font(.system(.subheadline, design: .serif).weight(.medium).monospacedDigit())
+            .foregroundStyle(appearance.foreground)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background {
-                let shape = Capsule(style: .continuous)
-                shape.fill(appearance.accent.opacity(0.1))
-                    .overlay {
-                        shape.strokeBorder(appearance.accent.opacity(0.24), lineWidth: 0.8)
-                    }
-            }
             .accessibilityLabel("总章节数，共 \(total) 章")
             .accessibilityIdentifier("reader.directory.total")
     }

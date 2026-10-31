@@ -56,12 +56,12 @@ struct ReaderFloatingToolsView: View {
                 }
             }
         }
-        .padding(4).frame(maxWidth: metrics.verticalButtons ? 280 : 340)
-        .background {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)
-        }
+        .padding(8).frame(maxWidth: metrics.verticalButtons ? 280 : 340)
         .background(appearance.fill, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 28, style: .continuous).fill(appearance.shadow)
+                .shadow(color: appearance.shadow, radius: 8, y: 3).allowsHitTesting(false)
+        }
     }
 
     private var edgeBar: some View {
@@ -80,10 +80,11 @@ struct ReaderFloatingToolsView: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 4)
         .frame(maxWidth: .infinity)
-        .background(alignment: .top) {
-            Rectangle().fill(appearance.edge).frame(height: 0.5).allowsHitTesting(false)
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 20, style: .continuous).fill(appearance.shadow)
+                .shadow(color: appearance.shadow, radius: 6, y: -2).allowsHitTesting(false)
         }
-        .background(appearance.fill)
     }
 
     private var edgeDock: some View {
@@ -97,12 +98,12 @@ struct ReaderFloatingToolsView: View {
                     }
                     .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
                 }
-                .padding(4).frame(maxWidth: 340)
+                .padding(8).frame(maxWidth: 340)
+                .background(appearance.fill, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                 .background {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous).fill(appearance.shadow)
+                        .shadow(color: appearance.shadow, radius: 8, y: 3).allowsHitTesting(false)
                 }
-                .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
                 Button {
                     guard visible, state.canInteract, !model.exitSaveFailed else { return }
@@ -115,13 +116,10 @@ struct ReaderFloatingToolsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 12).padding(.vertical, 4)
                         .frame(minWidth: 44, minHeight: metrics.controlHeight)
-                        .background {
-                            Capsule().strokeBorder(appearance.edge, lineWidth: 0.8).allowsHitTesting(false)
-                        }
-                        .background(appearance.fill, in: Capsule())
-                        .contentShape(Capsule())
+                        .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 }
-                .buttonStyle(.plain).disabled(model.exitSaveFailed || !state.canInteract)
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(model.exitSaveFailed || !state.canInteract)
+                .background(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
                 .accessibilityIdentifier("reader.tools.expand")
                 .accessibilityHint("展开目录和排版工具")
                 .accessibilityFocused($focusedControl, equals: "dock.expand")
@@ -145,7 +143,7 @@ struct ReaderFloatingToolsView: View {
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 .frame(minWidth: 44, minHeight: metrics.controlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent)).disabled(model.exitSaveFailed || !state.canInteract)
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary)).disabled(model.exitSaveFailed || !state.canInteract)
         .accessibilityIdentifier("reader.tools.collapse")
         .accessibilityFocused($focusedControl, equals: "dock.collapse")
     }
@@ -173,7 +171,7 @@ struct ReaderFloatingToolsView: View {
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 .frame(maxWidth: .infinity, minHeight: metrics.controlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent)).accessibilityIdentifier("reader.tools.\(key)")
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground)).accessibilityIdentifier("reader.tools.\(key)")
         .accessibilityFocused($focusedControl, equals: key)
     }
 }

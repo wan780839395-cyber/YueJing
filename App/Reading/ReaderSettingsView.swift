@@ -36,7 +36,7 @@ struct ReaderSettingsView: View {
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
@@ -75,27 +75,29 @@ struct ReaderSettingsView: View {
     }
 
     private var typographySection: some View {
-        ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并自动保存", mark: "字", appearance: appearance) {
+        ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并自动保存", appearance: appearance) {
             VStack(alignment: .leading, spacing: 8) {
                 ReaderSettingAdjustment(title: "字号", key: "font", value: $draft.fontSize, range: 14...36,
-                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+                    accent: appearance.foreground, isActive: isActive, commit: commitDraft)
                 Divider().overlay(appearance.edge)
                 ReaderSettingAdjustment(title: "行距", key: "spacing", value: $draft.lineSpacing, range: 0...20,
-                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+                    accent: appearance.foreground, isActive: isActive, commit: commitDraft)
             }
         }
     }
 
     private var themeSection: some View {
-        ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", mark: "色", appearance: appearance) {
+        ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", appearance: appearance) {
             threeOptionLayout(ReaderTheme.allCases) { theme in themeButton(theme) }
         }
     }
 
     private var presetsSection: some View {
-        ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", mark: "式", appearance: appearance) {
+        ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", appearance: appearance) {
             VStack(spacing: 8) {
                 threeOptionLayout(ReaderTypographyPreset.allCases) { preset in presetButton(preset) }
+                    .padding(4)
+                    .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 restoreTypographyButton
             }
         }
@@ -129,7 +131,7 @@ struct ReaderSettingsView: View {
         return Button { apply(preset) } label: {
             VStack(spacing: 4) {
                 Text(preset.title)
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(selected ? .semibold : .regular))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
@@ -138,38 +140,22 @@ struct ReaderSettingsView: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 10)
             .padding(.vertical, 10)
-            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 56)
-            .background {
-                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                shape.fill(selected ? appearance.accent.opacity(0.12) : appearance.card)
-                    .overlay {
-                        shape.strokeBorder(selected ? appearance.accent : appearance.edge,
-                                           lineWidth: selected ? 1.5 : 0.8)
-                    }
-                    .allowsHitTesting(false)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
-                    }
-            }
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(appearance.accent)
-                    .padding(6)
-                    .opacity(selected ? 1 : 0)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
-                    }
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 68)
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(selected ? appearance.surface : .clear)
+                .allowsHitTesting(false)
+                .animation(selectionAnimation, value: selectionMotionKey)
+                .transaction { transaction in
+                    if reduceMotion { transaction.animation = nil }
+                }
+                .opacity(isActive() ? 1 : 0.4)
+        }
         .disabled(!isActive())
         .accessibilityLabel("\(preset.title)排版，字号 \(Int(preset.fontSize))，行距 \(Int(preset.lineSpacing))")
         .accessibilityValue(selected ? "已选择" : "未选择")
@@ -187,7 +173,7 @@ struct ReaderSettingsView: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, outlined: true))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
         .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
         .accessibilityIdentifier("reader.typography.restore")
     }
@@ -226,20 +212,16 @@ struct ReaderSettingsView: View {
         } label: {
             VStack(spacing: 6) {
                 Text("阅").font(.system(size: 22))
-                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .frame(maxWidth: .infinity, minHeight: 52)
                     .foregroundStyle(Color(uiColor: theme.foreground))
-                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 Text(theme.title).font(.caption).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
-            .padding(10)
+            .padding(8)
             .frame(minWidth: 84, maxWidth: .infinity, minHeight: 64)
             .background {
-                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                shape.fill(selected ? appearance.accent.opacity(0.12) : appearance.card)
-                    .overlay {
-                        shape.strokeBorder(selected ? appearance.accent : appearance.edge,
-                                           lineWidth: selected ? 1.5 : 0.8)
-                    }
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(selected ? appearance.selection : .clear)
                     .allowsHitTesting(false)
                     .animation(selectionAnimation, value: selectionMotionKey)
                     .transaction { transaction in
@@ -247,9 +229,9 @@ struct ReaderSettingsView: View {
                     }
             }
             .overlay(alignment: .topTrailing) {
-                Image(systemName: "checkmark.circle.fill")
+                Image(systemName: "checkmark")
                     .font(.caption)
-                    .foregroundStyle(appearance.accent)
+                    .foregroundStyle(appearance.foreground)
                     .padding(6)
                     .opacity(selected ? 1 : 0)
                     .animation(selectionAnimation, value: selectionMotionKey)
@@ -259,9 +241,9 @@ struct ReaderSettingsView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(.plain).disabled(!isActive())
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground)).disabled(!isActive())
         .accessibilityLabel(theme.title).accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("reader.theme.\(theme.rawValue)")

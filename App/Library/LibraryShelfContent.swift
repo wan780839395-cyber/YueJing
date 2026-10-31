@@ -21,7 +21,7 @@ struct LibraryShelfContent: View {
     var body: some View {
         List {
             Section {
-                LibraryHeaderView(bookCount: books.count, appearance: appearance)
+                LibraryHeaderView(bookCount: books.count, appearance: appearance, showsShelfTitle: layout == .direct)
                     .listRowSeparator(.hidden)
                     .listRowBackground(appearance.page)
             }
@@ -73,7 +73,7 @@ struct LibraryShelfContent: View {
                         .accessibilityHint("打开正文，恢复已保存的阅读位置")
                         .listRowInsets(EdgeInsets(top: 0, leading: LibraryAppearance.horizontalInset,
                                                   bottom: 0, trailing: LibraryAppearance.horizontalInset))
-                        .listRowSeparatorTint(appearance.edge.opacity(layout == .direct ? 0.7 : 1))
+                        .listRowSeparatorTint(appearance.edge.opacity(0.6))
                         .listRowBackground(appearance.page)
                     }
                 }
@@ -108,7 +108,7 @@ struct LibraryShelfContent: View {
             }
             .font(.caption).foregroundStyle(appearance.secondary)
         }
-        .padding(.vertical, 22)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
     }

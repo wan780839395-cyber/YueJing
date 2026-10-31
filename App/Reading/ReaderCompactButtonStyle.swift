@@ -1,36 +1,30 @@
 import SwiftUI
 
-/// The label, visible surface and interaction shape share one >=44pt enclosure.
-/// Callers provide content spacing; no invisible inset or expanded row target.
+/// Geometry is independent of paint: quiet actions have no persistent surface.
+enum ReaderControlRole: Equatable {
+    case quiet, primary
+}
+
+/// Only the local fill animates; the label and its >=44pt hit bounds never animate.
 @MainActor
 struct ReaderCompactButtonStyle: ButtonStyle {
     let tint: Color
-    var outlined: Bool = true
+    var role: ReaderControlRole = .quiet
     @Environment(\.isEnabled) private var isEnabled
+    var cornerRadius: CGFloat = 16
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    // Keep the legacy zero-inset panel call site source-compatible; geometry is never inset.
-    init(tint: Color, surfaceInset _: CGFloat = 0, outlined: Bool = true) {
-        self.tint = tint
-        self.outlined = outlined
-    }
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = isEnabled && configuration.isPressed
         let animatePress = isEnabled && !reduceMotion
         return configuration.label
             .frame(minWidth: 44, minHeight: 44)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .foregroundStyle(tint)
             .background {
-                let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-                shape
-                    .fill(tint.opacity(pressed ? 0.18 : 0.08))
-                    .overlay {
-                        if outlined {
-                            shape.strokeBorder(tint.opacity(pressed ? 0.36 : 0.22), lineWidth: 0.8)
-                        }
-                    }
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(tint.opacity(pressed ? 0.10 : (role == .primary ? 0.06 : 0)))
                     .allowsHitTesting(false)
                     .animation(animatePress ? ReaderMotion.pressFeedback : nil,
                                value: animatePress ? (pressed ? 1 : 2) : 0)

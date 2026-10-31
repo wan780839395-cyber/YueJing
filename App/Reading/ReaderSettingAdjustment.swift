@@ -41,7 +41,7 @@ struct ReaderSettingAdjustment: View {
     }
 
     private var controls: some View {
-        HStack(alignment: .center, spacing: 6) {
+        HStack(alignment: .center, spacing: 0) {
             Button { step(-1) } label: {
                 Image(systemName: "minus").font(.body.weight(.medium)).imageScale(.medium)
                     .frame(minWidth: 44, minHeight: 44)
@@ -52,7 +52,7 @@ struct ReaderSettingAdjustment: View {
             Text("\(Int(value))").font(.body.monospacedDigit())
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: true, vertical: false)
-                .frame(minWidth: 34, alignment: .center)
+                .frame(minWidth: 42, alignment: .center)
                 .accessibilityLabel("\(title)，\(Int(value))")
                 .accessibilityIdentifier("reader.\(key).value")
             Button { step(1) } label: {
@@ -63,6 +63,8 @@ struct ReaderSettingAdjustment: View {
             .disabled(!isActive() || value >= range.upperBound)
             .accessibilityLabel("增大\(title)").accessibilityIdentifier("reader.\(key).increase")
         }
+        .padding(2)
+        .background(accent.opacity(0.05), in: Capsule())
     }
 
     private var sliderValue: Binding<Double> {

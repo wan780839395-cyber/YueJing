@@ -9,7 +9,7 @@ struct LibraryBookRow: View {
     let appearance: LibraryAppearance
 
     var body: some View {
-        HStack(alignment: .top, spacing: 13) {
+        HStack(alignment: .center, spacing: 16) {
             LibraryCoverPlaceholder(title: book.title, appearance: appearance)
             VStack(alignment: .leading, spacing: 7) {
                 Text(book.title)
@@ -40,7 +40,7 @@ struct LibraryBookRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, minHeight: LibraryAppearance.minimumControlHeight, alignment: .leading)
         .contentShape(Rectangle())
     }

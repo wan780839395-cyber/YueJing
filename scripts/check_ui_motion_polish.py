@@ -182,53 +182,49 @@ def verify_source_contracts(sources: dict[str, str]) -> list[str]:
     settings_code = stripped["App/Reading/ReaderSettingsView.swift"]
     require("@Environment(\\.accessibilityReduceMotion) private var reduceMotion" in settings,
             "settings:reduceMotion-environment")
-    require(settings_code.count(".animation(") == 4,
-            "settings:exact-four-decorative-animations-no-root-or-scroll-animation")
-    require(settings.count(".animation(selectionAnimation, value: selectionMotionKey)") == 4,
-            "settings:all-four-animations-use-reduceMotion-gated-selection-token-and-key")
+    require(settings_code.count('.animation(') == 3,
+            'settings:three-local-animations-no-container-animation')
+    require(settings.count('.animation(selectionAnimation, value: selectionMotionKey)') == 3,
+            'settings:all-three-animations-use-reduce-motion-token')
     require(settings.count("let selectionMotionKey = reduceMotion ? 0 : (selected ? 1 : 2)") == 2,
             "settings:preset-and-theme-reduceMotion-value-key")
     require(settings.count("let selectionAnimation = reduceMotion ? nil : ReaderMotion.selectionFeedback") == 2,
             "settings:preset-and-theme-reduceMotion-nil-animation")
-    require(settings.count("if reduceMotion { transaction.animation = nil }") == 4,
-            "settings:all-four-decorative-subtrees-clear-transaction-on-reduceMotion")
+    require(settings.count('if reduceMotion { transaction.animation = nil }') == 3,
+            'settings:three-decoration-transactions-clear-reduce-motion')
 
     preset_fn = settings[settings.index("private func presetButton"):settings.index("private var restoreTypographyButton")]
     theme_fn = settings[settings.index("private func themeButton"):settings.index("private func apply(")]
 
-    require("if selected" not in preset_fn and "if selected" not in theme_fn,
-            "settings:checkmarks-stably-mounted-without-conditional-insertion")
-    require(preset_fn.count(".opacity(selected ? 1 : 0)") == 1 and theme_fn.count(".opacity(selected ? 1 : 0)") == 1,
-            "settings:checkmarks-toggle-via-opacity")
-    require(preset_fn.count('Image(systemName: "checkmark.circle.fill")') == 1
-            and theme_fn.count('Image(systemName: "checkmark.circle.fill")') == 1,
-            "settings:both-topTrailing-checkmarks-retained")
-    require(preset_fn.count(".accessibilityHidden(true)") == 1 and theme_fn.count(".accessibilityHidden(true)") == 1,
-            "settings:decorative-checkmarks-remain-ax-hidden")
-
-    # V2: the rounded whole-card surface contains the title as well as the swatch.
-    # Only background/overlay subtrees animate, never the label frame or action.
-    shape = 'RoundedRectangle(cornerRadius: 12, style: .continuous)'
+    require('if selected' not in preset_fn+theme_fn and 'checkmark' not in preset_fn and
+            theme_fn.count('.opacity(selected ? 1 : 0)') == 1 and
+            theme_fn.count('Image(systemName: "checkmark")') == 1 and
+            theme_fn.count('.accessibilityHidden(true)') == 1,
+            'settings:one-stable-theme-check-no-preset-badge-stack')
+    shape = 'RoundedRectangle(cornerRadius: 16, style: .continuous)'
     hit = '.contentShape('+shape+')'
     for name, card in [('preset', preset_fn), ('theme', theme_fn)]:
-        require(hit in card, 'settings:'+name+'-exact-rounded-content-shape')
-        background = card[card.index('.background {'):card.index('.overlay(alignment: .topTrailing)')]
-        mark = card[card.index('.overlay(alignment: .topTrailing)'):card.index(hit)]
-        tail = card[card.index(hit):]
-        head = card[:card.index('.background {')]
-        require('let shape = '+shape in background and 'shape.fill(selected ?' in background and
-                'shape.strokeBorder(selected ?' in background and
-                background.count('.animation(selectionAnimation, value: selectionMotionKey)') == 1 and
-                '.allowsHitTesting(false)' in background,
-                'settings:'+name+'-whole-card-fill-stroke-local-animation')
-        require(mark.count('.animation(selectionAnimation, value: selectionMotionKey)') == 1 and
-                '.opacity(selected ? 1 : 0)' in mark and '.allowsHitTesting(false)' in mark,
-                'settings:'+name+'-noninteractive-checkmark-opacity-local-animation')
+        require(hit in card, 'settings:'+name+'-whole-option-hit-shape')
+        if name == 'preset':
+            from check_ui_control_cohesion import _press_block
+            paint = _press_block(card, '.background {')
+            head = card[:card.index(paint)]
+            tail = card[card.index(paint)+len(paint):]
+            require(card.index(hit) < card.index('.buttonStyle(') < card.index(paint),
+                    'settings:preset-press-in-front-of-selected-base')
+        else:
+            paint = card[card.index('.background {'):card.index(hit)]
+            head = card[:card.index('.background {')]
+            tail = card[card.index(hit):]
+        require(shape in paint and '.fill(selected ?' in paint and '.stroke' not in paint and
+                paint.count('.animation(selectionAnimation, value: selectionMotionKey)') == (1 if name == 'preset' else 2) and
+                paint.count('.allowsHitTesting(false)') == (1 if name == 'preset' else 2),
+                'settings:'+name+'-soft-paint-animations-decoration-only')
         require('.animation(' not in head+tail and '.inset(' not in card and '.clipShape(' not in card and
                 '.frame(minWidth: 84, maxWidth: .infinity, minHeight:' in head,
-                'settings:'+name+'-no-glyph-frame-action-or-external-animation')
+                'settings:'+name+'-no-glyph-label-frame-action-animation')
     require(theme_fn.index('Text(theme.title)') < theme_fn.index('.frame(minWidth: 84') < theme_fn.index('.background {'),
-            'settings:theme-title-inside-selected-whole-card-boundary')
+            'settings:theme-title-in-whole-option')
 
     # Preserved settings submission, isolation, ranges, and AX contracts.
     commit_fn = settings[settings.index("private func apply("):]
@@ -312,10 +308,10 @@ def verify_source_contracts(sources: dict[str, str]) -> list[str]:
     content = sources["App/ContentView.swift"]
     nav = sources["App/Library/LibraryPlannedNavigation.swift"]
 
-    stroke_bg = ".background { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }"
-    fill_bg = ".background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))"
-    require(stroke_bg in screen and fill_bg in screen and screen.index(stroke_bg) < screen.index(fill_bg),
-            "screen:titleBar-stroke-background-precedes-fill-background")
+    fill_bg = '.background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))'
+    header = screen[screen.index('private func titleBar('):screen.index('private var panelPresentation:')]
+    require(fill_bg in header and '.stroke' not in header and '.overlay' not in header,
+            'screen:titlebar-single-soft-surface-no-button-cover')
     require(".allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)" in screen,
             "screen:titleBar-hitTesting-and-ax-gate-intact")
     require("var request: UUID?\n        mutateTools { request = $0.beginExit() }" in screen,
@@ -329,6 +325,8 @@ def verify_source_contracts(sources: dict[str, str]) -> list[str]:
             and "guard activeRoute?.id == id else { return false }" in nav,
             "navigation:single-destination-and-no-shelf-list-animation")
 
+    from check_ui_control_cohesion import f1_press_layers
+    checks.extend(f1_press_layers(sources, callers=('preset',))['checks'])
     return checks
 
 
@@ -445,17 +443,17 @@ def verify_negative_controls(live_sources: dict[str, str], baseline: dict | None
         ".opacity(selected ? 1 : 0).symbolEffect(.bounce, value: selected)",
     )
 
-    expect_source_rejection('reject:card-shape-mismatch', 'App/Reading/ReaderSettingsView.swift',
-                            'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8')
-    expect_source_rejection('reject:selected-stroke-on-wrong-shape', 'App/Reading/ReaderSettingsView.swift',
-                            'shape.strokeBorder(selected ?', 'Circle().strokeBorder(selected ?')
-    expect_source_rejection('reject:inset-card-visible-boundary', 'App/Reading/ReaderSettingsView.swift',
-                            'shape.fill(selected ?', 'shape.inset(by: 6).fill(selected ?')
+    expect_source_rejection('reject:option-shape-mismatch', 'App/Reading/ReaderSettingsView.swift',
+                            'contentShape(RoundedRectangle(cornerRadius: 16', 'contentShape(RoundedRectangle(cornerRadius: 8')
+    expect_source_rejection('reject:permanent-option-outline', 'App/Reading/ReaderSettingsView.swift',
+                            '.fill(selected ? appearance.surface : .clear)', '.stroke(appearance.accent)')
+    expect_source_rejection('reject:option-fill-on-wrong-shape', 'App/Reading/ReaderSettingsView.swift',
+                            'RoundedRectangle(cornerRadius: 16, style: .continuous)', 'Circle()')
     theme_start = live_sources['App/Reading/ReaderSettingsView.swift'].index('private func themeButton')
     altered = dict(live_sources)
     altered['App/Reading/ReaderSettingsView.swift'] = (live_sources['App/Reading/ReaderSettingsView.swift'][:theme_start] +
         live_sources['App/Reading/ReaderSettingsView.swift'][theme_start:].replace(
-            'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8', 1))
+            'contentShape(RoundedRectangle(cornerRadius: 16', 'contentShape(RoundedRectangle(cornerRadius: 8', 1))
     try:
         verify_source_contracts(altered)
     except (AssertionError, ValueError):
@@ -515,15 +513,9 @@ def verify_negative_controls(live_sources: dict[str, str], baseline: dict | None
         "ProgressView()",
     )
 
-    # Group 5: Protected ReaderScreen stroke/background order & protected baseline hash drift.
-    stroke_line = "        .background { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }\n"
-    fill_line = "        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))\n"
-    expect_source_rejection(
-        "reject:screen-stroke-moved-after-fill-background",
-        "App/Reading/ReaderScreen.swift",
-        stroke_line + fill_line,
-        fill_line + stroke_line,
-    )
+    expect_source_rejection('reject:titlebar-foreground-hit-cover', 'App/Reading/ReaderScreen.swift',
+        '.background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))',
+        '.overlay(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))')
 
     if baseline is not None and live_digests is not None:
         for protected_path, label in (
@@ -612,12 +604,16 @@ def verify_git_and_protection(baseline_path: Path | None) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", type=Path, default=None,
-                        help="Explicit historical 214-path motion-batch freeze only; not current reconciliation protection")
+    parser.add_argument('--historical-baseline', '--baseline', dest='baseline', type=Path, default=None,
+                        help='Explicit historical 214-path hash protection only; no historical freeze is loaded by current default')
     args = parser.parse_args()
 
     live_sources = load_live_sources()
     source_checks = verify_source_contracts(live_sources)
+    if args.baseline is None:
+        from check_ui_control_cohesion import current_exact
+        current_exact(live_sources)
+        source_checks.append('current-exact-paint-deltas-guard-task-viewport-preserved')
     protection_info, baseline, live_digests = verify_git_and_protection(args.baseline)
     negative_controls = verify_negative_controls(live_sources, baseline, live_digests)
     inv_report = inventory.validate_source(ROOT)
@@ -626,8 +622,8 @@ def main() -> None:
     ast.parse(Path(__file__).read_text(encoding="utf-8"))
 
     report = {
-        "contract_version": "control-cohesion-v2-live-source",
-        "historical_protection": "explicit --baseline only; never auto-load an unrelated scratch batch",
+        'contract_version': 'soft-editorial-current-7d55-preedit',
+        'historical_protection': 'explicit --historical-baseline/--baseline only; old freeze files unchanged',
         "kind": "OFFLINE_MOTION_SOURCE_CONTRACTS_AND_NEGATIVE_CONTROLS_NOT_NATIVE",
         "scope_notice": (
             "Lexical/structural source contracts, in-memory negative controls, and SHA256 baseline protection only. "

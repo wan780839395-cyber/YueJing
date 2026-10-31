@@ -83,3 +83,32 @@ struct AppVisualStyle {
               blue: Double(value & 0xFF) / 255, opacity: 1)
     }
 }
+
+/// Paint feedback only; the label owns its in-bounds 44pt target and row geometry.
+@MainActor
+struct AppControlButtonStyle: ButtonStyle {
+    let foreground: Color
+    var surface: Color = .clear
+    var cornerRadius: CGFloat = 22
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = isEnabled && configuration.isPressed
+        let animatePress = isEnabled && !reduceMotion
+        return configuration.label
+            .foregroundStyle(foreground)
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(surface)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(foreground.opacity(pressed ? 0.08 : 0))
+                    }
+                    .allowsHitTesting(false)
+                    .animation(animatePress ? .easeOut(duration: 0.10) : nil, value: pressed)
+                    .transaction { if !animatePress { $0.animation = nil } }
+            }
+            .opacity(isEnabled ? 1 : 0.4)
+    }
+}

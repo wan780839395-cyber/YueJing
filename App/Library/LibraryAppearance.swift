@@ -14,10 +14,10 @@ struct LibraryAppearance {
 
     private var style: AppVisualStyle { AppVisualStyle(appearance: appAppearance, colorScheme: colorScheme) }
 
-    static let horizontalInset: CGFloat = 22
+    static let horizontalInset: CGFloat = 20
     static let minimumControlHeight: CGFloat = AppVisualStyle.minimumControlHeight
-    static let coverWidth: CGFloat = 44
-    static let coverHeight: CGFloat = 59
+    static let coverWidth: CGFloat = 48
+    static let coverHeight: CGFloat = 66
     static let entryCornerRadius: CGFloat = 15
 
     static var titleFont: Font { AppVisualStyle.pageTitleFont }
@@ -31,4 +31,6 @@ struct LibraryAppearance {
     var edge: Color { style.edge }
     var accent: Color { style.accent }
     var coverSurface: Color { style.coverSurface }
+    var groupSurface: Color { style.surface }
+    var softSelection: Color { style.foreground.opacity(0.06) }
 }

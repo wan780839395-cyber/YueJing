@@ -115,26 +115,22 @@ def contracts(src):
          'if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }' in c,
          'one-unified-import-original-action-complete-ax-name-and-bookid-open')
     need('.frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)' in import_control and
-         'let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)' in import_control and
-         'shape.fill(appearance.accent.opacity(0.08))' in import_control and
-         'shape.strokeBorder(appearance.accent.opacity(0.3), lineWidth: 0.8)' in import_control and
-         '.contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))' in import_control and
-         '.allowsHitTesting(false)' in import_control and '.inset(' not in import_control and '.clipShape(' not in import_control and
-         import_control.index('.frame(minWidth: 44') < import_control.index('.background {') < import_control.index('.contentShape(') and
-         '.padding(' not in import_control[import_control.index('.contentShape('):],
-         'import-visible-44-surface-border-shape-coincident-no-external-padding')
+         '.contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))' in import_control and
+         'AppControlButtonStyle(foreground: appearance.accent, surface: appearance.accent.opacity(0.12))' in import_control and
+         '.stroke' not in import_control and '.padding(' not in import_control[import_control.index('.contentShape('):],
+         'soft-import-single-filled-pill-44-hit-shape-no-frame-or-outer-target')
     options = block(management, '    private func optionLabel(')
-    need(management.count('.buttonStyle(.plain)') == 2 and
-         management.count('.listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))') == 2 and
-         '.listRowBackground(Color.clear)' in management and
-         '.frame(minWidth: 44, maxWidth: .infinity, minHeight: 44, alignment: .leading)' in options and
-         'let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)' in options and
-         'shape.fill(appearance.surface)' in options and 'shape.strokeBorder(appearance.edge, lineWidth: 0.8)' in options and
-         '.contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))' in options and
-         '.allowsHitTesting(false)' in options and '.inset(' not in options and '.clipShape(' not in options and
-         options.index('.padding(12)') < options.index('.frame(minWidth: 44') < options.index('.background {') < options.index('.contentShape(') and
-         '.padding(' not in options[options.index('.contentShape('):],
-         'management-menu-one-step-explicit-visible-card-not-auto-list-row')
+    need(management.count('.buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0))') == 2 and
+         management.count('.listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))') == 2 and
+         management.count('.listRowBackground(appearance.groupSurface)') == 1 and
+         '.frame(minWidth: 44, maxWidth: .infinity, minHeight: 64, alignment: .leading)' in options and
+         '.contentShape(Rectangle())' in options and '.background(' not in options and '.stroke' not in options and
+         '.padding(' not in options[options.index('.contentShape('):] and
+         'Text(value)' in options and 'chevron.down' in options and 'ViewThatFits(in: .horizontal)' in options,
+         'management-menu-shared-group-row-local-press-not-transparent-outer-row')
+    need('shape.fill(item == section ? appearance.softSelection : .clear)' in shell and '.strokeBorder(' not in shell and
+         'AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12)' in shell,
+         'drawer-only-current-soft-band-no-card-stack')
     need('ReaderDiagnosticsView(importState: model.importDiagnostics, importSummary: model.processingSummary)' in c and
          'Bundle.main.url(forResource: "GRDB-LICENSE", withExtension: "txt")' in management and
          'Text(Self.text)' in management and 'try? String(contentsOf: url, encoding: .utf8)' in management,
@@ -179,10 +175,15 @@ def protection(baseline_path, sources):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--historical-baseline', '--baseline', dest='baseline', type=Path, help='Historical navigation batch hash protection only; current paint is validated by default')
     args = parser.parse_args()
     sources = {p:(ROOT/p).read_text(encoding='utf8') for p in FILES}
     checked = contracts(sources)
+    if not args.baseline:
+        from check_ui_control_cohesion import current_exact
+        exact_paint = current_exact(sources)
+    else:
+        exact_paint = 'historical hash mode; no current freeze substitution'
     controls = [
         ('wrong-layout-key', FILES[1], 'dev.yuejing.ui.libraryLayout.v1', 'dev.yuejing.ui.appAppearance.v1'),
         ('wrong-default', FILES[1], 'defaultLayout: LibraryLayout = .tabs', 'defaultLayout: LibraryLayout = .direct'),
@@ -200,9 +201,11 @@ def main():
         ('wrong-import-action', CONTENT, 'Button { model.beginFileSelection() }', 'Button { model.cancelImport() }'),
         ('wrong-import-ax-name', CONTENT, '.accessibilityLabel("导入书籍")', '.accessibilityLabel("打开")'),
         ('import-under44', CONTENT, 'minHeight: LibraryAppearance.minimumControlHeight', 'minHeight: 32'),
-        ('import-visible-inset', CONTENT, 'shape.fill(appearance.accent.opacity(0.08))', 'shape.inset(by: 6).fill(appearance.accent.opacity(0.08))'),
-        ('menu-auto-list-row', FILES[4], '.buttonStyle(.plain)', '.buttonStyle(.automatic)'),
-        ('menu-mismatched-shape', FILES[4], 'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8'),
+        ('import-extra-transparent-target', CONTENT, '.contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))', '.contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous)).padding(8)'),
+        ('menu-auto-list-row', FILES[4], '.buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0))', '.buttonStyle(.automatic)'),
+        ('menu-expanded-row', FILES[4], '.contentShape(Rectangle())', '.contentShape(Rectangle()).padding(8)'),
+        ('menu-under44', FILES[4], 'minWidth: 44, maxWidth: .infinity, minHeight: 64', 'minWidth: 32, maxWidth: .infinity, minHeight: 32'),
+        ('drawer-all-selected', FILES[2], 'item == section ? appearance.softSelection : .clear', 'true ? appearance.softSelection : .clear'),
     ]
     rejected = []
     for label, path, old, new in controls:
@@ -215,6 +218,7 @@ def main():
     gates = ['service','feedback','not-importing','no-encoding','no-message','no-reader','no-planned-push','no-info-push','no-drawer']
     specification = {name: not all([True]*i+[False]+[True]*(len(gates)-i-1)) for i,name in enumerate(gates)}
     assert all(specification.values()) and all([True]*len(gates))
+    checked.append('current-exact-paint-deltas-business-rest-equal' if not args.baseline else 'explicit-historical-mode')
     result = dict(kind='OFFLINE_SOURCE_HASH_AND_SPEC_NOT_NATIVE', source_checks=len(checked), checks=checked,
                   negative_controls_rejected=rejected, synthetic_gate_truth_table=specification,
                   protection=protection(args.baseline,sources) if args.baseline else 'not requested',

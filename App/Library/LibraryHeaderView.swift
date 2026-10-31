@@ -4,20 +4,10 @@ import SwiftUI
 struct LibraryHeaderView: View {
     let bookCount: Int
     let appearance: LibraryAppearance
+    var showsShelfTitle: Bool = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("书架")
-                    .font(LibraryAppearance.titleFont)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 8)
-                Text("\(bookCount) 本")
-                    .font(.caption).monospacedDigit()
-                    .foregroundStyle(appearance.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 8) {
                 // The open gate/book mark is decorative, not a new action.
                 Path { path in
@@ -41,18 +31,24 @@ struct LibraryHeaderView: View {
                 .stroke(appearance.accent, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
                 .frame(width: 18, height: 18)
                 .accessibilityHidden(true)
-                Text("开卷，自有一境。")
-                    .font(.footnote).foregroundStyle(appearance.secondary)
+                Text("阅境 · 本地书籍").font(.caption).foregroundStyle(appearance.secondary)
+                Spacer(minLength: 8)
+                Text("\(bookCount) 本").font(.caption.monospacedDigit())
+                    .foregroundStyle(appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Rectangle().fill(appearance.edge).frame(height: 0.5)
-                .overlay(alignment: .leading) {
-                    Capsule().fill(appearance.accent).frame(width: 28, height: 3)
-                }
-                .padding(.top, 6)
-                .accessibilityHidden(true)
+            Text(showsShelfTitle ? "书架" : "开卷，自有一境。")
+                .font(showsShelfTitle ? LibraryAppearance.titleFont : .system(.title2, design: .serif).weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+            if showsShelfTitle {
+                Text("开卷，自有一境。").font(.system(.subheadline, design: .serif))
+                    .foregroundStyle(appearance.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Rectangle().fill(appearance.edge.opacity(0.6)).frame(height: 0.5)
+                .padding(.top, 12).accessibilityHidden(true)
         }
         .foregroundStyle(appearance.foreground)
-        .padding(.top, 8).padding(.bottom, 2)
+        .padding(.top, 8).padding(.bottom, 16)
     }
 }

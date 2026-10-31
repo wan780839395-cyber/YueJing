@@ -66,17 +66,11 @@ struct ContentView: View {
                             Label("更多", systemImage: "ellipsis")
                                 .labelStyle(.iconOnly)
                                 .font(AppVisualStyle.actionFont).imageScale(.medium)
-                                .foregroundStyle(appearance.accent)
+                                .foregroundStyle(appearance.foreground)
                                 .frame(minWidth: 44, minHeight: 44)
-                                .background {
-                                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    shape.fill(appearance.surface)
-                                        .overlay { shape.strokeBorder(appearance.edge, lineWidth: 0.8) }
-                                        .allowsHitTesting(false)
-                                }
                                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
                         .disabled(!canChangeManagement)
                     }
                 }
@@ -90,15 +84,9 @@ struct ContentView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.horizontal, 12)
                                 .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
-                                .background {
-                                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    shape.fill(appearance.accent.opacity(0.08))
-                                        .overlay { shape.strokeBorder(appearance.accent.opacity(0.3), lineWidth: 0.8) }
-                                        .allowsHitTesting(false)
-                                }
-                                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(AppControlButtonStyle(foreground: appearance.accent, surface: appearance.accent.opacity(0.12)))
                         .accessibilityLabel("导入书籍")
                         .disabled(!model.canBeginFileSelection || !canChangeManagement)
                         .accessibilityHidden(drawerPresented)

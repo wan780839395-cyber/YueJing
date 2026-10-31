@@ -20,7 +20,7 @@ enum ReaderVisualStyle {
     static var panelActionFont: Font { AppVisualStyle.actionFont }
 
     static func surface(for theme: ReaderTheme) -> Color {
-        theme == .dark ? rgb(36, 45, 39) : rgb(250, 251, 247)
+        theme == .dark ? rgb(38, 46, 41) : (theme == .paper ? rgb(247, 245, 237) : rgb(249, 250, 247))
     }
 
     static func edge(for theme: ReaderTheme) -> Color {
@@ -32,7 +32,7 @@ enum ReaderVisualStyle {
     }
 
     static func sectionSurface(for theme: ReaderTheme) -> Color {
-        theme == .dark ? rgb(42, 52, 45) : rgb(252, 253, 249)
+        theme == .dark ? rgb(45, 53, 47) : (theme == .paper ? rgb(241, 238, 227) : rgb(241, 244, 238))
     }
 
     private static func rgb(_ red: Double, _ green: Double, _ blue: Double) -> Color {

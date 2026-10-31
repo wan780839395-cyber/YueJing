@@ -87,7 +87,7 @@ def source_contracts(sources):
          'Text(' not in b and 'Label(' not in b and 'model.' not in b and '.frame(maxWidth: .infinity)' in b,
          'b-actual-empty-center-no-chapter-progress-or-query')
     need('.padding(.horizontal, layout == .tabs ? 0 : 16).padding(.bottom, layout == .tabs ? 0 : 8)' in s and
-         '.ignoresSafeArea' not in d and 'Rectangle().fill(appearance.edge).frame(height: 0.5).allowsHitTesting(false)' in b,
+         '.ignoresSafeArea' not in d and '.background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))' in b,
          'b-safe-area-edge-bar-only-dock-margins-changed')
     need('if trayExpanded {' in edge and
          'HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }' in edge and
@@ -114,30 +114,26 @@ def source_contracts(sources):
          'ScrollView(.vertical)' in edge and 'VStack(spacing: 4) { directoryButton; settingsButton }' in d and
          'metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8' in edge,
          'width-fallbacks-and-bounded-scroll-for-large-font-short-height')
-    # A/C tray enclosures are noninteractive backgrounds; the C capsule surface
-    # belongs to its Button label, not a transparent outer button rectangle.
-    need('.overlay' not in d and all('.stroke(appearance.edge, lineWidth: 0.5).allowsHitTesting(false)' in region
-                                   for region in (a, edge)) and
-         'Capsule().strokeBorder(appearance.edge, lineWidth: 0.8).allowsHitTesting(false)' in edge and
-         '.background(appearance.fill, in: Capsule())\n                        .contentShape(Capsule())' in edge and
-         edge.index('.frame(minWidth: 44, minHeight: metrics.controlHeight)') < edge.index('Capsule().strokeBorder(') < edge.index('.contentShape(Capsule())') and
-         '.contentShape(Rectangle())' not in d and
-         d.count('.buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))') == 2,
-         'dock-label-capsule-and-tray-decorations-noninteractive-coincident-bounds')
+    need('.overlay' not in d and '.stroke' not in d and d.count('.shadow(') == 3 and
+         'cornerRadius: 28' in a and 'cornerRadius: 24' in edge and
+         '.background(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1), in: RoundedRectangle(cornerRadius: 28, style: .continuous))' in edge and
+         '.contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))' in edge and
+         'ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)' in edge and
+         'ReaderCompactButtonStyle(tint: appearance.foreground)' in d and
+         'ReaderCompactButtonStyle(tint: appearance.secondary)' in collapse,
+         'dock-one-soft-surface-per-group-with-quiet-foreground-actions')
     style = sources[COMPACT_STYLE]
     need('.frame(minWidth: 44, minHeight: 44)' in style and '.inset(' not in style and
-         '.contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))' in style and
-         'let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)' in style and
-         'shape.strokeBorder(' in style and '.allowsHitTesting(false)' in style,
-         'dock-shared-tool-visible-44-matching-rounded-surface-not-inset32')
+         '.contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))' in style and
+         'var role: ReaderControlRole = .quiet' in style and 'role == .primary ? 0.06 : 0)))' in style and
+         '.stroke' not in style and '.allowsHitTesting(false)' in style,
+         'dock-shared-tool-44-geometry-independent-of-quiet-paint')
     header = member(s, '    private func titleBar(', '    private var panelPresentation:')
-    stroke = '.background { RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(appearance.edge, lineWidth: 0.5) }'
-    fill = '.background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))'
-    need(stroke in header and fill in header and header.index(stroke) < header.index(fill) and
-         'Button { exitReader() }' in header and '.accessibilityIdentifier("reader.exit")' in header and
-         '.frame(minWidth: 44, minHeight: 44)' in header and
+    need('.background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))' in header and
+         '.stroke' not in header and 'Button { exitReader() }' in header and
+         '.accessibilityIdentifier("reader.exit")' in header and '.frame(minWidth: 44, minHeight: 44)' in header and
          '.allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)' in header,
-         'exit-header-original-action-hit-region-id-and-stroke-before-fill')
+         'exit-header-only-paint-changed-original-button-frame-action-gates')
     return checks
 
 
@@ -268,8 +264,8 @@ def negative_controls(sources, snapshots):
         ('D1-lost-panel-return', SCREEN, 'lastPanelControl = panel == .directory ? "directory" : "settings"', 'lastPanelControl = "dock.expand"'),
         ('D1-layout-reset-stale-target', DOCK, '            rememberFocus(layout == .sidebar ? "dock.expand" : "back")\n', ''),
         ('b-middle-button-intrusion', DOCK, 'Spacer(minLength: 24).accessibilityHidden(true)', 'Button("middle") { open(.settings) }'),
-        ('c-capsule-shape-mismatch', DOCK, '.contentShape(Capsule())', '.contentShape(Rectangle())'),
-        ('tool-visible-inset', COMPACT_STYLE, 'shape\n                    .fill(', 'shape.inset(by: 6)\n                    .fill('),
+        ('c-capsule-shape-mismatch', DOCK, '.contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))', '.contentShape(Rectangle())'),
+        ('tool-quiet-paint-regression', COMPACT_STYLE, 'role == .primary ? 0.06 : 0', 'role == .primary ? 0.06 : 0.08'),
         ('tool-under44', COMPACT_STYLE, '.frame(minWidth: 44, minHeight: 44)', '.frame(minWidth: 32, minHeight: 32)'),
     ]
     rejected = []
@@ -307,7 +303,7 @@ def negative_controls(sources, snapshots):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline', type=Path, help='Actual pre-edit freeze, NOT an old batch')
+    parser.add_argument('--historical-baseline', '--baseline', dest='baseline', type=Path, help='Historical dock hash protection only')
     parser.add_argument('--snapshot-root', type=Path, help='Three complete pre-edit copies')
     args = parser.parse_args()
     if bool(args.baseline) != bool(args.snapshot_root):
@@ -316,6 +312,10 @@ def main():
     sources = {p: (ROOT/p).read_text(encoding='utf8') for p in paths}
     d1_checks = d1_focus_contracts(sources)
     checks = source_contracts(sources) + d1_checks
+    if not args.baseline:
+        from check_ui_control_cohesion import current_exact
+        current_exact(sources)
+        checks.append('current-exact-paint-deltas-preserve-screen-and-dock-business')
     specifications = d1_focus_specifications(sources)
     controls = negative_controls(sources, args.snapshot_root)
     print(json.dumps(dict(kind='OFFLINE_SOURCE_AND_HASH_NOT_SWIFT_OR_UI_EXECUTION', source_checks=len(checks), checks=checks,

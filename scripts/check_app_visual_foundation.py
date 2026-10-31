@@ -48,7 +48,7 @@ def contracts(sources):
             '            && model.encodingChoice?.id == nil && model.message == nil\n'
             '            && readerRoutes.presentation?.id == nil' in content, 'six-original-busy-gates')
     management, shelf, shell, layout = (sources[p] for p in (MANAGEMENT, SHELF, SHELL, LAYOUT))
-    menu = management[management.index('Section("外观与入口")'):management.index('Section("格式与书籍显示")')]
+    menu = management[management.index('        Section {', management.index('struct LibraryManagementOptions')):management.index('Section("格式与书籍显示")')]
     selection = navigation.block(content, '    private func chooseAppearance(')
     require('Menu { managementOptions(asMenu: true) } label:' in content and
             r'ForEach(AppAppearance.allCases, id: \.self)' in menu and
@@ -69,15 +69,13 @@ def contracts(sources):
             'optionLabel("外观", value: appAppearance.title' in menu,
             'current-selection-text-checkmark-value-and-ax-label')
     option = navigation.block(management, '    private func optionLabel(')
-    require('.frame(minWidth: 44, maxWidth: .infinity, minHeight: 44, alignment: .leading)' in option and
-            'let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)' in option and
-            'shape.fill(appearance.surface)' in option and 'shape.strokeBorder(appearance.edge, lineWidth: 0.8)' in option and
-            '.contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))' in option and
-            '.allowsHitTesting(false)' in option and '.inset(' not in option and '.clipShape(' not in option and
-            option.index('.padding(12)') < option.index('.frame(minWidth: 44') < option.index('.background {') < option.index('.contentShape(') and
+    require('.frame(minWidth: 44, maxWidth: .infinity, minHeight: 64, alignment: .leading)' in option and
+            '.contentShape(Rectangle())' in option and '.background' not in option and '.stroke' not in option and
+            option.index('.padding(.horizontal, 16)') < option.index('.frame(minWidth: 44') < option.index('.contentShape(') and
             '.padding(' not in option[option.index('.contentShape('):] and
-            '.buttonStyle(.plain)' in menu and '.listRowBackground(Color.clear)' in menu,
-            'visible-menu-card-44-surface-stroke-shape-not-implicit-row')
+            menu.count('AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0)') == 2 and
+            '.listRowBackground(appearance.groupSurface)' in menu,
+            'shared-soft-menu-row-current-value-local-press-not-card-outline')
     require(not re.search(r'\b(model|readerRoutes|Task|Timer|NotificationCenter|UserDefaults)\b', menu+option), 'menu-no-service-task-or-reader-effects')
     require('dev.yuejing.ui.libraryLayout.v1' in layout and KEY not in layout and
             '@AppStorage(LibraryLayout.storageKey) private var libraryLayoutRawValue' in content and
@@ -94,7 +92,7 @@ def contracts(sources):
             'ui-token-access-main-actor-not-pure-enum')
     for role in ('page', 'surface', 'foreground', 'secondary', 'edge', 'accent', 'coverSurface'):
         require(f'var {role}: Color {{ style.{role} }}' in library, 'library-role-' + role)
-    require(all(x in shelf for x in ('LibraryHeaderView(bookCount: books.count, appearance: appearance)',
+    require(all(x in shelf for x in ('LibraryHeaderView(bookCount: books.count, appearance: appearance, showsShelfTitle: layout == .direct)',
                 'LibraryBookRow(book: book, appearance: appearance)', 'LibraryPlannedEntriesView(appearance: appearance,',
                 '.background(appearance.page.ignoresSafeArea())', '.foregroundStyle(appearance.foreground)', '.tint(appearance.accent)')) and
             'LibraryShelfContent(books: model.books' in content and
@@ -105,13 +103,15 @@ def contracts(sources):
             'three-palettes-system-light-dark-handled')
     require('AppAppearance' not in reader and '@AppStorage' not in reader and 'colorScheme' not in reader,
             'reader-does-not-consume-app-selection')
-    for name, dark, light in [('surface', '36, 45, 39', '250, 251, 247'),
-                              ('edge', '58, 71, 61', '223, 229, 219'),
-                              ('accent', '212, 172, 144', '139, 91, 76'),
-                              ('sectionSurface', '42, 52, 45', '252, 253, 249')]:
-        require(f'static func {name}(for theme: ReaderTheme) -> Color {{\n'
-                f'        theme == .dark ? rgb({dark}) : rgb({light})\n    }}' in reader,
-                'reader-original-theme-colors-' + name)
+    for name, value in [('surface', 'theme == .dark ? rgb(38, 46, 41) : (theme == .paper ? rgb(247, 245, 237) : rgb(249, 250, 247))'),
+                        ('edge', 'theme == .dark ? rgb(58, 71, 61) : rgb(223, 229, 219)'),
+                        ('accent', 'theme == .dark ? rgb(212, 172, 144) : rgb(139, 91, 76)'),
+                        ('sectionSurface', 'theme == .dark ? rgb(45, 53, 47) : (theme == .paper ? rgb(241, 238, 227) : rgb(241, 244, 238))')]:
+        require(f'static func {name}(for theme: ReaderTheme) -> Color {{\n        {value}\n    }}' in reader,
+                'reader-independent-soft-tool-colors-'+name)
+    require('var surface: Color = .clear' in style and 'foreground.opacity(pressed ? 0.08 : 0)' in style and
+            'let animatePress = isEnabled && !reduceMotion' in style and 'if !animatePress { $0.animation = nil }' in style,
+            'management-quiet-vs-primary-paint-local-press-motion')
     for token, value in [('minimumControlHeight', '44'), ('compactSpacing', '8'), ('dividerHeight', '0.5')]:
         require(f'static let {token}: CGFloat = {value}' in style and f'AppVisualStyle.{token}' in reader,
                 'shared-constant-unchanged-' + token)
@@ -156,6 +156,10 @@ def main():
     args = parser.parse_args()
     sources = {p: (ROOT / p).read_text(encoding='utf-8') for p in FILES}
     checks = contracts(sources)
+    if not args.snapshot_root:
+        from check_ui_control_cohesion import current_exact
+        current_exact(sources)
+        checks.append('current-exact-paint-deltas-persistence-and-business-unchanged')
     mutations = [
         ('wrong-key', STYLE, KEY, 'dev.yuejing.reader.theme'),
         ('reader-theme-mapping', STYLE, 'AppAppearance(rawValue: rawValue)', 'ReaderTheme(rawValue: rawValue)'),
@@ -164,11 +168,12 @@ def main():
         ('lost-selection-wire', CONTENT, 'onAppearance: chooseAppearance', 'onAppearance: { _ in }'),
         ('fallback-write', CONTENT, 'appAppearanceRawValue = option.rawValue', 'appAppearanceRawValue = option.rawValue; appAppearanceRawValue = "mist"'),
         ('service-side-effect', CONTENT, 'appAppearanceRawValue = option.rawValue', 'appAppearanceRawValue = option.rawValue; model.savePreferences()'),
-        ('reader-color-drift', READER, 'rgb(36, 45, 39)', 'rgb(1, 2, 3)'),
+        ('reader-color-drift', READER, 'rgb(38, 46, 41)', 'rgb(1, 2, 3)'),
         ('layout-persist-confusion', LAYOUT, 'dev.yuejing.ui.libraryLayout.v1', KEY),
-        ('menu-under44', MANAGEMENT, 'minWidth: 44, maxWidth: .infinity, minHeight: 44', 'minWidth: 32, maxWidth: .infinity, minHeight: 32'),
-        ('menu-shape-mismatch', MANAGEMENT, 'contentShape(RoundedRectangle(cornerRadius: 12', 'contentShape(RoundedRectangle(cornerRadius: 8'),
-        ('menu-visible-inset', MANAGEMENT, 'shape.fill(appearance.surface)', 'shape.inset(by: 6).fill(appearance.surface)'),
+        ('menu-under44', MANAGEMENT, 'minWidth: 44, maxWidth: .infinity, minHeight: 64', 'minWidth: 32, maxWidth: .infinity, minHeight: 32'),
+        ('menu-expanded-hit', MANAGEMENT, '.contentShape(Rectangle())', '.contentShape(Rectangle()).padding(8)'),
+        ('menu-automatic-row', MANAGEMENT, 'AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0)', '.automatic'),
+        ('management-no-reduce-motion', STYLE, 'isEnabled && !reduceMotion', 'isEnabled'),
     ]
     rejected = []
     for name, path, before, after in mutations:
