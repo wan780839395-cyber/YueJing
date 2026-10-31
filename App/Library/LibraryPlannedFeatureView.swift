@@ -3,9 +3,12 @@ import SwiftUI
 @MainActor
 struct LibraryPlannedFeatureView: View {
     let feature: LibraryPlannedFeature
-    @Environment(\.colorScheme) private var colorScheme
+    let appearance: LibraryAppearance
 
-    private var appearance: LibraryAppearance { LibraryAppearance(colorScheme: colorScheme) }
+    init(feature: LibraryPlannedFeature, appearance: LibraryAppearance) {
+        self.feature = feature
+        self.appearance = appearance
+    }
 
     var body: some View {
         ScrollView {
@@ -43,6 +46,7 @@ struct LibraryPlannedFeatureView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(appearance.page, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(appearance.controlColorScheme, for: .navigationBar)
         .accessibilityIdentifier("library.planned.\(feature.rawValue)")
     }
 }

@@ -7,17 +7,17 @@ import SwiftUI
 enum ReaderVisualStyle {
     static let panelHorizontalInset: CGFloat = 20
     static let panelTopInset: CGFloat = 12
-    static let panelHeaderSpacing: CGFloat = 8
+    static let panelHeaderSpacing: CGFloat = AppVisualStyle.compactSpacing
     static let panelCornerRadius: CGFloat = 24
-    static let panelDividerHeight: CGFloat = 0.5
-    static let minimumControlHeight: CGFloat = 44
+    static let panelDividerHeight: CGFloat = AppVisualStyle.dividerHeight
+    static let minimumControlHeight: CGFloat = AppVisualStyle.minimumControlHeight
     static let panelActionMinimumWidth: CGFloat = 56
     static let headingMarkWidth: CGFloat = 3
     static let headingMarkHeight: CGFloat = 18
 
     // Semantic styles retain Dynamic Type; no bundled or downloaded fonts.
-    static var panelTitleFont: Font { .system(.title, design: .serif).weight(.medium) }
-    static var panelActionFont: Font { .subheadline.weight(.medium) }
+    static var panelTitleFont: Font { AppVisualStyle.panelTitleFont }
+    static var panelActionFont: Font { AppVisualStyle.actionFont }
 
     static func surface(for theme: ReaderTheme) -> Color {
         theme == .dark ? rgb(36, 45, 39) : rgb(250, 251, 247)

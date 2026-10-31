@@ -6,15 +6,31 @@ import UIKit
 struct ContentView: View {
     @StateObject private var model: LibraryViewModel
     @StateObject private var readerRoutes = ReaderRouteOwner()
+    @State private var plannedNavigation = LibraryPlannedNavigation()
+    @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.defaultAppearance.rawValue
+    @AppStorage(LibraryLayout.storageKey) private var libraryLayoutRawValue = LibraryLayout.defaultLayout.rawValue
+    @State private var selectedSection: LibrarySection = .shelf
+    @State private var drawerPresented = false
+    @State private var informationRoute: LibraryInformationRoute?
+    @State private var displayedInformation: LibraryInformationPage = .diagnostics
     @Environment(\.colorScheme) private var colorScheme
 
-    private var appearance: LibraryAppearance { LibraryAppearance(colorScheme: colorScheme) }
+    private var appAppearance: AppAppearance { AppAppearance.restored(from: appAppearanceRawValue) }
+    private var layout: LibraryLayout { LibraryLayout.restored(from: libraryLayoutRawValue) }
+    private var appearance: LibraryAppearance {
+        LibraryAppearance(colorScheme: colorScheme, appAppearance: appAppearance)
+    }
     /// New static destinations must not compete with import or reading presentation.
     private var canOpenPlannedFeatures: Bool {
         model.service != nil && model.canPresentLibraryFeedback && !model.importing
             && model.encodingChoice?.id == nil && model.message == nil
             && readerRoutes.presentation?.id == nil
     }
+    // A dismissed picker session is retained by the existing model; its dismissal gate above is authoritative.
+    private var canNavigateManagement: Bool {
+        canOpenPlannedFeatures && !plannedNavigation.isActive && informationRoute == nil
+    }
+    private var canChangeManagement: Bool { canNavigateManagement && !drawerPresented }
 
     init() {
         _model = StateObject(wrappedValue: LibraryViewModel(makeService: Self.makeLibraryService))
@@ -31,108 +47,52 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    LibraryHeaderView(bookCount: model.books.count, appearance: appearance)
-                        .listRowInsets(EdgeInsets(top: 8, leading: LibraryAppearance.horizontalInset,
-                                                  bottom: 6, trailing: LibraryAppearance.horizontalInset))
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(appearance.page)
-                }
-                if let notice = model.notice {
-                    Section {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text(notice.title).font(.headline).accessibilityAddTraits(.isHeader)
-                            Text(notice.detail).fixedSize(horizontal: false, vertical: true)
-                            Button("关闭这条提示") { model.notice = nil }.frame(minHeight: 44)
-                        }.padding(.vertical, 4)
-                    }
-                    .listRowBackground(appearance.surface)
-                }
-                if model.importing {
-                    Section {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .top) {
-                                ProgressView().accessibilityHidden(true)
-                                Text(model.importPresentation.title).font(.headline)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Text(model.importPresentation.detail).font(.footnote)
-                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            Button(model.importPresentation.stopRequested ? "正在停止…" : "停止准备") {
-                                Task { await model.cancelImport() }
-                            }
-                            .disabled(model.importPresentation.stopRequested)
-                            .frame(minHeight: 44)
-                            .accessibilityHint("请求停止并等待最终结果，已完成的入架不会被撤销")
-                        }
-                    }
-                    .listRowBackground(appearance.surface)
-                }
-                if model.books.isEmpty {
-                    Section {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Label("把第一本书放进阅境", systemImage: "books.vertical").font(.title3)
-                            Text("从“文件”选择 TXT。应用只管理自己的副本，原文件保持不变。")
-                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }.padding(.vertical, 8)
-                    }
-                    .listRowBackground(appearance.surface)
-                } else {
-                    Section("最近阅读与新加入") {
-                        ForEach(model.books) { book in
-                            Button {
-                                if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }
-                            } label: {
-                                LibraryBookRow(book: book, appearance: appearance)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityElement(children: .combine)
-                            .accessibilityHint("打开正文，恢复已保存的阅读位置")
-                            .listRowInsets(EdgeInsets(top: 0, leading: LibraryAppearance.horizontalInset,
-                                                      bottom: 0, trailing: LibraryAppearance.horizontalInset))
-                            .listRowSeparatorTint(appearance.edge)
-                            .listRowBackground(appearance.page)
-                        }
-                    }
-                }
-                Section {
-                    LibraryPlannedEntriesView(appearance: appearance, canOpenFeatures: canOpenPlannedFeatures)
-                        .listRowInsets(EdgeInsets(top: 8, leading: LibraryAppearance.horizontalInset,
-                                                  bottom: 0, trailing: LibraryAppearance.horizontalInset))
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(appearance.page)
-                }
-                if model.service == nil {
-                    Button("重新打开书架") { Task { await model.start() } }.frame(minHeight: 44)
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(appearance.page.ignoresSafeArea())
-            .foregroundStyle(appearance.foreground)
-            .tint(appearance.accent)
-            .navigationTitle("阅境")
+            LibraryNavigationShell(layout: layout, section: sectionSelection, drawerPresented: drawerPresentation,
+                canNavigate: canNavigateManagement, appearance: appearance,
+                onDrawerSection: selectDrawerSection, onDrawerInformation: openDrawerInformation,
+                shelf: shelfContent,
+                explore: LibraryExploreContent(appearance: appearance, canOpenFeatures: canChangeManagement,
+                                               onOpenFeature: openPlannedFeature),
+                settings: LibrarySettingsContent(appearance: appearance, options: managementOptions(asMenu: false)))
+            .navigationTitle(layout == .direct ? "阅境" : selectedSection.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(appearance.page, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(appearance.controlColorScheme, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    NavigationLink {
-                        ReaderDiagnosticsView(importState: model.importDiagnostics, importSummary: model.processingSummary)
-                    } label: {
-                        Label("诊断与耗时", systemImage: "ladybug")
-                            .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                if layout == .direct {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Menu { managementOptions(asMenu: true) } label: {
+                            Label("更多", systemImage: "ellipsis")
+                                .frame(minWidth: 44, minHeight: 44)
+                                .background(appearance.surface, in: Capsule())
+                        }
+                        .disabled(!canChangeManagement)
                     }
-                    .disabled(!model.canPresentLibraryFeedback)
-                    .accessibilityHint("查看本次导入的安全阶段记录与本地耗时")
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { model.beginFileSelection() } label: {
-                        Label("导入 TXT", systemImage: "plus")
-                            .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                if layout == .direct || selectedSection == .shelf {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button { model.beginFileSelection() } label: {
+                            Label("导入书籍", systemImage: "plus")
+                                .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                                .padding(.horizontal, layout == .direct ? 12 : 0)
+                                .background(appearance.surface, in: Capsule())
+                        }
+                        .disabled(!model.canBeginFileSelection || !canChangeManagement)
+                        .accessibilityHidden(drawerPresented)
+                        .accessibilityHint("当前仅支持 TXT；EPUB 规划中，未接入")
                     }
-                        .disabled(!model.canBeginFileSelection)
+                }
+            }
+            .navigationDestination(isPresented: plannedFeaturePresentation) {
+                LibraryPlannedFeatureView(feature: plannedNavigation.displayedFeature, appearance: appearance)
+            }
+            .navigationDestination(isPresented: informationPresentation) {
+                switch displayedInformation {
+                case .diagnostics:
+                    ReaderDiagnosticsView(importState: model.importDiagnostics, importSummary: model.processingSummary)
+                case .license:
+                    LibraryLicenseView(appearance: appearance)
                 }
             }
         }
@@ -143,7 +103,7 @@ struct ContentView: View {
             #endif
         }
         .fullScreenCover(item: readerPresentation) { route in
-            ReaderScreen(model: route.model, routeID: route.id) { readerRoutes.finishExit(route.id) }
+            ReaderScreen(model: route.model, routeID: route.id, layout: layout) { readerRoutes.finishExit(route.id) }
                 .id(route.id)
         }
         .task { await model.start() }
@@ -169,11 +129,97 @@ struct ContentView: View {
         } message: { Text(model.message ?? "") }
     }
 
+    private var shelfContent: some View {
+        LibraryShelfContent(books: model.books, notice: model.notice, importing: model.importing,
+            importPresentation: model.importPresentation, serviceUnavailable: model.service == nil,
+            layout: layout, appearance: appearance, canOpenFeatures: canChangeManagement,
+            onOpenBook: { book in
+                guard canChangeManagement else { return }
+                if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }
+            },
+            onDismissNotice: { model.notice = nil },
+            onCancelImport: { Task { await model.cancelImport() } },
+            onRetry: { Task { await model.start() } }, onOpenFeature: openPlannedFeature)
+    }
+
+    private func managementOptions(asMenu: Bool) -> some View {
+        LibraryManagementOptions(asMenu: asMenu, appearance: appearance, appAppearance: appAppearance,
+            layout: layout, canChange: canChangeManagement, onAppearance: chooseAppearance,
+            onLayout: chooseLayout, onOpenFeature: openPlannedFeature, onInformation: openInformation)
+    }
+
+    private func chooseAppearance(_ option: AppAppearance) {
+        guard canChangeManagement else { return }
+        appAppearanceRawValue = option.rawValue
+    }
+
+    private func chooseLayout(_ option: LibraryLayout) {
+        guard canChangeManagement else { return }
+        libraryLayoutRawValue = option.rawValue
+        selectedSection = .shelf
+        drawerPresented = false
+    }
+
+    private var sectionSelection: Binding<LibrarySection> {
+        Binding(get: { selectedSection }, set: { value in
+            guard canChangeManagement else { return }
+            selectedSection = value
+        })
+    }
+
+    private var drawerPresentation: Binding<Bool> {
+        Binding(get: { drawerPresented }, set: { open in
+            if open {
+                guard layout == .sidebar, canChangeManagement else { return }
+            }
+            drawerPresented = open
+        })
+    }
+
+    private func selectDrawerSection(_ section: LibrarySection) {
+        guard drawerPresented, canNavigateManagement else { return }
+        selectedSection = section
+        drawerPresented = false
+    }
+
+    private func openDrawerInformation(_ page: LibraryInformationPage) {
+        guard drawerPresented, canNavigateManagement else { return }
+        drawerPresented = false
+        openInformation(page)
+    }
+
+    private func openInformation(_ page: LibraryInformationPage) {
+        guard canChangeManagement else { return }
+        displayedInformation = page
+        informationRoute = LibraryInformationRoute(page: page)
+    }
+
+    private var informationPresentation: Binding<Bool> {
+        let expectedID = informationRoute?.id
+        return Binding(get: { informationRoute != nil }, set: { presented in
+            guard !presented, let expectedID, informationRoute?.id == expectedID else { return }
+            informationRoute = nil
+        })
+    }
+
     private var readerPresentation: Binding<ReaderPresentation?> {
         let expected = readerRoutes.presentation
         return Binding(get: { readerRoutes.presentation }, set: { value in
             guard value == nil, let expected else { return }
             readerRoutes.presentationEnded(expected)
+        })
+    }
+
+    private func openPlannedFeature(_ feature: LibraryPlannedFeature) {
+        guard canChangeManagement else { return }
+        _ = plannedNavigation.begin(feature, allowed: canOpenPlannedFeatures)
+    }
+
+    private var plannedFeaturePresentation: Binding<Bool> {
+        let expectedID = plannedNavigation.activeRoute?.id
+        return Binding(get: { plannedNavigation.isActive }, set: { isPresented in
+            guard !isPresented, let expectedID else { return }
+            _ = plannedNavigation.end(id: expectedID)
         })
     }
 }

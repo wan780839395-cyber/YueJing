@@ -14,6 +14,7 @@ struct ReaderSettingsView: View {
     @State private var showRestore = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var closeFocused: Bool
 
     init(preferences: Binding<ReaderPreferences>, changed: @escaping @MainActor () -> Void,
@@ -29,11 +30,14 @@ struct ReaderSettingsView: View {
             ReaderPanelHeader(title: "排版", appearance: appearance) {
                 Button(action: finish) {
                     Text("完成").font(ReaderVisualStyle.panelActionFont)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
@@ -73,7 +77,7 @@ struct ReaderSettingsView: View {
 
     private var typographySection: some View {
         ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并自动保存", mark: "字", appearance: appearance) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 8) {
                 ReaderSettingAdjustment(title: "字号", key: "font", value: $draft.fontSize, range: 14...36,
                     accent: appearance.accent, isActive: isActive, commit: commitDraft)
                 Divider().overlay(appearance.edge)
@@ -85,46 +89,107 @@ struct ReaderSettingsView: View {
 
     private var themeSection: some View {
         ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", mark: "色", appearance: appearance) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: dynamicType.isAccessibilitySize ? 130 : 76), spacing: 10)], spacing: 12) {
-                ForEach(ReaderTheme.allCases, id: \.rawValue) { theme in themeButton(theme) }
-            }
+            threeOptionLayout(ReaderTheme.allCases) { theme in themeButton(theme) }
         }
     }
 
     private var presetsSection: some View {
         ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", mark: "式", appearance: appearance) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: dynamicType.isAccessibilitySize ? 130 : 76), spacing: 8)], spacing: 10) {
-                ForEach(ReaderTypographyPreset.allCases, id: \.rawValue) { preset in
-                    let selected = preset.matches(draft)
-                    Button { apply(preset) } label: {
-                        VStack(spacing: 4) {
-                            HStack(spacing: 4) {
-                                Text(preset.title).font(.subheadline.weight(.medium))
-                                if selected { Image(systemName: "checkmark").font(.caption).accessibilityHidden(true) }
-                            }
-                            Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))").font(.caption.monospacedDigit())
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 52).padding(.horizontal, 4)
-                        .background(selected ? appearance.accent.opacity(0.12) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 1.5 : 0.5) }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain).disabled(!isActive())
-                    .accessibilityLabel("\(preset.title)排版，字号 \(Int(preset.fontSize))，行距 \(Int(preset.lineSpacing))")
-                    .accessibilityValue(selected ? "已选择" : "未选择")
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                    .accessibilityIdentifier("reader.preset.\(preset.rawValue)")
+            VStack(spacing: 8) {
+                threeOptionLayout(ReaderTypographyPreset.allCases) { preset in presetButton(preset) }
+                restoreTypographyButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func threeOptionLayout<Option: Hashable, OptionView: View>(
+        _ options: [Option],
+        @ViewBuilder content: @escaping (Option) -> OptionView
+    ) -> some View {
+        if dynamicType.isAccessibilitySize {
+            VStack(spacing: 8) {
+                ForEach(options, id: \.self) { option in content(option) }
+            }
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(options, id: \.self) { option in content(option) }
+                }
+                VStack(spacing: 8) {
+                    ForEach(options, id: \.self) { option in content(option) }
                 }
             }
-            Button { if isActive() { showRestore = true } } label: {
-                Label("恢复默认字号与行距", systemImage: "arrow.counterclockwise")
-                    .font(.subheadline).frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
-            .accessibilityIdentifier("reader.typography.restore")
         }
+    }
+
+    private func presetButton(_ preset: ReaderTypographyPreset) -> some View {
+        let selected = preset.matches(draft)
+        let selectionMotionKey = reduceMotion ? 0 : (selected ? 1 : 2)
+        let selectionAnimation = reduceMotion ? nil : ReaderMotion.selectionFeedback
+        return Button { apply(preset) } label: {
+            VStack(spacing: 4) {
+                Text(preset.title)
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(appearance.foreground.opacity(selected ? 0.92 : 0.72))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 56)
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                shape.fill(selected ? appearance.accent.opacity(0.12) : appearance.card)
+                    .overlay {
+                        shape.strokeBorder(selected ? appearance.accent : appearance.edge,
+                                           lineWidth: selected ? 1.5 : 0.8)
+                    }
+                    .animation(selectionAnimation, value: selectionMotionKey)
+                    .transaction { transaction in
+                        if reduceMotion { transaction.animation = nil }
+                    }
+            }
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(appearance.accent)
+                    .padding(6)
+                    .opacity(selected ? 1 : 0)
+                    .animation(selectionAnimation, value: selectionMotionKey)
+                    .transaction { transaction in
+                        if reduceMotion { transaction.animation = nil }
+                    }
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActive())
+        .accessibilityLabel("\(preset.title)排版，字号 \(Int(preset.fontSize))，行距 \(Int(preset.lineSpacing))")
+        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("reader.preset.\(preset.rawValue)")
+    }
+
+    private var restoreTypographyButton: some View {
+        Button { if isActive() { showRestore = true } } label: {
+            Label("恢复默认字号与行距", systemImage: "arrow.counterclockwise")
+                .font(.subheadline.weight(.medium))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
+        .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
+        .accessibilityIdentifier("reader.typography.restore")
     }
 
     private var moreSection: some View {
@@ -153,6 +218,8 @@ struct ReaderSettingsView: View {
 
     private func themeButton(_ theme: ReaderTheme) -> some View {
         let selected = draft.theme == theme
+        let selectionMotionKey = reduceMotion ? 0 : (selected ? 1 : 2)
+        let selectionAnimation = reduceMotion ? nil : ReaderMotion.selectionFeedback
         return Button {
             guard isActive() else { return }
             draft.theme = theme; commitDraft()
@@ -163,14 +230,27 @@ struct ReaderSettingsView: View {
                     .foregroundStyle(Color(uiColor: theme.foreground))
                     .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(alignment: .topTrailing) {
-                        if selected {
-                            Image(systemName: "checkmark.circle.fill").font(.caption)
-                                .foregroundStyle(appearance.accent).padding(4).accessibilityHidden(true)
-                        }
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(appearance.accent)
+                            .padding(4)
+                            .opacity(selected ? 1 : 0)
+                            .animation(selectionAnimation, value: selectionMotionKey)
+                            .transaction { transaction in
+                                if reduceMotion { transaction.animation = nil }
+                            }
+                            .accessibilityHidden(true)
                     }
-                    .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 2 : 0.5) }
-                Text(theme.title).font(.caption).fixedSize(horizontal: false, vertical: true)
-            }.frame(maxWidth: .infinity, minHeight: 64).contentShape(Rectangle())
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(selected ? appearance.accent : appearance.edge, lineWidth: selected ? 2 : 0.5)
+                            .animation(selectionAnimation, value: selectionMotionKey)
+                            .transaction { transaction in
+                                if reduceMotion { transaction.animation = nil }
+                            }
+                    }
+                Text(theme.title).font(.caption).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }.frame(minWidth: 84, maxWidth: .infinity, minHeight: 64).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!isActive())
         .accessibilityLabel(theme.title).accessibilityValue(selected ? "已选择" : "未选择")

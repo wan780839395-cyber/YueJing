@@ -5,35 +5,61 @@ import SwiftUI
 struct ReaderDirectoryChapterRow: View {
     let title: String
     let ordinal: Int
+    var totalCount: Int = 0
     let isCurrent: Bool
     let appearance: ReaderToolAppearance
     @Environment(\.dynamicTypeSize) private var dynamicType
 
+    static let horizontalColumnLimit = 6
+    static let columnSpacing: CGFloat = 16
+
+    static func ordinalColumnDigits(ordinal: Int, totalCount: Int) -> Int {
+        let highestOrdinal = max(1, max(ordinal, totalCount))
+        return max(2, String(highestOrdinal).count)
+    }
+
+    private var columnDigits: Int {
+        Self.ordinalColumnDigits(ordinal: ordinal, totalCount: totalCount)
+    }
+
+    private var usesStackedLayout: Bool {
+        dynamicType.isAccessibilitySize || columnDigits > Self.horizontalColumnLimit
+    }
+
+    private var ordinalFont: Font {
+        if usesStackedLayout {
+            return .system(.footnote, design: .serif).weight(.medium)
+        }
+        return columnDigits >= 5
+            ? .system(.subheadline, design: .serif).weight(.medium)
+            : .system(.title3, design: .serif).weight(.medium)
+    }
+
+    private var ordinalPlaceholder: String {
+        String(repeating: "8", count: columnDigits)
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // The ordinal is decorative; do not crowd the full title at accessibility sizes.
-            if !dynamicType.isAccessibilitySize {
-                Text("\(ordinal)")
-                    .font(.system(.title3, design: .serif).weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground.opacity(0.7))
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: 32, alignment: .leading)
-                    .accessibilityHidden(true)
-            }
-            Text(title)
-                .font(.body)
-                .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .layoutPriority(1)
-            if isCurrent {
-                Image(systemName: "checkmark")
-                    .font(.subheadline).foregroundStyle(appearance.accent)
-                    .accessibilityHidden(true)
+        Group {
+            if usesStackedLayout {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        ordinalLabel
+                        Spacer(minLength: 8)
+                        currentCheckmark
+                    }
+                    titleText
+                }
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: Self.columnSpacing) {
+                    measuredOrdinalColumn
+                    titleText
+                    currentCheckmark
+                }
             }
         }
-        .padding(.leading, 8)
+        .padding(.leading, 10)
+        .padding(.vertical, 2)
         .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
         .contentShape(Rectangle())
         .overlay(alignment: .leading) {
@@ -42,6 +68,46 @@ struct ReaderDirectoryChapterRow: View {
                     .frame(width: ReaderVisualStyle.headingMarkWidth, height: ReaderVisualStyle.headingMarkHeight)
                     .accessibilityHidden(true)
             }
+        }
+    }
+
+    private var measuredOrdinalColumn: some View {
+        Text(ordinalPlaceholder)
+            .font(ordinalFont)
+            .monospacedDigit()
+            .fixedSize(horizontal: true, vertical: false)
+            .hidden()
+            .overlay(alignment: .leading) {
+                ordinalLabel
+            }
+            .accessibilityHidden(true)
+    }
+
+    private var ordinalLabel: some View {
+        Text("\(ordinal)")
+            .font(ordinalFont)
+            .monospacedDigit()
+            .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground.opacity(0.7))
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityHidden(true)
+    }
+
+    private var titleText: some View {
+        Text(title)
+            .font(.body)
+            .foregroundStyle(isCurrent ? appearance.accent : appearance.foreground)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+    }
+
+    @ViewBuilder
+    private var currentCheckmark: some View {
+        if isCurrent {
+            Image(systemName: "checkmark")
+                .font(.subheadline)
+                .foregroundStyle(appearance.accent)
+                .accessibilityHidden(true)
         }
     }
 }

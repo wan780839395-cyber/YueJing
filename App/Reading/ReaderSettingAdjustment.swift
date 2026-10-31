@@ -13,13 +13,16 @@ struct ReaderSettingAdjustment: View {
     @Environment(\.dynamicTypeSize) private var dynamicType
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             if dynamicType.isAccessibilitySize {
-                Text(title).font(.subheadline.weight(.medium)).frame(maxWidth: .infinity, alignment: .leading)
-                controls.frame(maxWidth: .infinity)
+                Text(title).font(.subheadline.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                controls.frame(maxWidth: .infinity, alignment: .center)
             } else {
-                HStack {
+                HStack(alignment: .center, spacing: 8) {
                     Text(title).font(.subheadline.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     controls
                 }
@@ -38,7 +41,7 @@ struct ReaderSettingAdjustment: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 4) {
+        HStack(alignment: .center, spacing: 6) {
             Button { step(-1) } label: {
                 Image(systemName: "minus").font(.system(size: 14, weight: .medium))
                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
@@ -46,7 +49,10 @@ struct ReaderSettingAdjustment: View {
             .buttonStyle(ReaderCompactButtonStyle(tint: accent))
             .disabled(!isActive() || value <= range.lowerBound)
             .accessibilityLabel("减小\(title)").accessibilityIdentifier("reader.\(key).decrease")
-            Text("\(Int(value))").font(.body.monospacedDigit()).frame(minWidth: 30)
+            Text("\(Int(value))").font(.body.monospacedDigit())
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 34, alignment: .center)
                 .accessibilityLabel("\(title)，\(Int(value))")
                 .accessibilityIdentifier("reader.\(key).value")
             Button { step(1) } label: {

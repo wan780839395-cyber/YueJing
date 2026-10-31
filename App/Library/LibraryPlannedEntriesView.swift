@@ -4,6 +4,8 @@ import SwiftUI
 struct LibraryPlannedEntriesView: View {
     let appearance: LibraryAppearance
     let canOpenFeatures: Bool
+    var features: [LibraryPlannedFeature] = LibraryPlannedFeature.modules
+    let onOpenFeature: (LibraryPlannedFeature) -> Void
     @Environment(\.dynamicTypeSize) private var dynamicType
 
     var body: some View {
@@ -11,23 +13,22 @@ struct LibraryPlannedEntriesView: View {
             Rectangle().fill(appearance.edge).frame(height: 0.5)
                 .accessibilityHidden(true)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("更多故事").font(.footnote).accessibilityAddTraits(.isHeader)
+                Text(features.contains(.comics) ? "更多故事" : "格式与书籍显示").font(.footnote).accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
                 Text("入口预留").font(.caption)
             }
             .foregroundStyle(appearance.secondary)
             if dynamicType.isAccessibilitySize {
                 VStack(spacing: 10) {
-                    ForEach(LibraryPlannedFeature.modules) { feature in moduleLink(feature) }
+                    ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
                 }
             } else {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(LibraryPlannedFeature.modules) { feature in moduleLink(feature) }
+                    ForEach(features.filter { LibraryPlannedFeature.modules.contains($0) }) { feature in moduleButton(feature) }
                 }
             }
             VStack(spacing: 0) {
-                informationLink(.epub)
-                informationLink(.cover)
+                ForEach(features.filter { !LibraryPlannedFeature.modules.contains($0) }) { feature in informationButton(feature) }
             }
             Text("当前仅支持 TXT 导入，以上扩展均未接入。")
                 .font(.caption).foregroundStyle(appearance.secondary)
@@ -37,9 +38,9 @@ struct LibraryPlannedEntriesView: View {
         .disabled(!canOpenFeatures)
     }
 
-    private func moduleLink(_ feature: LibraryPlannedFeature) -> some View {
-        NavigationLink {
-            LibraryPlannedFeatureView(feature: feature)
+    private func moduleButton(_ feature: LibraryPlannedFeature) -> some View {
+        Button {
+            onOpenFeature(feature)
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: feature.symbol)
@@ -64,9 +65,9 @@ struct LibraryPlannedEntriesView: View {
         .accessibilityIdentifier("library.planned.entry.\(feature.rawValue)")
     }
 
-    private func informationLink(_ feature: LibraryPlannedFeature) -> some View {
-        NavigationLink {
-            LibraryPlannedFeatureView(feature: feature)
+    private func informationButton(_ feature: LibraryPlannedFeature) -> some View {
+        Button {
+            onOpenFeature(feature)
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(feature.title) · 预留")

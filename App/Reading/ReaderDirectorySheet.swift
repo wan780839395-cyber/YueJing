@@ -14,19 +14,26 @@ struct ReaderDirectorySheet: View {
     let selected: @MainActor (TXTChapter) -> Void
     @AccessibilityFocusState private var focusedChapterID: String?
     @AccessibilityFocusState private var closeFocused: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicType
     var body: some View {
         VStack(spacing: 0) {
             ReaderPanelHeader(title: "目录", appearance: appearance) {
                 Button { if active { close() } } label: {
                     Text("完成").font(ReaderVisualStyle.panelActionFont)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, surfaceInset: 0, outlined: true))
                 .accessibilityLabel("关闭目录")
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
+            }
+            if let page = model.state.page, page.total > 0 {
+                directorySummaryHeader(page: page)
             }
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
@@ -47,7 +54,8 @@ struct ReaderDirectorySheet: View {
                                     selected(item.element)
                                 } label: {
                                     ReaderDirectoryChapterRow(title: item.element.title ?? "正文开头",
-                                        ordinal: page.start + item.offset + 1, isCurrent: current, appearance: appearance)
+                                        ordinal: page.start + item.offset + 1, totalCount: page.total,
+                                        isCurrent: current, appearance: appearance)
                                 }
                                 .id(item.element.id)
                                 .accessibilityIdentifier("reader.chapter.\(page.start + item.offset)")
@@ -60,7 +68,7 @@ struct ReaderDirectorySheet: View {
                         } else if !model.state.loading, model.state.message == nil {
                             Text("正文显示后会定位当前章节。")
                         }
-                        if model.state.loading {
+                        if model.state.loading && (model.state.page?.chapters.isEmpty ?? true) {
                             HStack { ProgressView(); Text("正在读取目录…") }.accessibilityElement(children: .combine)
                         }
                     }
@@ -76,6 +84,7 @@ struct ReaderDirectorySheet: View {
                     }
                     if let page = model.state.page, !page.chapters.isEmpty {
                         ReaderDirectoryFooter(rangeLabel: page.rangeLabel,
+                            loading: model.state.loading,
                             previousDisabled: page.start == 0 || model.state.loading,
                             nextDisabled: page.start + page.chapters.count >= page.total || model.state.loading,
                             appearance: appearance,
@@ -100,4 +109,71 @@ struct ReaderDirectorySheet: View {
         .accessibilityAction(.escape) { if active { close() } }
     }
     private var active: Bool { isActive() && model.state.ownsPresentation(presentationID) }
+
+    private func directorySummaryHeader(page: ReadingDirectoryPage) -> some View {
+        VStack(spacing: 8) {
+            if dynamicType.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 6) {
+                    totalCountBadge(total: page.total)
+                    summaryDetailText(page: page)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 12) {
+                        totalCountBadge(total: page.total)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 12)
+                        summaryDetailText(page: page)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        totalCountBadge(total: page.total)
+                        summaryDetailText(page: page)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Rectangle()
+                .fill(appearance.edge)
+                .frame(height: ReaderVisualStyle.panelDividerHeight)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+        .padding(.top, 8)
+        .background(appearance.surface)
+    }
+
+    private func totalCountBadge(total: Int) -> some View {
+        Text("共 \(total) 章")
+            .font(.footnote.weight(.medium).monospacedDigit())
+            .foregroundStyle(appearance.accent)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background {
+                let shape = Capsule(style: .continuous)
+                shape.fill(appearance.accent.opacity(0.1))
+                    .overlay {
+                        shape.strokeBorder(appearance.accent.opacity(0.24), lineWidth: 0.8)
+                    }
+            }
+            .accessibilityLabel("总章节数，共 \(total) 章")
+            .accessibilityIdentifier("reader.directory.total")
+    }
+
+    private func summaryDetailText(page: ReadingDirectoryPage) -> some View {
+        let text: String
+        if let currentIndex = page.currentIndex {
+            text = "当前第 \(currentIndex + 1) 章 · 本组 \(page.start + 1)–\(page.start + page.chapters.count)"
+        } else if !page.chapters.isEmpty {
+            text = "本组第 \(page.start + 1)–\(page.start + page.chapters.count) 章"
+        } else {
+            text = "暂无章节"
+        }
+        return Text(text)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(appearance.foreground.opacity(0.72))
+            .fixedSize(horizontal: false, vertical: true)
+    }
 }
