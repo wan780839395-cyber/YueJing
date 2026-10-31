@@ -15,7 +15,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      APPROVED_PARENT: 96b540c45d886139df4a6c61620bf6628bd37316
+      APPROVED_PARENT: 3b72b9031e62f29a510e603a75f0d5f73744d67e
     defaults:
       run:
         shell: bash
@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Freeze the approved import-entry fix and disclose no native test execution
+      - name: Freeze the approved workflow-only device package and disclose no native test execution
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -37,48 +37,56 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
-          allowed = [
-              ".github/workflows/ios-build.yml",
-              "scripts/check_device_build_validation_entry.py"]
-          changed = subprocess.check_output(["git", "diff", "--name-only", os.environ["APPROVED_PARENT"], "HEAD"], text=True).splitlines()
-          assert len(allowed) == 2 and len(changed) == 2 and changed == sorted(allowed), "Source changes differ from the approved two-file workflow import-entry fix batch"
+          approved_parent = "3b72b9031e62f29a510e603a75f0d5f73744d67e"
+          assert os.environ["APPROVED_PARENT"] == approved_parent, "Approved parent binding changed"
+          assert os.environ["GITHUB_RUN_ATTEMPT"] == "1" and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch", "Only the single authorized manual attempt is accepted"
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          parents = subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", "HEAD"], text=True).split()
+          assert head == os.environ["GITHUB_SHA"] and parents == [head, approved_parent], "Candidate SHA or single-parent lineage mismatch"
+          assert not subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], text=True).strip(), "Tracked candidate is dirty"
+          allowed = [".github/workflows/ios-build.yml"]
+          changed = subprocess.check_output(["git", "diff", "--name-only", approved_parent, "HEAD"], text=True).splitlines()
+          assert len(allowed) == 1 and changed == allowed, "Source changes differ from the approved single-workflow device-package batch"
           assert all(Path(path).is_file() and not Path(path).is_symlink() for path in allowed), "Approved candidate file is missing or symlinked"
-          status = dict(purpose="reading UI physical-device verification only",
+          status = dict(purpose="unchanged App source package for physical-device validation",
                         qualification="TESTS NOT RUN",
                         tests_run=False,
-                        full_test_gate="not run; historical Task3 138-case gate not passed",
+                        full_test_gate="not run for this candidate; parent Task3 gate failed",
                         source_commit=os.environ["GITHUB_SHA"],
-                        previous_candidate=os.environ["APPROVED_PARENT"],
+                        previous_candidate=approved_parent,
                         product_changes=[path for path in allowed if path.startswith(("App/", "Sources/"))],
                         approved_changed_files=allowed,
-                        product_change_scope="no product changes; workflow-local runpy import path fix and offline entry regression only",
-                        carried_reader_candidate=dict(source_commit=os.environ["APPROVED_PARENT"], scope="reader titleBar decorative stroke .background candidate; unchanged in this batch", physical_device_acceptance="not performed"),
-                        prior_device_build=dict(source_commit=os.environ["APPROVED_PARENT"], run=41039839315, attempt=1, device_compile="passed", packaging="failed before dependency checks: ModuleNotFoundError task3_test_inventory", applies_to_current_candidate=False),
+                        product_change_scope="no App, Core, Domain or test changes; single-workflow eligibility and disclosure adaptation only",
+                        carried_reader_candidate=dict(source_commit=approved_parent, scope="App business source unchanged byte-for-byte from approved parent; new repository source SHA is this candidate", physical_device_acceptance="not performed"),
                         native_tests_this_run=dict(status="not run", executions=0, selection=[]),
-                        prior_validation_source_commit="7a5753658e686a9c3ed7886136a79cdb23d99a49",
-                        prior_validation_run=41019503235,
+                        prior_validation_source_commit=approved_parent,
+                        prior_validation_run=41162425493,
                         prior_validation_attempt=1,
-                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41019503235",
+                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41162425493",
+                        prior_validation_declared=139,
                         prior_validation_selected=138,
+                        prior_validation_started=135,
+                        prior_validation_finished=135,
                         prior_validation_passed=134,
                         prior_validation_failed=1,
                         prior_validation_unexecuted=3,
                         prior_validation_skipped=0,
+                        prior_validation_failure="exit readiness notHittable before actual tap; cause and physical reproduction unknown",
                         prior_validation_applies_to_current_candidate=False,
                         prior_task3_tests_rerun=False,
                         original_task3_gate="unchanged in this batch; not executed",
                         physical_device_acceptance="not performed")
           Path("artifacts/verification-status.json").write_text(json.dumps(status, indent=2) + "\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved two-file workflow import-entry fix "
-                           "(workflow-local scripts path setup plus an offline loader regression); no product source changes. "
-                           "The reader titleBar stroke candidate is carried unchanged from the approved parent. Parent device run 41039839315 compiled successfully but packaging failed at the runpy import before dependency checks; this is historical, not validation of this new source. "
-                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`). The offline Python regression is not a native test. "
-                           "Historical Task3 run [41019503235](" + status["prior_validation_url"] +
+              output.write("## TESTS NOT RUN\n\nThis attempt only compiles and packages the approved single-workflow eligibility adaptation for physical-device validation. "
+                           "App business source is unchanged from the approved parent; no App, Core, Domain, tests or diagnostic probes were changed. "
+                           "No simulator, unit, host, UI or Canvas tests are executed (`tests_run: false`, native test executions: `0`, selection: `[]`). The offline Python regression is not a native test. "
+                           "Parent Task3 run [41162425493](" + status["prior_validation_url"] +
                            ") on `" + status["prior_validation_source_commit"] +
-                           "` had 134 passed / 1 failed / 3 unexecuted / 0 skipped out of 138 selected cases and does not apply as a pass for this candidate. "
+                           "` declared 139 / selected 138 cases, with 135 started and finished: 134 passed / 1 failed / 3 unexecuted / 0 native skipped. This failed history is preserved, not a pass for the new candidate. "
+                           "Its exit readiness failure occurred before the actual tap; cause and physical reproduction remain unknown, and this package does not claim a bug fix. "
                            "Physical-device acceptance is not performed.\n\n"
-                           "Build source: `" + status["source_commit"] + "`; approved parent: `" +
+                           "Build source: `" + status["source_commit"] + "`; unchanged App source parent: `" +
                            status["previous_candidate"] + "`. The original Task3 workflow is not run or modified in this batch.\n")
           PY
           python3 -B scripts/check_device_build_validation_entry.py
