@@ -32,7 +32,7 @@ struct ReaderScreen: View {
                 // Safe-area-sized from the start. Tools never reserve or resize this viewport.
                 // UIKit retains the existing 16/24pt scroll-end insets and 20pt text side margins.
                 ReaderViewport(window: model.window, preferences: model.preferences, handle: model.viewport,
-                    interactionActive: scenePhase == .active,
+                    routeID: routeID, onSceneInteraction: handleNativeScene,
                     // BEGIN READER DIAGNOSTICS viewport facts
                     diagnosticTools: tools, diagnosticLoading: model.loading,
                     diagnosticSaveFailed: model.exitSaveFailed, diagnosticScene: scenePhase,
@@ -109,17 +109,7 @@ struct ReaderScreen: View {
             // BEGIN READER DIAGNOSTICS screen scene
             model.viewport.observeDiagnosticScene(phase)
             // END READER DIAGNOSTICS screen scene
-            model.viewport.setInteractionActive(phase == .active)
-            if phase == .active {
-                mutateTools { $0.resume(); if model.loading || model.window == nil { $0.forceCompact() } }
-            } else { mutateTools { $0.suspend() } }
-            // BEGIN READER DIAGNOSTICS scene tools completion
-            model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
-            // END READER DIAGNOSTICS scene tools completion
-            Task {
-                guard scenePhase == phase else { return }
-                if phase == .active { await model.resume() } else { await model.suspend() }
-            }
+            // Environment phase remains diagnostic only; the attached native scene owns recovery.
         }
         .onChange(of: model.loading) { loading in if loading { mutateTools { $0.forceCompact() } } }
         .onChange(of: model.exitSaveFailed) { failed in if failed { mutateTools { $0.forceCompact() } } }
@@ -135,6 +125,18 @@ struct ReaderScreen: View {
                 Button("知道了", role: .cancel) { model.message = nil }
             }
         } message: { Text(model.message ?? "") }
+    }
+
+    private func handleNativeScene(_ event: ReaderSceneEvent) {
+        guard model.viewport.isCurrent(event, routeID: routeID) else { return }
+        if event.active { mutateTools { $0.resume() } }
+        else { mutateTools { $0.suspend() } }
+        // BEGIN READER DIAGNOSTICS scene tools completion
+        model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
+        // END READER DIAGNOSTICS scene tools completion
+        model.viewport.scheduleModelSceneTransition(event, routeID: routeID) { active in
+            if active { await model.resume() } else { await model.suspend() }
+        }
     }
 
     private func titleBar(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {

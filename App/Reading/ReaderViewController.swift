@@ -263,6 +263,92 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     private let toolsTap = ReadingToolsTapRecognizer()
     private(set) var interactionContext = ReaderToolTouchContext()
     private var appliedTheme: ReaderTheme?
+    private weak var sceneHandle: ReaderViewportHandle?
+    private var sceneRouteID: UUID?
+    private weak var boundScene: UIWindowScene?
+    private(set) var sceneBindingID: UUID?
+    var onSceneInteraction: (@MainActor (ReaderSceneEvent) -> Void)?
+    private var sceneObservation: SceneObservation?
+
+    // One selector target per binding. Even a late delivery retains its OLD immutable IDs.
+    @MainActor
+    private final class SceneObservation: NSObject {
+        private weak var owner: ReaderViewController?
+        private weak var scene: UIWindowScene?
+        private let routeID: UUID
+        private let binding: UUID
+        init(owner: ReaderViewController, scene: UIWindowScene, routeID: UUID, binding: UUID) {
+            self.owner = owner; self.scene = scene; self.routeID = routeID; self.binding = binding
+            super.init()
+            for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(receive(_:)), name: name, object: scene)
+            }
+        }
+        @objc private func receive(_ notification: Notification) {
+            owner?.sceneLifecycleChanged(notification, routeID: routeID, binding: binding)
+        }
+        func stop() {
+            if let scene {
+                for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
+                    NotificationCenter.default.removeObserver(self, name: name, object: scene)
+                }
+            }
+            owner = nil
+        }
+    }
+
+    func prepareSceneAuthority(handle: ReaderViewportHandle, routeID: UUID) {
+        guard sceneHandle !== handle || sceneRouteID != routeID else { return }
+        revokeSceneBinding()
+        sceneHandle = handle; sceneRouteID = routeID
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        bindCurrentScene()
+    }
+    // Only called after UIKit has attached the view, never from Representable make/update.
+    private func bindCurrentScene() {
+        guard let sceneHandle, let sceneRouteID,
+              sceneHandle.ownsSceneController(self, routeID: sceneRouteID) else { return }
+        guard let scene = viewIfLoaded?.window?.windowScene else { revokeSceneBinding(); return }
+        if boundScene !== scene || sceneBindingID == nil {
+            revokeSceneBinding()
+            let binding = UUID()
+            guard sceneHandle.beginSceneBinding(self, routeID: sceneRouteID, binding: binding) else { return }
+            boundScene = scene; sceneBindingID = binding
+            sceneObservation = SceneObservation(owner: self, scene: scene, routeID: sceneRouteID, binding: binding)
+        }
+        forwardScenePhase(scene.activationState == .foregroundActive, scene: scene)
+    }
+    func matchesSceneBinding(_ binding: UUID, scene: UIWindowScene? = nil) -> Bool {
+        guard sceneBindingID == binding, let boundScene,
+              viewIfLoaded?.window?.windowScene === boundScene else { return false }
+        return scene == nil || scene === boundScene
+    }
+    // UIKit scene notifications are delivered on the main thread. Selector observation avoids
+    // sending a non-Sendable Notification/scene through a Sendable closure or an extra Task.
+    private func sceneLifecycleChanged(_ notification: Notification, routeID: UUID, binding: UUID) {
+        guard routeID == sceneRouteID, binding == sceneBindingID,
+              let scene = notification.object as? UIWindowScene, scene === boundScene else { return }
+        switch notification.name {
+        case UIScene.didActivateNotification:
+            guard scene.activationState == .foregroundActive else { return }
+            forwardScenePhase(true, scene: scene)
+        case UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification:
+            // willDeactivate is the immediate pause boundary; activationState may still be active.
+            forwardScenePhase(false, scene: scene)
+        default: return
+        }
+    }
+    private func forwardScenePhase(_ active: Bool, scene: UIWindowScene) {
+        guard let sceneRouteID, let binding = sceneBindingID else { return }
+        sceneHandle?.acceptScenePhase(active, from: self, scene: scene, routeID: sceneRouteID, binding: binding)
+    }
+    private func revokeSceneBinding() {
+        sceneObservation?.stop(); sceneObservation = nil
+        if let binding = sceneBindingID { sceneHandle?.endSceneBinding(self, binding: binding) }
+        boundScene = nil; sceneBindingID = nil
+    }
     // BEGIN READER DIAGNOSTICS storage
     let interactionDiagnostics = ReaderInteractionDiagnostics()
     weak var diagnosticHandle: ReaderViewportHandle?
@@ -343,6 +429,8 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     func detachCallbacks() {
+        revokeSceneBinding()
+        sceneHandle = nil; sceneRouteID = nil; onSceneInteraction = nil
         // BEGIN READER DIAGNOSTICS revoke
         interactionDiagnostics.revoked()
         defer { sampleInteractionDiagnostics() }

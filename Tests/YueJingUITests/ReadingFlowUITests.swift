@@ -245,6 +245,68 @@ final class ReadingFlowUITests: XCTestCase {
         }
     }
 
+    @MainActor func testOtherAppRoundTripRestoresCentralTapAndWindowUpdates() {
+        withFixture { app in
+            open("UITest-Long-A", app)
+            XCTAssertTrue(endMarker("UI_CHAPTER_1", app).exists)
+            waitHittable(app.buttons["reader.exit"])
+            let before = visibleCanvases(app), pid = sceneRoundTripPID(app)
+            XCTAssertFalse(before.isEmpty)
+            XCTAssertGreaterThan(pid, 0)
+            let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+            // Measurement starts here. No terminate/launch/open-book fallback is permitted.
+            settings.activate()
+            XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
+            let background = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                app.state == .runningBackground || app.state == .runningBackgroundSuspended
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 10), .completed,
+                           "Another real App must be foreground while the reader process is backgrounded")
+            XCTAssertTrue(app.state == .runningBackground || app.state == .runningBackgroundSuspended)
+            app.activate()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+            XCTAssertNotEqual(settings.state, .runningForeground)
+            XCTAssertEqual(sceneRoundTripPID(app), pid, "A terminated/relaunched process is not recovery")
+            XCTAssertTrue(viewport(app).exists, "Returning to the shelf or losing the reader must fail")
+            XCTAssertEqual(visibleCanvases(app), before, "The same stationary synthetic reader must remain visible")
+            XCTAssertFalse(app.buttons["reader.tools.settings"].isHittable)
+            // No scroll, AX action, showTools helper, context helper or second tap before this assertion.
+            viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let exit = app.buttons["reader.exit"], dock = app.buttons["reader.tools.settings"]
+            let recalled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                exit.exists && exit.isHittable && dock.exists && dock.isHittable
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [recalled], timeout: 10), .completed,
+                           "One fresh stationary central native tap must restore both header and dock")
+            XCTAssertTrue(exit.exists && exit.isHittable && dock.exists && dock.isHittable)
+            openSettings(app)
+            app.buttons["reader.font.increase"].tap()
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("21"))
+            closePanel(app)
+            openDirectory(app)
+            scrollTo(app.buttons["下一组"], in: app.tables.firstMatch)
+            app.buttons["下一组"].tap()
+            let distant = app.buttons["reader.chapter.32"]
+            waitHittable(distant); distant.tap()
+            XCTAssertTrue(endMarker("UI_CHAPTER_33", app).waitForExistence(timeout: 10),
+                          "A real distant body-window update must complete, not just re-enable the gesture")
+            XCTAssertFalse(endMarker("UI_CHAPTER_1", app).exists)
+            XCTAssertEqual(sceneRoundTripPID(app), pid)
+        }
+    }
+
+    @MainActor private func sceneRoundTripPID(_ app: XCUIApplication) -> Int {
+        // Public debugDescription, not an invented XCUIApplication.processID property or KVC.
+        // The textual format is not guaranteed: absence is a failure, never a skip/relaunch.
+        let description = app.debugDescription
+        let expression = try? NSRegularExpression(pattern: #"\bApplication\b[^\n]*\bpid:\s*(\d+)"#)
+        guard let match = expression?.firstMatch(in: description, range: NSRange(description.startIndex..., in: description)),
+              let range = Range(match.range(at: 1), in: description), let pid = Int(description[range]), pid > 0 else {
+            XCTFail("Public application description did not expose a process identity"); return 0
+        }
+        return pid
+    }
+
     @MainActor private func revealSetting(_ element: XCUIElement, _ app: XCUIApplication) {
         let scroll = app.scrollViews["reader.settings.scroll"]
         for _ in 0..<12 {
