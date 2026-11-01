@@ -4,8 +4,9 @@ import Testing
 import UIKit
 @testable import YueJing
 
-// Actual host window/scene + production selector observer and parent delivery path.
-// Notifications below are injected; this is NOT a physical App-switch or native touch test.
+// Attached host window/scene + explicitly delivered appearance callback: production binding,
+// selector observer, parent delivery and coordinator contract, NOT UIKit automatic delivery.
+// Scene notifications and suspended model work are injected; no actual App-switch or touch proof.
 @MainActor
 @Suite(.serialized)
 struct ReaderSceneAuthorityTests {
@@ -14,6 +15,26 @@ struct ReaderSceneAuthorityTests {
             .first(where: { $0.activationState == .foregroundActive }))
         let host = UIWindow(windowScene: scene)
         host.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        @MainActor func deliverAttachedAppearance(_ controller: ReaderViewController,
+                                                 handle: ReaderViewportHandle, routeID: UUID) throws {
+            host.layoutIfNeeded()
+            controller.view.layoutIfNeeded()
+            try #require(host.rootViewController === controller && !host.isHidden)
+            try #require(host.windowScene === scene)
+            try #require(controller.viewIfLoaded?.window === host)
+            try #require(controller.viewIfLoaded?.window?.windowScene === scene)
+            try #require(handle.controller === controller)
+            try #require(handle.ownsSceneController(controller, routeID: routeID))
+            try #require(controller.onSceneInteraction != nil)
+            try #require(scene.activationState == .foregroundActive)
+            controller.viewDidAppear(false) // Production creates the binding and observer.
+        }
+        @MainActor func mountConfigured(_ controller: ReaderViewController,
+                                       handle: ReaderViewportHandle, routeID: UUID) throws {
+            host.rootViewController = controller
+            host.isHidden = false
+            try deliverAttachedAppearance(controller, handle: handle, routeID: routeID)
+        }
         let handle = ReaderViewportHandle(), old = ReaderViewController(), route = UUID()
         var tools = ReadingToolsPresentation(), events: [ReaderSceneEvent] = []
         var modelTransitions: [Bool] = []
@@ -25,12 +46,12 @@ struct ReaderSceneAuthorityTests {
                 modelTransitions.append(active)
             }
         }
+        old.loadViewIfNeeded()
         handle.attach(old)
         handle.configureSceneAuthority(old, routeID: route, onChange: parent)
         defer { if let current = handle.controller { handle.detach(current) }; host.isHidden = true; host.rootViewController = nil }
         #expect(events.isEmpty) // make/configure cannot mutate parent state before window attachment.
-        host.rootViewController = old; host.isHidden = false
-        old.beginAppearanceTransition(true, animated: false); old.endAppearanceTransition()
+        try mountConfigured(old, handle: handle, routeID: route)
         #expect(old.view.window?.windowScene === scene)
         let oldBinding = try #require(old.sceneBindingID), initial = try #require(events.last)
         #expect(initial.active && initial.routeID == route && initial.owner == ObjectIdentifier(old))
@@ -66,10 +87,10 @@ struct ReaderSceneAuthorityTests {
         #expect(!handle.isCurrent(resumed, routeID: UUID()))
 
         let replacement = ReaderViewController()
+        replacement.loadViewIfNeeded()
         handle.attach(replacement)
         handle.configureSceneAuthority(replacement, routeID: route, onChange: parent)
-        host.rootViewController = replacement
-        replacement.beginAppearanceTransition(true, animated: false); replacement.endAppearanceTransition()
+        try mountConfigured(replacement, handle: handle, routeID: route)
         let replacementBinding = try #require(replacement.sceneBindingID)
         #expect(old.sceneBindingID == nil && old.onSceneInteraction == nil && !old.interactionContext.active)
         let count = events.count
@@ -83,7 +104,7 @@ struct ReaderSceneAuthorityTests {
         let nextRoute = UUID()
         handle.configureSceneAuthority(replacement, routeID: nextRoute, onChange: parent)
         #expect(replacement.sceneBindingID == nil)
-        replacement.viewDidAppear(false)
+        try deliverAttachedAppearance(replacement, handle: handle, routeID: nextRoute)
         await handle.modelSceneTask?.value
         let newBinding = try #require(replacement.sceneBindingID)
         #expect(newBinding != replacementBinding)
@@ -109,14 +130,14 @@ struct ReaderSceneAuthorityTests {
                 await open.apply(active)
             }
         }
-        @MainActor func mount(_ controller: ReaderViewController) {
+        @MainActor func mount(_ controller: ReaderViewController) throws {
+            controller.loadViewIfNeeded()
             asyncHandle.attach(controller)
             asyncHandle.configureSceneAuthority(controller, routeID: asyncRoute, onChange: asyncParent)
-            host.rootViewController = controller
-            controller.beginAppearanceTransition(true, animated: false); controller.endAppearanceTransition()
+            try mountConfigured(controller, handle: asyncHandle, routeID: asyncRoute)
         }
         defer { open.release(); if let current = asyncHandle.controller { asyncHandle.detach(current) } }
-        mount(first)
+        try mount(first)
         #expect(applied.isEmpty && asyncHandle.modelSceneTask == nil)
         NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
         await asyncHandle.modelSceneTask?.value
@@ -125,7 +146,7 @@ struct ReaderSceneAuthorityTests {
         try await open.requireWaiting()
         let recovering = try #require(asyncHandle.modelSceneTask)
         let second = ReaderViewController()
-        mount(second) // Same route + active, while resume -> open is still suspended.
+        try mount(second) // Same route + active, while resume -> open is still suspended.
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
         #expect(!recovering.isCancelled && open.started == 1 && open.completed == 0)
         open.release(); await recovering.value; await asyncHandle.modelSceneTask?.value
@@ -139,7 +160,7 @@ struct ReaderSceneAuthorityTests {
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
         let notStarted = try #require(asyncHandle.modelSceneTask)
         let third = ReaderViewController()
-        mount(third) // No await between active delivery and replacement.
+        try mount(third) // No await between active delivery and replacement.
         await notStarted.value; await asyncHandle.modelSceneTask?.value
         #expect(applied.count == countBeforeTakeover + 1 && applied.last == true)
         #expect(appliedOwners.last == ObjectIdentifier(third) && asyncHandle.modelSceneTask == nil)
