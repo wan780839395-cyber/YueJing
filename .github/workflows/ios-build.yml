@@ -3,6 +3,15 @@ run-name: Reading UI device package · TESTS NOT RUN · ${{ github.sha }}
 
 on:
   workflow_dispatch:
+    inputs:
+      package_scope:
+        description: Fixed approved package scope (build only; tests not run)
+        required: true
+        type: choice
+        default: reader-dock-exact8
+        options:
+          - reader-dock-exact8
+          - physical-recovery-32d6244-exact1
 
 permissions:
   contents: read
@@ -20,13 +29,24 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Reject unapproved package scopes before checkout
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGE_SCOPE" in
+            reader-dock-exact8|physical-recovery-32d6244-exact1) ;;
+            *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
+          esac
+
       - name: Check out this source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: ${{ inputs.package_scope == 'physical-recovery-32d6244-exact1' && 4 || 2 }}
 
       - name: Freeze the approved eight-file reader dock package and disclose no native test execution
+        if: ${{ inputs.package_scope == 'reader-dock-exact8' }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -90,6 +110,130 @@ jobs:
           python3 -B scripts/check_reader_dock_schemes.py --device-release-ci > artifacts/reader-dock-source.json
           python3 -B scripts/check_ui_motion_polish.py --device-release-ci > artifacts/reader-dock-motion.json
           python3 -B scripts/check_ui_control_cohesion.py --device-release-ci > artifacts/reader-dock-cohesion.json
+
+      - name: Freeze the fixed parent32 workflow-only package and disclose the failed full regression
+        if: ${{ inputs.package_scope == 'physical-recovery-32d6244-exact1' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          python3 -B - <<'PY'
+          import hashlib, json, os, stat, subprocess
+          from pathlib import Path
+
+          def physical_recovery_gate_state(env, state):
+              parent = "32d6244c7e481de79d74e10a71ecae78635ffc0a"
+              workflow = ".github/workflows/ios-build.yml"
+              repo = "wan780839395-cyber/YueJing"
+              assert env["PACKAGE_SCOPE"] == "physical-recovery-32d6244-exact1", "Unapproved package scope"
+              assert env["GITHUB_REPOSITORY"] == repo, "Wrong repository"
+              assert env["GITHUB_EVENT_NAME"] == "workflow_dispatch" and env["GITHUB_RUN_ATTEMPT"] == "1", "Manual attempt1 only"
+              assert env["GITHUB_REF"] == "refs/heads/main" and env["GITHUB_REF_NAME"] == "main", "Only main accepted"
+              assert env["GITHUB_WORKFLOW_REF"] == repo + "/" + workflow + "@refs/heads/main", "Wrong workflow"
+              assert state["head"] == env["GITHUB_SHA"] == env["GITHUB_WORKFLOW_SHA"], "Source/workflow SHA mismatch"
+              assert state["parents"] == [state["head"], parent], "Only the fixed single parent32 accepted"
+              assert not state["dirty"], "Tracked worktree/index must be clean"
+              assert state["changed"] == "M\t" + workflow + "\n", "Only one modified workflow accepted"
+              before, after = state["before_tree"], state["after_tree"]
+              assert set(before) == set(after) and workflow in after, "Tracked path set changed"
+              for tree in (before, after):
+                  assert tree[workflow][0:2] == ["100644", "blob"], "Workflow must be regular100644"
+              assert before[workflow][2] != after[workflow][2], "Workflow blob must change"
+              assert {p: v for p, v in before.items() if p != workflow} == {p: v for p, v in after.items() if p != workflow}, "Nonworkflow modes/types/blobs changed"
+              assert state["tracked"] == sorted(after), "Index tracked paths differ"
+              assert set(state["working"]) == set(after), "Working path set differs"
+              for path, entry in after.items():
+                  assert entry[0] in ("100644", "100755") and entry[1] == "blob", "Nonregular tracked entry: " + path
+                  assert state["working"][path] == dict(regular=True, blob=entry[2]), "Working bytes/symlink differ: " + path
+              return dict(source_commit=state["head"], single_parent=parent,
+                          approved_changed_files=[workflow], workflow_mode="100644",
+                          nonworkflow_tracked_entries_equal=len(after) - 1,
+                          nonworkflow_paths_modes_blobs_and_working_bytes_equal=True)
+
+          def git(*args):
+              return subprocess.check_output(["git", "--no-optional-locks", *args])
+
+          def tree_at(revision):
+              result = {}
+              for entry in git("ls-tree", "-r", "-z", revision).split(b"\0"):
+                  if entry:
+                      meta, path = entry.split(b"\t", 1)
+                      result[path.decode("utf-8")] = meta.decode("ascii").split()
+              return result
+
+          parent = "32d6244c7e481de79d74e10a71ecae78635ffc0a"
+          after = tree_at("HEAD")
+          working = {}
+          for path in sorted(after):
+              file = Path(path)
+              regular = stat.S_ISREG(file.lstat().st_mode) and not any(p.is_symlink() for p in (file, *file.parents))
+              data = file.read_bytes() if regular else b""
+              blob = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+              working[path] = dict(regular=regular, blob=blob)
+          state = dict(head=git("rev-parse", "HEAD").decode().strip(),
+                       parents=git("rev-list", "--parents", "-n", "1", "HEAD").decode().split(),
+                       dirty=git("status", "--porcelain=v1", "--untracked-files=no").decode(),
+                       changed=git("diff", "--no-renames", "--name-status", parent, "HEAD").decode(),
+                       before_tree=tree_at(parent), after_tree=after,
+                       tracked=sorted(p.decode("utf-8") for p in git("ls-files", "-z").split(b"\0") if p),
+                       working=working)
+          receipt = physical_recovery_gate_state(os.environ, state)
+          Path("artifacts/task3/physical-recovery-exact1-gate.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          status = dict(purpose="fixed parent32 product/test bytes; workflow-only child for device verification",
+                        qualification="TESTS NOT RUN",
+                        qualification_zh="完整回归未通过，供真机验证",
+                        tests_run=False,
+                        full_test_gate="NOT PASSED; run41261929914 failed on these identical product/test bytes",
+                        source_commit=receipt["source_commit"],
+                        previous_candidate=parent,
+                        product_test_source_commit=parent,
+                        product_test_bytes_equal_parent=True,
+                        approved_changed_files=receipt["approved_changed_files"],
+                        product_changes=[],
+                        product_change_scope="none; all nonworkflow tracked paths/modes/blobs and working bytes equal parent32",
+                        exact1_gate=receipt,
+                        native_tests_this_run=dict(status="not run", executions=0, selection=[]),
+                        native_execution=[],
+                        prior_validation_source_commit=parent,
+                        prior_validation_workflow_id=398234793,
+                        prior_validation_run=41261929914,
+                        prior_validation_attempt=1,
+                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41261929914",
+                        prior_validation_conclusion="failure",
+                        prior_validation_declared=145,
+                        prior_validation_selected=144,
+                        prior_validation_started=141,
+                        prior_validation_finished=141,
+                        prior_validation_passed=140,
+                        prior_validation_failed=1,
+                        prior_validation_unexecuted=3,
+                        prior_validation_skipped=0,
+                        prior_validation_groups=dict(Core="25 passed", Domain="93 passed", Block="6 passed", serial="1 passed", Host="8 passed", UI="7 passed / 1 failed", Canvas="3 unexecuted"),
+                        prior_validation_failure="Tests/YueJingUITests/ReadingFlowUITests.swift:473 shared10s exit/settings hittable wait timed out before actual exit tap; exit exists=true/hittable=false; settings hittable; cause and physical reproduction unknown",
+                        prior_validation_applies_to_current_candidate=True,
+                        prior_task3_tests_rerun=False,
+                        original_task3_gate="unchanged and not executed; no full-pass claim",
+                        physical_device_acceptance="not performed")
+          Path("artifacts/verification-status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print("::warning::TESTS NOT RUN / 完整回归未通过，供真机验证")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+              output.write("## TESTS NOT RUN / 完整回归未通过，供真机验证\n\n"
+                           "Build-only attempt: zero native tests; selection `[]`, execution `[]`. Full regression **NOT PASSED**. "
+                           "Source commit `" + status["source_commit"] + "` is a workflow-only child, NOT the original32 commit. "
+                           "Its unique parent and product/test byte source are `" + parent + "`; every nonworkflow tracked path/mode/blob and working byte is identical. "
+                           "The failed full Task3 [run41261929914](" + status["prior_validation_url"] + ") / workflow398234793 / attempt1 applies to these identical product/test bytes: "
+                           "145 declared / 144 selected / 141 started and completed; **140 passed / 1 failed / 3 unexecuted / nativeSkip0**. "
+                           "Core25, Domain93, Block6, serial1 and Host8 passed; UI7 passed/1 failed; Canvas3 unexecuted. "
+                           "ReadingFlowUITests.swift:473: shared10s exit/settings hittable wait timed out BEFORE actual exit tap; exit exists=true/hittable=false; settings hittable. "
+                           "Cause and physical reproduction remain unknown. No exit/App-switch/animation bug-fix, native-test, touch, performance or physical-device acceptance claim. "
+                           "The original full gate and its failure are preserved, not rerun or waived as a different product source. "
+                           "Only Release device compilation and unsigned packaging are attempted here.\n")
+          PY
+          python3 -B scripts/check_device_build_validation_entry.py
+          python3 -B scripts/check_reader_dock_schemes.py --device-release-ci > artifacts/task3/physical-recovery-dock-source.json
+          python3 -B scripts/check_ui_motion_polish.py --device-release-ci > artifacts/task3/physical-recovery-motion-source.json
+          python3 -B scripts/check_ui_control_cohesion.py --device-release-ci > artifacts/task3/physical-recovery-cohesion-source.json
 
       - name: Verify the selected native toolchain
         run: |
