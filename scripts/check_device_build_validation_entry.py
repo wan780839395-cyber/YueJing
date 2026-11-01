@@ -93,8 +93,8 @@ def child(mode):
               and Path(inventory.__file__).resolve() == ROOT / "scripts/task3_test_inventory.py",
               "inventory_resolves_from_repository", checks)
         report = inventory.validate_source(ROOT)  # declarations only; no test execution
-        check(inventory.TOTAL == report["selected"] == 138 and report["all_declared"] == 139
-              and report["native_executions"] == 0, "reviewed_138_selected_declarations", checks)
+        check(inventory.TOTAL == report["selected"] == 144 and report["all_declared"] == 145
+              and report["native_executions"] == 0, "reviewed_144_selected_declarations", checks)
         if mode == "blocked_commands":
             for label, operation in (("subprocess", lambda: subprocess.run(["offline-command-must-not-launch"])),
                                      ("os_system", lambda: os.system("offline-command-must-not-launch"))):

@@ -33,15 +33,17 @@ FILES = {
     "ReaderDomainTests/ReadingToolsPresentationTests.swift": """centralTapTogglesButAnOldTouchCannotOverrideANewerIntent activeScrollingHidesAndNeitherSettlingNorResumeAutomaticallyRevealsTools panelCloseReturnsCompactAndChapterSelectionReturnsImmersive rapidPanelSwitchRejectsOldCloseSelectionAndQueuedBodyTap suspensionRevokesPanelsAndTouchesWithoutRestoringThemOnResume exitIsSingleFlightAndFailureRestoresAnExplicitExitPath invalidatedReaderRejectsLateExitAndAllOldPresentationActions centralTapCoordinatesUseScrolledBoundsOriginAndRejectEdgesOrInvalidGeometry momentumIsLatchedAtTouchBeginEvenWhenTapUpIsAlreadyIdle repeatedPanelOpenDoesNotAllocateAnotherSessionButExplicitCloseRevokesIt""",
     "ProcessingReuseMeasurementTests/ProcessingReuseMeasurementTests.swift": """syntheticImportFirstOpenReopenAndNewServiceColdCache""",
     "YueJingHostTests/ReaderViewportLifecycleTests.swift": """rebuildKeepsDetachedAnchorUntilApplyAndRestoresTheScrolledWindow attachBeforeLateOldDismantlePreservesRestorationAndRejectsOldCallbacks""",
+    "YueJingHostTests/ReaderInteractionInterruptionTests.swift": """interruptedDecelerationRecoversOnSameControllerWithoutMovingAnchor interruptionRevokesOldTouchAndAcceptsFreshIntent momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle viewportInterruptionForwardingIsIdempotentAndDetachedControllerIsInert""",
+    "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch""",
     "YueJingCanvasTests/ReadingCanvasRenderingTests.swift": """dirtyRegionCoversTheSentinelInEveryThemeAndPreservesOutsidePixels reuseRemovesOldInkAndAccessibilityActionsWithoutResettingTheTheme fractionalResizeRerasterizesToTheSameImageAsAFreshCanvas""",
     "TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift": """automaticDecodeAndChaptersBaseline""",
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 93, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 2,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 8,
           "YueJingUITests": 8, "YueJingCanvasTests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 138  # original 129 + typography 4 + canvas 3 + UI acceptance 2
+TOTAL = 144  # previous 142 selected + two Host theme-update regressions (one performance case excluded)
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

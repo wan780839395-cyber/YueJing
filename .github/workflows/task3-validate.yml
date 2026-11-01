@@ -169,7 +169,7 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts ProcessingReuseMeasurementTests || exit "$?"
           python3 scripts/validate_task3.py processing-measurements
 
-      - name: Run the 2 real App-host UIKit tests once
+      - name: Run the 8 real App-host UIKit tests once
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -206,7 +206,7 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 -B scripts/validate_task3.py test-counts YueJingCanvasTests
 
-      - name: Require the exact reviewed 138-case union before device App compilation
+      - name: Require the exact reviewed 144-case union before device App compilation
         run: |
           set -euo pipefail
           python3 scripts/validate_task3.py all-test-gate

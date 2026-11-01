@@ -6,6 +6,12 @@ import UIKit
 final class ReaderViewportHandle {
     weak var controller: ReaderViewController?
     private var restoration: ReaderViewportRestoration?
+    private(set) var interactionActive = true
+    func setInteractionActive(_ active: Bool) {
+        guard interactionActive != active else { return }
+        interactionActive = active
+        controller?.setInteractionActive(active)
+    }
     var onNextRestoreIsNavigation = false
     func anchor() -> ReadingAnchor? { controller?.restorableAnchor() ?? restoration?.anchor }
     var interacting: Bool { controller?.interacting ?? false }
@@ -15,10 +21,12 @@ final class ReaderViewportHandle {
             old.detachCallbacks()
         }
         controller = value
+        value.setInteractionActive(interactionActive)
     }
     func detach(_ value: ReaderViewController) {
         guard controller === value else { return }
         restoration = value.restorationPoint() ?? restoration; controller = nil
+        value.detachCallbacks()
     }
     func restoration(for id: UUID) -> ReaderViewportRestoration? { restoration?.windowID == id ? restoration : nil }
     func applied(_ value: ReaderViewController) { if controller === value { restoration = nil } }
@@ -33,6 +41,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
     let window: ReadingWindow?
     let preferences: ReaderPreferences
     let handle: ReaderViewportHandle
+    let interactionActive: Bool
     let onAnchor: @MainActor (ReadingAnchor, UUID) -> Void
     let onExtend: @MainActor (ReadingAnchor, UUID) -> Void
     let onWidth: @MainActor (Double) -> Void
@@ -45,6 +54,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> ReaderViewController {
         let controller = ReaderViewController()
+        handle.setInteractionActive(interactionActive)
         handle.attach(controller)
         controller.onAnchor = onAnchor; controller.onExtend = onExtend; controller.onWidth = onWidth
         controller.onSettled = onSettled
@@ -54,6 +64,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: ReaderViewController, context: Context) {
         guard handle.controller === controller else { return }
+        handle.setInteractionActive(interactionActive)
         controller.toolIntent = toolIntent; controller.onToolsInteraction = onToolsInteraction
         controller.setTheme(preferences.theme)
         guard let window, controller.window?.id != window.id else { return }

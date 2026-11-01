@@ -2,6 +2,57 @@ import ReaderDomain
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
+/// Transient input only: no book, position, session, or asynchronous work.
+struct ReaderToolTouchContext {
+    struct Touch {
+        let id = UUID()
+        let generation: UUID
+        let intent: UUID
+        var beganDuringDeceleration: Bool
+        var beganDuringDragging: Bool
+    }
+    private(set) var active = true
+    private(set) var generation = UUID()
+    private(set) var toolDecelerating = false
+    private(set) var touch: Touch?
+
+    mutating func setActive(_ value: Bool, decelerating: Bool) {
+        guard active != value else { return }
+        active = value; generation = UUID(); touch = nil
+        toolDecelerating = value && decelerating
+    }
+    mutating func begin(intent: UUID?, dragging: Bool, decelerating: Bool) -> UUID? {
+        guard active, let intent else { return nil }
+        let value = Touch(generation: generation, intent: intent,
+            beganDuringDeceleration: decelerating || toolDecelerating, beganDuringDragging: dragging)
+        touch = value
+        return value.id
+    }
+    mutating func latch(_ id: UUID?, dragging: Bool, decelerating: Bool) {
+        guard active, var value = touch, value.id == id, value.generation == generation else { return }
+        value.beganDuringDeceleration = value.beganDuringDeceleration || decelerating || toolDecelerating
+        value.beganDuringDragging = value.beganDuringDragging || dragging
+        touch = value
+    }
+    mutating func cancel(_ id: UUID?) {
+        guard touch?.id == id else { return }
+        touch = nil
+    }
+    mutating func draggingBegan() { if active { toolDecelerating = false } }
+    mutating func draggingEnded(decelerating: Bool) { if active { toolDecelerating = decelerating } }
+    mutating func decelerationEnded() { toolDecelerating = false }
+    mutating func finish(_ id: UUID?, dragging: Bool, decelerating: Bool,
+                         voiceOver: Bool) -> (UUID, ReadingToolsTapDecision)? {
+        guard active, let value = touch, value.id == id, value.generation == generation else { return nil }
+        touch = nil
+        let decision = ReadingToolsGesturePolicy.tap(beganDuringDeceleration: value.beganDuringDeceleration,
+            dragging: value.beganDuringDragging || dragging, decelerating: decelerating, voiceOver: voiceOver)
+        // Consume only the shadow; never stop UIKit or discard the touch-begin latch.
+        toolDecelerating = decelerating
+        return (value.intent, decision)
+    }
+}
+
 @MainActor
 final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
@@ -17,10 +68,8 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     private var userInputSinceRestore = false
     private var previousWidth = 0.0
     private let toolsTap = ReadingToolsTapRecognizer()
-    private var tapIntent: UUID?
-    private var tapBeganDuringDeceleration = false
-    private var tapBeganDuringDragging = false
-    private var toolDecelerating = false
+    private(set) var interactionContext = ReaderToolTouchContext()
+    private var appliedTheme: ReaderTheme?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -38,12 +87,8 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         toolsTap.cancelsTouchesInView = false
         toolsTap.delaysTouchesBegan = false
         toolsTap.require(toFail: table.panGestureRecognizer)
-        toolsTap.onTouchBegan = { [weak self] in
-            guard let self else { return }
-            // Latch the beginning, not merely the eventual tap-up state after UIKit stops inertia.
-            tapBeganDuringDeceleration = tapBeganDuringDeceleration || table.isDecelerating || toolDecelerating
-            tapBeganDuringDragging = tapBeganDuringDragging || table.isDragging
-        }
+        toolsTap.onTouchBegan = { [weak self] id in self?.latchToolTouch(id) }
+        toolsTap.onTouchCancelled = { [weak self] id in self?.cancelToolTouch(id) }
         table.addGestureRecognizer(toolsTap)
         view.addSubview(table)
     }
@@ -55,14 +100,43 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         if width >= 120, abs(width - previousWidth) > 0.5 { previousWidth = width; onWidth?(width) }
     }
 
-    func setTheme(_ theme: ReaderTheme) {
+    @discardableResult
+    func setTheme(_ theme: ReaderTheme) -> Bool {
+        guard appliedTheme != theme else { return false }
         loadViewIfNeeded()
-        view.backgroundColor = theme.background; table.backgroundColor = theme.background
+        let background = theme.background
+        view.backgroundColor = background; table.backgroundColor = background
+        appliedTheme = theme
+        return true
     }
 
     func detachCallbacks() {
+        setInteractionActive(false)
         onAnchor = nil; onExtend = nil; onWidth = nil; onSettled = nil
         toolIntent = nil; onToolsInteraction = nil
+    }
+
+    func setInteractionActive(_ active: Bool) {
+        guard interactionContext.active != active else { return }
+        interactionContext.setActive(active, decelerating: table.isDecelerating)
+        // Cancels/reset the existing recognizer; no replacement or overlapping gesture.
+        toolsTap.isEnabled = active
+    }
+
+    func beginToolTouch() -> UUID? {
+        interactionContext.begin(intent: toolIntent?(), dragging: table.isDragging, decelerating: table.isDecelerating)
+    }
+    func latchToolTouch(_ id: UUID?) {
+        interactionContext.latch(id, dragging: table.isDragging, decelerating: table.isDecelerating)
+    }
+    func cancelToolTouch(_ id: UUID?) { interactionContext.cancel(id) }
+    @discardableResult
+    func endToolTouch(_ id: UUID?) -> ReadingToolsTapDecision? {
+        guard let (intent, decision) = interactionContext.finish(id, dragging: table.isDragging,
+            decelerating: table.isDecelerating, voiceOver: UIAccessibility.isVoiceOverRunning) else { return nil }
+        // UIKit retains its stop-on-touch behavior. This bridge never adjusts the content offset.
+        onToolsInteraction?(.tap(intent, decision))
+        return decision
     }
 
     func apply(_ value: ReadingWindow, userNavigation: Bool, restoring point: ReaderViewportRestoration? = nil) {
@@ -142,18 +216,12 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         guard ReadingToolsGesturePolicy.central(x: Double(point.x), y: Double(point.y),
             width: Double(table.bounds.width), height: Double(table.bounds.height),
             originX: Double(table.bounds.minX), originY: Double(table.bounds.minY)) else { return false }
-        tapIntent = toolIntent?()
-        tapBeganDuringDeceleration = table.isDecelerating || toolDecelerating
-        tapBeganDuringDragging = table.isDragging
-        return true
+        toolsTap.touchID = beginToolTouch()
+        return toolsTap.touchID != nil
     }
     @objc private func bodyTapped() {
-        guard toolsTap.state == .ended, let intent = tapIntent else { return }
-        let decision = ReadingToolsGesturePolicy.tap(beganDuringDeceleration: tapBeganDuringDeceleration,
-            dragging: tapBeganDuringDragging || table.isDragging, decelerating: table.isDecelerating,
-            voiceOver: UIAccessibility.isVoiceOverRunning)
-        // UIKit retains its stop-on-touch behavior. This bridge never adjusts the content offset.
-        onToolsInteraction?(.tap(intent, decision))
+        guard toolsTap.state == .ended else { return }
+        endToolTouch(toolsTap.touchID)
     }
     @objc private func showToolsAccessibility() -> Bool {
         guard let onToolsInteraction else { return false }
@@ -164,7 +232,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         onToolsInteraction(.exitAccessibility); return true
     }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        userInputSinceRestore = true; toolDecelerating = false
+        userInputSinceRestore = true; interactionContext.draggingBegan()
         onToolsInteraction?(.scrollingBegan)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -172,10 +240,10 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         onAnchor?(visible, window.id)
     }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        toolDecelerating = decelerate
+        interactionContext.draggingEnded(decelerating: decelerate)
         if !decelerate { endedScrolling() }
     }
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { toolDecelerating = false; endedScrolling() }
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { interactionContext.decelerationEnded(); endedScrolling() }
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { if userInputSinceRestore { endedScrolling() } }
 
     private func endedScrolling() {
@@ -217,8 +285,9 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             "offset": [Double(table.contentOffset.x), Double(table.contentOffset.y)],
             "panState": table.panGestureRecognizer.state.rawValue, "tapState": toolsTap.state.rawValue,
             "panEnabled": table.panGestureRecognizer.isEnabled, "tapEnabled": toolsTap.isEnabled,
-            "latchedDecelerating": tapBeganDuringDeceleration, "latchedDragging": tapBeganDuringDragging,
-            "toolDecelerating": toolDecelerating, "restoring": restoring,
+            "latchedDecelerating": interactionContext.touch?.beganDuringDeceleration ?? false,
+            "latchedDragging": interactionContext.touch?.beganDuringDragging ?? false,
+            "toolDecelerating": interactionContext.toolDecelerating, "restoring": restoring,
             "topPointInWindow": [Double(topPoint.x), Double(topPoint.y)],
             "topHitChain": chain(actualWindow.hitTest(topPoint, with: nil))]
         // Public AX lookup only; unsupported/truncated/ambiguous containers remain unknown.
@@ -266,9 +335,19 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
 @MainActor
 private final class ReadingToolsTapRecognizer: UITapGestureRecognizer {
-    var onTouchBegan: (@MainActor () -> Void)?
+    var touchID: UUID?
+    var onTouchBegan: (@MainActor (UUID?) -> Void)?
+    var onTouchCancelled: (@MainActor (UUID?) -> Void)?
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        onTouchBegan?(); super.touchesBegan(touches, with: event)
+        onTouchBegan?(touchID); super.touchesBegan(touches, with: event)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        onTouchCancelled?(touchID); touchID = nil
+        super.touchesCancelled(touches, with: event)
+    }
+    override func reset() {
+        onTouchCancelled?(touchID); touchID = nil
+        super.reset()
     }
 }
 

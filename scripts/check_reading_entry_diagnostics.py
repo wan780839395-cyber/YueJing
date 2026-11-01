@@ -255,7 +255,7 @@ def source_contracts():
         check(token in controller, 'native-bound:' + token)
     import task3_test_inventory as inventory
     inventory.validate_source()
-    check(inventory.TOTAL == 138, 'reviewed-138-unique-cases')
+    check(inventory.TOTAL == 144, 'reviewed-144-unique-cases')
     ui = (ROOT / 'scripts/run_reading_ui_tests.py').read_text(encoding='utf-8')
     check('export_ui_evidence(out, provenance, code)' in ui, 'existing-attachment-export-retained')
     check('"exported_files": list(files.values())' in ui, 'new-json-exported-without-gate-change')

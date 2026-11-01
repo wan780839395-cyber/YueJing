@@ -32,6 +32,7 @@ struct ReaderScreen: View {
                 // Safe-area-sized from the start. Tools never reserve or resize this viewport.
                 // UIKit retains the existing 16/24pt scroll-end insets and 20pt text side margins.
                 ReaderViewport(window: model.window, preferences: model.preferences, handle: model.viewport,
+                    interactionActive: scenePhase == .active,
                     onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
                     onSettled: model.scrollingEnded, onApplied: model.windowApplied,
                     toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction)
@@ -101,6 +102,7 @@ struct ReaderScreen: View {
             }
         }
         .onChange(of: scenePhase) { phase in
+            model.viewport.setInteractionActive(phase == .active)
             if phase == .active {
                 mutateTools { $0.resume(); if model.loading || model.window == nil { $0.forceCompact() } }
             } else { mutateTools { $0.suspend() } }
