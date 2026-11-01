@@ -53,6 +53,199 @@ struct ReaderToolTouchContext {
     }
 }
 
+// BEGIN READER DIAGNOSTICS recorder
+/// Local, passive device diagnosis. No identifiers, text, coordinates, clocks or persistence.
+/// Each VC owns its own facts; an old VC can never write into its replacement's recorder.
+@MainActor
+final class ReaderInteractionDiagnostics {
+    enum Scene: String { case unknown = "?", active = "A", inactive = "I", background = "B" }
+    enum Event: String {
+        case attach = "att", replace = "new", detach = "det", revoke = "rev"
+        case scene = "sc", handle = "h", phase = "vc", phaseDone = "vc+", tools = "tools"
+        case receive = "rx", admitted = "ok", rejected = "no", began = "beg", latched = "lat"
+        case touchEnd = "up", touchEndReturned = "up+", cancelled = "can", reset = "rst", resetReturned = "rst+"
+        case target = "end", finish = "fin", callback = "cb", callbackReturned = "cb+"
+        case parent = "par", parentDone = "par+", scroll = "scr"
+    }
+    enum Admission: String { case none = "-", accepted = "ok", other = "other", voiceOver = "VO", outside = "edge", noToken = "nil" }
+    enum Decision: String { case none = "-", rejected = "nil", ignore = "ign", momentum = "stop", toggle = "tog" }
+    enum Parent: String { case none = "-", noWindow = "win", loading = "load", saveFailed = "save", decision = "dec", cannotInteract = "off", staleIntent = "old", action = "act" }
+    enum Mode: String { case unknown = "?", hidden = "h", compact = "c", panel = "p" }
+    enum Recognizer: String { case unknown = "?", possible = "p", began = "b", changed = "c", ended = "e", cancelled = "x", failed = "f" }
+    struct Tap {
+        var admission: Admission = .none
+        var began = false, touchEnded = false, target = false, cancelled = false, reset = false
+        var token = false, generation = false, dragging = false, decelerating = false
+        var latchedDrag = false, latchedDecel = false, callback = false, parentReceived = false
+        var decision: Decision = .none
+        var parent: Parent = .none
+        var before: Mode = .unknown, after: Mode = .unknown
+        var intentMatches = false, canInteract = false, finalVisible = false
+        var resetState: Recognizer = .unknown
+    }
+    private weak var label: UILabel?
+    private var events: [Event] = [] // Append-only, at most 64. Never a time series or ring of user data.
+    private var taps = [Tap(), Tap()]
+    private var attempts = 0
+    private var tapOpen = false
+    private var chainReset = false
+    private var recordingAdmission = false
+    private var inCallback = false
+    private var sawScroll = false
+    private var interrupted = false
+    private var replacedOwner = false
+    private var scene: Scene = .unknown
+    private var owner = false, handleActive = true, enabled = true, contextActive = true
+    private var dragging = false, decelerating = false, shadow = false
+    private var mode: Mode = .unknown
+    private var valid = false, suspended = false, canInteract = false, visible = false
+    private var hasWindow = false, loading = false, saveFailed = false
+    private var recognizer: Recognizer = .unknown
+
+    private func append(_ event: Event) {
+        if events.count < 64 { events.append(event) }
+        paint()
+    }
+    private func changeTap(_ change: (inout Tap) -> Void) {
+        guard tapOpen, (1...2).contains(attempts) else { return }
+        change(&taps[attempts - 1])
+    }
+    private func toolMode(_ tools: ReadingToolsPresentation) -> Mode {
+        switch tools.mode { case .hidden: .hidden; case .compact: .compact; case .panel: .panel }
+    }
+    func install(_ label: UILabel) { self.label = label; paint() }
+    func observeScene(_ next: Scene) {
+        // One reset per active -> nonactive transition, not again for inactive -> background.
+        if scene == .active, next != .active {
+            events.removeAll(keepingCapacity: true); taps = [Tap(), Tap()]; attempts = 0
+            tapOpen = false; chainReset = false; recordingAdmission = false
+            inCallback = false; sawScroll = false; interrupted = true
+        }
+        if next != scene { scene = next; append(.scene) }
+    }
+    func attach(scene: Scene, replacing: Bool) {
+        owner = true; replacedOwner = replacing; observeScene(scene); append(replacing ? .replace : .attach)
+    }
+    func observeOwner(_ current: Bool) { owner = current; paint() }
+    func detached() { owner = false; append(.detach) }
+    func revoked() { append(.revoke) }
+    func handlePhase(_ active: Bool, current: Bool) {
+        owner = current
+        if handleActive != active { handleActive = active; append(.handle) } else { paint() }
+    }
+    func sample(enabled: Bool, context: ReaderToolTouchContext, dragging: Bool, decelerating: Bool,
+                state: UIGestureRecognizer.State) {
+        self.enabled = enabled; contextActive = context.active; self.dragging = dragging
+        self.decelerating = decelerating; shadow = context.toolDecelerating
+        switch state {
+        case .possible: recognizer = .possible
+        case .began: recognizer = .began
+        case .changed: recognizer = .changed
+        case .ended: recognizer = .ended
+        case .cancelled: recognizer = .cancelled
+        case .failed: recognizer = .failed
+        @unknown default: recognizer = .unknown
+        }
+        paint()
+    }
+    func phase(_ done: Bool) { append(done ? .phaseDone : .phase) }
+    func sceneTools(_ tools: ReadingToolsPresentation) { observeTools(tools); append(.tools) }
+    func observeTools(_ tools: ReadingToolsPresentation) {
+        mode = toolMode(tools); valid = tools.valid; suspended = tools.suspended
+        canInteract = tools.canInteract; visible = tools.visible && tools.panel == nil; paint()
+    }
+    func beginAdmission() {
+        // Budget closes on a THIRD admission after reset, not on the second admission/end.
+        // Keep reset-before-target ordering observable too; no timer guesses completion.
+        if attempts == 2, chainReset { tapOpen = false }
+        recordingAdmission = (!tapOpen || chainReset) && attempts < 2
+        guard recordingAdmission else { return }
+        attempts += 1; tapOpen = true; chainReset = false; append(.receive)
+    }
+    func admission(isTools: Bool, voiceOver: Bool, central: Bool, hasToken: Bool) {
+        guard recordingAdmission else { return }
+        let reason: Admission = !isTools ? .other : voiceOver ? .voiceOver : !central ? .outside : !hasToken ? .noToken : .accepted
+        changeTap { $0.admission = reason }
+        append(reason == .accepted ? .admitted : .rejected)
+        // A rejected admission never gets a recognizer chain; do not wait forever for reset.
+        if reason != .accepted { tapOpen = false }
+        recordingAdmission = false
+    }
+    func token(_ id: UUID?, context: ReaderToolTouchContext, dragging: Bool, decelerating: Bool) {
+        // Only equality facts survive this call. Never retain the UUID or context.
+        changeTap {
+            $0.token = id != nil && context.touch?.id == id
+            $0.generation = context.touch?.generation == context.generation
+            $0.dragging = dragging; $0.decelerating = decelerating
+            $0.latchedDrag = context.touch?.beganDuringDragging ?? false
+            $0.latchedDecel = context.touch?.beganDuringDeceleration ?? false
+        }
+    }
+    func recognizerEvent(_ event: Event) {
+        guard tapOpen || attempts == 0 else { return }
+        changeTap {
+            if event == .began { $0.began = true }
+            if event == .touchEnd { $0.touchEnded = true }
+            if event == .target { $0.target = true }
+            if event == .cancelled { $0.cancelled = true }
+            if event == .reset { $0.reset = true; $0.resetState = recognizer }
+        }
+        append(event)
+        // Keep a late target/parent tail after reset observable until the next admission.
+        if event == .resetReturned { chainReset = true }
+    }
+    func willFinish() { changeTap { $0.decision = .rejected }; recognizerEvent(.finish) }
+    func callback(_ decision: ReadingToolsTapDecision, present: Bool) {
+        changeTap {
+            switch decision { case .ignore: $0.decision = .ignore; case .stopMomentum: $0.decision = .momentum; case .toggle: $0.decision = .toggle }
+            $0.callback = present
+        }
+        inCallback = tapOpen; recognizerEvent(.callback)
+    }
+    func callbackReturned() { recognizerEvent(.callbackReturned); inCallback = false }
+    func parentTap(window: Bool, loading: Bool, saveFailed: Bool, toggle: Bool,
+                   intentMatches: Bool, tools: ReadingToolsPresentation) {
+        // A revoked/old VC cannot attribute its late callback to the current VC's recorder.
+        guard inCallback else { return }
+        hasWindow = window; self.loading = loading; self.saveFailed = saveFailed
+        changeTap {
+            $0.parentReceived = true; $0.before = toolMode(tools)
+            $0.intentMatches = intentMatches; $0.canInteract = tools.canInteract
+            $0.parent = !window ? .noWindow : loading ? .loading : saveFailed ? .saveFailed : !toggle ? .decision
+                : !tools.canInteract ? .cannotInteract : !intentMatches ? .staleIntent : .action
+        }
+        append(.parent)
+    }
+    func parentFinished(_ tools: ReadingToolsPresentation) {
+        guard inCallback else { return }
+        changeTap { $0.after = toolMode(tools); $0.finalVisible = tools.visible && tools.panel == nil }
+        observeTools(tools); append(.parentDone)
+    }
+    func screenFacts(window: Bool, loading: Bool, saveFailed: Bool, tools: ReadingToolsPresentation) {
+        hasWindow = window; self.loading = loading; self.saveFailed = saveFailed; observeTools(tools)
+    }
+    func scrolling() { if !sawScroll { sawScroll = true; append(.scroll) } }
+    private func bit(_ value: Bool) -> String { value ? "1" : "0" }
+    private func tapLine(_ index: Int) -> String {
+        let t = taps[index]
+        return "T\(index + 1) \(t.admission.rawValue) B\(bit(t.began))U\(bit(t.touchEnded))E\(bit(t.target)) X\(bit(t.cancelled))R\(bit(t.reset))\(t.resetState.rawValue) \(t.decision.rawValue)"
+    }
+    private func resultLine(_ index: Int) -> String {
+        let t = taps[index]
+        return " m\(bit(t.token))\(bit(t.generation)) d\(bit(t.dragging))\(bit(t.decelerating)) l\(bit(t.latchedDrag))\(bit(t.latchedDecel)) cb\(bit(t.callback))p\(bit(t.parentReceived)):\(t.parent.rawValue) \(t.before.rawValue)>\(t.after.rawValue) i\(bit(t.intentMatches))c\(bit(t.canInteract))v\(bit(t.finalVisible))"
+    }
+    private func paint() {
+        label?.text = [
+            "DIAG R\(bit(interrupted)) S:\(scene.rawValue) O\(bit(owner))N\(bit(replacedOwner)) H\(bit(handleActive)) E\(bit(enabled))C\(bit(contextActive))",
+            "rx\(attempts)/2 end\(taps.filter { $0.target }.count)/2 g:\(recognizer.rawValue) d\(bit(dragging))\(bit(decelerating)) sh\(bit(shadow))",
+            tapLine(0), resultLine(0), tapLine(1), resultLine(1),
+            "P:\(mode.rawValue) v\(bit(visible)) c\(bit(canInteract)) V\(bit(valid))s\(bit(suspended)) w\(bit(hasWindow))l\(bit(loading))f\(bit(saveFailed))",
+            "#\(events.count)/64 " + events.suffix(9).map(\.rawValue).joined(separator: ">")
+        ].joined(separator: "\n")
+    }
+}
+// END READER DIAGNOSTICS recorder
+
 @MainActor
 final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
@@ -70,6 +263,15 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     private let toolsTap = ReadingToolsTapRecognizer()
     private(set) var interactionContext = ReaderToolTouchContext()
     private var appliedTheme: ReaderTheme?
+    // BEGIN READER DIAGNOSTICS storage
+    let interactionDiagnostics = ReaderInteractionDiagnostics()
+    weak var diagnosticHandle: ReaderViewportHandle?
+    private let interactionDiagnosticLabel = UILabel()
+    private func sampleInteractionDiagnostics() {
+        interactionDiagnostics.sample(enabled: toolsTap.isEnabled, context: interactionContext,
+            dragging: table.isDragging, decelerating: table.isDecelerating, state: toolsTap.state)
+    }
+    // END READER DIAGNOSTICS storage
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -91,11 +293,41 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         toolsTap.onTouchCancelled = { [weak self] id in self?.cancelToolTouch(id) }
         table.addGestureRecognizer(toolsTap)
         view.addSubview(table)
+        // BEGIN READER DIAGNOSTICS install
+        toolsTap.onDiagnosticEvent = { [weak self] event, id in
+            guard let self else { return }
+            self.sampleInteractionDiagnostics()
+            if event == .began {
+                self.interactionDiagnostics.token(id, context: self.interactionContext,
+                    dragging: self.table.isDragging, decelerating: self.table.isDecelerating)
+            }
+            self.interactionDiagnostics.recognizerEvent(event)
+        }
+        interactionDiagnosticLabel.isUserInteractionEnabled = false
+        interactionDiagnosticLabel.isAccessibilityElement = false
+        interactionDiagnosticLabel.accessibilityElementsHidden = true
+        interactionDiagnosticLabel.numberOfLines = 8
+        interactionDiagnosticLabel.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(
+            for: .monospacedSystemFont(ofSize: 10, weight: .regular), maximumPointSize: 13)
+        interactionDiagnosticLabel.adjustsFontForContentSizeCategory = true
+        interactionDiagnosticLabel.textColor = .white
+        interactionDiagnosticLabel.backgroundColor = UIColor(white: 0, alpha: 1)
+        view.addSubview(interactionDiagnosticLabel)
+        interactionDiagnostics.install(interactionDiagnosticLabel)
+        sampleInteractionDiagnostics()
+        // END READER DIAGNOSTICS install
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         table.frame = view.bounds
+        // BEGIN READER DIAGNOSTICS label frame
+        // Last-event facts only; no per-frame/per-pixel recorder or polling.
+        // Passive paint only: table frame, content insets and hit-testing stay unchanged.
+        let diagnosticTop = view.safeAreaInsets.top + 52
+        interactionDiagnosticLabel.frame = CGRect(x: 8, y: diagnosticTop,
+            width: max(0, view.bounds.width - 16), height: min(144, max(0, view.bounds.height - diagnosticTop - 8)))
+        // END READER DIAGNOSTICS label frame
         let width = Double(view.bounds.width)
         if width >= 120, abs(width - previousWidth) > 0.5 { previousWidth = width; onWidth?(width) }
     }
@@ -111,12 +343,20 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     func detachCallbacks() {
+        // BEGIN READER DIAGNOSTICS revoke
+        interactionDiagnostics.revoked()
+        defer { sampleInteractionDiagnostics() }
+        // END READER DIAGNOSTICS revoke
         setInteractionActive(false)
         onAnchor = nil; onExtend = nil; onWidth = nil; onSettled = nil
         toolIntent = nil; onToolsInteraction = nil
     }
 
     func setInteractionActive(_ active: Bool) {
+        // BEGIN READER DIAGNOSTICS phase
+        interactionDiagnostics.phase(false)
+        defer { sampleInteractionDiagnostics(); interactionDiagnostics.phase(true) }
+        // END READER DIAGNOSTICS phase
         guard interactionContext.active != active else { return }
         interactionContext.setActive(active, decelerating: table.isDecelerating)
         // Cancels/reset the existing recognizer; no replacement or overlapping gesture.
@@ -128,13 +368,31 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
     func latchToolTouch(_ id: UUID?) {
         interactionContext.latch(id, dragging: table.isDragging, decelerating: table.isDecelerating)
+        // BEGIN READER DIAGNOSTICS latch
+        interactionDiagnostics.token(id, context: interactionContext, dragging: table.isDragging, decelerating: table.isDecelerating)
+        interactionDiagnostics.recognizerEvent(.latched)
+        // END READER DIAGNOSTICS latch
     }
     func cancelToolTouch(_ id: UUID?) { interactionContext.cancel(id) }
     @discardableResult
     func endToolTouch(_ id: UUID?) -> ReadingToolsTapDecision? {
+        // BEGIN READER DIAGNOSTICS finish
+        sampleInteractionDiagnostics()
+        interactionDiagnostics.token(id, context: interactionContext, dragging: table.isDragging, decelerating: table.isDecelerating)
+        interactionDiagnostics.willFinish()
+        defer { sampleInteractionDiagnostics() }
+        // END READER DIAGNOSTICS finish
         guard let (intent, decision) = interactionContext.finish(id, dragging: table.isDragging,
             decelerating: table.isDecelerating, voiceOver: UIAccessibility.isVoiceOverRunning) else { return nil }
         // UIKit retains its stop-on-touch behavior. This bridge never adjusts the content offset.
+        // BEGIN READER DIAGNOSTICS callback
+        diagnosticHandle?.beginDiagnosticDelivery(self)
+        interactionDiagnostics.callback(decision, present: onToolsInteraction != nil)
+        defer {
+            interactionDiagnostics.callbackReturned()
+            diagnosticHandle?.endDiagnosticDelivery(self)
+        }
+        // END READER DIAGNOSTICS callback
         onToolsInteraction?(.tap(intent, decision))
         return decision
     }
@@ -211,16 +469,35 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // BEGIN READER DIAGNOSTICS admission start
+        interactionDiagnostics.beginAdmission()
+        var diagnosticCentral = false
+        defer {
+            sampleInteractionDiagnostics()
+            interactionDiagnostics.admission(isTools: gestureRecognizer === toolsTap,
+                voiceOver: UIAccessibility.isVoiceOverRunning, central: diagnosticCentral, hasToken: toolsTap.touchID != nil)
+        }
+        // END READER DIAGNOSTICS admission start
         guard gestureRecognizer === toolsTap, !UIAccessibility.isVoiceOverRunning else { return false }
         let point = touch.location(in: table)
         guard ReadingToolsGesturePolicy.central(x: Double(point.x), y: Double(point.y),
             width: Double(table.bounds.width), height: Double(table.bounds.height),
             originX: Double(table.bounds.minX), originY: Double(table.bounds.minY)) else { return false }
+        // BEGIN READER DIAGNOSTICS central passed
+        diagnosticCentral = true
+        // END READER DIAGNOSTICS central passed
         toolsTap.touchID = beginToolTouch()
+        // BEGIN READER DIAGNOSTICS admission token
+        interactionDiagnostics.token(toolsTap.touchID, context: interactionContext,
+            dragging: table.isDragging, decelerating: table.isDecelerating)
+        // END READER DIAGNOSTICS admission token
         return toolsTap.touchID != nil
     }
     @objc private func bodyTapped() {
         guard toolsTap.state == .ended else { return }
+        // BEGIN READER DIAGNOSTICS target
+        sampleInteractionDiagnostics(); interactionDiagnostics.recognizerEvent(.target)
+        // END READER DIAGNOSTICS target
         endToolTouch(toolsTap.touchID)
     }
     @objc private func showToolsAccessibility() -> Bool {
@@ -233,6 +510,9 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         userInputSinceRestore = true; interactionContext.draggingBegan()
+        // BEGIN READER DIAGNOSTICS drag facts
+        sampleInteractionDiagnostics()
+        // END READER DIAGNOSTICS drag facts
         onToolsInteraction?(.scrollingBegan)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -241,12 +521,18 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         interactionContext.draggingEnded(decelerating: decelerate)
+        // BEGIN READER DIAGNOSTICS drag end facts
+        sampleInteractionDiagnostics()
+        // END READER DIAGNOSTICS drag end facts
         if !decelerate { endedScrolling() }
     }
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { interactionContext.decelerationEnded(); endedScrolling() }
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { if userInputSinceRestore { endedScrolling() } }
 
     private func endedScrolling() {
+        // BEGIN READER DIAGNOSTICS settled facts
+        sampleInteractionDiagnostics()
+        // END READER DIAGNOSTICS settled facts
         guard !restoring, let window, let visible = actualVisibleAnchor(), let paths = table.indexPathsForVisibleRows else { return }
         if onSettled?(visible, window.id) == true { return }
         let rows = paths.map(\.row)
@@ -338,16 +624,36 @@ private final class ReadingToolsTapRecognizer: UITapGestureRecognizer {
     var touchID: UUID?
     var onTouchBegan: (@MainActor (UUID?) -> Void)?
     var onTouchCancelled: (@MainActor (UUID?) -> Void)?
+    // BEGIN READER DIAGNOSTICS recognizer observer
+    var onDiagnosticEvent: (@MainActor (ReaderInteractionDiagnostics.Event, UUID?) -> Void)?
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        onDiagnosticEvent?(.touchEnd, touchID)
+        super.touchesEnded(touches, with: event)
+        onDiagnosticEvent?(.touchEndReturned, touchID)
+    }
+    // END READER DIAGNOSTICS recognizer observer
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        // BEGIN READER DIAGNOSTICS raw begin
+        onDiagnosticEvent?(.began, touchID)
+        // END READER DIAGNOSTICS raw begin
         onTouchBegan?(touchID); super.touchesBegan(touches, with: event)
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        // BEGIN READER DIAGNOSTICS raw cancel
+        onDiagnosticEvent?(.cancelled, touchID)
+        // END READER DIAGNOSTICS raw cancel
         onTouchCancelled?(touchID); touchID = nil
         super.touchesCancelled(touches, with: event)
     }
     override func reset() {
+        // BEGIN READER DIAGNOSTICS raw reset
+        onDiagnosticEvent?(.reset, touchID)
+        // END READER DIAGNOSTICS raw reset
         onTouchCancelled?(touchID); touchID = nil
         super.reset()
+        // BEGIN READER DIAGNOSTICS raw reset returned
+        onDiagnosticEvent?(.resetReturned, touchID)
+        // END READER DIAGNOSTICS raw reset returned
     }
 }
 

@@ -12,6 +12,7 @@ on:
         options:
           - reader-dock-exact8
           - physical-recovery-32d6244-exact1
+          - interaction-diagnostics-2830bd0-exact4
 
 permissions:
   contents: read
@@ -35,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -43,7 +44,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: ${{ inputs.package_scope == 'physical-recovery-32d6244-exact1' && 4 || 2 }}
+          fetch-depth: ${{ inputs.package_scope == 'interaction-diagnostics-2830bd0-exact4' && 5 || inputs.package_scope == 'physical-recovery-32d6244-exact1' && 4 || 2 }}
 
       - name: Freeze the approved eight-file reader dock package and disclose no native test execution
         if: ${{ inputs.package_scope == 'reader-dock-exact8' }}
@@ -234,6 +235,160 @@ jobs:
           python3 -B scripts/check_reader_dock_schemes.py --device-release-ci > artifacts/task3/physical-recovery-dock-source.json
           python3 -B scripts/check_ui_motion_polish.py --device-release-ci > artifacts/task3/physical-recovery-motion-source.json
           python3 -B scripts/check_ui_control_cohesion.py --device-release-ci > artifacts/task3/physical-recovery-cohesion-source.json
+
+      - name: Freeze the exact4 passive interaction diagnostics and disclose no full regression pass
+        if: ${{ inputs.package_scope == 'interaction-diagnostics-2830bd0-exact4' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          python3 -B - <<'PY'
+          import base64, hashlib, json, os, re, stat, subprocess, zlib
+          from pathlib import Path
+
+          PARENT = "2830bd041fb6dc9267d2894c8283e7663dfa128d"
+          SCOPE = "interaction-diagnostics-2830bd0-exact4"
+          WORKFLOW = ".github/workflows/ios-build.yml"
+          REPO = "wan780839395-cyber/YueJing"
+          FIXED = {
+              "App/Reading/ReaderScreen.swift": "81d04c077efc92bd6b8156814c5d1409e47eeb0345a1b275d167f7f5d04f64ff",
+              "App/Reading/ReaderViewport.swift": "5dff5d62d72d561e39a0b39492427ad1850945f309e277216ad25041ea3cbb92",
+              "App/Reading/ReaderViewController.swift": "2ecadd2bc68ae7c2232b01d12c4947423df8d52e3e530785849cc3899ccbbce5",
+          }
+          PREIMAGE = {
+              "App/Reading/ReaderScreen.swift": "75207444a56915abfb049fe5ecac423822f80910471520b12e4faa5d97c0e92a",
+              "App/Reading/ReaderViewport.swift": "a749022cb0b1d6ab865cb9c3fb8c2c3ff395c5d7492fa307ffa2fbed94b1b52c",
+              "App/Reading/ReaderViewController.swift": "f2424be0236346bcda760251137f7d80089373dd5c3e5f18c7472025d9e2a6f6",
+          }
+          # Lossless original39 ledger, not a source mask; raw bytes are hash-bound before decoding JSON.
+          LEDGER_RAW = zlib.decompress(base64.b64decode("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", validate=True))
+          LEDGER_SHA = "3f1f5ce9cbf4b18d0b25d072356c63089118e3178ff3bc5202a486cda9f05c2a"
+          assert hashlib.sha256(LEDGER_RAW).hexdigest() == LEDGER_SHA, "Immutable fragment ledger changed"
+          FRAGMENTS = json.loads(LEDGER_RAW)
+          assert set(FRAGMENTS) == set(FIXED) and sum(map(len, FRAGMENTS.values())) == 39
+
+          def diagnostic_gate_state(env, state):
+              allowed = sorted([WORKFLOW, *FIXED])
+              assert env["PACKAGE_SCOPE"] == SCOPE, "Unapproved scope"
+              assert env["GITHUB_REPOSITORY"] == REPO, "Wrong repository"
+              assert env["GITHUB_EVENT_NAME"] == "workflow_dispatch", "Manual event only"
+              assert env["GITHUB_RUN_ATTEMPT"] == "1", "Attempt1 only"
+              assert env["GITHUB_REF"] == "refs/heads/main" and env["GITHUB_REF_NAME"] == "main", "Main only"
+              assert env["GITHUB_REF_TYPE"] == "branch", "Branch only"
+              assert env["GITHUB_WORKFLOW_REF"] == REPO + "/" + WORKFLOW + "@refs/heads/main", "Wrong workflow ref"
+              assert state["inputs"] == {"package_scope": SCOPE}, "Unknown or changed dispatch input"
+              assert re.fullmatch(r"[0-9a-f]{40}", state["head"]), "Invalid commit"
+              assert state["head"] == env["GITHUB_SHA"] == env["GITHUB_WORKFLOW_SHA"], "Source/workflow SHA differs"
+              assert state["parents"] == [state["head"], PARENT], "Fixed unique parent2830 only"
+              assert not state["dirty"], "Tracked worktree/index dirty"
+              assert state["changed"] == "".join("M\t" + p + "\n" for p in allowed), "Exact4 M only"
+              before, after = state["before_tree"], state["after_tree"]
+              assert len(before) == len(after) == 181 and set(before) == set(after), "Tracked path set changed"
+              for path in allowed:
+                  assert before[path][:2] == after[path][:2] == ["100644", "blob"], "Exact4 must be regular100644"
+                  assert before[path][2] != after[path][2], "Each approved blob must change"
+              assert {p:v for p,v in before.items() if p not in allowed} == {p:v for p,v in after.items() if p not in allowed}, "Other177 modes/types/blobs changed"
+              assert set(state["index"]) == set(after) == set(state["working"]), "Index/working path set differs"
+              for path, entry in after.items():
+                  assert entry[0] in ("100644", "100755") and entry[1] == "blob", "Nonregular tracked entry"
+                  assert state["index"][path] == [entry[0], entry[2], "0"], "Index mode/blob/stage differs: " + path
+                  assert state["working"][path] == dict(regular=True, blob=entry[2]), "Working bytes/symlink differ: " + path
+              for path, sha in FIXED.items():
+                  data = state["source"][path]
+                  assert hashlib.sha256(data).hexdigest() == sha, "Frozen source changed: " + path
+                  lines = data.decode("utf-8").splitlines(keepends=True)
+                  text = data.decode("utf-8")
+                  last = 0
+                  for fragment in FRAGMENTS[path]:
+                      start, end, value = fragment["start_line"], fragment["end_line"], fragment["text"]
+                      assert last < start <= end and text.count(value) == 1, "Fragment overlap/nonunique"
+                      assert "".join(lines[start-1:end]) == value, "Fragment placement differs"
+                      last = end
+                  for fragment in reversed(FRAGMENTS[path]):
+                      del lines[fragment["start_line"]-1:fragment["end_line"]]
+                  preimage = "".join(lines).encode("utf-8")
+                  assert preimage == state["preimage"][path], "Exact reverse differs from Git2830"
+                  assert hashlib.sha256(preimage).hexdigest() == PREIMAGE[path], "Preimage hash differs"
+              return dict(source_commit=state["head"], product_source_commit=state["head"],
+                          business_preimage_commit=PARENT, single_parent=PARENT, approved_changed_files=allowed,
+                          frozen_diagnostic_sha256=FIXED, fragment_ledger_sha256=LEDGER_SHA, exact_fragments_reversed=39,
+                          preimage_sha256=PREIMAGE, other_tracked_entries_equal=177,
+                          index_and_working_equal_commit=True, workflow_id_to_bind=397959305)
+
+          def git(*args):
+              return subprocess.check_output(["git", "--no-optional-locks", *args])
+
+          def tree_at(revision):
+              result = {}
+              for entry in git("ls-tree", "-r", "-z", revision).split(b"\0"):
+                  if entry:
+                      meta, path = entry.split(b"\t", 1)
+                      result[path.decode("utf-8")] = meta.decode("ascii").split()
+              return result
+
+          def gather_state():
+              after, working, index = tree_at("HEAD"), {}, {}
+              for path in sorted(after):
+                  file = Path(path)
+                  regular = stat.S_ISREG(file.lstat().st_mode) and not any(p.is_symlink() for p in (file, *file.parents))
+                  data = file.read_bytes() if regular else b""
+                  blob = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+                  working[path] = dict(regular=regular, blob=blob)
+              for entry in git("ls-files", "--stage", "-z").split(b"\0"):
+                  if entry:
+                      meta, path = entry.split(b"\t", 1)
+                      key = path.decode("utf-8")
+                      assert key not in index, "Unmerged index"
+                      index[key] = meta.decode("ascii").split()
+              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+              return dict(head=git("rev-parse", "HEAD").decode().strip(),
+                          parents=git("rev-list", "--parents", "-n", "1", "HEAD").decode().split(),
+                          dirty=git("status", "--porcelain=v1", "--untracked-files=no").decode(),
+                          changed=git("diff", "--no-renames", "--name-status", PARENT, "HEAD").decode(),
+                          before_tree=tree_at(PARENT), after_tree=after, index=index, working=working,
+                          source={p:Path(p).read_bytes() for p in FIXED},
+                          preimage={p:git("show", PARENT + ":" + p) for p in FIXED}, inputs=event.get("inputs"))
+
+          receipt = diagnostic_gate_state(os.environ, gather_state())
+          Path("artifacts/task3/interaction-diagnostics-exact4-gate.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          status = dict(purpose="passive interaction evidence only; not a fix", qualification="TESTS NOT RUN",
+                        qualification_zh="仅取证、完整回归未通过，供真机验证", tests_run=False, full_test_gate="NOT PASSED",
+                        source_commit=receipt["source_commit"], product_source_commit=receipt["source_commit"],
+                        business_preimage_commit=PARENT, previous_candidate=PARENT,
+                        product_test_bytes_equal_parent32=False, diagnostic_is_not_a_fix=True,
+                        approved_changed_files=receipt["approved_changed_files"], product_changes=sorted(FIXED),
+                        product_change_scope="three frozen diagnostic Swift files differ from32; other177 tracked entries equal2830; workflow gate only",
+                        exact4_gate=receipt, native_tests_this_run=dict(status="not run", executions=0, selection=[]),
+                        native_execution=[], physical_device_acceptance="not performed",
+                        prior_validation_source_commit="32d6244c7e481de79d74e10a71ecae78635ffc0a",
+                        prior_validation_workflow_id=398234793, prior_validation_run=41261929914,
+                        prior_validation_attempt=1, prior_validation_conclusion="failure",
+                        prior_validation_url="https://github.com/wan780839395-cyber/YueJing/actions/runs/41261929914",
+                        prior_validation_declared=145, prior_validation_selected=144,
+                        prior_validation_started=141, prior_validation_finished=141,
+                        prior_validation_passed=140, prior_validation_failed=1, prior_validation_unexecuted=3, prior_validation_skipped=0,
+                        prior_validation_failure="Tests/YueJingUITests/ReadingFlowUITests.swift:473 shared10s exit/settings hittable wait timed out BEFORE actual exit tap; root cause unknown",
+                        prior_Host8_pass="old32 only; not transferred to diagnostic source N",
+                        prior_validation_applies_to_current_candidate=False, prior_task3_tests_rerun=False,
+                        original_task3_gate="unchanged, failed history preserved; not executed",
+                        physical_2830_feedback="User confirms body scrolls after App switch but central taps cannot recall tools; root unknown; passive diagnosis not repair; nonreproduction is not a fix")
+          Path("artifacts/verification-status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print("::warning::TESTS NOT RUN / 仅取证、完整回归未通过，供真机验证")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+              output.write("## TESTS NOT RUN / 仅取证、完整回归未通过，供真机验证\n\n"
+                           "Source/product N: `" + receipt["source_commit"] + "`; unique parent/business preimage: `" + PARENT + "`. "
+                           "Three frozen diagnostic Swift files differ from32; not an identical-product workflow-only build. "
+                           "Full regression **NOT PASSED**. Native test executions0, selection[], native_execution[]; physical-device acceptance not performed. "
+                           "Old32 full Task3 workflow398234793/run41261929914/attempt1 failed: 145declared/144selected/141started+completed/140pass/1fail/3unexecuted/nativeSkip0. "
+                           "ReadingFlowUITests.swift:473 shared10s exit/settings hittable wait failed BEFORE actual exit tap; root unknown. Host8pass belongs only to32, not N. "
+                           "User confirmed2830 App-switch body scrolling works but central recall fails. This passive diagnostic is NOT a fix; nonreproduction is not repair acceptance. "
+                           "No simulator, unit, host, UI, Canvas or full Task3 tests run. Device Release compilation and unsigned packaging only.\n")
+          PY
+          python3 -B scripts/check_device_build_validation_entry.py
+          python3 -B scripts/check_reader_dock_schemes.py --device-release-ci > artifacts/task3/interaction-diagnostics-dock-source.json
+          python3 -B scripts/check_ui_motion_polish.py --device-release-ci > artifacts/task3/interaction-diagnostics-motion-source.json
+          python3 -B scripts/check_ui_control_cohesion.py --device-release-ci > artifacts/task3/interaction-diagnostics-cohesion-source.json
 
       - name: Verify the selected native toolchain
         run: |

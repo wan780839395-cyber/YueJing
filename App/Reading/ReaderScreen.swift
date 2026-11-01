@@ -33,6 +33,10 @@ struct ReaderScreen: View {
                 // UIKit retains the existing 16/24pt scroll-end insets and 20pt text side margins.
                 ReaderViewport(window: model.window, preferences: model.preferences, handle: model.viewport,
                     interactionActive: scenePhase == .active,
+                    // BEGIN READER DIAGNOSTICS viewport facts
+                    diagnosticTools: tools, diagnosticLoading: model.loading,
+                    diagnosticSaveFailed: model.exitSaveFailed, diagnosticScene: scenePhase,
+                    // END READER DIAGNOSTICS viewport facts
                     onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
                     onSettled: model.scrollingEnded, onApplied: model.windowApplied,
                     toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction)
@@ -102,10 +106,16 @@ struct ReaderScreen: View {
             }
         }
         .onChange(of: scenePhase) { phase in
+            // BEGIN READER DIAGNOSTICS screen scene
+            model.viewport.observeDiagnosticScene(phase)
+            // END READER DIAGNOSTICS screen scene
             model.viewport.setInteractionActive(phase == .active)
             if phase == .active {
                 mutateTools { $0.resume(); if model.loading || model.window == nil { $0.forceCompact() } }
             } else { mutateTools { $0.suspend() } }
+            // BEGIN READER DIAGNOSTICS scene tools completion
+            model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
+            // END READER DIAGNOSTICS scene tools completion
             Task {
                 guard scenePhase == phase else { return }
                 if phase == .active { await model.resume() } else { await model.suspend() }
@@ -177,6 +187,10 @@ struct ReaderScreen: View {
     private func mutateTools(_ change: (inout ReadingToolsPresentation) -> Void) {
         let old = tools.panel == .directory ? tools.panelID : nil
         change(&tools)
+        // BEGIN READER DIAGNOSTICS tools observation
+        model.viewport.controller?.interactionDiagnostics.screenFacts(window: model.window != nil,
+            loading: model.loading, saveFailed: model.exitSaveFailed, tools: tools)
+        // END READER DIAGNOSTICS tools observation
         let next = tools.panel == .directory ? tools.panelID : nil
         if let old, old != next { model.directory.dismiss(presentation: old) }
     }
@@ -199,9 +213,19 @@ struct ReaderScreen: View {
         case .showAccessibility: mutateTools { $0.show() }
         case .exitAccessibility: exitReader()
         case .scrollingBegan:
+            // BEGIN READER DIAGNOSTICS scrolling observation
+            model.viewport.controller?.interactionDiagnostics.scrolling()
+            // END READER DIAGNOSTICS scrolling observation
             guard model.window != nil, !model.loading, tools.panel == nil else { return }
             mutateTools { $0.scrollingBegan() }
         case .tap(let expected, let decision):
+            // BEGIN READER DIAGNOSTICS screen tap
+            let observation = model.viewport.diagnosticCallbackObservation
+            observation?.parentTap(window: model.window != nil, loading: model.loading,
+                saveFailed: model.exitSaveFailed, toggle: decision == .toggle,
+                intentMatches: expected == tools.intent, tools: tools)
+            defer { observation?.parentFinished(tools) }
+            // END READER DIAGNOSTICS screen tap
             guard model.window != nil, !model.loading, !model.exitSaveFailed, decision == .toggle else { return }
             mutateTools { $0.bodyTapped(expected: expected) }
         }
