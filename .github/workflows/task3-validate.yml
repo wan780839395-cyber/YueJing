@@ -11,7 +11,7 @@ on:
         default: full
         options:
           - full
-          - host-lifecycle-8ce9990-exact2
+          - host-container-root-069a350-exact2
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: ${{ inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' && 2 || 1 }}
+          fetch-depth: ${{ inputs.validation_scope == 'host-container-root-069a350-exact2' && 2 || 1 }}
 
       - name: Guard the approved Host-only scope before native preparation
         env:
@@ -42,11 +42,11 @@ jobs:
           python3 -B - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
-          BASE = '8ce99904a532ba4d11ebf79eb2f607e73ed615dd'
+          BASE = '069a350724f67a8a1c1bd16b49ad9617b99e5600'
           HOST = 'Tests/YueJingHostTests/ReaderSceneAuthorityTests.swift'
           WORKFLOW = '.github/workflows/task3-validate.yml'
-          SCOPE = 'host-lifecycle-8ce9990-exact2'
-          FROZEN = '4fb2409b2d1e45725d748c9d14cecfdbb2cd0a781a942b2b63748db224471224'
+          SCOPE = 'host-container-root-069a350-exact2'
+          FROZEN = '7832009284e27a45507b2846f7ddb919911dbea7352cd403c10395cd6e5b9d5a'
           def require(ok, message):
               if not ok:
                   raise ValueError(message)
@@ -57,7 +57,7 @@ jobs:
               changed = {p for p in set(previous) | set(current) if previous.get(p) != current.get(p)}
               require(changed == {HOST, WORKFLOW}, 'Host-only commit must change exactly the two approved paths')
               require(all(current[p][0:2] == ['100644', 'blob'] for p in changed), 'Host-only paths must be regular 100644 blobs')
-              require(len(blob) == 17850 and hashlib.sha256(blob).hexdigest() == FROZEN and worktree == blob, 'Frozen Host blob/worktree differs')
+              require(len(blob) == 20645 and hashlib.sha256(blob).hexdigest() == FROZEN and worktree == blob, 'Frozen Host blob/worktree differs')
               return dict(scope=scope, qualification='HOST_ONLY_NOT_FULL_REGRESSION', source_commit=sha,
                           parent=BASE, changed_paths=sorted(changed), host_sha256=FROZEN, host_bytes=len(blob),
                           selected=9, full_selected=146, full_passed=False, ui_execution_authorized=False, ipa_authorized=False)
@@ -237,7 +237,7 @@ jobs:
           python3 scripts/validate_task3.py processing-measurements
 
       - name: Confirm the prepared Host-only dependency and frozen selection
-        if: ${{ success() && inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' }}
+        if: ${{ success() && inputs.validation_scope == 'host-container-root-069a350-exact2' }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'
@@ -269,7 +269,7 @@ jobs:
             --evidence-dir artifacts/reading-ui-native
 
       - name: Audit Host9 and lifecycle warnings without another native invocation
-        if: ${{ success() && inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' }}
+        if: ${{ success() && inputs.validation_scope == 'host-container-root-069a350-exact2' }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'

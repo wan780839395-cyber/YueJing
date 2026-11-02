@@ -4,9 +4,9 @@ import Testing
 import UIKit
 @testable import YueJing
 
-// Real host window/scene + container-owned, paired child appearance transitions: production
-// binding, selector observer, parent delivery and coordinator contract, NOT automatic child delivery.
-// Scene notifications and suspended model work are injected; no actual App-switch or touch proof.
+// Real host window/scene + explicitly completed root and paired child appearance transitions.
+// Exercises production binding, selector observer, parent delivery and coordinator contract.
+// Scene notifications/model work are injected; no automatic child delivery or actual App-switch proof.
 @MainActor
 @Suite(.serialized)
 struct ReaderSceneAuthorityTests {
@@ -18,11 +18,14 @@ struct ReaderSceneAuthorityTests {
         let fixture = AppearanceContainer()
         defer {
             fixture.removeAllChildren()
-            host.isHidden = true
+            if host.rootViewController === fixture { fixture.disappearRoot() }
             host.rootViewController = nil
+            host.isHidden = true
+            fixture.expectRootDetached()
         }
         @MainActor func deliverAttachedAppearance(_ controller: ReaderViewController,
                                                  handle: ReaderViewportHandle, routeID: UUID) throws {
+            try fixture.requireRootAppearance(true)
             fixture.disappear(controller) // A return/rebind first closes the previous appearance.
             host.layoutIfNeeded()
             controller.view.layoutIfNeeded()
@@ -39,10 +42,9 @@ struct ReaderSceneAuthorityTests {
         @MainActor func mountConfigured(_ controller: ReaderViewController,
                                        handle: ReaderViewportHandle, routeID: UUID) throws {
             fixture.removeAllChildren()
-            // UIKit owns the root lifecycle; only the fixture forwards to its children.
-            // Restore the real window after the explicit root=nil rejection check below.
-            if host.rootViewController == nil { host.rootViewController = fixture }
-            host.isHidden = false
+            // Complete the real root appearance before driving child callbacks. Restore it
+            // after the explicit root=nil rejection check without yielding during owner handoff.
+            if host.rootViewController == nil { try fixture.installRoot(in: host) }
             try fixture.contain(controller)
             try deliverAttachedAppearance(controller, handle: handle, routeID: routeID)
         }
@@ -132,9 +134,11 @@ struct ReaderSceneAuthorityTests {
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: route, binding: replacementBinding))
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: nextRoute, binding: replacementBinding))
         #expect(events.count == reboundCount && modelTransitions == [false, true, true] && tools.intent == resumedIntent)
-        fixture.disappearAll() // Close child appearances before UIKit detaches the root.
+        fixture.disappearRoot() // Finish both child AND root disappearance before detachment.
+        try fixture.requireRootAppearance(false)
         host.rootViewController = nil // The actual current window must still belong to the bound scene.
         try #require(fixture.viewIfLoaded?.window == nil && replacement.viewIfLoaded?.window == nil)
+        fixture.expectRootDetached()
         NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
         #expect(events.count == reboundCount)
         handle.detach(replacement)
@@ -206,12 +210,65 @@ struct ReaderSceneAuthorityTests {
         #expect(applied.count == completedCount && asyncHandle.modelSceneTask == nil)
     }
 
-    // UIKit may transition the real window/root. Child appearance has exactly one driver:
-    // this container, never automatic forwarding and never direct lifecycle callbacks.
+    // UIWindow may initiate root appearance; explicitly complete it, and finish root
+    // disappearance before root=nil. Child appearance still has this single driver.
     @MainActor
     private final class AppearanceContainer: UIViewController {
         override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
         private var appeared: Set<ObjectIdentifier> = []
+        private var rootAppearance: Bool? = false
+        private var rootWillAppear = 0, rootDidAppear = 0
+        private var rootWillDisappear = 0, rootDidDisappear = 0
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            rootWillAppear += 1; rootAppearance = nil
+            traceRoot("willAppear")
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            rootDidAppear += 1; rootAppearance = true
+            traceRoot("didAppear")
+        }
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            rootWillDisappear += 1; rootAppearance = nil
+            traceRoot("willDisappear")
+        }
+        override func viewDidDisappear(_ animated: Bool) {
+            super.viewDidDisappear(animated)
+            rootDidDisappear += 1; rootAppearance = false
+            traceRoot("didDisappear")
+        }
+        func installRoot(in window: UIWindow) throws {
+            try #require(window.rootViewController == nil && viewIfLoaded?.window == nil)
+            try #require(children.isEmpty && appeared.isEmpty)
+            window.isHidden = false
+            window.rootViewController = self
+            beginAppearanceTransition(true, animated: false)
+            endAppearanceTransition()
+            try requireRootAppearance(true)
+            try #require(window.rootViewController === self && viewIfLoaded?.window === window)
+            traceRoot("installed")
+        }
+        func disappearRoot() {
+            disappearAll()
+            beginAppearanceTransition(false, animated: false)
+            endAppearanceTransition()
+            #expect(rootAppearance == false && rootWillAppear == rootDidAppear && rootWillDisappear == rootDidDisappear)
+            traceRoot("disappeared")
+        }
+        func requireRootAppearance(_ active: Bool) throws {
+            try #require(rootAppearance == active && rootWillAppear == rootDidAppear && rootWillDisappear == rootDidDisappear)
+        }
+        func expectRootDetached() {
+            #expect(viewIfLoaded?.window == nil && rootAppearance == false
+                && rootWillAppear == rootDidAppear && rootWillDisappear == rootDidDisappear)
+            traceRoot("detached")
+        }
+        private func traceRoot(_ event: String) {
+            print("HOST_ROOT_LIFECYCLE \(ObjectIdentifier(self)) \(event) appear=\(rootWillAppear)/\(rootDidAppear) disappear=\(rootWillDisappear)/\(rootDidDisappear)")
+        }
 
         func contain(_ controller: UIViewController) throws {
             try #require(controller.parent == nil && !appeared.contains(ObjectIdentifier(controller)))
