@@ -3,6 +3,15 @@ run-name: Task 3 validate once · ${{ github.sha }}
 
 on:
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: Full regression or the approved exact-two-file Host lifecycle check
+        required: true
+        type: choice
+        default: full
+        options:
+          - full
+          - host-lifecycle-8ce9990-exact2
 
 permissions:
   contents: read
@@ -23,6 +32,60 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' && 2 || 1 }}
+
+      - name: Guard the approved Host-only scope before native preparation
+        env:
+          VALIDATION_SCOPE: ${{ inputs.validation_scope || 'full' }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          BASE = '8ce99904a532ba4d11ebf79eb2f607e73ed615dd'
+          HOST = 'Tests/YueJingHostTests/ReaderSceneAuthorityTests.swift'
+          WORKFLOW = '.github/workflows/task3-validate.yml'
+          SCOPE = 'host-lifecycle-8ce9990-exact2'
+          FROZEN = '4fb2409b2d1e45725d748c9d14cecfdbb2cd0a781a942b2b63748db224471224'
+          def require(ok, message):
+              if not ok:
+                  raise ValueError(message)
+          def validate_host(scope, attempt, event, ref, sha, head, parents, previous, current, blob, worktree, status):
+              require(scope == SCOPE, 'Unapproved Host-only scope')
+              require(attempt == '1' and event == 'workflow_dispatch' and ref == 'refs/heads/main', 'Host-only run identity differs')
+              require(head == sha and parents == [head, BASE] and not status, 'Host-only checkout/unique parent/clean state differs')
+              changed = {p for p in set(previous) | set(current) if previous.get(p) != current.get(p)}
+              require(changed == {HOST, WORKFLOW}, 'Host-only commit must change exactly the two approved paths')
+              require(all(current[p][0:2] == ['100644', 'blob'] for p in changed), 'Host-only paths must be regular 100644 blobs')
+              require(len(blob) == 17850 and hashlib.sha256(blob).hexdigest() == FROZEN and worktree == blob, 'Frozen Host blob/worktree differs')
+              return dict(scope=scope, qualification='HOST_ONLY_NOT_FULL_REGRESSION', source_commit=sha,
+                          parent=BASE, changed_paths=sorted(changed), host_sha256=FROZEN, host_bytes=len(blob),
+                          selected=9, full_selected=146, full_passed=False, ui_execution_authorized=False, ipa_authorized=False)
+          def git(*args):
+              return subprocess.check_output(['git', '-C', os.environ['GITHUB_WORKSPACE'], *args])
+          def tree(revision):
+              result = {}
+              for row in git('ls-tree', '-r', '-z', revision).split(b'\0'):
+                  if row:
+                      meta, path = row.split(b'\t', 1)
+                      result[path.decode('utf-8')] = meta.decode('ascii').split()
+              return result
+          scope = os.environ['VALIDATION_SCOPE']
+          require(scope in ('full', SCOPE), 'Unknown validation scope')
+          if scope == SCOPE:
+              head = git('rev-parse', 'HEAD').decode().strip()
+              receipt = validate_host(scope, os.environ['GITHUB_RUN_ATTEMPT'], os.environ['GITHUB_EVENT_NAME'],
+                  os.environ['GITHUB_REF'], os.environ['GITHUB_SHA'], head,
+                  git('rev-list', '--parents', '-n', '1', 'HEAD').decode().split(), tree(BASE), tree('HEAD'),
+                  git('show', 'HEAD:' + HOST), Path(HOST).read_bytes(), git('status', '--porcelain=v1', '--untracked-files=all'))
+              receipt.update(run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+              Path('artifacts/task3').mkdir(parents=True, exist_ok=True)
+              with Path('artifacts/task3/host-only-scope.json').open('x', encoding='utf-8') as output:
+                  json.dump(receipt, output, indent=2)
+              print(json.dumps(receipt))
+          else:
+              print('Full regression selected; original full gates remain required.')
+          PY
 
       - name: Verify the selected native toolchain
         run: |
@@ -86,6 +149,7 @@ jobs:
           python3 -B scripts/validate_task3.py freeze-candidate
 
       - name: Run the original 25 TXTCore tests once
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           selection_text="$(python3 -B scripts/task3_test_inventory.py --selection TXTCoreTests)" || exit "$?"
@@ -106,6 +170,7 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts TXTCoreTests
 
       - name: Run 93 ReaderDomain cases (original 89 plus 4 typography cases)
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           selection_text="$(python3 -B scripts/task3_test_inventory.py --selection ReaderDomainTests)" || exit "$?"
@@ -126,6 +191,7 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts ReaderDomainTests
 
       - name: Run the 6 decoder differential tests and one timed pair in Release
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py decoder-comparison-settings || exit "$?"
@@ -148,6 +214,7 @@ jobs:
           python3 scripts/validate_task3.py decoder-comparison
 
       - name: Measure one sequential synthetic reuse path in Release
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py measurement-settings || exit "$?"
@@ -169,6 +236,30 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts ProcessingReuseMeasurementTests || exit "$?"
           python3 scripts/validate_task3.py processing-measurements
 
+      - name: Confirm the prepared Host-only dependency and frozen selection
+        if: ${{ success() && inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          import task3_test_inventory as inventory
+          import validate_task3 as validator
+          validator.check_candidate()
+          dependency = json.loads(Path('artifacts/task3/dependency-resolution.json').read_text(encoding='utf-8'))
+          if dependency['package']['state']['revision'] != '4de97e6903d29697caae1179cdef8479c64c2639' or dependency['checkout_revision'] != '4de97e6903d29697caae1179cdef8479c64c2639':
+              raise ValueError('Host-only GRDB revision differs from the approved official 7.0.0 pin')
+          scope = json.loads(Path('artifacts/task3/host-only-scope.json').read_text(encoding='utf-8'))
+          if scope['source_commit'] != os.environ['GITHUB_SHA'] or scope['run_id'] != os.environ['GITHUB_RUN_ID'] or scope['run_attempt'] != '1':
+              raise ValueError('Host-only scope receipt provenance differs')
+          names = inventory.expected_names('YueJingHostTests')
+          if inventory.COUNTS['YueJingHostTests'] != 9 or len(names) != 9 or inventory.selection('YueJingHostTests') != ['-only-testing:YueJingHostTests']:
+              raise ValueError('Host-only exact-nine identity/selection differs')
+          print(json.dumps(dict(qualification='HOST_ONLY_NOT_FULL_REGRESSION', selected=9, cases=names,
+              ui_execution_authorized=False, device_build=False, ipa=False, full_regression_passed=False)))
+          PY
+
       - name: Run the 8 real App-host UIKit tests once
         timeout-minutes: 12
         run: |
@@ -177,7 +268,78 @@ jobs:
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             --evidence-dir artifacts/reading-ui-native
 
+      - name: Audit Host9 and lifecycle warnings without another native invocation
+        if: ${{ success() && inputs.validation_scope == 'host-lifecycle-8ce9990-exact2' }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib, json, os, re, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          import run_reading_ui_tests as runner
+          import validate_task3 as validator
+          validator.check_candidate()
+          out = Path('artifacts/reading-ui-native')
+          def load(name):
+              return json.loads((out / name).read_text(encoding='utf-8'))
+          def require(ok, message):
+              if not ok:
+                  raise ValueError(message)
+          execution = load('YueJingHostTests-execution.json')
+          counts = load('YueJingHostTests-counts.json')
+          selection = load('YueJingHostTests-selection.json')
+          scope = json.loads(Path('artifacts/task3/host-only-scope.json').read_text(encoding='utf-8'))
+          for record in (execution, counts, selection, scope):
+              require(record['source_commit'] == os.environ['GITHUB_SHA'] and record['run_id'] == os.environ['GITHUB_RUN_ID']
+                      and record['run_attempt'] == os.environ['GITHUB_RUN_ATTEMPT'] == '1', 'Host-only result provenance differs')
+          require(execution['native_exit'] == counts['native_exit'] == 0 and execution['timed_out'] is False, 'Host execution failed or timed out')
+          require(int((out / 'YueJingHostTests-exit-code.txt').read_text()) == 0, 'Host raw exit differs')
+          require(selection['expected'] == 9 and selection['timeout_seconds'] == 480 and selection['configuration'] == 'Debug', 'Host selection/budget differs')
+          command = selection['command']
+          require(command == execution['command'] == counts['command'] and command.count('-only-testing:YueJingHostTests') == 1
+                  and not any(a.startswith('-only-testing:') and a != '-only-testing:YueJingHostTests' for a in command), 'Non-Host test selection')
+          raw = (out / 'YueJingHostTests.log').read_bytes()
+          log = raw.decode('utf-8', errors='replace')
+          parsed = runner.count_log('YueJingHostTests', log, execution['native_exit'])
+          require(len(parsed['passed']) == len(counts['passed']) == 9 and parsed['passed'] == counts['passed']
+                  and all(counts[k] == 0 for k in ('failed', 'skipped', 'unexecuted'))
+                  and counts['log_sha256'] == hashlib.sha256(raw).hexdigest(), 'Host exact-nine ledger/log differs')
+          require(not any(p.name.startswith('YueJingUITests') for p in out.iterdir()), 'Unexpected UI execution evidence')
+          require(not list(Path('artifacts').glob('*.ipa')) and not Path('artifacts/manifest.json').exists(), 'Unexpected IPA evidence')
+          lines = log.splitlines()
+          direct = []
+          unbalanced = []
+          suite_marker = None
+          for number, line in enumerate(lines, 1):
+              if re.search(r'\bSuite\b.*\b(?:started|passed|failed)\b', line):
+                  suite_marker = dict(line=number, text=line)
+              if re.search(r'Calling\s+-viewDid(?:Appear|Disappear):[^\r\n]*directly[^\r\n]*not supported', line):
+                  direct.append(dict(line=number, text=line))
+              if 'Unbalanced' in line:
+                  unbalanced.append(dict(line=number, text=line, nearest_suite_marker=suite_marker,
+                      attribution='UNCONFIRMED: nearest suite marker is context, not object ownership',
+                      context=[dict(line=i + 1, text=lines[i]) for i in range(max(0, number - 9), min(len(lines), number + 8))]))
+          explicit_fixture = [row for row in unbalanced if 'AppearanceContainer' in row['text'] or 'ReaderSceneAuthorityTests' in row['text']]
+          audit = dict(qualification='HOST_ONLY_NOT_FULL_REGRESSION', source_commit=os.environ['GITHUB_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt='1', selected=9, actual_passed=len(parsed['passed']),
+              native_exit=execution['native_exit'], timed_out=execution['timed_out'], skipped=0,
+              direct_lifecycle_misuse=direct, unbalanced=unbalanced, explicit_fixture_unbalanced=explicit_fixture,
+              unbalanced_attribution='UNCONFIRMED_REQUIRES_INDEPENDENT_COLLECTION' if unbalanced else 'No Unbalanced lines in this Host log',
+              ui_cases_executed=0, device_build=False, ipa=False, full_regression_passed=False,
+              limitation='Host-only; scheme may compile UI modules. No App UI flow, device, IPA or full146 acceptance.')
+          with Path('artifacts/task3/host-only-audit.json').open('x', encoding='utf-8') as output:
+              json.dump(audit, output, indent=2)
+          print(json.dumps(audit))
+          require(not direct, 'Direct UIKit lifecycle misuse warning remains; stop')
+          require(not explicit_fixture, 'Explicit new fixture Unbalanced warning remains; stop')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## HOST_ONLY_NOT_FULL_REGRESSION\nSelected9: actual9 passed, skip0; direct lifecycle misuse warnings0.\n')
+              summary.write('Unbalanced lines: ' + str(len(unbalanced)) + '; attribution requires independent collection if present. No blanket all-warning-clear claim.\n')
+              summary.write('UI cases0; no device build or IPA; full146 regression NOT run/passed.\n')
+          PY
+
       - name: Run 8 real App UI flows (original 6 plus 2 typography and relaunch cases)
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         timeout-minutes: 18
         run: |
           set -euo pipefail
@@ -186,6 +348,7 @@ jobs:
             --evidence-dir artifacts/reading-ui-native
 
       - name: Run the 3 existing Canvas App-host regressions in the same attempt
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 -B scripts/validate_task3.py canvas-settings || exit "$?"
@@ -207,11 +370,13 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts YueJingCanvasTests
 
       - name: Require the exact reviewed 144-case union before device App compilation
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -euo pipefail
           python3 scripts/validate_task3.py all-test-gate
 
       - name: Compile the actual unsigned iPhoneOS arm64 App
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           set +e
@@ -229,6 +394,7 @@ jobs:
           exit "${pipeline[1]}"
 
       - name: Validate embedded dependencies and resources then package the same commit
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         id: package
         run: |
           set -euo pipefail
@@ -250,7 +416,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish the validated unsigned IPA separately
-        if: success()
+        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}

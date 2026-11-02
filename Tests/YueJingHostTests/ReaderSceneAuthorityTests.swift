@@ -4,8 +4,8 @@ import Testing
 import UIKit
 @testable import YueJing
 
-// Attached host window/scene + explicitly delivered appearance callback: production binding,
-// selector observer, parent delivery and coordinator contract, NOT UIKit automatic delivery.
+// Real host window/scene + container-owned, paired child appearance transitions: production
+// binding, selector observer, parent delivery and coordinator contract, NOT automatic child delivery.
 // Scene notifications and suspended model work are injected; no actual App-switch or touch proof.
 @MainActor
 @Suite(.serialized)
@@ -15,11 +15,18 @@ struct ReaderSceneAuthorityTests {
             .first(where: { $0.activationState == .foregroundActive }))
         let host = UIWindow(windowScene: scene)
         host.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        let fixture = AppearanceContainer()
+        defer {
+            fixture.removeAllChildren()
+            host.isHidden = true
+            host.rootViewController = nil
+        }
         @MainActor func deliverAttachedAppearance(_ controller: ReaderViewController,
                                                  handle: ReaderViewportHandle, routeID: UUID) throws {
+            fixture.disappear(controller) // A return/rebind first closes the previous appearance.
             host.layoutIfNeeded()
             controller.view.layoutIfNeeded()
-            try #require(host.rootViewController === controller && !host.isHidden)
+            try #require(host.rootViewController === fixture && controller.parent === fixture && !host.isHidden)
             try #require(host.windowScene === scene)
             try #require(controller.viewIfLoaded?.window === host)
             try #require(controller.viewIfLoaded?.window?.windowScene === scene)
@@ -27,12 +34,16 @@ struct ReaderSceneAuthorityTests {
             try #require(handle.ownsSceneController(controller, routeID: routeID))
             try #require(controller.onSceneInteraction != nil)
             try #require(scene.activationState == .foregroundActive)
-            controller.viewDidAppear(false) // Production creates the binding and observer.
+            try fixture.appear(controller) // Production creates the binding and observer.
         }
         @MainActor func mountConfigured(_ controller: ReaderViewController,
                                        handle: ReaderViewportHandle, routeID: UUID) throws {
-            host.rootViewController = controller
+            fixture.removeAllChildren()
+            // UIKit owns the root lifecycle; only the fixture forwards to its children.
+            // Restore the real window after the explicit root=nil rejection check below.
+            if host.rootViewController == nil { host.rootViewController = fixture }
             host.isHidden = false
+            try fixture.contain(controller)
             try deliverAttachedAppearance(controller, handle: handle, routeID: routeID)
         }
         let handle = ReaderViewportHandle(), old = ReaderViewController(), route = UUID()
@@ -49,7 +60,7 @@ struct ReaderSceneAuthorityTests {
         old.loadViewIfNeeded()
         handle.attach(old)
         handle.configureSceneAuthority(old, routeID: route, onChange: parent)
-        defer { if let current = handle.controller { handle.detach(current) }; host.isHidden = true; host.rootViewController = nil }
+        defer { if let current = handle.controller { handle.detach(current) } }
         #expect(events.isEmpty) // make/configure cannot mutate parent state before window attachment.
         try mountConfigured(old, handle: handle, routeID: route)
         #expect(old.view.window?.windowScene === scene)
@@ -58,10 +69,10 @@ struct ReaderSceneAuthorityTests {
         #expect(events.count == 1 && modelTransitions.isEmpty) // Initial .task(load), no duplicate resume.
         let intent = tools.intent, generation = old.interactionContext.generation
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
-        old.viewDidAppear(false) // A sheet return must not allocate another binding or intent.
+        try deliverAttachedAppearance(old, handle: handle, routeID: route) // Sheet return: same binding/intent.
         #expect(events.count == 1 && tools.intent == intent && old.interactionContext.generation == generation)
         #expect(old.sceneBindingID == oldBinding)
-        old.viewDidDisappear(false)
+        fixture.disappear(old)
         #expect(handle.interactionActive && tools.canInteract)
         NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: NSObject())
         #expect(events.count == 1) // Wrong object; do not invent a second UIWindowScene.
@@ -94,7 +105,16 @@ struct ReaderSceneAuthorityTests {
         let replacementBinding = try #require(replacement.sceneBindingID)
         #expect(old.sceneBindingID == nil && old.onSceneInteraction == nil && !old.interactionContext.active)
         let count = events.count
-        handle.detach(old); old.viewDidAppear(false)
+        handle.detach(old)
+        // Deliver the late lifecycle to an unauthorized child without reattaching the handle
+        // or replacing the window root/current owner's view. No configured-owner helper here.
+        try fixture.contain(old)
+        try #require(host.rootViewController === fixture && replacement.view.window === host)
+        try #require(old.viewIfLoaded?.window === host && old.viewIfLoaded?.window?.windowScene === scene)
+        try #require(handle.controller === replacement && handle.ownsSceneController(replacement, routeID: route))
+        try #require(old.onSceneInteraction == nil)
+        try fixture.appear(old)
+        fixture.remove(old)
         #expect(!handle.acceptScenePhase(true, from: old, scene: scene, routeID: route, binding: oldBinding))
         #expect(!handle.acceptScenePhase(false, from: old, scene: scene, routeID: route, binding: oldBinding))
         #expect(events.count == count && handle.controller === replacement && handle.interactionActive)
@@ -112,7 +132,9 @@ struct ReaderSceneAuthorityTests {
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: route, binding: replacementBinding))
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: nextRoute, binding: replacementBinding))
         #expect(events.count == reboundCount && modelTransitions == [false, true, true] && tools.intent == resumedIntent)
+        fixture.disappearAll() // Close child appearances before UIKit detaches the root.
         host.rootViewController = nil // The actual current window must still belong to the bound scene.
+        try #require(fixture.viewIfLoaded?.window == nil && replacement.viewIfLoaded?.window == nil)
         NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
         #expect(events.count == reboundCount)
         handle.detach(replacement)
@@ -182,6 +204,52 @@ struct ReaderSceneAuthorityTests {
         let completedCount = applied.count
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
         #expect(applied.count == completedCount && asyncHandle.modelSceneTask == nil)
+    }
+
+    // UIKit may transition the real window/root. Child appearance has exactly one driver:
+    // this container, never automatic forwarding and never direct lifecycle callbacks.
+    @MainActor
+    private final class AppearanceContainer: UIViewController {
+        override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
+        private var appeared: Set<ObjectIdentifier> = []
+
+        func contain(_ controller: UIViewController) throws {
+            try #require(controller.parent == nil && !appeared.contains(ObjectIdentifier(controller)))
+            loadViewIfNeeded()
+            addChild(controller) // UIKit sends willMove(toParent:).
+            controller.view.isHidden = true
+            controller.view.frame = view.bounds
+            controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(controller.view)
+            controller.didMove(toParent: self)
+        }
+        func appear(_ controller: UIViewController) throws {
+            try #require(controller.parent === self && controller.viewIfLoaded?.window != nil)
+            try #require(!appeared.contains(ObjectIdentifier(controller)))
+            controller.beginAppearanceTransition(true, animated: false)
+            controller.view.isHidden = false
+            controller.endAppearanceTransition()
+            appeared.insert(ObjectIdentifier(controller))
+        }
+        func disappear(_ controller: UIViewController) {
+            guard appeared.remove(ObjectIdentifier(controller)) != nil else { return }
+            controller.beginAppearanceTransition(false, animated: false)
+            controller.view.isHidden = true
+            controller.endAppearanceTransition()
+        }
+        func disappearAll() {
+            for controller in children { disappear(controller) }
+        }
+        func remove(_ controller: UIViewController) {
+            disappear(controller)
+            controller.willMove(toParent: nil)
+            controller.view.removeFromSuperview()
+            controller.removeFromParent() // UIKit sends didMove(toParent: nil).
+        }
+        func removeAllChildren() {
+            for controller in children { remove(controller) }
+            #expect(appeared.isEmpty && children.isEmpty)
+        }
     }
 
     @MainActor
