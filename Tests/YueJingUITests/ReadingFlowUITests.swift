@@ -132,6 +132,20 @@ final class ReadingFlowUITests: XCTestCase {
     @MainActor func testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading() {
         withFixture { app in
             open("UITest-Long-A", app)
+            let frame = viewport(app).frame
+            let collapse = app.buttons["reader.tools.collapse"]
+            waitHittable(collapse); collapse.tap()
+            let expand = app.buttons["reader.tools.expand"]
+            waitHittable(expand)
+            XCTAssertFalse(collapse.isHittable)
+            XCTAssertFalse(app.buttons["reader.tools.settings"].isHittable)
+            XCTAssertGreaterThanOrEqual(expand.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(expand.frame.height, 44)
+            assertSameFrame(viewport(app).frame, frame)
+            expandCDock(app, deadline: Date().addingTimeInterval(10), startsCollapsed: true)
+            waitHittable(app.buttons["reader.tools.settings"])
+            XCTAssertFalse(expand.isHittable)
+            assertSameFrame(viewport(app).frame, frame)
             for _ in 0..<3 {
                 openSettings(app); closePanel(app)
                 openDirectory(app); closePanel(app)
@@ -263,8 +277,10 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 10), .completed,
                            "Another real App must be foreground while the reader process is backgrounded")
             XCTAssertTrue(app.state == .runningBackground || app.state == .runningBackgroundSuspended)
+            let returnDeadline = Date().addingTimeInterval(10)
             app.activate()
-            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: max(0, returnDeadline.timeIntervalSinceNow)))
+            waitForExclusiveReaderForeground(app, previousApp: settings, deadline: returnDeadline)
             XCTAssertNotEqual(settings.state, .runningForeground)
             XCTAssertEqual(sceneRoundTripPID(app), pid, "A terminated/relaunched process is not recovery")
             XCTAssertTrue(viewport(app).exists, "Returning to the shelf or losing the reader must fail")
@@ -373,6 +389,7 @@ final class ReadingFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: max(0.01, deadline.timeIntervalSinceNow)), .completed,
                        "The expected synthetic book must have content geometrically visible in the reader viewport")
         let key = Self.evidenceCase(name)
+        expandCDock(app, deadline: deadline, startsCollapsed: true)
         let entryDiagnostic = ReadingEntryEvidence.beforeSettings(app, key: key, sharedDeadline: deadline)
         waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow), onFailure: {
             if entryDiagnostic { ReadingEntryEvidence.settingsFailed(app, key: key) }
@@ -503,14 +520,57 @@ final class ReadingFlowUITests: XCTestCase {
         attachment.name = prefix + ".hitprobe.json"; attachment.lifetime = .keepAlways
         XCTContext.runActivity(named: prefix + "--hitprobe") { activity in activity.add(attachment) }
     }
+    @MainActor private func waitForExclusiveReaderForeground(_ app: XCUIApplication,
+                                                            previousApp: XCUIApplication, deadline: Date) {
+        var consecutiveMatches = 0
+        var observations: [String] = []
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let readerBefore = app.state
+            let previous = previousApp.state
+            let readerAfter = app.state
+            observations.append("\(readerBefore.rawValue)/\(previous.rawValue)/\(readerAfter.rawValue)")
+            if observations.count > 4 { observations.removeFirst() }
+            let departed = previous == .runningBackground || previous == .runningBackgroundSuspended || previous == .notRunning
+            let matches = readerBefore == .runningForeground && readerAfter == .runningForeground && departed
+            consecutiveMatches = matches ? consecutiveMatches + 1 : 0
+            return consecutiveMatches >= 2
+        }, object: nil)
+        let result = XCTWaiter.wait(for: [ready], timeout: max(0, deadline.timeIntervalSinceNow))
+        print("UI_C_FOREGROUND_WAIT result=\(result.rawValue) samples=\(observations.joined(separator: ","))")
+        XCTAssertEqual(result, .completed, "Reader foreground and previous-App departure must agree within the same return budget")
+    }
+
+    @MainActor private func expandCDock(_ app: XCUIApplication, deadline: Date, startsCollapsed: Bool = false) {
+        let expand = app.buttons["reader.tools.expand"], collapse = app.buttons["reader.tools.collapse"]
+        if startsCollapsed {
+            waitHittable(expand, timeout: max(0, deadline.timeIntervalSinceNow))
+            XCTAssertFalse(collapse.isHittable)
+        } else {
+            let presented = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                (expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [presented], timeout: max(0, deadline.timeIntervalSinceNow)), .completed,
+                           "The C dock must have a real compact or expanded control before opening a panel")
+        }
+        if expand.isHittable { expand.tap() }
+        waitHittable(collapse, timeout: max(0, deadline.timeIntervalSinceNow))
+        XCTAssertFalse(expand.isHittable)
+    }
+
     @MainActor private func viewport(_ app: XCUIApplication) -> XCUIElement { app.tables["reader.viewport"] }
     @MainActor private func openSettings(_ app: XCUIApplication) {
-        let button = app.buttons["reader.tools.settings"]; waitHittable(button); button.tap()
+        let deadline = Date().addingTimeInterval(10)
+        expandCDock(app, deadline: deadline)
+        let button = app.buttons["reader.tools.settings"]
+        waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow)); button.tap()
         waitHittable(app.buttons["reader.panel.close"])
         XCTAssertFalse(app.buttons["reader.exit"].isHittable)
     }
     @MainActor private func openDirectory(_ app: XCUIApplication) {
-        let button = app.buttons["reader.tools.directory"]; waitHittable(button); button.tap()
+        let deadline = Date().addingTimeInterval(10)
+        expandCDock(app, deadline: deadline)
+        let button = app.buttons["reader.tools.directory"]
+        waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow)); button.tap()
         waitHittable(app.buttons["reader.panel.close"])
     }
     @MainActor private func closePanel(_ app: XCUIApplication) {
@@ -549,15 +609,22 @@ final class ReadingFlowUITests: XCTestCase {
         Self.hitProbeWindows.removeValue(forKey: key)
     }
     @MainActor private func showTools(_ app: XCUIApplication) {
-        if !app.buttons["reader.tools.settings"].isHittable {
+        // Preserve the finite two-touch inertia protocol; sharing its original 10+10-second allowance.
+        let deadline = Date().addingTimeInterval(20)
+        let expand = app.buttons["reader.tools.expand"], collapse = app.buttons["reader.tools.collapse"]
+        if !((expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)) {
             viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            if !app.buttons["reader.tools.settings"].waitForExistence(timeout: 10) {
-                // Finite protocol: the first tap may only stop inertia; one subsequent tap
-                // must reveal tools. This helper does not claim to verify the inertia policy.
+            let firstTouch = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                (expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)
+            }, object: nil)
+            let result = XCTWaiter.wait(for: [firstTouch], timeout: min(10, max(0, deadline.timeIntervalSinceNow)))
+            if result != .completed {
+                // Only the existing second fresh touch after a possible inertia-stop touch.
                 viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             }
         }
-        waitHittable(app.buttons["reader.tools.settings"])
+        expandCDock(app, deadline: deadline)
+        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0, deadline.timeIntervalSinceNow))
     }
     @MainActor private func endMarker(_ text: String, _ app: XCUIApplication) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", text)).firstMatch
