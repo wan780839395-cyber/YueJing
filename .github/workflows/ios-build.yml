@@ -14,6 +14,7 @@ on:
           - physical-recovery-32d6244-exact1
           - interaction-diagnostics-2830bd0-exact4
           - host-verified-natural-root-5c88543-exact3
+          - c-only-repro-09c61b5-exact1
       host_validation_run_id:
         description: Same-source successful Task3 Host9 attempt1 run (required only for the natural-root scope)
         required: false
@@ -42,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -531,6 +532,96 @@ jobs:
           print(json.dumps(receipt, indent=2))
           PY
 
+      - name: Freeze the workflow-only single C reproduction package and retain the nine UI failures
+        if: ${{ inputs.package_scope == 'c-only-repro-09c61b5-exact1' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib, json, os, re, stat, subprocess, sys
+          from pathlib import Path
+          BASE = '09c61b53f456ef8ddf9319f96bbde8c7f6b1db81'
+          REPO = 'wan780839395-cyber/YueJing'
+          DEVICE = '.github/workflows/ios-build.yml'
+          SCOPE = 'c-only-repro-09c61b5-exact1'
+          def require(ok, message):
+              if not ok:
+                  raise ValueError(message)
+          def validate_c_repro_source(env, state):
+              require(env['PACKAGE_SCOPE'] == SCOPE and env['GITHUB_REPOSITORY'] == REPO, 'Single C scope/repository differs')
+              require(env['GITHUB_RUN_ATTEMPT'] == '1' and env['GITHUB_EVENT_NAME'] == 'workflow_dispatch', 'Manual attempt1 only')
+              require(env['GITHUB_REF'] == 'refs/heads/main' and env['GITHUB_WORKFLOW_REF'] == REPO + '/' + DEVICE + '@refs/heads/main', 'Main/workflow differs')
+              head = state['head']
+              require(re.fullmatch(r'[0-9a-f]{40}', head) and head == env['GITHUB_SHA'] == env['GITHUB_WORKFLOW_SHA'], 'Source/workflow SHA differs')
+              require(state['parents'] == [head, BASE] and not state['dirty'], 'Unique parent/clean checkout differs')
+              before, after = state['before'], state['after']
+              require(len(before) == len(after) == 186 and set(before) == set(after), 'Tracked path set differs')
+              changed = {p for p in before if before[p] != after[p]}
+              require(changed == {DEVICE} and before[DEVICE][:2] == after[DEVICE][:2] == ['100644', 'blob'], 'Only the regular device workflow may change')
+              require(set(state['working']) == set(after) == set(state['index']), 'Working/index path set differs')
+              for path, entry in after.items():
+                  require(state['working'][path] == dict(regular=True, blob=entry[2]) and state['index'][path] == [entry[0], entry[2], '0'], 'Working/index differs: ' + path)
+              inputs = state['inputs']
+              require(isinstance(inputs, dict) and set(inputs) <= {'package_scope', 'host_validation_run_id'} and inputs.get('package_scope') == SCOPE and inputs.get('host_validation_run_id', '') == '', 'Dispatch inputs differ')
+              return dict(source_commit=head, parent=BASE, app_candidate=BASE, approved_changed_files=[DEVICE],
+                          other_tracked_entries_equal=185, production_source_equals_app_candidate=True, index_and_working_equal_commit=True)
+          def git(*args):
+              return subprocess.check_output(['git', '-C', os.environ['GITHUB_WORKSPACE'], *args])
+          def tree(revision):
+              result = {}
+              for row in git('ls-tree', '-r', '-z', revision).split(b'\0'):
+                  if row:
+                      meta, path = row.split(b'\t', 1)
+                      result[path.decode('utf-8')] = meta.decode('ascii').split()
+              return result
+          after, working, index, source_hashes = tree('HEAD'), {}, {}, {}
+          for path in after:
+              file = Path(path)
+              regular = stat.S_ISREG(file.lstat().st_mode) and not any(p.is_symlink() for p in (file, *file.parents))
+              data = file.read_bytes() if regular else b''
+              working[path] = dict(regular=regular, blob=hashlib.sha1(b'blob ' + str(len(data)).encode('ascii') + b'\0' + data).hexdigest())
+              source_hashes[path] = hashlib.sha256(data).hexdigest()
+          for row in git('ls-files', '--stage', '-z').split(b'\0'):
+              if row:
+                  meta, path = row.split(b'\t', 1)
+                  key = path.decode('utf-8')
+                  require(key not in index, 'Unmerged index')
+                  index[key] = meta.decode('ascii').split()
+          state = dict(head=git('rev-parse', 'HEAD').decode().strip(), parents=git('rev-list', '--parents', '-n', '1', 'HEAD').decode().split(),
+                       dirty=git('status', '--porcelain=v1', '--untracked-files=all'), before=tree(BASE), after=after, working=working, index=index,
+                       inputs=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8')).get('inputs'))
+          receipt = validate_c_repro_source(os.environ, state)
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          import task3_test_inventory as inventory
+          reviewed = inventory.validate_source()
+          require(reviewed['all_declared'] == 147 and reviewed['selected'] == 146, 'Reviewed inventory changed')
+          out = Path('artifacts/task3')
+          out.mkdir(parents=True, exist_ok=True)
+          receipt.update(run_id=os.environ['GITHUB_RUN_ID'], run_attempt='1', files=source_hashes)
+          (out / 'c-only-repro-exact1-gate.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          status = dict(purpose='unchanged single C App for iPhone13/iOS16.6.1 manual reproduction; not a fix',
+                        qualification='TESTS NOT RUN', tests_run=False, full_test_gate='NOT PASSED: prior App candidate has nine UI failures',
+                        full_regression_passed=False, source_commit=receipt['source_commit'], app_candidate=BASE, previous_candidate=BASE,
+                        approved_changed_files=[DEVICE], product_changes=[], product_change_scope='Device workflow only; all App, Sources, Tests, project, dependencies and resources equal parent09c61b5',
+                        native_tests_this_run=dict(status='not run', executions=0, selection=[]), native_execution=[],
+                        prior_validation_source_commit=BASE, prior_validation_run=41424997189, prior_validation_attempt=1,
+                        prior_validation_url='https://github.com/' + REPO + '/actions/runs/41424997189',
+                        prior_validation_selected=146, prior_validation_started=143, prior_validation_finished=143,
+                        prior_validation_passed=134, prior_validation_failed=9, prior_validation_unexecuted=3, prior_validation_skipped=0,
+                        prior_validation_failure='Eight UI cases fail ReadingFlowUITests.swift:547 before expand; accessibility case waits for offscreen collapse and fails at656. Business assertions and App-return recall were not reached.',
+                        original_task3_gate='unchanged; not executed in this build-only attempt', physical_device_acceptance='not performed',
+                        user_operations='iPhone only: existing TrollStore, Files, synthetic TXT import and screen recording; no user Mac required', exact1_gate=receipt)
+          Path('artifacts/verification-status.json').write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+          print('::warning::TESTS NOT RUN / full regression NOT PASSED / single C reproduction package, not a repair')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as output:
+              output.write('## Single C manual reproduction IPA: TESTS NOT RUN\n\nWorkflow-only child of `' + BASE + '`. App and tests unchanged. '
+                  + 'Prior full run41424997189/1:146 selected,143 completed,134 passed,9 UI failed,3 unexecuted,0 skipped. '
+                  + 'No unit, Host, UI or Canvas test runs in this attempt. Full regression NOT PASSED. '
+                  + 'Device build/package checks remain required. User operates iPhone only; physical-device acceptance is not performed.\n')
+          print(json.dumps(receipt, indent=2))
+          PY
+
       - name: Verify the selected native toolchain
         run: |
           set -euo pipefail
@@ -575,6 +666,24 @@ jobs:
           if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 scripts/validate_task3.py resolved
+
+      - name: Require the original fixed GRDB checkout for the single C reproduction package
+        if: ${{ inputs.package_scope == 'c-only-repro-09c61b5-exact1' }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = json.loads(Path('artifacts/task3/dependency-resolution.json').read_text(encoding='utf-8'))
+          fixed = '4de97e6903d29697caae1179cdef8479c64c2639'
+          if not (receipt['package']['location'] == 'https://github.com/groue/GRDB.swift.git'
+                  and receipt['package']['state'] == dict(revision=fixed, version='7.0.0')
+                  and receipt['checkout_revision'] == fixed
+                  and receipt['package_manifest_sha256'] == '8140971be34f0cc80ef71e96a2b709ff98358a5c7412fe2e2a1687a4cb21867a'):
+              raise ValueError('GRDB differs from the original single C candidate dependency')
+          Path('artifacts/task3/c-only-fixed-dependency.json').write_text(json.dumps(dict(source_commit=os.environ['GITHUB_SHA'], revision=fixed,
+              package_manifest_sha256=receipt['package_manifest_sha256'], passed=True), indent=2) + '\n', encoding='utf-8')
+          PY
 
       - name: Verify Release settings exclude the test-only diagnostics
         run: |
