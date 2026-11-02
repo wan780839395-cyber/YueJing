@@ -34,16 +34,13 @@ struct LibrarySettingsContent<Options: View>: View {
     }
 }
 
-/// Same guarded actions in A's system menu and B/C's settings, without another route owner.
+/// Guarded settings actions without another route owner.
 @MainActor
 struct LibraryManagementOptions: View {
-    let asMenu: Bool
     let appearance: LibraryAppearance
     let appAppearance: AppAppearance
-    let layout: LibraryLayout
     let canChange: Bool
     let onAppearance: (AppAppearance) -> Void
-    let onLayout: (LibraryLayout) -> Void
     let onOpenFeature: (LibraryPlannedFeature) -> Void
     let onInformation: (LibraryInformationPage) -> Void
 
@@ -68,42 +65,16 @@ struct LibraryManagementOptions: View {
             .accessibilityLabel("App 外观").accessibilityValue(appAppearance.title)
             .accessibilityHint("仅改变管理界面，不改变阅读背景")
             .accessibilityIdentifier("library.appAppearance")
-            Menu {
-                ForEach(LibraryLayout.allCases, id: \.self) { option in
-                    Button { onLayout(option) } label: {
-                        if option == layout { Label("\(option.title) · 当前", systemImage: "checkmark") }
-                        else { Text(option.title) }
-                    }
-                    .accessibilityValue(option == layout ? "当前" : "未选中")
-                }
-            } label: {
-                optionLabel("入口", value: layout.title, symbol: "rectangle.3.group")
-            }
-            .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0))
-            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-            .listRowSeparatorTint(appearance.edge.opacity(0.6))
-            .disabled(!canChange)
-            .accessibilityLabel("导航入口").accessibilityValue(layout.title)
-            .accessibilityIdentifier("library.layout")
         } header: {
-            Text("外观与入口")
+            Text("外观")
         } footer: {
-            if !asMenu {
-                Text("外观仅改变管理界面，不改变阅读背景。入口切换保留原有三种导航。")
-                    .font(.footnote).fixedSize(horizontal: false, vertical: true)
-            }
+            Text("外观仅改变管理界面，不改变阅读背景。")
+                .font(.footnote).fixedSize(horizontal: false, vertical: true)
         }
         .listRowBackground(appearance.groupSurface)
         Section("格式与书籍显示") {
-            if asMenu {
-                Button("EPUB 格式 · 规划中，未接入") { onOpenFeature(.epub) }
-                    .disabled(!canChange).accessibilityIdentifier("library.planned.entry.epub")
-                Button("封面展示 · 规划中，未接入") { onOpenFeature(.cover) }
-                    .disabled(!canChange).accessibilityIdentifier("library.planned.entry.cover")
-            } else {
-                LibraryPlannedEntriesView(appearance: appearance, canOpenFeatures: canChange,
-                                          features: [.epub, .cover], onOpenFeature: onOpenFeature)
-            }
+            LibraryPlannedEntriesView(appearance: appearance, canOpenFeatures: canChange,
+                                      features: [.epub, .cover], onOpenFeature: onOpenFeature)
         }.listRowBackground(appearance.surface)
         Section("本地信息") {
             Button { onInformation(.diagnostics) } label: {
@@ -117,32 +88,26 @@ struct LibraryManagementOptions: View {
 
     @ViewBuilder
     private func optionLabel(_ title: String, value: String, symbol: String) -> some View {
-        if asMenu {
-            Label("\(title) · \(value)", systemImage: symbol)
-                .font(AppVisualStyle.actionFont).frame(minHeight: 44)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(title).font(.body.weight(.medium)).fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 8)
-                    Text(value).font(.subheadline).foregroundStyle(appearance.secondary).fixedSize(horizontal: true, vertical: false)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title).font(.body.weight(.medium)).fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 8)
+                Text(value).font(.subheadline).foregroundStyle(appearance.secondary).fixedSize(horizontal: true, vertical: false)
+                Image(systemName: "chevron.down").font(.caption.weight(.medium)).accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(.body.weight(.medium))
+                HStack(spacing: 8) {
+                    Text(value).font(.subheadline).foregroundStyle(appearance.secondary)
                     Image(systemName: "chevron.down").font(.caption.weight(.medium)).accessibilityHidden(true)
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title).font(.body.weight(.medium))
-                    HStack(spacing: 8) {
-                        Text(value).font(.subheadline).foregroundStyle(appearance.secondary)
-                        Image(systemName: "chevron.down").font(.caption.weight(.medium)).accessibilityHidden(true)
-                    }
-                }
             }
-            .fixedSize(horizontal: false, vertical: true)
-            .multilineTextAlignment(.leading)
-            .padding(.horizontal, 16).padding(.vertical, 12)
-            .frame(minWidth: 44, maxWidth: .infinity, minHeight: 64, alignment: .leading)
-            .contentShape(Rectangle())
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .multilineTextAlignment(.leading)
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(minWidth: 44, maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

@@ -3,7 +3,6 @@ import SwiftUI
 /// Presentation only. The parent owns guarded bindings, routes and all business work.
 @MainActor
 struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View {
-    let layout: LibraryLayout
     @Binding var section: LibrarySection
     @Binding var drawerPresented: Bool
     let canNavigate: Bool
@@ -28,46 +27,30 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
         .foregroundStyle(appearance.foreground)
         .tint(appearance.accent)
         .toolbar {
-            if layout == .sidebar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button { drawerPresented = true } label: {
-                        Label("菜单", systemImage: "line.3.horizontal")
-                            .labelStyle(.iconOnly)
-                            .font(AppVisualStyle.actionFont).imageScale(.medium)
-                            .foregroundStyle(appearance.foreground)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
-                    .disabled(!canNavigate || drawerPresented)
-                    .accessibilityHidden(drawerPresented)
-                    .accessibilityFocused($focusedControl, equals: .menu)
-                    .accessibilityIdentifier("library.sidebar.open")
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button { drawerPresented = true } label: {
+                    Label("菜单", systemImage: "line.3.horizontal")
+                        .labelStyle(.iconOnly)
+                        .font(AppVisualStyle.actionFont).imageScale(.medium)
+                        .foregroundStyle(appearance.foreground)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
+                .disabled(!canNavigate || drawerPresented)
+                .accessibilityHidden(drawerPresented)
+                .accessibilityFocused($focusedControl, equals: .menu)
+                .accessibilityIdentifier("library.sidebar.open")
             }
         }
         .onChange(of: drawerPresented) { open in focusedControl = open ? .close : .menu }
     }
 
     @ViewBuilder private var rootContent: some View {
-        switch layout {
-        case .direct:
-            shelf
-        case .tabs:
-            TabView(selection: $section) {
-                shelf.tag(LibrarySection.shelf).tabItem { Label("书架", systemImage: "books.vertical") }
-                explore.tag(LibrarySection.explore).tabItem { Label("探索", systemImage: "square.grid.2x2") }
-                settings.tag(LibrarySection.settings).tabItem { Label("设置", systemImage: "slider.horizontal.3") }
-            }
-            .toolbarBackground(appearance.surface, for: .tabBar)
-            .toolbarBackground(.visible, for: .tabBar)
-            .toolbarColorScheme(appearance.controlColorScheme, for: .tabBar)
-        case .sidebar:
-            switch section {
-            case .shelf: shelf
-            case .explore: explore
-            case .settings: settings
-            }
+        switch section {
+        case .shelf: shelf
+        case .explore: explore
+        case .settings: settings
         }
     }
 
@@ -114,7 +97,7 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                                 .accessibilityValue(item == section ? "当前" : "未选中")
                             }
                             Divider().overlay(appearance.edge)
-                            Text("格式、外观与布局请进入设置").font(.footnote)
+                            Text("格式与外观请进入设置").font(.footnote)
                                 .foregroundStyle(appearance.secondary).fixedSize(horizontal: false, vertical: true)
                             Button("诊断与耗时") { onDrawerInformation(.diagnostics) }.frame(minHeight: 44)
                                 .disabled(!canNavigate)

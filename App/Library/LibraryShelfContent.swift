@@ -9,19 +9,16 @@ struct LibraryShelfContent: View {
     let importing: Bool
     let importPresentation: LibraryImportPresentation
     let serviceUnavailable: Bool
-    let layout: LibraryLayout
     let appearance: LibraryAppearance
-    let canOpenFeatures: Bool
     let onOpenBook: (LibraryBook) -> Void
     let onDismissNotice: () -> Void
     let onCancelImport: () -> Void
     let onRetry: () -> Void
-    let onOpenFeature: (LibraryPlannedFeature) -> Void
 
     var body: some View {
         List {
             Section {
-                LibraryHeaderView(bookCount: books.count, appearance: appearance, showsShelfTitle: layout == .direct)
+                LibraryHeaderView(bookCount: books.count, appearance: appearance, showsShelfTitle: false)
                     .listRowSeparator(.hidden)
                     .listRowBackground(appearance.page)
             }
@@ -65,8 +62,7 @@ struct LibraryShelfContent: View {
                 Section("最近阅读与新加入") {
                     ForEach(books) { book in
                         Button { onOpenBook(book) } label: {
-                            if layout == .direct { directBookRow(book) }
-                            else { LibraryBookRow(book: book, appearance: appearance) }
+                            LibraryBookRow(book: book, appearance: appearance)
                         }
                         .buttonStyle(.plain)
                         .accessibilityElement(children: .combine)
@@ -78,14 +74,6 @@ struct LibraryShelfContent: View {
                     }
                 }
             }
-            if layout == .direct {
-                Section {
-                    LibraryPlannedEntriesView(appearance: appearance, canOpenFeatures: canOpenFeatures,
-                                              features: LibraryPlannedFeature.modules, onOpenFeature: onOpenFeature)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(appearance.page)
-                }
-            }
             if serviceUnavailable {
                 Button("重新打开书架", action: onRetry).frame(minHeight: 44)
             }
@@ -95,21 +83,5 @@ struct LibraryShelfContent: View {
         .background(appearance.page.ignoresSafeArea())
         .foregroundStyle(appearance.foreground)
         .tint(appearance.accent)
-    }
-
-    private func directBookRow(_ book: LibraryBook) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(book.title).font(LibraryAppearance.bookTitleFont)
-                .foregroundStyle(appearance.foreground).fixedSize(horizontal: false, vertical: true)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("TXT")
-                if let date = book.lastReadAt { Text(Date(timeIntervalSince1970: date), style: .date) }
-                else { Text("新加入 · 尚未阅读") }
-            }
-            .font(.caption).foregroundStyle(appearance.secondary)
-        }
-        .padding(.vertical, 16)
-        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        .contentShape(Rectangle())
     }
 }

@@ -7,7 +7,6 @@ import UIKit
 struct ReaderScreen: View {
     @ObservedObject var model: ReaderViewModel
     let routeID: UUID
-    let layout: LibraryLayout
     let onExit: @MainActor () -> Void
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
@@ -70,10 +69,10 @@ struct ReaderScreen: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     ReaderFloatingToolsView(model: model, state: tools, metrics: metrics,
-                        appearance: appearance, layout: layout, rememberFocus: { lastPanelControl = $0 },
+                        appearance: appearance, rememberFocus: { lastPanelControl = $0 },
                         open: openPanel, focusedControl: $focusedControl)
                 }
-                .padding(.horizontal, layout == .tabs ? 0 : 16).padding(.bottom, layout == .tabs ? 0 : 8)
+                .padding(.horizontal, 16).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }

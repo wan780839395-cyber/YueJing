@@ -8,7 +8,6 @@ struct ContentView: View {
     @StateObject private var readerRoutes = ReaderRouteOwner()
     @State private var plannedNavigation = LibraryPlannedNavigation()
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.defaultAppearance.rawValue
-    @AppStorage(LibraryLayout.storageKey) private var libraryLayoutRawValue = LibraryLayout.defaultLayout.rawValue
     @State private var selectedSection: LibrarySection = .shelf
     @State private var drawerPresented = false
     @State private var informationRoute: LibraryInformationRoute?
@@ -16,7 +15,6 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var appAppearance: AppAppearance { AppAppearance.restored(from: appAppearanceRawValue) }
-    private var layout: LibraryLayout { LibraryLayout.restored(from: libraryLayoutRawValue) }
     private var appearance: LibraryAppearance {
         LibraryAppearance(colorScheme: colorScheme, appAppearance: appAppearance)
     }
@@ -47,34 +45,20 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            LibraryNavigationShell(layout: layout, section: sectionSelection, drawerPresented: drawerPresentation,
+            LibraryNavigationShell(section: sectionSelection, drawerPresented: drawerPresentation,
                 canNavigate: canNavigateManagement, appearance: appearance,
                 onDrawerSection: selectDrawerSection, onDrawerInformation: openDrawerInformation,
                 shelf: shelfContent,
                 explore: LibraryExploreContent(appearance: appearance, canOpenFeatures: canChangeManagement,
                                                onOpenFeature: openPlannedFeature),
-                settings: LibrarySettingsContent(appearance: appearance, options: managementOptions(asMenu: false)))
-            .navigationTitle(layout == .direct ? "阅境" : selectedSection.title)
+                settings: LibrarySettingsContent(appearance: appearance, options: managementOptions()))
+            .navigationTitle(selectedSection.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(appearance.page, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(appearance.controlColorScheme, for: .navigationBar)
             .toolbar {
-                if layout == .direct {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Menu { managementOptions(asMenu: true) } label: {
-                            Label("更多", systemImage: "ellipsis")
-                                .labelStyle(.iconOnly)
-                                .font(AppVisualStyle.actionFont).imageScale(.medium)
-                                .foregroundStyle(appearance.foreground)
-                                .frame(minWidth: 44, minHeight: 44)
-                                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 12))
-                        .disabled(!canChangeManagement)
-                    }
-                }
-                if layout == .direct || selectedSection == .shelf {
+                if selectedSection == .shelf {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button { model.beginFileSelection() } label: {
                             Label("导入", systemImage: "plus")
@@ -113,7 +97,7 @@ struct ContentView: View {
             #endif
         }
         .fullScreenCover(item: readerPresentation) { route in
-            ReaderScreen(model: route.model, routeID: route.id, layout: layout) { readerRoutes.finishExit(route.id) }
+            ReaderScreen(model: route.model, routeID: route.id) { readerRoutes.finishExit(route.id) }
                 .id(route.id)
         }
         .task { await model.start() }
@@ -142,32 +126,25 @@ struct ContentView: View {
     private var shelfContent: some View {
         LibraryShelfContent(books: model.books, notice: model.notice, importing: model.importing,
             importPresentation: model.importPresentation, serviceUnavailable: model.service == nil,
-            layout: layout, appearance: appearance, canOpenFeatures: canChangeManagement,
+            appearance: appearance,
             onOpenBook: { book in
                 guard canChangeManagement else { return }
                 if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }
             },
             onDismissNotice: { model.notice = nil },
             onCancelImport: { Task { await model.cancelImport() } },
-            onRetry: { Task { await model.start() } }, onOpenFeature: openPlannedFeature)
+            onRetry: { Task { await model.start() } })
     }
 
-    private func managementOptions(asMenu: Bool) -> some View {
-        LibraryManagementOptions(asMenu: asMenu, appearance: appearance, appAppearance: appAppearance,
-            layout: layout, canChange: canChangeManagement, onAppearance: chooseAppearance,
-            onLayout: chooseLayout, onOpenFeature: openPlannedFeature, onInformation: openInformation)
+    private func managementOptions() -> some View {
+        LibraryManagementOptions(appearance: appearance, appAppearance: appAppearance,
+            canChange: canChangeManagement, onAppearance: chooseAppearance,
+            onOpenFeature: openPlannedFeature, onInformation: openInformation)
     }
 
     private func chooseAppearance(_ option: AppAppearance) {
         guard canChangeManagement else { return }
         appAppearanceRawValue = option.rawValue
-    }
-
-    private func chooseLayout(_ option: LibraryLayout) {
-        guard canChangeManagement else { return }
-        libraryLayoutRawValue = option.rawValue
-        selectedSection = .shelf
-        drawerPresented = false
     }
 
     private var sectionSelection: Binding<LibrarySection> {
@@ -180,7 +157,7 @@ struct ContentView: View {
     private var drawerPresentation: Binding<Bool> {
         Binding(get: { drawerPresented }, set: { open in
             if open {
-                guard layout == .sidebar, canChangeManagement else { return }
+                guard canChangeManagement else { return }
             }
             drawerPresented = open
         })
