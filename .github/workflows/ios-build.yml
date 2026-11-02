@@ -13,6 +13,12 @@ on:
           - reader-dock-exact8
           - physical-recovery-32d6244-exact1
           - interaction-diagnostics-2830bd0-exact4
+          - host-verified-natural-root-5c88543-exact3
+      host_validation_run_id:
+        description: Same-source successful Task3 Host9 attempt1 run (required only for the natural-root scope)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -36,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -389,6 +395,141 @@ jobs:
           python3 -B scripts/check_reader_dock_schemes.py --device-release-ci > artifacts/task3/interaction-diagnostics-dock-source.json
           python3 -B scripts/check_ui_motion_polish.py --device-release-ci > artifacts/task3/interaction-diagnostics-motion-source.json
           python3 -B scripts/check_ui_control_cohesion.py --device-release-ci > artifacts/task3/interaction-diagnostics-cohesion-source.json
+
+      - name: Require same-source Host9 and lifecycle audit before the natural-root device package
+        if: ${{ inputs.package_scope == 'host-verified-natural-root-5c88543-exact3' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+          HOST_VALIDATION_RUN_ID: ${{ inputs.host_validation_run_id }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib, json, os, re, stat, subprocess, urllib.request
+          from pathlib import Path
+          BASE = '5c88543dc7857cfaa1bfc6944a4dbe96bc1b7de2'
+          REPO = 'wan780839395-cyber/YueJing'
+          SCOPE = 'host-verified-natural-root-5c88543-exact3'
+          HOST = 'Tests/YueJingHostTests/ReaderSceneAuthorityTests.swift'
+          TASK = '.github/workflows/task3-validate.yml'
+          DEVICE = '.github/workflows/ios-build.yml'
+          FIXED = {HOST: (23330, '08a325fff97999c55e6b20923e9f71d37ca4ea6df5b206e9b15f338ba04a2f2c'),
+                   TASK: (26998, 'f692534ab4b229cabf68992462d1a7a56be2a843d356f7b3a458f0e1f6f0ddc6')}
+          REQUIRED = {
+              3: 'Guard the approved Host-only scope before native preparation',
+              13: 'Confirm the prepared Host-only dependency and frozen selection',
+              14: 'Run the 8 real App-host UIKit tests once',
+              15: 'Audit Host9 and lifecycle warnings without another native invocation'}
+          EXCLUDED = {
+              9: 'Run the original 25 TXTCore tests once',
+              10: 'Run 93 ReaderDomain cases (original 89 plus 4 typography cases)',
+              11: 'Run the 6 decoder differential tests and one timed pair in Release',
+              12: 'Measure one sequential synthetic reuse path in Release',
+              16: 'Run 8 real App UI flows (original 6 plus 2 typography and relaunch cases)',
+              17: 'Run the 3 existing Canvas App-host regressions in the same attempt',
+              18: 'Require the exact reviewed 144-case union before device App compilation',
+              19: 'Compile the actual unsigned iPhoneOS arm64 App',
+              20: 'Validate embedded dependencies and resources then package the same commit',
+              22: 'Publish the validated unsigned IPA separately'}
+          def require(ok, message):
+              if not ok:
+                  raise ValueError(message)
+          def validate_source(env, state):
+              require(env['PACKAGE_SCOPE'] == SCOPE and env['GITHUB_REPOSITORY'] == REPO, 'Scope/repository differs')
+              require(env['GITHUB_RUN_ATTEMPT'] == '1' and env['GITHUB_EVENT_NAME'] == 'workflow_dispatch', 'Manual attempt1 only')
+              require(env['GITHUB_REF'] == 'refs/heads/main' and env['GITHUB_WORKFLOW_REF'] == REPO + '/' + DEVICE + '@refs/heads/main', 'Main/workflow differs')
+              head = state['head']
+              require(re.fullmatch(r'[0-9a-f]{40}', head) and head == env['GITHUB_SHA'] == env['GITHUB_WORKFLOW_SHA'], 'Source/workflow SHA differs')
+              require(state['parents'] == [head, BASE] and not state['dirty'], 'Unique parent/clean checkout differs')
+              before, after = state['before'], state['after']
+              allowed = {HOST, TASK, DEVICE}
+              require(len(before) == len(after) == 182 and set(before) == set(after), 'Tracked path set differs')
+              changed = {p for p in before if before[p] != after[p]}
+              require(changed == allowed and all(before[p][:2] == after[p][:2] == ['100644', 'blob'] for p in allowed), 'Exact3 regular changed blobs required')
+              require(set(state['working']) == set(after) == set(state['index']), 'Working/index path set differs')
+              for path, entry in after.items():
+                  require(state['working'][path] == dict(regular=True, blob=entry[2]) and state['index'][path] == [entry[0], entry[2], '0'], 'Working/index differs: ' + path)
+              for path, (size, digest) in FIXED.items():
+                  data = state['source'][path]
+                  require(len(data) == size and hashlib.sha256(data).hexdigest() == digest, 'Frozen source differs: ' + path)
+              run_id = env['HOST_VALIDATION_RUN_ID']
+              require(re.fullmatch(r'[1-9][0-9]*', run_id) and run_id != env['GITHUB_RUN_ID'], 'A distinct positive Host run ID is required')
+              require(state['inputs'] == dict(package_scope=SCOPE, host_validation_run_id=run_id), 'Dispatch inputs differ')
+              return dict(source_commit=head, parent=BASE, approved_changed_files=sorted(allowed), other_tracked_entries_equal=179,
+                          frozen_source_sha256={p:v[1] for p,v in FIXED.items()}, index_and_working_equal_commit=True)
+          def validate_host_run(run, jobs, sha, run_id):
+              require(run['id'] == int(run_id) and run['workflow_id'] == 398234793 and run['run_attempt'] == 1, 'Host run/workflow/attempt differs')
+              require(run['repository']['full_name'] == REPO and run['head_sha'] == sha and run['head_branch'] == 'main', 'Host source/repository differs')
+              require(run['event'] == 'workflow_dispatch' and run['path'] == TASK and run['status'] == 'completed' and run['conclusion'] == 'success', 'Host run not successful manual Task3')
+              require(jobs['total_count'] == len(jobs['jobs']) == 1, 'Expected one unpaginated Host job')
+              job = jobs['jobs'][0]
+              require(job['run_id'] == int(run_id) and job['run_attempt'] == 1 and job['head_sha'] == sha, 'Host job identity differs')
+              require(job['name'] == 'validate' and job['status'] == 'completed' and job['conclusion'] == 'success', 'Host validate job not successful')
+              steps = {step['number']: step for step in job['steps']}
+              require(len(steps) == len(job['steps']), 'Duplicate Host step numbers')
+              for number, name in REQUIRED.items():
+                  step = steps.get(number, {})
+                  require(step.get('name') == name and step.get('status') == 'completed' and step.get('conclusion') == 'success', 'Required Host step did not succeed: ' + name)
+              for number, name in EXCLUDED.items():
+                  step = steps.get(number, {})
+                  require(step.get('name') == name and step.get('conclusion') == 'skipped', 'Out-of-scope Host step was not skipped: ' + name)
+              return dict(run_id=int(run_id), url=run['html_url'], source_commit=sha, workflow_id=398234793, attempt=1,
+                          qualification='HOST_ONLY_NOT_FULL_REGRESSION', host_selected=9, host_passed=9,
+                          native_exit=0, skipped=0, lifecycle_audit='passed', full_regression_passed=False)
+          def git(*args):
+              return subprocess.check_output(['git', '-C', os.environ['GITHUB_WORKSPACE'], *args])
+          def tree(revision):
+              result = {}
+              for row in git('ls-tree', '-r', '-z', revision).split(b'\0'):
+                  if row:
+                      meta, path = row.split(b'\t', 1)
+                      result[path.decode('utf-8')] = meta.decode('ascii').split()
+              return result
+          def gather():
+              after, working, index = tree('HEAD'), {}, {}
+              for path in after:
+                  file = Path(path)
+                  regular = stat.S_ISREG(file.lstat().st_mode) and not any(p.is_symlink() for p in (file, *file.parents))
+                  data = file.read_bytes() if regular else b''
+                  working[path] = dict(regular=regular, blob=hashlib.sha1(b'blob ' + str(len(data)).encode('ascii') + b'\0' + data).hexdigest())
+              for row in git('ls-files', '--stage', '-z').split(b'\0'):
+                  if row:
+                      meta, path = row.split(b'\t', 1)
+                      key = path.decode('utf-8')
+                      require(key not in index, 'Unmerged index')
+                      index[key] = meta.decode('ascii').split()
+              return dict(head=git('rev-parse', 'HEAD').decode().strip(), parents=git('rev-list', '--parents', '-n', '1', 'HEAD').decode().split(),
+                          dirty=git('status', '--porcelain=v1', '--untracked-files=all'), before=tree(BASE), after=after,
+                          working=working, index=index, source={p:Path(p).read_bytes() for p in FIXED},
+                          inputs=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8')).get('inputs'))
+          receipt = validate_source(os.environ, gather())
+          out = Path('artifacts/task3')
+          out.mkdir(parents=True, exist_ok=True)
+          def public_get(suffix, filename):
+              request = urllib.request.Request('https://api.github.com/repos/' + REPO + suffix,
+                  headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'YueJing-same-source-Host-gate', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  raw = response.read()
+              (out / filename).write_bytes(raw)
+              return json.loads(raw)
+          run_id = os.environ['HOST_VALIDATION_RUN_ID']
+          run = public_get('/actions/runs/' + run_id, 'host-prerequisite-run.json')
+          jobs = public_get('/actions/runs/' + run_id + '/attempts/1/jobs?per_page=100', 'host-prerequisite-jobs.json')
+          host_validation = validate_host_run(run, jobs, receipt['source_commit'], run_id)
+          receipt['host_validation'] = host_validation
+          (out / 'natural-root-exact3-gate.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          status = dict(purpose='device validation of existing native-scene recovery after Host fixture correction',
+                        qualification='TESTS NOT RUN', tests_run=False, source_commit=receipt['source_commit'], previous_candidate=BASE,
+                        full_test_gate='NOT PASSED: only previous same-source Host9 passed; other137 outside this Host scope',
+                        approved_changed_files=receipt['approved_changed_files'], product_changes=[],
+                        product_change_scope='Host fixture and two workflow gates only; production source equals parent5c',
+                        native_tests_this_run=dict(status='not run', executions=0, selection=[]), native_execution=[],
+                        physical_device_acceptance='not performed', host_validation=host_validation, exact3_gate=receipt)
+          Path('artifacts/verification-status.json').write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as output:
+              output.write('## Device build only: TESTS NOT RUN in this attempt\n\nSame-source Host9 and lifecycle audit passed: ' + host_validation['url']
+                  + '. Full146 regression not passed. Physical-device acceptance not performed; original App-switch symptom remains for user retest.\n')
+          print(json.dumps(receipt, indent=2))
+          PY
 
       - name: Verify the selected native toolchain
         run: |

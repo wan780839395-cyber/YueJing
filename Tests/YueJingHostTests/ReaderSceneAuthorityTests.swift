@@ -2,27 +2,30 @@ import Foundation
 import ReaderDomain
 import Testing
 import UIKit
+import XCTest
 @testable import YueJing
 
-// Real host window/scene + explicitly completed root and paired child appearance transitions.
+// Real host window/scene + UIKit-completed root and explicitly paired child appearance transitions.
 // Exercises production binding, selector observer, parent delivery and coordinator contract.
 // Scene notifications/model work are injected; no automatic child delivery or actual App-switch proof.
 @MainActor
 @Suite(.serialized)
 struct ReaderSceneAuthorityTests {
     @Test func nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites() async throws {
+        // All root waits consume the same case budget, never a fresh timeout per transition.
+        let rootDeadline = ContinuousClock.now.advanced(by: .seconds(180))
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first(where: { $0.activationState == .foregroundActive }))
         let host = UIWindow(windowScene: scene)
         host.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
         let fixture = AppearanceContainer()
         defer {
-            fixture.removeAllChildren()
-            if host.rootViewController === fixture { fixture.disappearRoot() }
-            host.rootViewController = nil
-            host.isHidden = true
-            fixture.expectRootDetached()
+            if !fixture.children.isEmpty { fixture.removeAllChildren() }
+            // Failure-only fallback: no claim that an unawaited root callback completed.
+            fixture.detachRootForFailureCleanup(in: host)
+            if !host.isHidden { host.isHidden = true }
         }
+        try await fixture.installRoot(in: host, before: rootDeadline)
         @MainActor func deliverAttachedAppearance(_ controller: ReaderViewController,
                                                  handle: ReaderViewportHandle, routeID: UUID) throws {
             try fixture.requireRootAppearance(true)
@@ -41,10 +44,9 @@ struct ReaderSceneAuthorityTests {
         }
         @MainActor func mountConfigured(_ controller: ReaderViewController,
                                        handle: ReaderViewportHandle, routeID: UUID) throws {
+            try #require(host.rootViewController === fixture && !host.isHidden)
+            try fixture.requireRootAppearance(true)
             fixture.removeAllChildren()
-            // Complete the real root appearance before driving child callbacks. Restore it
-            // after the explicit root=nil rejection check without yielding during owner handoff.
-            if host.rootViewController == nil { try fixture.installRoot(in: host) }
             try fixture.contain(controller)
             try deliverAttachedAppearance(controller, handle: handle, routeID: routeID)
         }
@@ -134,9 +136,8 @@ struct ReaderSceneAuthorityTests {
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: route, binding: replacementBinding))
         #expect(!handle.acceptScenePhase(false, from: replacement, scene: scene, routeID: nextRoute, binding: replacementBinding))
         #expect(events.count == reboundCount && modelTransitions == [false, true, true] && tools.intent == resumedIntent)
-        fixture.disappearRoot() // Finish both child AND root disappearance before detachment.
+        try await fixture.removeRoot(from: host, before: rootDeadline)
         try fixture.requireRootAppearance(false)
-        host.rootViewController = nil // The actual current window must still belong to the bound scene.
         try #require(fixture.viewIfLoaded?.window == nil && replacement.viewIfLoaded?.window == nil)
         fixture.expectRootDetached()
         NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
@@ -144,6 +145,9 @@ struct ReaderSceneAuthorityTests {
         handle.detach(replacement)
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
         #expect(events.count == reboundCount && handle.controller == nil && replacement.sceneBindingID == nil)
+
+        fixture.removeAllChildren()
+        try await fixture.installRoot(in: host, before: rootDeadline)
 
         // P2: exercise the production single-task coordinator via the real observer/parent path.
         // Only the async model operation is injected; no test copy of the scheduling algorithm.
@@ -208,10 +212,13 @@ struct ReaderSceneAuthorityTests {
         let completedCount = applied.count
         NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
         #expect(applied.count == completedCount && asyncHandle.modelSceneTask == nil)
+        try await fixture.removeRoot(from: host, before: rootDeadline)
+        fixture.expectRootDetached()
+        fixture.removeAllChildren()
     }
 
-    // UIWindow may initiate root appearance; explicitly complete it, and finish root
-    // disappearance before root=nil. Child appearance still has this single driver.
+    // UIKit alone drives root appearance. Only real did callbacks release the bounded waits.
+    // Automatic child forwarding stays off; child appearance has its own single paired driver.
     @MainActor
     private final class AppearanceContainer: UIViewController {
         override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
@@ -219,6 +226,8 @@ struct ReaderSceneAuthorityTests {
         private var rootAppearance: Bool? = false
         private var rootWillAppear = 0, rootDidAppear = 0
         private var rootWillDisappear = 0, rootDidDisappear = 0
+        private var didAppearCompletion: XCTestExpectation?
+        private var didDisappearCompletion: XCTestExpectation?
 
         override func viewWillAppear(_ animated: Bool) {
             super.viewWillAppear(animated)
@@ -229,6 +238,8 @@ struct ReaderSceneAuthorityTests {
             super.viewDidAppear(animated)
             rootDidAppear += 1; rootAppearance = true
             traceRoot("didAppear")
+            let completion = didAppearCompletion; didAppearCompletion = nil
+            completion?.fulfill()
         }
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
@@ -239,24 +250,58 @@ struct ReaderSceneAuthorityTests {
             super.viewDidDisappear(animated)
             rootDidDisappear += 1; rootAppearance = false
             traceRoot("didDisappear")
+            let completion = didDisappearCompletion; didDisappearCompletion = nil
+            completion?.fulfill()
         }
-        func installRoot(in window: UIWindow) throws {
+        func installRoot(in window: UIWindow, before deadline: ContinuousClock.Instant) async throws {
             try #require(window.rootViewController == nil && viewIfLoaded?.window == nil)
             try #require(children.isEmpty && appeared.isEmpty)
-            window.isHidden = false
+            try #require(didAppearCompletion == nil && didDisappearCompletion == nil)
+            let completion = XCTestExpectation(description: "root didAppear")
+            didAppearCompletion = completion
+            defer { didAppearCompletion = nil }
+            traceRoot("install.begin")
             window.rootViewController = self
-            beginAppearanceTransition(true, animated: false)
-            endAppearanceTransition()
+            window.isHidden = false
+            traceRoot("install.mutated")
+            try await waitForRootCallback(completion, before: deadline)
             try requireRootAppearance(true)
             try #require(window.rootViewController === self && viewIfLoaded?.window === window)
             traceRoot("installed")
         }
-        func disappearRoot() {
+        func removeRoot(from window: UIWindow, before deadline: ContinuousClock.Instant) async throws {
+            try #require(window.rootViewController === self && viewIfLoaded?.window === window && !window.isHidden)
+            try requireRootAppearance(true)
+            try #require(didAppearCompletion == nil && didDisappearCompletion == nil)
             disappearAll()
-            beginAppearanceTransition(false, animated: false)
-            endAppearanceTransition()
+            let completion = XCTestExpectation(description: "root didDisappear")
+            didDisappearCompletion = completion
+            defer { didDisappearCompletion = nil }
+            traceRoot("remove.begin")
+            window.rootViewController = nil
+            traceRoot("remove.mutated")
+            try await waitForRootCallback(completion, before: deadline)
+            try requireRootAppearance(false)
             #expect(rootAppearance == false && rootWillAppear == rootDidAppear && rootWillDisappear == rootDidDisappear)
+            try #require(viewIfLoaded?.window == nil)
+            window.isHidden = true
             traceRoot("disappeared")
+        }
+        private func waitForRootCallback(_ completion: XCTestExpectation,
+                                         before deadline: ContinuousClock.Instant) async throws {
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            try #require(remaining > .zero)
+            let parts = remaining.components
+            let timeout = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+            // Async XCTWaiter suspends rather than blocking MainActor; fulfillment is callback-only.
+            let result = await XCTWaiter.fulfillment(of: [completion], timeout: timeout)
+            try #require(result == .completed)
+        }
+        func detachRootForFailureCleanup(in window: UIWindow) {
+            guard window.rootViewController === self else { return }
+            traceRoot("cleanup.unverified.begin")
+            window.rootViewController = nil
+            traceRoot("cleanup.unverified.mutated")
         }
         func requireRootAppearance(_ active: Bool) throws {
             try #require(rootAppearance == active && rootWillAppear == rootDidAppear && rootWillDisappear == rootDidDisappear)
