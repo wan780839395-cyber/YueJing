@@ -68,8 +68,9 @@ struct ReaderScreen: View {
                 }
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    ReaderFloatingToolsView(model: model, state: tools, metrics: metrics,
-                        appearance: appearance, rememberFocus: { lastPanelControl = $0 },
+                    ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
+                        directoryAvailable: model.chapterTotal > 0, settingsAvailable: model.window != nil,
+                        exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
                         open: openPanel, focusedControl: $focusedControl)
                 }
                 .padding(.horizontal, 16).padding(.bottom, 8)

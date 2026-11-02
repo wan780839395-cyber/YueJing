@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var informationRoute: LibraryInformationRoute?
     @State private var displayedInformation: LibraryInformationPage = .diagnostics
     @Environment(\.colorScheme) private var colorScheme
+    @AccessibilityFocusState private var focusedLibraryControl: String?
 
     private var appAppearance: AppAppearance { AppAppearance.restored(from: appAppearanceRawValue) }
     private var appearance: LibraryAppearance {
@@ -46,8 +47,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             LibraryNavigationShell(section: sectionSelection, drawerPresented: drawerPresentation,
-                canNavigate: canNavigateManagement, appearance: appearance,
-                onDrawerSection: selectDrawerSection, onDrawerInformation: openDrawerInformation,
+                canNavigate: canNavigateManagement, appearance: appearance, focusedControl: $focusedLibraryControl,
                 shelf: shelfContent,
                 explore: LibraryExploreContent(appearance: appearance, canOpenFeatures: canChangeManagement,
                                                onOpenFeature: openPlannedFeature),
@@ -89,6 +89,15 @@ struct ContentView: View {
                     LibraryLicenseView(appearance: appearance)
                 }
             }
+        }
+        .overlay(alignment: .leading) {
+            LibrarySidebarView(section: selectedSection, presented: drawerPresentation,
+                canNavigate: canNavigateManagement, appearance: appearance,
+                onSection: selectDrawerSection, onInformation: openDrawerInformation,
+                focusedControl: $focusedLibraryControl)
+        }
+        .onChange(of: drawerPresented) { open in
+            focusedLibraryControl = open ? "library.close" : "library.menu"
         }
         .accessibilityIdentifier("library.screen")
         .overlay(alignment: .topLeading) {

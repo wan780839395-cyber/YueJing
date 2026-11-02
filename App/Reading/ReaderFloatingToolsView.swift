@@ -3,10 +3,12 @@ import SwiftUI
 
 @MainActor
 struct ReaderFloatingToolsView: View {
-    @ObservedObject var model: ReaderViewModel
     let state: ReadingToolsPresentation
     let metrics: ReaderToolMetrics
     let appearance: ReaderToolAppearance
+    let directoryAvailable: Bool
+    let settingsAvailable: Bool
+    let exitSaveFailed: Bool
     let rememberFocus: @MainActor (String) -> Void
     let open: @MainActor (ReadingToolPanel) -> Void
     @AccessibilityFocusState.Binding var focusedControl: String?
@@ -40,14 +42,16 @@ struct ReaderFloatingToolsView: View {
                     .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
                 }
             }
+            .transaction { $0.animation = nil }
             .opacity(trayExpanded ? 1 : 0)
             .allowsHitTesting(trayExpanded && visible && state.canInteract)
             .accessibilityHidden(!trayExpanded || !visible)
+            .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
 
             Button {
-                guard visible, state.canInteract, !model.exitSaveFailed else { return }
+                guard visible, state.canInteract, !exitSaveFailed else { return }
                 trayExpanded = true
-                restoreFocus(to: model.chapterTotal > 0 ? "directory" : (model.window != nil ? "settings" : "dock.collapse"))
+                restoreFocus(to: directoryAvailable ? "directory" : (settingsAvailable ? "settings" : "dock.collapse"))
             } label: {
                 Label("阅读工具", systemImage: "slider.horizontal.3")
                     .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
@@ -57,30 +61,31 @@ struct ReaderFloatingToolsView: View {
                     .frame(minWidth: 44, minHeight: metrics.controlHeight)
                     .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(model.exitSaveFailed || !state.canInteract)
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(exitSaveFailed || !state.canInteract)
             .background {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(appearance.fill.opacity(model.exitSaveFailed || !state.canInteract ? 0.4 : 1))
+                    .fill(appearance.fill.opacity(exitSaveFailed || !state.canInteract ? 0.4 : 1))
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
             .accessibilityIdentifier("reader.tools.expand")
             .accessibilityHint("展开目录和排版工具")
             .accessibilityFocused($focusedControl, equals: "dock.expand")
+            .transaction { $0.animation = nil }
             .opacity(trayExpanded ? 0 : 1)
             .allowsHitTesting(!trayExpanded && visible && state.canInteract)
             .accessibilityHidden(trayExpanded || !visible)
+            .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
         }
-        .transaction { $0.animation = nil }
         .frame(maxWidth: .infinity, alignment: .trailing)
-        // Both control groups retain their structural identity and bottom-right anchor.
-        // Expansion does not mount a branch or start a second presentation animation.
-        // Only the active group participates in hit testing and accessibility.
-        // The existing outer visibility modifier still owns whole-tool reveal/hide.
+        // Stable control groups keep their bottom-right anchor and existing actions.
+        // Only the two group opacity values animate; child text and layout do not.
+        // Model publication is observed by ReaderScreen, not subscribed to again here.
+        // Whole-tool reveal/hide remains owned by the existing visibility modifier.
     }
 
     private var collapseButton: some View {
         Button {
-            guard visible, state.canInteract, !model.exitSaveFailed else { return }
+            guard visible, state.canInteract, !exitSaveFailed else { return }
             trayExpanded = false
             restoreFocus(to: "dock.expand")
         } label: {
@@ -91,7 +96,7 @@ struct ReaderFloatingToolsView: View {
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 .frame(minWidth: 44, minHeight: metrics.controlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary)).disabled(model.exitSaveFailed || !state.canInteract)
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary)).disabled(exitSaveFailed || !state.canInteract)
         .accessibilityIdentifier("reader.tools.collapse")
         .accessibilityFocused($focusedControl, equals: "dock.collapse")
     }
@@ -103,11 +108,11 @@ struct ReaderFloatingToolsView: View {
 
     private var directoryButton: some View {
         toolButton("目录", symbol: "list.bullet", panel: .directory, key: "directory")
-            .disabled(model.chapterTotal == 0 || model.exitSaveFailed || !state.canInteract)
+            .disabled(!directoryAvailable || exitSaveFailed || !state.canInteract)
     }
     private var settingsButton: some View {
         toolButton("排版", symbol: "textformat.size", panel: .settings, key: "settings")
-            .disabled(model.window == nil || model.exitSaveFailed || !state.canInteract)
+            .disabled(!settingsAvailable || exitSaveFailed || !state.canInteract)
             .accessibilityHint("调整字号、行距和阅读背景，立即应用并保存")
     }
     private func toolButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String) -> some View {

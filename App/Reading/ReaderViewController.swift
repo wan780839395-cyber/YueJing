@@ -235,13 +235,18 @@ final class ReaderInteractionDiagnostics {
         return " m\(bit(t.token))\(bit(t.generation)) d\(bit(t.dragging))\(bit(t.decelerating)) l\(bit(t.latchedDrag))\(bit(t.latchedDecel)) cb\(bit(t.callback))p\(bit(t.parentReceived)):\(t.parent.rawValue) \(t.before.rawValue)>\(t.after.rawValue) i\(bit(t.intentMatches))c\(bit(t.canInteract))v\(bit(t.finalVisible))"
     }
     private func paint() {
-        label?.text = [
+        guard let label else { return }
+        let next = [
             "DIAG R\(bit(interrupted)) S:\(scene.rawValue) O\(bit(owner))N\(bit(replacedOwner)) H\(bit(handleActive)) E\(bit(enabled))C\(bit(contextActive))",
             "rx\(attempts)/2 end\(taps.filter { $0.target }.count)/2 g:\(recognizer.rawValue) d\(bit(dragging))\(bit(decelerating)) sh\(bit(shadow))",
             tapLine(0), resultLine(0), tapLine(1), resultLine(1),
             "P:\(mode.rawValue) v\(bit(visible)) c\(bit(canInteract)) V\(bit(valid))s\(bit(suspended)) w\(bit(hasWindow))l\(bit(loading))f\(bit(saveFailed))",
             "#\(events.count)/64 " + events.suffix(9).map(\.rawValue).joined(separator: ">")
         ].joined(separator: "\n")
+        // Several observations can describe the same facts in one touch chain.
+        // Preserve every recorded event, but avoid invalidating UILabel for equal text.
+        guard label.text != next else { return }
+        label.text = next
     }
 }
 // END READER DIAGNOSTICS recorder
