@@ -16,6 +16,7 @@ on:
           - host-verified-natural-root-5c88543-exact3
           - c-only-repro-09c61b5-exact1
           - c-dock-failure-1b2117-exact6
+          - c-exit-recovery-2f962b6-exact5
       host_validation_run_id:
         description: Same-source native run ID (natural-root Host9 or C-dock full-validation UI failure)
         required: false
@@ -44,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1|c-dock-failure-1b2117-exact6) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1|c-dock-failure-1b2117-exact6|c-exit-recovery-2f962b6-exact5) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -633,6 +634,16 @@ jobs:
           set -euo pipefail
           python3 -B scripts/check_c_dock_failure_repair.py --device-repro-gate
 
+      - name: Require the exact five-path exit recovery and same-source UI-only failure evidence
+        if: ${{ inputs.package_scope == 'c-exit-recovery-2f962b6-exact5' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+          HOST_VALIDATION_RUN_ID: ${{ inputs.host_validation_run_id }}
+          NATIVE_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_c_exit_recovery.py --device-repro-gate
+
       - name: Verify the selected native toolchain
         run: |
           set -euo pipefail
@@ -701,6 +712,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B scripts/check_c_dock_failure_repair.py --fixed-dependency
+
+      - name: Require the original fixed GRDB checkout for the exit recovery diagnosis package
+        if: ${{ inputs.package_scope == 'c-exit-recovery-2f962b6-exact5' }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_c_exit_recovery.py --fixed-dependency
 
       - name: Verify Release settings exclude the test-only diagnostics
         run: |

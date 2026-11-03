@@ -141,7 +141,18 @@ struct ReaderScreen: View {
 
     private func titleBar(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
         let visible = tools.visible && tools.panel == nil
-        return HStack(spacing: 6) {
+        return ZStack {
+            if visible {
+                titleBarContent(metrics: metrics, appearance: appearance)
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: -ReaderMotion.hiddenTravel)))
+            }
+        }
+        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
+        .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)
+    }
+
+    private func titleBarContent(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
+        HStack(spacing: 6) {
             Button { exitReader() } label: {
                 Group {
                     if tools.exitRequest != nil { ProgressView() }
@@ -169,8 +180,8 @@ struct ReaderScreen: View {
         .padding(.horizontal, 8).frame(minHeight: metrics.titleHeight)
         .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.horizontal, 12).padding(.top, 6)
-        .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: -ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
-        .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)
+        // Keep title/layout updates out of the visibility transition.
+        .transaction { transaction in transaction.animation = nil }
     }
 
     private var panelPresentation: Binding<ReaderPanelSession?> {
