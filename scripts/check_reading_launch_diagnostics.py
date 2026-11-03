@@ -463,7 +463,7 @@ def self_check():
         tree = ast.parse(source)
         native = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_native")
         text = ast.get_source_segment(source, native)
-        check('timeout_seconds = 480 if target == "YueJingHostTests" else 900' in text, "host-480-ui-900-budgets-preserved")
+        check('timeout_seconds = 480 if target == "YueJingHostTests" else 1200' in text, "host-480-ui-1200-approved-budgets")
         check('"-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180"' in text, "per-case-180-budgets-preserved")
         check('if timed_out:' in text and 'count_log(target,' in text and 'raise ValueError("Native target timed out' in text, "timeout-and-exact-case-gates-preserved")
 

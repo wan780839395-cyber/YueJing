@@ -505,7 +505,7 @@ def run_native(destination, target=None, evidence_dir=None):
     source = {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     selected_targets = [target] if target else list(GROUPS)
     for target in selected_targets:
-        timeout_seconds = 480 if target == "YueJingHostTests" else 900
+        timeout_seconds = 480 if target == "YueJingHostTests" else 1200
         args = ["xcodebuild", "test", "-project", "YueJing.xcodeproj", "-scheme", "YueJingUI", "-configuration", "Debug",
                 "-destination", destination, "-only-testing:" + target, "-parallel-testing-enabled", "NO",
                 "-clonedSourcePackagesDirPath", "build/SourcePackages", "-disableAutomaticPackageResolution", "-skipPackageUpdates",

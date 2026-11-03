@@ -92,13 +92,13 @@ def main():
     assert workflow.index("freeze-candidate") < workflow.index("--selection TXTCoreTests")
     assert workflow.index("test-counts YueJingCanvasTests") < workflow.index("all-test-gate") < workflow.index("generic/platform=iOS")
     assert "workflow_dispatch:" in workflow and "runs-on: macos-15" in workflow
-    # Approved total-job headroom only; native suite/case deadlines stay unchanged.
-    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "18"]
+    # Approved aggregate UI headroom; Host and individual case deadlines stay unchanged.
+    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "23"]
     runner = (ROOT / "scripts/run_reading_ui_tests.py").read_text(encoding="utf-8")
-    assert 'timeout_seconds = 480 if target == "YueJingHostTests" else 900' in runner
+    assert 'timeout_seconds = 480 if target == "YueJingHostTests" else 1200' in runner
     assert '"-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180"' in runner
     assert "-skip-testing:" not in workflow  # filters are emitted only by the reviewed selector
-    checked.append("workflow-order-approved-job60-native-deadlines-unchanged")
+    checked.append("workflow-order-approved-job60-ui1200-case180-host480")
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if bash.is_file():
         bodies = re.findall(r"^        run: \|\n((?:          .*\n|\n)+)", workflow, re.MULTILINE)

@@ -747,14 +747,30 @@ final class ReadingFlowUITests: XCTestCase {
         Self.hitProbeRoutes.removeValue(forKey: key)
         Self.hitProbeWindows.removeValue(forKey: key)
     }
+    @MainActor private func hasVisibleDockControl(_ app: XCUIApplication) -> Bool {
+        let screen = app.windows.firstMatch.frame
+        guard !screen.isNull, screen.width > 0, screen.height > 0 else { return false }
+        let scroll = app.scrollViews["reader.tools.scroll"]
+        let trayBounds = scroll.exists ? scroll.frame.intersection(screen) : screen
+        for identifier in ["reader.tools.expand", "reader.tools.directory", "reader.tools.settings", "reader.tools.collapse"] {
+            let button = app.buttons[identifier]
+            guard button.exists, button.isHittable else { continue }
+            let frame = button.frame
+            let bounds = identifier == "reader.tools.expand" ? screen : trayBounds
+            if !frame.isNull, frame.width > 0, frame.height > 0,
+               !bounds.isNull, bounds.width > 0, bounds.height > 0,
+               bounds.contains(CGPoint(x: frame.midX, y: frame.midY)) { return true }
+        }
+        return false
+    }
+
     @MainActor private func showTools(_ app: XCUIApplication) {
         // Preserve the finite two-touch inertia protocol; sharing its original 10+10-second allowance.
         let deadline = Date().addingTimeInterval(20)
-        let expand = app.buttons["reader.tools.expand"], collapse = app.buttons["reader.tools.collapse"]
-        if !((expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)) {
+        if !self.hasVisibleDockControl(app) {
             viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             let firstTouch = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                (expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)
+                self.hasVisibleDockControl(app)
             }, object: nil)
             let result = XCTWaiter.wait(for: [firstTouch], timeout: min(10, max(0, deadline.timeIntervalSinceNow)))
             if result != .completed {
@@ -763,7 +779,7 @@ final class ReadingFlowUITests: XCTestCase {
             }
         }
         expandCDock(app, deadline: deadline)
-        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0, deadline.timeIntervalSinceNow))
+        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
     }
     @MainActor private func endMarker(_ text: String, _ app: XCUIApplication) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", text)).firstMatch

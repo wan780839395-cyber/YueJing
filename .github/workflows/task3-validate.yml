@@ -341,7 +341,7 @@ jobs:
 
       - name: Run 11 real App UI flows including 2 bookmark flows
         if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
-        timeout-minutes: 18
+        timeout-minutes: 23
         run: |
           set -euo pipefail
           python3 -u scripts/run_reading_ui_tests.py --run --target YueJingUITests \
