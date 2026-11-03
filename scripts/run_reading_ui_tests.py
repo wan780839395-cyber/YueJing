@@ -155,6 +155,201 @@ def _lifecycle_snapshot(observer):
                 "status": "unknown", "reason": "snapshot-unavailable-or-over-cap"}
 
 
+class _UIProcessTimeline:
+    """Bounded, non-gate UI observations. No disk IO in process/timer callbacks."""
+    MAX_EVENTS = 64
+    MAX_BYTES = 16384
+    EVENTS = frozenset((
+        "popen_requested", "popen_returned", "popen_failed", "timer_started", "timer_callback",
+        "timer_poll", "timer_poll_failed", "kill_requested", "kill_returned", "kill_failed",
+        "stdout_eof", "wait_started", "wait_returned", "stream_error", "timer_cancelled",
+        "stdout_closed", "stream_unwound", "stream_returned", "returned_timed_out",
+        "native_stream_finished", "first_test_start_observed", "native_receipt_written",
+        "native_receipt_failed", "export_started", "export_finished", "export_failed"))
+
+    def __init__(self, path, provenance):
+        self.path = path
+        self._lock = threading.Lock()
+        self._events = []
+        self._dropped = 0
+        self._unknown = False
+        self._lines = 0
+        self._first_test = False
+        self._identity = {}
+        for key, pattern in (("source_commit", r"[0-9a-f]{40}"), ("run_id", r"[1-9][0-9]{0,19}"),
+                             ("run_attempt", r"[1-9][0-9]{0,5}"), ("target", r"YueJingUITests")):
+            value = provenance.get(key)
+            if value is not None and (not isinstance(value, str) or not re.fullmatch(pattern, value)):
+                value = None
+                self._unknown = True
+            self._identity[key] = value
+
+    def record(self, event, value=None):
+        with self._lock:
+            if event not in self.EVENTS:
+                self._unknown = True
+                return
+            if len(self._events) >= self.MAX_EVENTS:
+                self._dropped = min(self._dropped + 1, 2**63 - 1)
+                return
+            try:
+                utc = datetime.now(timezone.utc).isoformat()
+                if not isinstance(utc, str) or len(utc) > 40 or not re.fullmatch(r"[0-9T:.+Z-]+", utc):
+                    raise ValueError("Invalid observation clock")
+                mono = time.monotonic()
+                if type(mono) not in (int, float) or mono != mono or abs(mono) == float("inf"):
+                    raise ValueError("Invalid observation clock")
+            except Exception:
+                utc, mono = None, None
+                self._unknown = True
+            # Never retain exception messages, process arguments, stdout or arbitrary strings.
+            numeric = value if type(value) in (int, bool) and -(2**63) <= value < 2**63 else None
+            self._events.append({"sequence": len(self._events) + 1, "event": event,
+                                 "utc": utc, "monotonic": mono, "value": numeric})
+
+    def start(self, process, deadline):
+        pass  # No polling, extra process, deadline change or background writer.
+
+    def observe_line(self, line):
+        first = False
+        with self._lock:
+            self._lines = min(self._lines + 1, 2**63 - 1)
+            if not self._first_test and len(line) <= 512 and re.fullmatch(
+                    r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests test\w+\]' started\.\s*", line):
+                self._first_test = True
+                first = True
+        if first:
+            self.record("first_test_start_observed")
+
+    def finish(self):
+        # stream_native calls this before export; do not seal or persist the recorder here.
+        self.record("native_stream_finished")
+
+    def snapshot(self):
+        with self._lock:
+            return {"kind": "NON_GATE_UI_PROCESS_TIMELINE", "schema": 1, "acceptance_role": "none",
+                    "status": "unknown" if self._unknown else "truncated" if self._dropped else "observed",
+                    "truncated": bool(self._dropped), "dropped_events": self._dropped,
+                    "stdout_lines_observed": self._lines, "events": list(self._events),
+                    "late_events_possible": True, **self._identity}
+
+    def persist(self):
+        try:
+            value = self.snapshot()
+            while True:
+                raw = (json.dumps(value, allow_nan=False, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
+                if len(raw) <= self.MAX_BYTES:
+                    break
+                if not value["events"]:
+                    raise ValueError("Observation metadata over cap")
+                value["events"].pop()
+                value.update(status="truncated", truncated=True, dropped_events=value["dropped_events"] + 1)
+            with self.path.open("xb") as stream:
+                stream.write(raw)
+            return True
+        except Exception:
+            try:
+                print("UI process timeline unavailable: non-gate observation unknown", file=sys.stderr)
+            except Exception:
+                pass
+            return False
+
+
+def _ui_failure_kind(code, timed_out, native_error=None, receipt_error=None, export_error=None):
+    if native_error is not None:
+        return "NATIVE_EXECUTION_ERROR"
+    if timed_out is True:
+        return "NATIVE_TIMEOUT"
+    if type(code) is not int or type(timed_out) is not bool:
+        return "NATIVE_RESULT_UNAVAILABLE"
+    if code != 0:
+        return "NATIVE_FAILURE"
+    if receipt_error is not None:
+        return "NATIVE_RECEIPT_ERROR"
+    if export_error is not None:
+        return "ATTACHMENT_EXPORT_ERROR"
+    return None
+
+
+def _ui_export_exit(out, provenance, native_exit):
+    """Only annotate a matching existing receipt; never derive acceptance from it."""
+    try:
+        path = out / "attachment-export.json"
+        if path.stat().st_size > 65536:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if any(value.get(k) != provenance.get(k) for k in ("source_commit", "run_id", "run_attempt", "target")):
+            return None
+        if value.get("native_exit") != native_exit or type(value.get("export_exit")) is not int:
+            return None
+        return value["export_exit"]
+    except Exception:
+        return None
+
+
+def _run_ui_attempt(args, out, provenance, timeout_seconds):
+    """One UI native command and one export entry; original result wins over export errors."""
+    if provenance.get("target") != "YueJingUITests":
+        raise ValueError("UI coordinator cannot run a different target")
+    timeline = None
+    try:
+        timeline = _UIProcessTimeline(out / "YueJingUITests-process-timeline.json", provenance)
+    except Exception:
+        pass  # Observation availability is never acceptance.
+    code, timed_out = None, None
+    native_error = receipt_error = export_error = None
+    export_exit = None
+    try:
+        try:
+            code, timed_out = stream_native(args, out / "YueJingUITests.log", timeout_seconds,
+                                           process_lifecycle=timeline)
+        except BaseException as error:
+            native_error = error
+        if native_error is None:
+            try:
+                (out / "YueJingUITests-exit-code.txt").write_text(str(code) + "\n", encoding="utf-8")
+                write_new(out / "YueJingUITests-execution.json",
+                          {**provenance, "native_exit": code, "timed_out": timed_out})
+                _diagnostic_call(timeline, "record", "native_receipt_written")
+            except BaseException as error:
+                receipt_error = error
+                _diagnostic_call(timeline, "record", "native_receipt_failed")
+        _diagnostic_call(timeline, "record", "export_started")
+        try:
+            export_ui_evidence(out, provenance, code)
+        except BaseException as error:
+            export_error = error
+        export_exit = _ui_export_exit(out, provenance, code)
+        _diagnostic_call(timeline, "record", "export_failed" if export_error is not None else "export_finished", export_exit)
+    finally:
+        _diagnostic_call(timeline, "persist")
+    kind = _ui_failure_kind(code, timed_out, native_error, receipt_error, export_error)
+    note = (f"{kind}: target=YueJingUITests native_exit={code!r} timed_out={timed_out!r}; "
+            f"receipt_error={receipt_error is not None} export_error={export_error is not None} export_exit={export_exit!r}")
+    if kind:
+        try:
+            print("UI outcome: " + note, file=sys.stderr)
+        except Exception:
+            pass
+        for label, error in (("native receipt", receipt_error), ("attachment export", export_error)):
+            if isinstance(error, Exception):
+                try:
+                    print("UI " + label + " error: " + str(error), file=sys.stderr)
+                except Exception:
+                    pass
+    # Cancellation/control exceptions remain control flow, not ordinary test failures or success.
+    for error in (native_error, receipt_error, export_error):
+        if error is not None and not isinstance(error, Exception):
+            raise error.with_traceback(error.__traceback__)
+    if native_error is not None:
+        raise native_error.with_traceback(native_error.__traceback__)
+    if kind == "NATIVE_RECEIPT_ERROR":
+        raise receipt_error.with_traceback(receipt_error.__traceback__)
+    if kind:
+        raise ValueError(note) from None
+    return code, timed_out
+
+
 def stream_native(args, path, timeout_seconds, launch_diagnostics=None, process_lifecycle=None):
     timed_out = threading.Event()
     with path.open("x", encoding="utf-8") as stream:
@@ -337,7 +532,9 @@ def run_native(destination, target=None, evidence_dir=None):
                 process_lifecycle = ProcessLifecycleDiagnostics(out, provenance)
             except Exception:
                 pass  # Lifecycle observations never authorize or replace a native result.
-        try:
+        if target == "YueJingUITests":
+            code, timed_out = _run_ui_attempt(args, out, provenance, timeout_seconds)
+        else:
             code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
                                            launch_diagnostics=launch_diagnostics, process_lifecycle=process_lifecycle)
             (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
@@ -345,9 +542,6 @@ def run_native(destination, target=None, evidence_dir=None):
             if process_lifecycle is not None:
                 execution["process_lifecycle_observation"] = _lifecycle_snapshot(process_lifecycle)
             write_new(out / (target + "-execution.json"), execution)
-        finally:
-            if target == "YueJingUITests":
-                export_ui_evidence(out, provenance, code)
         if timed_out:
             raise ValueError("Native target timed out; raw process exit preserved: " + target)
         counts = {**count_log(target, (out / (target + ".log")).read_text(encoding="utf-8", errors="replace"), code), **provenance}
