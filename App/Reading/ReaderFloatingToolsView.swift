@@ -19,68 +19,78 @@ struct ReaderFloatingToolsView: View {
     private var visible: Bool { state.visible && state.panel == nil }
 
     var body: some View {
-        edgeDock
+        ZStack(alignment: .bottomTrailing) {
+            if visible {
+                edgeDock
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
-        .modifier(ReaderToolVisibility(visible: visible, hiddenOffset: ReaderMotion.hiddenTravel, reduceMotion: reduceMotion))
+        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
         .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
     }
 
     private var edgeDock: some View {
         ZStack(alignment: .bottomTrailing) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    dockSurface(cornerRadius: 24) {
-                        HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                dockSurface(cornerRadius: 24) {
-                    ScrollView(.vertical) {
-                        VStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
-                    }
-                    .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
-                }
+            if trayExpanded {
+                expandedDock
+                    .transaction { $0.animation = nil }
+                    .transition(.opacity)
+            } else {
+                expandButton
+                    .transaction { $0.animation = nil }
+                    .transition(.opacity)
             }
-            .transaction { $0.animation = nil }
-            .opacity(trayExpanded ? 1 : 0)
-            .allowsHitTesting(trayExpanded && visible && state.canInteract)
-            .accessibilityHidden(!trayExpanded || !visible)
-            .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
-
-            Button {
-                guard visible, state.canInteract, !exitSaveFailed else { return }
-                trayExpanded = true
-                restoreFocus(to: directoryAvailable ? "directory" : (settingsAvailable ? "settings" : "dock.collapse"))
-            } label: {
-                Label("阅读工具", systemImage: "slider.horizontal.3")
-                    .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
-                    .imageScale(.medium)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12).padding(.vertical, 4)
-                    .frame(minWidth: 44, minHeight: metrics.controlHeight)
-                    .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-            }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(exitSaveFailed || !state.canInteract)
-            .background {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(appearance.fill.opacity(exitSaveFailed || !state.canInteract ? 0.4 : 1))
-                    .allowsHitTesting(false).accessibilityHidden(true)
-            }
-            .accessibilityIdentifier("reader.tools.expand")
-            .accessibilityHint("展开目录和排版工具")
-            .accessibilityFocused($focusedControl, equals: "dock.expand")
-            .transaction { $0.animation = nil }
-            .opacity(trayExpanded ? 0 : 1)
-            .allowsHitTesting(!trayExpanded && visible && state.canInteract)
-            .accessibilityHidden(trayExpanded || !visible)
-            .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
-        // Stable control groups keep their bottom-right anchor and existing actions.
-        // Only the two group opacity values animate; child text and layout do not.
-        // Model publication is observed by ReaderScreen, not subscribed to again here.
-        // Whole-tool reveal/hide remains owned by the existing visibility modifier.
+        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
+        // The inactive controls are absent, not transparent retained AX/hit-test targets.
+        // The stable outer view still owns tray state; no reader/model identity changes.
+    }
+
+    private var expandedDock: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                dockSurface(cornerRadius: 24) {
+                    HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            dockSurface(cornerRadius: 24) {
+                ScrollView(.vertical) {
+                    VStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
+                }
+                .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
+                .accessibilityIdentifier("reader.tools.scroll")
+            }
+        }
+    }
+
+    private var expandButton: some View {
+        Button {
+            guard visible, state.canInteract, !exitSaveFailed else { return }
+            trayExpanded = true
+            restoreFocus(to: directoryAvailable ? "directory" : (settingsAvailable ? "settings" : "dock.collapse"))
+        } label: {
+            Label("阅读工具", systemImage: "slider.horizontal.3")
+                .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+                .imageScale(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                .frame(minWidth: 44, minHeight: metrics.controlHeight)
+                .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(exitSaveFailed || !state.canInteract)
+        .background {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(appearance.fill.opacity(exitSaveFailed || !state.canInteract ? 0.4 : 1))
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .accessibilityIdentifier("reader.tools.expand")
+        .accessibilityHint("展开目录和排版工具")
+        .accessibilityFocused($focusedControl, equals: "dock.expand")
     }
 
     private var collapseButton: some View {

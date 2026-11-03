@@ -172,7 +172,15 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertTrue((probe.value as? String)?.contains("accessibility") == true)
             open("UITest-Short-B", app)
             XCTAssertGreaterThanOrEqual(app.buttons["reader.exit"].frame.height, 44)
-            openSettings(app)
+            let dockDeadline = Date().addingTimeInterval(10)
+            let collapse = app.buttons["reader.tools.collapse"]
+            revealDockControl(collapse, app, deadline: dockDeadline)
+            XCTAssertGreaterThanOrEqual(collapse.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(collapse.frame.height, 44)
+            collapse.tap()
+            waitHittable(app.buttons["reader.tools.expand"], timeout: max(0, dockDeadline.timeIntervalSinceNow))
+            XCTAssertFalse(collapse.isHittable)
+            openSettings(app, sharedDeadline: dockDeadline)
             let close = app.buttons["reader.panel.close"]
             XCTAssertGreaterThanOrEqual(close.frame.height, 44)
             closePanel(app); exitReader(app, shelfBook: "UITest-Short-B")
@@ -390,6 +398,7 @@ final class ReadingFlowUITests: XCTestCase {
                        "The expected synthetic book must have content geometrically visible in the reader viewport")
         let key = Self.evidenceCase(name)
         expandCDock(app, deadline: deadline, startsCollapsed: true)
+        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
         let entryDiagnostic = ReadingEntryEvidence.beforeSettings(app, key: key, sharedDeadline: deadline)
         waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow), onFailure: {
             if entryDiagnostic { ReadingEntryEvidence.settingsFailed(app, key: key) }
@@ -547,21 +556,47 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertFalse(collapse.isHittable)
         } else {
             let presented = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                (expand.exists && expand.isHittable) || (collapse.exists && collapse.isHittable)
+                (expand.exists && expand.isHittable) || collapse.exists
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [presented], timeout: max(0, deadline.timeIntervalSinceNow)), .completed,
                            "The C dock must have a real compact or expanded control before opening a panel")
         }
         if expand.isHittable { expand.tap() }
-        waitHittable(collapse, timeout: max(0, deadline.timeIntervalSinceNow))
+        let expanded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            collapse.exists && !expand.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: max(0, deadline.timeIntervalSinceNow)), .completed,
+                       "Expansion must replace the compact control; large-text targets may need tool-local scrolling")
         XCTAssertFalse(expand.isHittable)
     }
 
+    @MainActor private func revealDockControl(_ button: XCUIElement, _ app: XCUIApplication, deadline: Date) {
+        let scroll = app.scrollViews["reader.tools.scroll"]
+        for _ in 0..<3 {
+            guard deadline.timeIntervalSinceNow > 0 else { break }
+            let screen = app.windows.firstMatch.frame
+            let bounds = scroll.exists ? scroll.frame.intersection(screen) : screen
+            if button.exists && button.isHittable && bounds.contains(CGPoint(x: button.frame.midX, y: button.frame.midY)) { break }
+            guard scroll.exists, !bounds.isNull, bounds.width > 0, bounds.height > 0 else { break }
+            if button.exists && button.frame.midY < bounds.midY {
+                scroll.swipeDown(velocity: .slow)
+            } else {
+                scroll.swipeUp(velocity: .slow)
+            }
+        }
+        waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow))
+        let screen = app.windows.firstMatch.frame
+        let bounds = scroll.exists ? scroll.frame.intersection(screen) : screen
+        XCTAssertTrue(bounds.contains(CGPoint(x: button.frame.midX, y: button.frame.midY)),
+                      "The real target center must be inside its visible dock viewport before tapping")
+    }
+
     @MainActor private func viewport(_ app: XCUIApplication) -> XCUIElement { app.tables["reader.viewport"] }
-    @MainActor private func openSettings(_ app: XCUIApplication) {
-        let deadline = Date().addingTimeInterval(10)
+    @MainActor private func openSettings(_ app: XCUIApplication, sharedDeadline: Date? = nil) {
+        let deadline = sharedDeadline ?? Date().addingTimeInterval(10)
         expandCDock(app, deadline: deadline)
         let button = app.buttons["reader.tools.settings"]
+        revealDockControl(button, app, deadline: deadline)
         waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow)); button.tap()
         waitHittable(app.buttons["reader.panel.close"])
         XCTAssertFalse(app.buttons["reader.exit"].isHittable)
@@ -570,12 +605,13 @@ final class ReadingFlowUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         expandCDock(app, deadline: deadline)
         let button = app.buttons["reader.tools.directory"]
+        revealDockControl(button, app, deadline: deadline)
         waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow)); button.tap()
         waitHittable(app.buttons["reader.panel.close"])
     }
     @MainActor private func closePanel(_ app: XCUIApplication) {
         app.buttons["reader.panel.close"].tap()
-        waitHittable(app.buttons["reader.tools.settings"])
+        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: Date().addingTimeInterval(10))
     }
     @MainActor private func exitReader(_ app: XCUIApplication, shelfBook title: String = "UITest-Long-A") {
         // Readiness and return-to-shelf share the original ten-second shelf-wait budget.
@@ -586,6 +622,7 @@ final class ReadingFlowUITests: XCTestCase {
             Self.captureEvidence(app, testName: key, stage: "probe-after-show", includeExitReadiness: true, probeDeadline: deadline)
         }
         let exit = app.buttons["reader.exit"], settings = app.buttons["reader.tools.settings"]
+        revealDockControl(settings, app, deadline: deadline)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             exit.exists && exit.isHittable && settings.exists && settings.isHittable
         }, object: nil)

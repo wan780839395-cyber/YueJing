@@ -15,8 +15,9 @@ on:
           - interaction-diagnostics-2830bd0-exact4
           - host-verified-natural-root-5c88543-exact3
           - c-only-repro-09c61b5-exact1
+          - c-dock-failure-1b2117-exact6
       host_validation_run_id:
-        description: Same-source successful Task3 Host9 attempt1 run (required only for the natural-root scope)
+        description: Same-source native run ID (natural-root Host9 or C-dock full-validation UI failure)
         required: false
         type: string
         default: ''
@@ -43,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1|c-dock-failure-1b2117-exact6) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -622,6 +623,16 @@ jobs:
           print(json.dumps(receipt, indent=2))
           PY
 
+      - name: Require the exact six-path C dock repair and its same-source UI assertion failure
+        if: ${{ inputs.package_scope == 'c-dock-failure-1b2117-exact6' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+          HOST_VALIDATION_RUN_ID: ${{ inputs.host_validation_run_id }}
+          NATIVE_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_c_dock_failure_repair.py --device-repro-gate
+
       - name: Verify the selected native toolchain
         run: |
           set -euo pipefail
@@ -684,6 +695,12 @@ jobs:
           Path('artifacts/task3/c-only-fixed-dependency.json').write_text(json.dumps(dict(source_commit=os.environ['GITHUB_SHA'], revision=fixed,
               package_manifest_sha256=receipt['package_manifest_sha256'], passed=True), indent=2) + '\n', encoding='utf-8')
           PY
+
+      - name: Require the original fixed GRDB checkout for the C dock failure reproduction package
+        if: ${{ inputs.package_scope == 'c-dock-failure-1b2117-exact6' }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_c_dock_failure_repair.py --fixed-dependency
 
       - name: Verify Release settings exclude the test-only diagnostics
         run: |
