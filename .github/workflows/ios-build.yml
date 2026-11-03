@@ -17,8 +17,9 @@ on:
           - c-only-repro-09c61b5-exact1
           - c-dock-failure-1b2117-exact6
           - c-exit-recovery-2f962b6-exact5
+          - full146-package-66d1291-exact3
       host_validation_run_id:
-        description: Same-source native run ID (natural-root Host9 or C-dock full-validation UI failure)
+        description: Fixed prior native run ID required by the selected package scope
         required: false
         type: string
         default: ''
@@ -45,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_SCOPE" in
-            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1|c-dock-failure-1b2117-exact6|c-exit-recovery-2f962b6-exact5) ;;
+            reader-dock-exact8|physical-recovery-32d6244-exact1|interaction-diagnostics-2830bd0-exact4|host-verified-natural-root-5c88543-exact3|c-only-repro-09c61b5-exact1|c-dock-failure-1b2117-exact6|c-exit-recovery-2f962b6-exact5|full146-package-66d1291-exact3) ;;
             *) printf '%s\n' 'Unapproved package_scope' >&2; exit 1 ;;
           esac
 
@@ -644,6 +645,16 @@ jobs:
           set -euo pipefail
           python3 -B scripts/check_c_exit_recovery.py --device-repro-gate
 
+      - name: Require unchanged parent66 App and tests plus its audited146 before package-only continuation
+        if: ${{ inputs.package_scope == 'full146-package-66d1291-exact3' }}
+        env:
+          PACKAGE_SCOPE: ${{ inputs.package_scope }}
+          HOST_VALIDATION_RUN_ID: ${{ inputs.host_validation_run_id }}
+          NATIVE_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_full146_package_resume.py --device-package-gate
+
       - name: Verify the selected native toolchain
         run: |
           set -euo pipefail
@@ -718,6 +729,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B scripts/check_c_exit_recovery.py --fixed-dependency
+
+      - name: Require the fixed official GRDB checkout for the audited146 package continuation
+        if: ${{ inputs.package_scope == 'full146-package-66d1291-exact3' }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_full146_package_resume.py --fixed-dependency
 
       - name: Verify Release settings exclude the test-only diagnostics
         run: |
@@ -837,7 +854,9 @@ jobs:
           report = dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence, signing="unsigned",
                         grdb_privacy_resources=[str(path.relative_to(app)) for path in resources],
                         grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path),
-                        full_test_gate="not passed", purpose="independent device verification only")
+                        full_test_gate=('NOT RUN THIS BUILD; prior146 passed on identical App/Tests bytes'
+                            if json.loads(Path('artifacts/verification-status.json').read_text(encoding='utf-8')).get('prior_full146_passed') is True
+                            else 'not passed'), purpose="independent device verification only")
           Path("artifacts/device-dependency-verification.json").write_text(json.dumps(report, indent=2) + "\n")
           PY
           python3 scripts/package_ipa.py 2>&1 | tee artifacts/package.log
