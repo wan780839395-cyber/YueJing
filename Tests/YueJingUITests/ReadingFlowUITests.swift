@@ -134,18 +134,25 @@ final class ReadingFlowUITests: XCTestCase {
             open("UITest-Long-A", app)
             let frame = viewport(app).frame
             let collapse = app.buttons["reader.tools.collapse"]
-            waitHittable(collapse); collapse.tap()
+            waitHittable(collapse)
+            let expandedControlFrame = collapse.frame
+            collapse.tap()
             let expand = app.buttons["reader.tools.expand"]
             waitHittable(expand)
             XCTAssertFalse(collapse.isHittable)
             XCTAssertFalse(app.buttons["reader.tools.settings"].isHittable)
             XCTAssertGreaterThanOrEqual(expand.frame.width, 44)
             XCTAssertGreaterThanOrEqual(expand.frame.height, 44)
+            let compactControlFrame = expand.frame
+            XCTAssertEqual(compactControlFrame.maxX, expandedControlFrame.maxX, accuracy: 0.5)
+            XCTAssertEqual(compactControlFrame.maxY, expandedControlFrame.maxY, accuracy: 0.5)
+            XCTAssertEqual(compactControlFrame.height, expandedControlFrame.height, accuracy: 0.5)
             assertSameFrame(viewport(app).frame, frame)
             expandCDock(app, deadline: Date().addingTimeInterval(10), startsCollapsed: true)
             waitHittable(app.buttons["reader.tools.settings"])
             XCTAssertFalse(expand.isHittable)
             assertSameFrame(viewport(app).frame, frame)
+            assertSameFrame(collapse.frame, expandedControlFrame)
             for _ in 0..<3 {
                 openSettings(app); closePanel(app)
                 openDirectory(app); closePanel(app)

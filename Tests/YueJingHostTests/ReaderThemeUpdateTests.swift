@@ -14,6 +14,14 @@ struct ReaderThemeUpdateTests {
             #expect(!controller.isViewLoaded)
             #expect(controller.setTheme(.paper)) // Initial nil must not skip the default paper theme.
             #expect(controller.isViewLoaded)
+            #expect(!ReaderViewController.interactionDiagnosticsOverlayEnabled(environment: [:]))
+            #expect(!ReaderViewController.interactionDiagnosticsOverlayEnabled(environment: ["YUEJING_READER_DIAGNOSTICS": "0"]))
+            #if DEBUG
+            #expect(ReaderViewController.interactionDiagnosticsOverlayEnabled(environment: ["YUEJING_READER_DIAGNOSTICS": "1"]))
+            #else
+            #expect(!ReaderViewController.interactionDiagnosticsOverlayEnabled(environment: ["YUEJING_READER_DIAGNOSTICS": "1"]))
+            #endif
+            #expect(!controller.view.subviews.contains { $0.accessibilityIdentifier == "reader.diagnostics.overlay" })
             try withHostedController(controller) { table in
                 expectContainers(controller, table, theme: .paper)
                 controller.apply(first, userNavigation: false)

@@ -357,7 +357,14 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     // BEGIN READER DIAGNOSTICS storage
     let interactionDiagnostics = ReaderInteractionDiagnostics()
     weak var diagnosticHandle: ReaderViewportHandle?
-    private let interactionDiagnosticLabel = UILabel()
+    private var interactionDiagnosticLabel: UILabel?
+    static func interactionDiagnosticsOverlayEnabled(environment: [String: String]) -> Bool {
+        #if DEBUG
+        return environment["YUEJING_READER_DIAGNOSTICS"] == "1"
+        #else
+        return false
+        #endif
+    }
     private func sampleInteractionDiagnostics() {
         interactionDiagnostics.sample(enabled: toolsTap.isEnabled, context: interactionContext,
             dragging: table.isDragging, decelerating: table.isDecelerating, state: toolsTap.state)
@@ -394,17 +401,23 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             }
             self.interactionDiagnostics.recognizerEvent(event)
         }
-        interactionDiagnosticLabel.isUserInteractionEnabled = false
-        interactionDiagnosticLabel.isAccessibilityElement = false
-        interactionDiagnosticLabel.accessibilityElementsHidden = true
-        interactionDiagnosticLabel.numberOfLines = 8
-        interactionDiagnosticLabel.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(
-            for: .monospacedSystemFont(ofSize: 10, weight: .regular), maximumPointSize: 13)
-        interactionDiagnosticLabel.adjustsFontForContentSizeCategory = true
-        interactionDiagnosticLabel.textColor = .white
-        interactionDiagnosticLabel.backgroundColor = UIColor(white: 0, alpha: 1)
-        view.addSubview(interactionDiagnosticLabel)
-        interactionDiagnostics.install(interactionDiagnosticLabel)
+        // Never install the on-canvas debug label in Release or by default in Debug.
+        if Self.interactionDiagnosticsOverlayEnabled(environment: ProcessInfo.processInfo.environment) {
+            let label = UILabel()
+            label.isUserInteractionEnabled = false
+            label.isAccessibilityElement = false
+            label.accessibilityElementsHidden = true
+            label.accessibilityIdentifier = "reader.diagnostics.overlay"
+            label.numberOfLines = 8
+            label.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(
+                for: .monospacedSystemFont(ofSize: 10, weight: .regular), maximumPointSize: 13)
+            label.adjustsFontForContentSizeCategory = true
+            label.textColor = .white
+            label.backgroundColor = UIColor(white: 0, alpha: 1)
+            view.addSubview(label)
+            interactionDiagnosticLabel = label
+            interactionDiagnostics.install(label)
+        }
         sampleInteractionDiagnostics()
         // END READER DIAGNOSTICS install
     }
@@ -415,9 +428,11 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         // BEGIN READER DIAGNOSTICS label frame
         // Last-event facts only; no per-frame/per-pixel recorder or polling.
         // Passive paint only: table frame, content insets and hit-testing stay unchanged.
-        let diagnosticTop = view.safeAreaInsets.top + 52
-        interactionDiagnosticLabel.frame = CGRect(x: 8, y: diagnosticTop,
-            width: max(0, view.bounds.width - 16), height: min(144, max(0, view.bounds.height - diagnosticTop - 8)))
+        if let interactionDiagnosticLabel {
+            let diagnosticTop = view.safeAreaInsets.top + 52
+            interactionDiagnosticLabel.frame = CGRect(x: 8, y: diagnosticTop,
+                width: max(0, view.bounds.width - 16), height: min(144, max(0, view.bounds.height - diagnosticTop - 8)))
+        }
         // END READER DIAGNOSTICS label frame
         let width = Double(view.bounds.width)
         if width >= 120, abs(width - previousWidth) > 0.5 { previousWidth = width; onWidth?(width) }

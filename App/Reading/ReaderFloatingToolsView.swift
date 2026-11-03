@@ -22,7 +22,7 @@ struct ReaderFloatingToolsView: View {
         ZStack(alignment: .bottomTrailing) {
             if visible {
                 edgeDock
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -38,7 +38,7 @@ struct ReaderFloatingToolsView: View {
                     .transaction { $0.animation = nil }
                     .transition(.opacity)
             } else {
-                expandButton
+                dockSurface(cornerRadius: 24) { expandButton }
                     .transaction { $0.animation = nil }
                     .transition(.opacity)
             }
@@ -83,11 +83,6 @@ struct ReaderFloatingToolsView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 28)).disabled(exitSaveFailed || !state.canInteract)
-        .background {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(appearance.fill.opacity(exitSaveFailed || !state.canInteract ? 0.4 : 1))
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
         .accessibilityIdentifier("reader.tools.expand")
         .accessibilityHint("展开目录和排版工具")
         .accessibilityFocused($focusedControl, equals: "dock.expand")

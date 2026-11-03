@@ -66,14 +66,14 @@ struct ReaderScreen: View {
                     titleBar(metrics: metrics, appearance: appearance)
                     Spacer(minLength: 0)
                 }
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
-                        directoryAvailable: model.chapterTotal > 0, settingsAvailable: model.window != nil,
-                        exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
-                        open: openPanel, focusedControl: $focusedControl)
-                }
-                .padding(.horizontal, 16).padding(.bottom, 8)
+            }
+            // Secondary layout: tool content cannot resize or recenter the reading viewport.
+            .overlay(alignment: .bottomTrailing) {
+                ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
+                    directoryAvailable: model.chapterTotal > 0, settingsAvailable: model.window != nil,
+                    exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
+                    open: openPanel, focusedControl: $focusedControl)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }

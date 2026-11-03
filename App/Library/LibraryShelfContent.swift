@@ -23,14 +23,11 @@ struct LibraryShelfContent: View {
                     .listRowBackground(appearance.page)
             }
             if let notice {
-                Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(notice.title).font(.headline).accessibilityAddTraits(.isHeader)
-                        Text(notice.detail).fixedSize(horizontal: false, vertical: true)
-                        Button("关闭这条提示", action: onDismissNotice).frame(minHeight: 44)
-                    }.padding(.vertical, 4)
-                }
-                .listRowBackground(appearance.surface)
+                LibraryNoticeBanner(notice: notice, appearance: appearance, dismiss: onDismissNotice)
+                    .listRowInsets(EdgeInsets(top: 2, leading: LibraryAppearance.horizontalInset,
+                                              bottom: 2, trailing: LibraryAppearance.horizontalInset))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(appearance.accent.opacity(0.06))
             }
             if importing {
                 Section {
