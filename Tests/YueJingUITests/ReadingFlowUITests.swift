@@ -579,12 +579,16 @@ final class ReadingFlowUITests: XCTestCase {
 
     @MainActor private func revealDockControl(_ button: XCUIElement, _ app: XCUIApplication, deadline: Date) {
         let scroll = app.scrollViews["reader.tools.scroll"]
+        var readyInBounds = false
         for _ in 0..<3 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
             let screen = app.windows.firstMatch.frame
             let bounds = scroll.exists ? scroll.frame.intersection(screen) : screen
             let targetFrame = button.exists ? button.frame : .null
-            if !targetFrame.isNull && button.isHittable && bounds.contains(CGPoint(x: targetFrame.midX, y: targetFrame.midY)) { break }
+            if !targetFrame.isNull && button.isHittable && bounds.contains(CGPoint(x: targetFrame.midX, y: targetFrame.midY)) {
+                readyInBounds = deadline.timeIntervalSinceNow > 0
+                break
+            }
             guard scroll.exists, !bounds.isNull, bounds.width > 0, bounds.height > 0 else { break }
             if !targetFrame.isNull && targetFrame.midY < bounds.midY {
                 scroll.swipeDown(velocity: .slow)
@@ -592,7 +596,8 @@ final class ReadingFlowUITests: XCTestCase {
                 scroll.swipeUp(velocity: .slow)
             }
         }
-        waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow))
+        // Reuse readiness proved in this deadline; a second predicate poll can outlive its remainder.
+        if !readyInBounds { waitHittable(button, timeout: max(0, deadline.timeIntervalSinceNow)) }
         let screen = app.windows.firstMatch.frame
         let bounds = scroll.exists ? scroll.frame.intersection(screen) : screen
         let targetFrame = button.frame
