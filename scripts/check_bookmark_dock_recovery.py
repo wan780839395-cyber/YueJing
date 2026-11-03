@@ -624,13 +624,354 @@ def self_check():
     return dict(passed=True, negative_controls=len(negatives), rejected=negatives, native_executions=0, synthetic_only=True)
 
 
+# Independent, separately approved package-only continuation. Legacy exact8 above is unchanged.
+HOST_LOG_BASE = 'a657de20e21cec44bbc152e0db8217a634e3d052'
+HOST_LOG_SCOPE = 'bookmark-host-log-a657de2-exact3'
+HOST_LOG_ALLOWED = [DEVICE, SELF, DOC]
+HOST_LOG_RUN = 41657258680
+HOST_LOG_ARTIFACT = 13240429087
+HOST_LOG_SIZE = 661864
+HOST_LOG_ARCHIVE_SHA = 'c349bd14a88f1927f9383ab2d3beb75d6e0a746cac1ef58cb211401dc0d8f69a'
+HOST_LOG_RAW_SHA = '84dc9d6f2b357d1d3c049f1e23b0df45322b306da6d3d6f8b14497ced948ae26'
+HOST_LOG_SPAN_SHA = '8edf4a2348abbfb1280d4a0fb7aae932d7ffaffc73481144b5f116217ede43e3'
+HOST_LOG_CASE = 'momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle'
+HOST_LOG_WARNING = ('2026-11-03 15:00:22.810490+0000 YueJing[14184:52530] '
+                    'Unbalanced calls to begin/end appearance transitions for <YueJing.ReaderViewController: 0x1041da000>.')
+HOST_LOG_SPAN = ('✔ Test '+HOST_LOG_CASE+'()'+HOST_LOG_WARNING+'\n passed after 0.126 seconds.\n').encode('utf-8')
+HOST_LOG_STEP = 'validate/14_Run the 13 real App-host UIKit tests once.txt'
+HOST_LOG_WRAPPER = 'Reading UI checks stopped: Missing, duplicate, or unexpected native execution: YueJingHostTests'
+
+
+def host_log_source_gate(env, state):
+    require(env['PACKAGE_SCOPE'] == HOST_LOG_SCOPE and env['GITHUB_REPOSITORY'] == common.REPO, 'Host-log scope/repository differs')
+    require(env['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and env['GITHUB_RUN_ATTEMPT'] == '1' and
+            env['GITHUB_REF'] == 'refs/heads/main' and env['GITHUB_WORKFLOW_REF'] == common.REPO+'/'+DEVICE+'@refs/heads/main', 'Host-log manual main attempt1 required')
+    head = state['head']
+    require(re.fullmatch(r'[0-9a-f]{40}', head) and head == env['GITHUB_SHA'] == env['GITHUB_WORKFLOW_SHA'] and
+            state['parents'] == [head, HOST_LOG_BASE] and not state['dirty'], 'Host-log source/parent/clean state differs')
+    before, after = state['before'], state['after']
+    require(len(before) == len(after) == 215 and set(before) == set(after) == set(state['working']) == set(state['index']), 'Host-log complete215 path sets differ')
+    require({n for n in after if before[n] != after[n]} == set(HOST_LOG_ALLOWED), 'Host-log exactly three changes required')
+    for n, entry in after.items():
+        require(entry[:2] == ['100644', 'blob'] and state['working'][n] == dict(regular=True, blob=entry[2]) and
+                state['index'][n] == [entry[0], entry[2], '0'], 'Host-log working/index/commit differs: '+n)
+    require(env['HOST_VALIDATION_RUN_ID'] == str(HOST_LOG_RUN) and env['GITHUB_RUN_ID'] != str(HOST_LOG_RUN) and
+            state['inputs'] == dict(package_scope=HOST_LOG_SCOPE, host_validation_run_id=str(HOST_LOG_RUN)), 'Host-log fixed upstream/input differs')
+    return dict(source_commit=head, parent=HOST_LOG_BASE, approved_changed_files=HOST_LOG_ALLOWED, other_entries_equal=212,
+                production_and_test_bytes_equal_parent=True, index_and_working_equal_commit=True)
+
+
+def host_log_upstream_gate(run, jobs):
+    require(all(run.get(k) == v for k, v in dict(id=HOST_LOG_RUN, head_sha=HOST_LOG_BASE, head_branch='main', event='workflow_dispatch',
+        run_attempt=1, workflow_id=398234793, path=TASK3, status='completed', conclusion='failure').items()), 'Fixed failed full Host-log run differs')
+    require(run['repository']['full_name'] == run['head_repository']['full_name'] == common.REPO, 'Host-log upstream repository differs')
+    require(jobs['total_count'] == len(jobs['jobs']) == 1, 'Host-log unique job required')
+    job = jobs['jobs'][0]
+    require(all(job.get(k) == v for k, v in dict(run_id=HOST_LOG_RUN, run_attempt=1, head_sha=HOST_LOG_BASE,
+        status='completed', conclusion='failure', name='validate').items()), 'Host-log upstream job differs')
+    names = re.findall(r'^      - name: (.+)$', git('show', HOST_LOG_BASE+':'+TASK3).decode('utf-8'), re.M)
+    require(len(names) == 21 and names[12] == 'Run the 13 real App-host UIKit tests once' and
+            names[14] == 'Run 11 real App UI flows including 2 bookmark flows', 'Frozen Task3 step identities differ')
+    steps = {s['number']: s for s in job['steps']}
+    require(len(steps) == len(job['steps']), 'Duplicate Host-log step number')
+    for number, name in enumerate(names, 2):
+        expected = 'failure' if number == 14 else 'skipped' if number in (13, 15, 16, 17, 18, 19, 20, 22) else 'success'
+        require(steps[number]['name'] == name and steps[number]['status'] == 'completed' and steps[number]['conclusion'] == expected,
+                'Host-log step differs: '+str(number))
+    require([s['number'] for s in job['steps'] if s['conclusion'] == 'failure'] == [14] and
+            all(s['conclusion'] in ('success', 'skipped', 'failure') for s in job['steps']), 'Additional upstream failure/cancellation')
+    return dict(run_id=HOST_LOG_RUN, attempt=1, source_commit=HOST_LOG_BASE, selection='full', conclusion='failure',
+                failed_step=14, url=run['html_url'], full_regression_passed=False)
+
+
+def host_log_parent_sources():
+    return {n: sha(git('show', HOST_LOG_BASE+':'+n)) for n in sorted(tree(HOST_LOG_BASE)) if n == 'project.yml' or
+            (n.startswith(('App/', 'Sources/', 'Tests/', 'scripts/', '.github/workflows/')) and Path(n).suffix in ('.swift', '.py', '.yml', '.txt'))}
+
+
+def host_log_derive(raw):
+    """Fixed two-line supplemental event; never changes original bytes or the old parser."""
+    require(len(raw) == 404000 and sha(raw) == HOST_LOG_RAW_SHA, 'Fixed original Host log hash/size differs')
+    lines = raw.splitlines(keepends=True)
+    require(len(lines) == 2344 and b''.join(lines[2283:2285]) == HOST_LOG_SPAN and raw.count(HOST_LOG_SPAN) == 1 and
+            sha(HOST_LOG_SPAN) == HOST_LOG_SPAN_SHA, 'Exact unique two-line Host interleave differs')
+    names = inventory.expected_names('YueJingHostTests')
+    original = audit.parse_events(raw, names)
+    require(original['totals'] == dict(passed=12, failed=0, skipped=0, unexecuted=0, unfinished=1, ambiguous=0) and
+            not original['unexpected'] and len(original['unknown_test_lines']) == 1 and
+            original['unknown_test_lines'][0]['line'] == 2284 and not original['parser_complete'], 'Original Host parser failure differs')
+    # Keep both original line positions and retain the warning on the second line in this in-memory view.
+    derived_line = ('✔ Test '+HOST_LOG_CASE+'() passed after 0.126 seconds.\n').encode('utf-8')
+    view = b''.join(lines[:2283])+derived_line+(HOST_LOG_WARNING+'\n').encode('utf-8')+b''.join(lines[2285:])
+    derived = audit.parse_events(view, names)
+    require(derived['parser_complete'] and derived['totals'] == dict(passed=13, failed=0, skipped=0, unexecuted=0, unfinished=0, ambiguous=0), 'Derived Host identities not exactly thirteen passed')
+    intervals = sorted((c['starts'][0]['line'], c['finishes'][0]['line']) for c in derived['cases'])
+    require(all(a[1] < b[0] for a, b in zip(intervals, intervals[1:])), 'Overlapping Host identities')
+    from run_reading_ui_tests import count_log
+    require(len(count_log('YueJingHostTests', view.decode('utf-8'), 0)['passed']) == 13, 'Host summary/success differs')
+    item = next(c for c in derived['cases'] if c['name'] == HOST_LOG_CASE)['finishes'][0]
+    item.update(kind='supplemental-derived-pass-exact-two-original-lines', end_line=2285,
+                raw_span_sha256=HOST_LOG_SPAN_SHA, original_lines=[2284, 2285], warning_retained=True)
+    return dict(kind='SUPPLEMENTAL_READONLY_DERIVATION_NOT_OLD_GATE_REPAIR', original=original, derived=derived,
+                raw_log_sha256=sha(raw), raw_span=HOST_LOG_SPAN.decode('utf-8'), raw_span_sha256=HOST_LOG_SPAN_SHA,
+                original_lines=[2284, 2285], derived_passes=1, original_log_unchanged=True, warning_retained=True,
+                original_parser_failure_retained=True, host_counts_receipt_created=False)
+
+
+def host_log_actions_gate(raw):
+    zip_members(raw)  # CRC and bounded safety checks on every member, including discarded files.
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        require(archive.namelist().count(HOST_LOG_STEP) == 1, 'Unique original Host14 Actions log required')
+        item = archive.getinfo(HOST_LOG_STEP)
+        require(item.file_size <= 2*1024*1024, 'Host Actions log too large')
+        body = archive.read(item)
+    lines = body.decode('utf-8').splitlines()
+    matches = [i for i, line in enumerate(lines) if HOST_LOG_WRAPPER in line]
+    require(len(matches) == 1 and matches[0] == len(lines)-2 and lines[-1].endswith('##[error]Process completed with exit code 1.') and
+            '** TEST SUCCEEDED **' in body.decode('utf-8'), 'Original Host wrapper error/exit differs')
+    require(len([line for line in lines if '##[error]' in line]) == 1, 'Additional Host Actions failure')
+    return dict(archive_sha256=sha(raw), host_step_sha256=sha(body), wrapper_error=lines[matches[0]], wrapper_exit=1,
+                workflow_conclusion='failure', original_parser_failure_retained=True)
+
+
+def host_log_artifact_gate(artifact, raw):
+    require(artifact['id'] == HOST_LOG_ARTIFACT and artifact['size_in_bytes'] == HOST_LOG_SIZE and
+            len(raw) == HOST_LOG_SIZE and sha(raw) == HOST_LOG_ARCHIVE_SHA, 'Fixed Host-log artifact ID/size/hash differs')
+    return artifact_gate(artifact, raw, HOST_LOG_BASE, str(HOST_LOG_RUN))
+
+
+def host_log_evidence_gate(files, expected_sources):
+    require(inventory.COUNTS == COUNTS and inventory.TOTAL == 166, 'Host-log frozen166 selection differs')
+    def receipt(name):
+        value = json.loads(files[name])
+        provenance(value, HOST_LOG_BASE, HOST_LOG_RUN)
+        return value
+    frozen = receipt('task3/candidate-sources.json')
+    require(frozen['files'] == expected_sources and frozen['inventory'] == inventory.validate_source(), 'Frozen parent source map/inventory differs')
+    require('task3/host-only-scope.json' not in files, 'Not full selection')
+    groups = []
+    for target in list(COUNTS)[:4]:
+        prefix = 'task3/'+target
+        raw = files[prefix+'.log']
+        parsed = audit.parse_events(raw, inventory.expected_names(target))
+        require(parsed['parser_complete'] and parsed['totals']['passed'] == COUNTS[target] and
+                all(v == 0 for k, v in parsed['totals'].items() if k != 'passed'), 'Upstream native failure: '+target)
+        require(files[prefix+'-exit-code.txt'].strip() == b'0', 'Upstream exit failure: '+target)
+        counts = receipt(prefix+'-counts.json')
+        native = inventory.parse_swift_log(target, raw.decode('utf-8'), 0)
+        require(all(counts.get(k) == json.loads(json.dumps(v)) for k, v in native.items()) and
+                counts['expected'] == COUNTS[target] and counts['log_sha256'] == sha(raw) and
+                counts['inventory_sha256'] == expected_sources['scripts/task3_test_inventory.py'] and
+                counts['selection'] == inventory.selection(target) and counts['source_files'] ==
+                ['Tests/'+p for p in sorted(inventory.FILES) if inventory.group_for(p) == target], 'Data receipt/raw/selection differs: '+target)
+        groups.append(dict(target=target, **parsed))
+    prefix = 'reading-ui-native/YueJingHostTests'
+    require(prefix+'-counts.json' not in files, 'Original Host counts receipt must remain absent')
+    selection, execution = receipt(prefix+'-selection.json'), receipt(prefix+'-execution.json')
+    selection_gate(selection, 'YueJingHostTests')
+    selection_gate(execution, 'YueJingHostTests')
+    require(all(execution.get(k) == v for k, v in selection.items()) and type(execution['native_exit']) is int and
+            execution['native_exit'] == 0 and execution['timed_out'] is False and files[prefix+'-exit-code.txt'].strip() == b'0', 'Host native selection/exit/timeout differs')
+    sources = json.loads(files[prefix+'-source-hashes.json'])
+    require(sources['source_commit'] == HOST_LOG_BASE and sources['files'] == app_source_subset(expected_sources), 'Complete parent Host source subset differs')
+    host = host_log_derive(files[prefix+'.log'])
+    require(not any(n.startswith(('reading-ui-native/YueJingUITests', 'reading-ui-native/attachment-', 'task3/YueJingCanvasTests')) or
+                    n == 'task3/native-test-gate.json' for n in files), 'Unexpected UI/Canvas/full gate evidence')
+    unexecuted = {t: audit.parse_events(b'', inventory.expected_names(t), t == 'YueJingUITests') for t in ('YueJingUITests', 'YueJingCanvasTests')}
+    return dict(groups=groups, host=host, unexecuted_groups=unexecuted, original_parser_totals=dict(passed=151, unfinished=1, unexecuted=14),
+                supplemental_totals=dict(passed=152, derived_passes=1, failed=0, skipped=0, unfinished=0, unexecuted=14, ambiguous=0),
+                UI_unexecuted=11, Canvas_unexecuted=3, full_regression_passed=False, original_Host_gate='FAILED: log parser',
+                native_reexecutions=0)
+
+
+def host_log_offline_gate(run, jobs, artifact, archive, actions_archive, expected_sources):
+    """Same pure evidence join used by CI and offline review; does not authorize a different child."""
+    result = host_log_upstream_gate(run, jobs)
+    files = host_log_artifact_gate(artifact, archive)
+    result.update(host_log_evidence_gate(files, expected_sources))
+    result.update(actions_log=host_log_actions_gate(actions_archive), artifact_id=HOST_LOG_ARTIFACT,
+                  artifact_sha256=sha(archive), artifact_bytes=len(archive))
+    return result
+
+
+def host_log_contracts():
+    before = tree(HOST_LOG_BASE)
+    require(len(before) == 215, 'Host-log parent215 differs')
+    changed = []
+    for n, entry in before.items():
+        path = ROOT/n
+        require(path.is_file() and not any(p.is_symlink() for p in (path, *path.parents)), 'Nonregular source: '+n)
+        if blob(path.read_bytes()) != entry[2]:
+            changed.append(n)
+    require(set(changed) == set(HOST_LOG_ALLOWED), 'Host-log local changes must be exact3; other212 frozen')
+    # All old imports/constants/functions stay byte-identical; only new functions and CLI branches are added.
+    old = git('show', HOST_LOG_BASE+':'+SELF).decode('utf-8')
+    now = (ROOT/SELF).read_text(encoding='utf-8')
+    old_tree, new_tree = ast.parse(old), ast.parse(now)
+    new_nodes = {n.name: n for n in new_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    for node in old_tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name != 'main':
+            require(ast.get_source_segment(old, node) == ast.get_source_segment(now, new_nodes[node.name]), 'Legacy definition changed: '+node.name)
+    marker = '# Independent, separately approved package-only continuation.'
+    require(now.split(marker)[0] == old.split('def main():')[0], 'Legacy pre-main bytes changed')
+    device = (ROOT/DEVICE).read_text(encoding='utf-8')
+    stripped = device.replace('          - '+HOST_LOG_SCOPE+'\n', '').replace('|'+HOST_LOG_SCOPE+') ;;', ') ;;')
+    for title in ('Require exact three-path Host log diagnostic continuation from fixed a657de2 evidence',
+                  'Require fixed official GRDB for the Host log diagnostic continuation'):
+        stripped, count = re.subn(r'      - name: '+re.escape(title)+r'\n.*?(?=      - name:)', '', stripped, flags=re.S)
+        require(count == 1, 'Unique new workflow branch required')
+    require(stripped == git('show', HOST_LOG_BASE+':'+DEVICE).decode('utf-8'), 'Legacy/common workflow bytes changed')
+    require(device.index('--host-log-package-gate') < device.index('      - name: Verify the selected native toolchain') and
+            device.index('python3 scripts/validate_task3.py resolved') < device.index('--host-log-fixed-dependency') < device.index('      - name: Verify Release settings'), 'New branch ordering differs')
+    require((ROOT/DOC).read_bytes().startswith(git('show', HOST_LOG_BASE+':'+DOC)), 'Historical document must remain intact')
+    return dict(passed=True, changed_files=HOST_LOG_ALLOWED, frozen_entries=212, production_and_test_bytes_equal_parent=True,
+                legacy_definitions_unchanged=True, native_executions=0)
+
+
+def host_log_status(head, receipt, upstream):
+    return dict(source_commit=head, app_candidate=HOST_LOG_BASE, prior_validation_source_commit=HOST_LOG_BASE,
+                prior_validation_run=HOST_LOG_RUN, prior_validation_attempt=1, prior_validation_url=upstream['url'],
+                qualification='TESTS NOT RUN', tests_run=False, full_regression_passed=False, formal_release=False,
+                full_test_gate='NOT PASSED: fixed parent Host log parser failure; UI11 and Canvas3 not run',
+                native_tests_this_run=dict(status='not run', executions=0, selection=[]), native_execution=[],
+                physical_device_acceptance='not performed', production_and_test_bytes_equal_parent=True,
+                approved_changed_files=HOST_LOG_ALLOWED, prior_counts=upstream['supplemental_totals'],
+                original_parser_counts=upstream['original_parser_totals'], original_task3_gate='FAILED; unchanged; no test rerun',
+                purpose='Separately approved diagnostic package after fixed Host log-parser failure', host_log_exact3_gate=receipt)
+
+
+def host_log_package_gate():
+    env = os.environ
+    after, working, index, hashes = tree('HEAD'), {}, {}, {}
+    for n in after:
+        path = ROOT/n
+        regular = path.is_file() and not any(p.is_symlink() for p in (path, *path.parents))
+        data = path.read_bytes() if regular else b''
+        working[n], hashes[n] = dict(regular=regular, blob=blob(data)), sha(data)
+    for row in git('ls-files', '--stage', '-z').split(b'\0'):
+        if row:
+            meta, n = row.split(b'\t', 1)
+            require(n.decode() not in index, 'Unmerged index')
+            index[n.decode()] = meta.decode().split()
+    state = dict(head=git('rev-parse', 'HEAD').decode().strip(), parents=git('rev-list', '--parents', '-n', '1', 'HEAD').decode().split(),
+                 dirty=git('status', '--porcelain=v1', '--untracked-files=all'), before=tree(HOST_LOG_BASE), after=after, working=working, index=index,
+                 inputs=json.loads(Path(env['GITHUB_EVENT_PATH']).read_bytes()).get('inputs'))
+    receipt = host_log_source_gate(env, state)
+    receipt['contracts'] = host_log_contracts()
+    token = env.get('NATIVE_READ_TOKEN', '')
+    require(token, 'Existing read token unavailable; no credential fallback')
+    run = api_read('/actions/runs/'+str(HOST_LOG_RUN), token)
+    jobs = api_read('/actions/runs/'+str(HOST_LOG_RUN)+'/attempts/1/jobs?per_page=100', token)
+    host_log_upstream_gate(run, jobs)
+    listing = api_read('/actions/runs/'+str(HOST_LOG_RUN)+'/artifacts?per_page=100', token)
+    require(listing['total_count'] == len(listing['artifacts']) == 1, 'Unique fixed artifact required')
+    artifact = listing['artifacts'][0]
+    require(artifact['id'] == HOST_LOG_ARTIFACT and artifact['size_in_bytes'] == HOST_LOG_SIZE and
+            artifact['digest'] == 'sha256:'+HOST_LOG_ARCHIVE_SHA, 'Fixed API artifact metadata differs')
+    archive = api_read('/actions/artifacts/'+str(HOST_LOG_ARTIFACT)+'/zip', token, binary=True)
+    actions_archive = api_read('/actions/runs/'+str(HOST_LOG_RUN)+'/attempts/1/logs', token, binary=True)
+    upstream = host_log_offline_gate(run, jobs, artifact, archive, actions_archive, host_log_parent_sources())
+    receipt.update(run_id=env['GITHUB_RUN_ID'], run_attempt='1', files=hashes, upstream_full_validation=upstream)
+    save(ROOT/'artifacts/task3/bookmark-host-log-exact3-gate.json', receipt)
+    save(ROOT/'artifacts/verification-status.json', host_log_status(receipt['source_commit'], receipt, upstream))
+    print('::warning::TESTS NOT RUN; full regression NOT PASSED; Host parser failure retained; UI11/Canvas3 unexecuted')
+
+
+def host_log_fixed_dependency():
+    value = json.loads((ROOT/'artifacts/task3/dependency-resolution.json').read_bytes())
+    require(value['package']['location'] == 'https://github.com/groue/GRDB.swift.git' and
+            value['package']['state'] == dict(revision=common.REVISION, version='7.0.0') and value['checkout_revision'] == common.REVISION and
+            value['package_manifest_sha256'] == common.PACKAGE_HASH, 'Host-log fixed official GRDB differs')
+    status = json.loads((ROOT/'artifacts/verification-status.json').read_bytes())
+    require(status['source_commit'] == os.environ['GITHUB_SHA'] and status['host_log_exact3_gate']['parent'] == HOST_LOG_BASE and
+            status['app_candidate'] == HOST_LOG_BASE and status['tests_run'] is False and status['full_regression_passed'] is False and
+            status['qualification'] == 'TESTS NOT RUN' and status['native_tests_this_run'] == dict(status='not run', executions=0, selection=[]) and
+            status['physical_device_acceptance'] == 'not performed', 'Missing truthful Host-log exact3 status')
+    save(ROOT/'artifacts/task3/bookmark-host-log-fixed-dependency.json', dict(source_commit=os.environ['GITHUB_SHA'],
+         revision=common.REVISION, package_manifest_sha256=common.PACKAGE_HASH, passed=True))
+
+
+def host_log_self_check():
+    """Bounded synthetic gate controls only; original sealed evidence is checked separately."""
+    rejected = []
+    def reject(label, fn):
+        try:
+            fn()
+        except (ValueError, KeyError, IndexError, zipfile.BadZipFile):
+            rejected.append(label)
+            return
+        raise ValueError('Unsafe Host-log gate accepted: '+label)
+    head = 'a'*40
+    before = {n: ['100644', 'blob', 'b'*40] for n in HOST_LOG_ALLOWED}
+    before.update({'App/frozen'+str(i): ['100644', 'blob', 'b'*40] for i in range(212)})
+    after = copy.deepcopy(before)
+    after.update({n: ['100644', 'blob', 'c'*40] for n in HOST_LOG_ALLOWED})
+    state = dict(head=head, parents=[head, HOST_LOG_BASE], dirty=b'', before=before, after=after,
+                 working={n: dict(regular=True, blob=e[2]) for n, e in after.items()}, index={n: [e[0], e[2], '0'] for n, e in after.items()},
+                 inputs=dict(package_scope=HOST_LOG_SCOPE, host_validation_run_id=str(HOST_LOG_RUN)))
+    env = dict(PACKAGE_SCOPE=HOST_LOG_SCOPE, GITHUB_REPOSITORY=common.REPO, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_RUN_ATTEMPT='1',
+               GITHUB_REF='refs/heads/main', GITHUB_WORKFLOW_REF=common.REPO+'/'+DEVICE+'@refs/heads/main', GITHUB_SHA=head,
+               GITHUB_WORKFLOW_SHA=head, HOST_VALIDATION_RUN_ID=str(HOST_LOG_RUN), GITHUB_RUN_ID='50000000000')
+    host_log_source_gate(env, state)
+    for key, value in [('PACKAGE_SCOPE', SCOPE), ('HOST_VALIDATION_RUN_ID', OLD_RUN), ('GITHUB_SHA', HOST_LOG_BASE),
+                       ('GITHUB_RUN_ATTEMPT', '2'), ('GITHUB_REF', 'refs/heads/other'), ('GITHUB_EVENT_NAME', 'push')]:
+        reject(key, lambda k=key, v=value: host_log_source_gate({**env, k: v}, state))
+    for key, value in [('parents', [head, BASE]), ('dirty', b'M file'), ('index', {}), ('working', {}), ('inputs', {})]:
+        reject(key, lambda k=key, v=value: host_log_source_gate(env, {**state, k: v}))
+    bad = copy.deepcopy(state)
+    bad['after']['App/frozen0'][2] = 'd'*40
+    reject('modified-App', lambda: host_log_source_gate(env, bad))
+    names = re.findall(r'^      - name: (.+)$', git('show', HOST_LOG_BASE+':'+TASK3).decode(), re.M)
+    steps = [dict(number=i, name=n, status='completed', conclusion='failure' if i == 14 else 'skipped' if i in (13,15,16,17,18,19,20,22) else 'success') for i, n in enumerate(names, 2)]
+    run = dict(id=HOST_LOG_RUN, head_sha=HOST_LOG_BASE, head_branch='main', event='workflow_dispatch', run_attempt=1,
+               workflow_id=398234793, path=TASK3, status='completed', conclusion='failure', repository=dict(full_name=common.REPO),
+               head_repository=dict(full_name=common.REPO), html_url='synthetic')
+    jobs = dict(total_count=1, jobs=[dict(run_id=HOST_LOG_RUN, run_attempt=1, head_sha=HOST_LOG_BASE, status='completed',
+                                      conclusion='failure', name='validate', steps=steps)])
+    host_log_upstream_gate(run, jobs)
+    for key, value in [('id', int(OLD_RUN)), ('head_sha', head), ('run_attempt', 2), ('conclusion', 'success')]:
+        reject('upstream-'+key, lambda k=key, v=value: host_log_upstream_gate({**run, k: v}, jobs))
+    for number in (4,9,10,11,12,14,16,17,21):
+        bad_jobs = copy.deepcopy(jobs)
+        next(s for s in bad_jobs['jobs'][0]['steps'] if s['number'] == number)['conclusion'] = 'success' if number in (14,16,17) else 'failure'
+        reject('step-'+str(number), lambda b=bad_jobs: host_log_upstream_gate(run, b))
+    def archive(name, body):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w') as z:
+            info = zipfile.ZipInfo('fixture')
+            info.filename = info.orig_filename = name
+            z.writestr(info, body)
+        return out.getvalue()
+    wrapper = ('** TEST SUCCEEDED **\n'+HOST_LOG_WRAPPER+'\n##[error]Process completed with exit code 1.\n').encode()
+    host_log_actions_gate(archive(HOST_LOG_STEP, wrapper))
+    for label, data in [('missing-wrapper', wrapper.replace(HOST_LOG_WRAPPER.encode(), b'other')),
+                        ('duplicate-wrapper', wrapper+wrapper), ('wrong-wrapper-exit', wrapper.replace(b'code 1.', b'code 65.'))]:
+        reject(label, lambda d=data: host_log_actions_gate(archive(HOST_LOG_STEP, d)))
+    for name in ('../unsafe.log', '/absolute.log', 'a\\b.log', 'a/./b.log', 'C:drive.log'):
+        reject('unsafeZIP-'+name, lambda n=name: zip_members(archive(n, b'fixture')))
+    reject('wrong-fixed-artifact', lambda: host_log_artifact_gate(dict(id=1), b''))
+    reject('missing-interleave', lambda: host_log_derive(b''))
+    reject('ambiguous-interleave', lambda: host_log_derive(HOST_LOG_SPAN*2))
+    require(BASE != HOST_LOG_BASE and SCOPE != HOST_LOG_SCOPE and len(HOST_LOG_ALLOWED) == 3, 'Independent legacy/new constants')
+    return dict(passed=True, synthetic_only=True, negative_controls=len(rejected), rejected=rejected, native_executions=0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--device-repro-gate', action='store_true')
     mode.add_argument('--fixed-dependency', action='store_true')
+    mode.add_argument('--host-log-package-gate', action='store_true')
+    mode.add_argument('--host-log-fixed-dependency', action='store_true')
+    mode.add_argument('--host-log-self-check', action='store_true')
     args = parser.parse_args()
-    if args.device_repro_gate:
+    if args.host_log_package_gate:
+        host_log_package_gate()
+    elif args.host_log_fixed_dependency:
+        host_log_fixed_dependency()
+    elif args.host_log_self_check:
+        print(json.dumps(dict(contracts=host_log_contracts(), self_checks=host_log_self_check()), indent=2))
+    elif args.device_repro_gate:
         device_repro_gate()
     elif args.fixed_dependency:
         fixed_dependency()

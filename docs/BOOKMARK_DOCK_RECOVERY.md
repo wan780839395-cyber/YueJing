@@ -58,3 +58,31 @@ CI 专用互斥模式：
 交付前在新独立诊断目录保存原 IPA、SHA256、source SHA、上游 run/attempt、真实 ledger、验证状态和打包校验收据。用户先确认现有书库/进度已有可恢复备份；不要卸载、清数据或用私人原书进行破坏性测试。无把握保留数据时暂停安装。
 
 仅用可丢弃合成 TXT，在 iPhone13/iOS16.6.1 记录系统/字体档位、App版本及 source SHA：正常字号和大字分别导入→滚动→显隐dock→目录→书签新增/跳转→局部滚动设置→删除测试书签→退出复开/真实进程重启后位置恢复。重点看大字 tray 部分可见时 directory/settings 是否可操作，退出后旧回调是否影响新阅读会话。测试只删合成书签/合成书，不动个人资料；若失败保留操作顺序与不含私人内容的截图/录像，停止并反馈，不自行重跑云测试或再改源码。
+
+## 新批次：仅诊断出包 exact3（上述 exact8 已结束）
+
+新批准原文：**批准仅诊断出包并交付IPA**（消息ID不可得）。这是独立的 package-only 例外，不是放宽旧 exact8 gate。只允许 `.github/workflows/ios-build.yml`、`scripts/check_bookmark_dock_recovery.py`、本文件三个已有路径改变；唯一父提交 `a657de20e21cec44bbc152e0db8217a634e3d052`，215→215 tracked，其余212条目完全相同，包括 App/Sources/Tests、runner、Task3、inventory 与 launch checker。只普通提交/push一次，只运行一次 ios-build attempt1，不再运行任何原生测试，不 rerun、不修补后重提交。失败即停，正式发布仍未批准。
+
+### 固定失败及补充推导
+
+原 full Task3 `41657258680/1`、source `a657de20e21cec44bbc152e0db8217a634e3d052` 在步骤14 Host wrapper失败：Core25、Domain107、Block6、measurement1 均通过；Host原生 exit0、timed_out=false、480秒预算、13项summary与 `TEST SUCCEEDED` 均存在，但一个pass被UIKit警告拆成原日志2284–2285两行，旧正则仅计12项，wrapper exit1。不存在 Host-counts.json，禁止伪造；UI11、Canvas3全部未运行。旧 exact8要求UI步骤16失败，所以本次原先不可出包，旧门禁不改。
+
+新门禁仅接受固定 artifact13240429087，661864字节，SHA256 `c349bd14a88f1927f9383ab2d3beb75d6e0a746cac1ef58cb211401dc0d8f69a`，API名称/run/SHA/摘要相符。逐成员有界CRC检查复用原安全ZIP读取；GET下载保留600秒及HTTPS白名单redirect、不转发Authorization。额外读取同一固定run attempt1的Actions日志ZIP，安全校验后只取唯一Host14步骤，证明原 `Missing, duplicate, or unexpected native execution: YueJingHostTests` 与wrapper exit1。
+
+Host原日志404000字节、SHA256 `84dc9d6f2b357d1d3c049f1e23b0df45322b306da6d3d6f8b14497ced948ae26`；唯一两行span SHA256 `8edf4a2348abbfb1280d4a0fb7aae932d7ffaffc73481144b5f116217ede43e3`。只在内存为 `momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle` 建立一个有来源的derived pass，并保留警告、原行号、原span与原审计结果。旧日志/旧parser/旧报告/云结论不修改。原parser全组151passed、1unfinished（日志事件未识别，不代表原生未结束）、14unexecuted；补充审计152passed（含1derived）、14unexecuted；full166仍未通过。UIKit警告的产品根因、真机效果均未证明。
+
+前四组必须用原始事件、原exit、原counts、provenance、selection逐项核对。Host必须完整13身份/原selection/execution/source subset、原生0且无timeout；唯一精确拆行推导后13项唯一started/finished且不重叠。上游candidate map从git父提交重建，不能与本批改过checker/workflow的hash混比；所有App/Tests仍与父提交相同。UI/Canvas证据及全通过receipt必须不存在，未执行事实逐项保存。
+
+### 新接口和状态
+
+- workflow inputs：`package_scope=bookmark-host-log-a657de2-exact3`、`host_validation_run_id=41657258680`。
+- 离线检查：`python3 -B scripts/check_bookmark_dock_recovery.py --host-log-self-check`，检查exact3本地源码冻结、旧函数/常量与公共workflow保持，以及有界合成负例；不是原生执行。
+- 工具链之前：`--host-log-package-gate`，使用既有 `GITHUB_*`、`GITHUB_EVENT_PATH`、`PACKAGE_SCOPE`、`HOST_VALIDATION_RUN_ID`、`NATIVE_READ_TOKEN`，要求main/manual/attempt1、current SHA/workflow SHA、唯一parent、working/index/commit一致。新收据 `artifacts/task3/bookmark-host-log-exact3-gate.json` 与 `artifacts/verification-status.json` 均排他写入。
+- 依赖解析后：`--host-log-fixed-dependency`，只检查原官方GRDB7.0.0固定revision/manifest及新状态，写 `artifacts/task3/bookmark-host-log-fixed-dependency.json`；不运行旧exact8依赖门禁。
+- 离线复验接口：`host_log_parent_sources()` 从git重建父map；`host_log_offline_gate(run, jobs, artifact, archive_bytes, actions_archive_bytes, parent_map)` 执行与CI相同的固定证据拼接；`host_log_source_gate(env, state)` 独立验证本批child源码；`host_log_evidence_gate(files, parent_map)` / `host_log_derive(raw)` 可用于负例。旧默认检查和旧exact8 CLI 保持原行为，新child不满足旧scope是预期，不伪造其通过。
+
+状态准确披露 `TESTS NOT RUN`、tests_run=false、full_regression_passed=false、formal_release=false、native_tests_this_run={status:not run,executions:0,selection:[]}、physical_device_acceptance=not performed。source_commit为本批child，app_candidate与prior_validation_source_commit为a657；production_and_test_bytes_equal_parent=true。原Host wrapper失败、152含1derived及14未执行明确保留。原生测试数0不表示以前测试未发生，也不表示本批通过全回归。
+
+公共编译/打包不变：20分钟job、实际Release arm64/iOS最低16.6/unsigned、固定工具链与依赖、资源/license/rpaths/ZIP CRC与built App逐字节校验。规范IPA名仍 `YueJing-0.2.0.ipa`，artifact仍 `reading-ui-TESTS-NOT-RUN-{runid}-{head}`。实际成功后以独立诊断目录交付原IPA及SHA256/manifest/状态/依赖校验；不得用旧IPA替代。任一构建/校验失败停止并明确没有新IPA。
+
+真机验证沿用上述备份优先、只用可丢弃合成TXT的清单；先保证现有书库/进度可恢复，不卸载/清数据，不触碰个人原书。iPhone13/iOS16.6.1上对正常及大字号验证dock、书签新增/跳转/删除、退出复开和位置恢复；保留不含私人内容的复现步骤/截图，失败即停。诊断交付不是产品已修复、性能通过或真机验收。
