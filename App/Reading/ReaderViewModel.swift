@@ -15,6 +15,19 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var openingPerformanceSummary: String?
     let viewport = ReaderViewportHandle()
     let directory = ReaderDirectoryViewModel()
+    let bookmarks = ReaderBookmarksViewModel()
+    private struct BookmarkPanelContext {
+        let presentation: UUID
+        let life: UUID
+        let generation: UUID
+        let positionRevision: UInt64
+        let owner: OpenedReader
+        let controller: ObjectIdentifier?
+        let binding: UUID?
+        let window: UUID?
+    }
+    private var bookmarkContext: BookmarkPanelContext?
+    private var preparedBookmarkWindow: UUID?
     private let bookID: String
     private let service: LibraryService
     private var reader: OpenedReader?
@@ -91,6 +104,7 @@ final class ReaderViewModel: ObservableObject {
         guard !closing, !suspended, !exitSaveFailed, let reader,
               navigationGate.accepts(window: windowID),
               value.bookID == reader.reading.session.bookID, value.versionID == reader.reading.session.versionID else { return }
+        bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
         anchor = value; userPosition = true; sequence += 1; positionRevision &+= 1
         let serial = sequence, request = lifecycle
         saveTask?.cancel()
@@ -159,6 +173,7 @@ final class ReaderViewModel: ObservableObject {
     func suspend() async {
         guard !closing else { return }
         suspended = true; lifecycle = UUID(); generation = UUID()
+        endBookmarkPanel()
         let request = lifecycle, owner = reader
         openTask?.cancel(); openTask = nil
         layoutTask?.cancel(); directory.cancel()
@@ -180,6 +195,7 @@ final class ReaderViewModel: ObservableObject {
     func close() async -> Bool {
         guard !closing else { return false }
         closing = true; lifecycle = UUID(); generation = UUID()
+        endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
         let reliable = userPosition ? viewport.anchor() : nil
@@ -199,6 +215,7 @@ final class ReaderViewModel: ObservableObject {
     }
     func leaveKeepingSavedPosition() async {
         closing = true; lifecycle = UUID(); generation = UUID()
+        endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
         if let reader { try? await reader.close(sequence: sequence + 1) }
@@ -207,6 +224,7 @@ final class ReaderViewModel: ObservableObject {
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
         lifecycle = UUID(); generation = UUID()
+        endBookmarkPanel()
         let request = lifecycle, old = reader
         openTask?.cancel(); openTask = nil; directory.dismiss()
         layoutTask = nil; saveTask?.cancel(); settingsTask?.cancel()
@@ -233,6 +251,7 @@ final class ReaderViewModel: ObservableObject {
     }
     private func requestWindow() {
         guard let reader, let anchor, !closing, !suspended, !exitSaveFailed, width >= 80 else { return }
+        bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
         layoutTask?.cancel(); generation = UUID(); layoutNeedsRefresh = true
         let request = generation, life = lifecycle, settings = preferences, currentWidth = width, revision = positionRevision
         let navigation = navigationGate.navigation
@@ -261,6 +280,7 @@ final class ReaderViewModel: ObservableObject {
     /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
         guard !closing, !suspended, window?.id == id else { return }
+        if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel() }
         let navigationApplied = navigationGate.applied(window: id)
         if let visible = directoryAnchor() {
             if navigationApplied { visibleChanged(visible, windowID: id) }
@@ -275,5 +295,70 @@ final class ReaderViewModel: ObservableObject {
             + ProcessingMeasurement.summary(openingMeasurements) + "\n进程重启/正文首绘未测；仅本地摘要。"
         let request = lifecycle
         Task { if lifecycle == request, !closing { openingPerformanceSummary = summary } }
+    }
+}
+
+extension ReaderViewModel {
+    /// Called synchronously from the directory-button action, before the sheet appears.
+    func beginBookmarkPanel(_ presentation: UUID) {
+        endBookmarkPanel()
+        guard let owner = reader, !closing, !suspended, !exitSaveFailed else { return }
+        let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,
+            generation: generation, positionRevision: positionRevision, owner: owner,
+            controller: viewport.controller.map(ObjectIdentifier.init),
+            binding: viewport.controller?.sceneBindingID, window: window?.id)
+        bookmarkContext = context
+        let captured = bookmarkPositionIsCurrent(context) ? viewport.controller?.bookmarkAnchor() : nil
+        bookmarks.present(reader: owner, anchor: captured, presentation: presentation,
+            current: { [weak self] in self?.bookmarkOwnerIsCurrent(context) ?? false },
+            positionValid: { [weak self] in self?.bookmarkPositionIsCurrent(context) ?? false })
+    }
+    func endBookmarkPanel(_ presentation: UUID? = nil) {
+        if let presentation, bookmarkContext?.presentation != presentation { return }
+        bookmarks.dismiss(presentation: presentation)
+        bookmarkContext = nil; preparedBookmarkWindow = nil
+    }
+    func prepareBookmarkWindow(id: String, presentation: UUID,
+                               request: BookmarkRequest) async throws -> ReadingWindow {
+        guard let context = bookmarkContext, context.presentation == presentation,
+              bookmarkPositionIsCurrent(context) else { throw LibraryError.invalidAnchor }
+        let target = try await context.owner.bookmarkAnchor(id: id, request: request)
+        try request.check()
+        guard bookmarkPositionIsCurrent(context) else { throw CancellationError() }
+        let rendered = try await context.owner.window(around: target, width: width, preferences: preferences)
+        try request.check()
+        guard bookmarkPositionIsCurrent(context) else { throw CancellationError() }
+        preparedBookmarkWindow = rendered.id
+        return rendered
+    }
+    /// No progress write until the existing windowApplied -> visibleChanged navigation path.
+    func applyBookmarkWindow(_ rendered: ReadingWindow, presentation: UUID) -> Bool {
+        guard let context = bookmarkContext, context.presentation == presentation,
+              preparedBookmarkWindow == rendered.id, bookmarkPositionIsCurrent(context),
+              rendered.anchor.bookID == context.owner.book.id,
+              rendered.anchor.versionID == context.owner.book.versionID else { return false }
+        preparedBookmarkWindow = nil
+        layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
+        navigationGate.begin()
+        guard let navigation = navigationGate.navigation else { return false }
+        navigationGate.expect(window: rendered.id, navigation: navigation)
+        anchor = rendered.anchor; layoutNeedsRefresh = false
+        viewport.onNextRestoreIsNavigation = true; window = rendered; loading = false
+        return true
+    }
+    private func bookmarkOwnerIsCurrent(_ context: BookmarkPanelContext) -> Bool {
+        bookmarkContext?.presentation == context.presentation && lifecycle == context.life &&
+            reader === context.owner && !closing && !suspended && !exitSaveFailed &&
+            viewport.interactionActive &&
+            viewport.controller.map(ObjectIdentifier.init) == context.controller &&
+            viewport.controller?.sceneBindingID == context.binding
+    }
+    private func bookmarkPositionIsCurrent(_ context: BookmarkPanelContext) -> Bool {
+        guard bookmarkOwnerIsCurrent(context), !loading, !layoutNeedsRefresh,
+              navigationGate.navigation == nil, !viewport.interacting,
+              generation == context.generation, positionRevision == context.positionRevision,
+              let id = context.window, window?.id == id,
+              viewport.controller?.window?.id == id, navigationGate.isDisplayed(window: id) else { return false }
+        return true
     }
 }

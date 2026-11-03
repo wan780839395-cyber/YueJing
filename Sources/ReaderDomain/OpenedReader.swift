@@ -120,3 +120,78 @@ struct ReadingRouteStatistics: Sendable {
     var diskHits = 0
     var rebuilds = 0
 }
+
+extension OpenedReader {
+    public func bookmarkPage(start: Int, request: BookmarkRequest) async throws -> ReadingBookmarkPage {
+        try checkBookmarkRequest(request)
+        let page = try await store.bookmarkPage(session: reading.session, start: start, request: request)
+        try checkBookmarkRequest(request)
+        return page
+    }
+
+    public func bookmark(at anchor: ReadingAnchor, request: BookmarkRequest) async throws -> ReadingBookmark? {
+        let position = try await strictBookmarkAnchor(anchor, request: request)
+        let value = try await store.bookmark(session: reading.session, anchor: position, request: request)
+        try checkBookmarkRequest(request)
+        return value
+    }
+
+    public func addBookmark(at anchor: ReadingAnchor, id: UUID = UUID(), request: BookmarkRequest) async throws -> ReadingBookmark {
+        let position = try await strictBookmarkAnchor(anchor, request: request)
+        // Optional metadata only: the bounded directory query cannot repair an invalid position.
+        let directoryPage = try? await directory(around: position)
+        try checkBookmarkRequest(request) // Also on metadata failure/cancellation.
+        var title: String?
+        if let page = directoryPage, let current = page.currentIndex,
+           page.chapters.indices.contains(current - page.start) {
+            title = page.chapters[current - page.start].title.map { String($0.prefix(80)) }
+        }
+        // No post-write checks: admission wins over a later UI cancellation or close.
+        return try await store.addBookmark(session: reading.session, anchor: position, id: id,
+                                           chapterTitle: title, request: request)
+    }
+
+    public func deleteBookmark(id: String, request: BookmarkRequest) async throws {
+        try checkBookmarkRequest(request)
+        try await store.deleteBookmark(session: reading.session, id: id, request: request)
+    }
+
+    public func bookmarkAnchor(id: String, request: BookmarkRequest) async throws -> ReadingAnchor {
+        try checkBookmarkRequest(request)
+        let value = try await store.bookmark(session: reading.session, id: id, request: request)
+        try checkBookmarkRequest(request)
+        guard let value, let anchor = value.anchor(matching: book) else { throw LibraryError.invalidAnchor }
+        let position = try await strictBookmarkAnchor(anchor, request: request)
+        // Mapping suspends: reload again so a deletion or superseding session cannot win unnoticed.
+        let current = try await store.bookmark(session: reading.session, id: id, request: request)
+        try checkBookmarkRequest(request)
+        guard current == value else { throw LibraryError.invalidAnchor }
+        return position
+    }
+
+    private func checkBookmarkRequest(_ request: BookmarkRequest) throws {
+        guard !closed else { throw DerivedStorageError.closed }
+        try request.check()
+    }
+
+    private func strictBookmarkAnchor(_ anchor: ReadingAnchor, request: BookmarkRequest) async throws -> ReadingAnchor {
+        try checkBookmarkRequest(request)
+        let metadata = source.metadata
+        guard anchor.bookID == book.id, anchor.versionID == book.versionID, anchor.unit == "raw-byte-v1",
+              anchor.bookID == reading.session.bookID, anchor.versionID == reading.session.versionID,
+              metadata.bookID == book.id, metadata.versionID == book.versionID,
+              anchor.rawByteOffset >= metadata.bomByteCount, anchor.rawByteOffset < metadata.byteCount else {
+            throw LibraryError.invalidAnchor
+        }
+        let utf16 = try await source.utf16Offset(for: RawByteOffset(anchor.rawByteOffset))
+        try checkBookmarkRequest(request)
+        guard utf16.value >= 0, utf16.value < metadata.utf16Count else { throw LibraryError.invalidAnchor }
+        let start = try await source.composedStart(at: utf16.value)
+        try checkBookmarkRequest(request)
+        guard start == utf16.value else { throw LibraryError.invalidAnchor }
+        let raw = try await source.rawByteOffset(for: utf16)
+        try checkBookmarkRequest(request)
+        guard raw.value == anchor.rawByteOffset else { throw LibraryError.invalidAnchor }
+        return ReadingAnchor(bookID: book.id, versionID: book.versionID, rawByteOffset: raw.value, lineFraction: 0)
+    }
+}

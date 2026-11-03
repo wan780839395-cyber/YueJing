@@ -540,6 +540,14 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         userInputSinceRestore ? actualVisibleAnchor() : window?.anchor
     }
 
+    /// Read-only snapshot for explicit bookmarks; never substitutes a saved/default anchor.
+    func bookmarkAnchor() -> ReadingAnchor? {
+        guard isViewLoaded, viewIfLoaded?.window != nil, !restoring, !interacting,
+              let visible = actualVisibleAnchor() else { return nil }
+        return ReadingAnchor(bookID: visible.bookID, versionID: visible.versionID,
+                             rawByteOffset: visible.rawByteOffset, lineFraction: 0)
+    }
+
     func restorationPoint() -> ReaderViewportRestoration? {
         guard let window, let anchor = restorableAnchor() else { return nil }
         return ReaderViewportRestoration(windowID: window.id, anchor: anchor,

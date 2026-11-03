@@ -326,6 +326,93 @@ final class ReadingFlowUITests: XCTestCase {
         }
     }
 
+    @MainActor func testBookmarksPersistIsolateAndJumpAfterRelaunch() {
+        withFixture { app in
+            open("UITest-Long-A", app); openDirectory(app)
+            let section = app.buttons["reader.contents.bookmarks"]
+            waitHittable(section); section.tap()
+            let add = app.buttons["reader.bookmarks.add"]
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                add.exists && add.isHittable && add.isEnabled
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
+            add.tap()
+            let rows = app.buttons.matching(NSPredicate(format:
+                "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
+                "reader.bookmark.", "reader.bookmark.delete."))
+            waitHittable(rows.firstMatch)
+            let identifier = rows.firstMatch.identifier
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertFalse(add.isEnabled)
+            closePanel(app); openDirectory(app)
+            scrollTo(app.buttons["下一组"], in: app.tables.firstMatch)
+            app.buttons["下一组"].tap()
+            let chapter = app.buttons["reader.chapter.32"]
+            waitHittable(chapter); chapter.tap()
+            XCTAssertTrue(endMarker("UI_CHAPTER_33", app).waitForExistence(timeout: 10))
+            showTools(app); exitReader(app)
+            open("UITest-Short-B", app); openDirectory(app)
+            waitHittable(section); section.tap()
+            XCTAssertTrue(app.staticTexts["reader.bookmarks.empty"].waitForExistence(timeout: 10))
+            XCTAssertEqual(rows.count, 0)
+            closePanel(app); exitReader(app)
+            Self.captureEvidence(app, testName: name, stage: "bookmarks-before-relaunch")
+            app.terminate(); app.launch() // Same synthetic database and fixture UUID.
+            open("UITest-Long-A", app); openDirectory(app)
+            waitHittable(section); section.tap()
+            let saved = app.buttons[identifier]
+            waitHittable(saved)
+            XCTAssertEqual(rows.count, 1)
+            saved.tap()
+            XCTAssertTrue(endMarker("UI_CHAPTER_1", app).waitForExistence(timeout: 10))
+            XCTAssertFalse(endMarker("UI_CHAPTER_33", app).exists)
+            showTools(app); openDirectory(app)
+            waitHittable(section); section.tap()
+            waitHittable(app.buttons[identifier])
+            XCTAssertFalse(add.isEnabled)
+            Self.captureEvidence(app, testName: name, stage: "bookmarks-restored")
+            closePanel(app)
+        }
+    }
+
+    @MainActor func testBookmarksAccessibilityCloseAndConfirmedDeletion() {
+        withFixture(largeText: true) { app in
+            open("UITest-Short-B", app); openDirectory(app)
+            let section = app.buttons["reader.contents.bookmarks"]
+            waitHittable(section); section.tap()
+            let add = app.buttons["reader.bookmarks.add"]
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                add.exists && add.isHittable && add.isEnabled
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
+            add.tap()
+            let rows = app.buttons.matching(NSPredicate(format:
+                "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
+                "reader.bookmark.", "reader.bookmark.delete."))
+            XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10))
+            let identifier = rows.firstMatch.identifier
+            waitHittable(app.buttons["reader.panel.close"]); closePanel(app)
+            openDirectory(app); waitHittable(section); section.tap()
+            let saved = app.buttons[identifier]
+            scrollTo(saved, in: app.tables["reader.bookmarks.list"]); saved.tap()
+            XCTAssertTrue(endMarker("UI-END-B", app).waitForExistence(timeout: 10))
+            showTools(app); openDirectory(app); waitHittable(section); section.tap()
+            let id = String(identifier.dropFirst("reader.bookmark.".count))
+            let delete = app.buttons["reader.bookmark.delete." + id]
+            scrollTo(delete, in: app.tables["reader.bookmarks.list"]); delete.tap()
+            let cancel = app.buttons["取消"]
+            waitHittable(cancel); cancel.tap()
+            XCTAssertTrue(saved.exists)
+            waitHittable(delete); delete.tap()
+            let confirm = app.buttons["reader.bookmarks.confirmDelete"]
+            waitHittable(confirm); confirm.tap()
+            XCTAssertTrue(app.staticTexts["reader.bookmarks.empty"].waitForExistence(timeout: 10))
+            XCTAssertEqual(rows.count, 0)
+            Self.captureEvidence(app, testName: name, stage: "bookmarks-accessibility-deleted")
+            closePanel(app); exitReader(app, shelfBook: "UITest-Short-B")
+        }
+    }
+
     @MainActor private func sceneRoundTripPID(_ app: XCUIApplication) -> Int {
         // Public debugDescription, not an invented XCUIApplication.processID property or KVC.
         // The textual format is not guaranteed: absence is a failure, never a skip/relaunch.

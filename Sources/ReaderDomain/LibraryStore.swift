@@ -397,3 +397,88 @@ private struct ProgressRow: Codable, FetchableRecord, PersistableRecord {
         return ReadingAnchor(bookID: bookID, versionID: versionID, rawByteOffset: rawByteOffset, lineFraction: lineFraction)
     }
 }
+
+// Bookmark transactions never write reading state or derived-cache authority.
+extension LibraryStore {
+    private func admitBookmark(_ db: Database, session: ReadingSession, request: BookmarkRequest) throws -> LibraryBook {
+        try request.check()
+        guard !closedSessions.contains(session.id),
+              let book = try LibraryBook.fetchOne(db, key: session.bookID),
+              book.activeSession == session.id, book.versionID == session.versionID else { throw CancellationError() }
+        // Last revocation check at admission. No await or post-commit cancellation check.
+        try request.check()
+        return book
+    }
+
+    func bookmarkPage(session: ReadingSession, start: Int, request: BookmarkRequest) throws -> ReadingBookmarkPage {
+        guard start >= 0, start % ReadingBookmarkPage.pageSize == 0 else { throw LibraryError.invalidAnchor }
+        return try queue.read { db in
+            _ = try admitBookmark(db, session: session, request: request)
+            // DatabaseQueue.read provides one snapshot for COUNT, clamping, and the bounded fetch.
+            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM bookmarks WHERE bookID = ?", arguments: [session.bookID]) ?? 0
+            let last = total == 0 ? 0 : (total - 1) / ReadingBookmarkPage.pageSize * ReadingBookmarkPage.pageSize
+            let offset = min(start, last)
+            let items = try ReadingBookmark.fetchAll(db, sql: """
+                SELECT * FROM bookmarks WHERE bookID = ? ORDER BY createdAt DESC, id ASC LIMIT ? OFFSET ?
+                """, arguments: [session.bookID, ReadingBookmarkPage.pageSize, offset])
+            return ReadingBookmarkPage(start: offset, total: total, items: items)
+        }
+    }
+
+    func bookmark(session: ReadingSession, anchor: ReadingAnchor, request: BookmarkRequest) throws -> ReadingBookmark? {
+        try queue.read { db in
+            let book = try admitBookmark(db, session: session, request: request)
+            try Self.checkBookmarkPosition(anchor, book: book)
+            return try Self.bookmark(db, at: anchor)
+        }
+    }
+
+    func bookmark(session: ReadingSession, id: String, request: BookmarkRequest) throws -> ReadingBookmark? {
+        try queue.read { db in
+            _ = try admitBookmark(db, session: session, request: request)
+            return try ReadingBookmark.fetchOne(db, sql: "SELECT * FROM bookmarks WHERE id = ? AND bookID = ?",
+                                                arguments: [id, session.bookID])
+        }
+    }
+
+    func addBookmark(session: ReadingSession, anchor: ReadingAnchor, id: UUID, chapterTitle: String?,
+                     request: BookmarkRequest, afterCommit: (@Sendable () -> Void)? = nil) throws -> ReadingBookmark {
+        let result = try queue.write { db in
+            let book = try admitBookmark(db, session: session, request: request)
+            try Self.checkBookmarkPosition(anchor, book: book)
+            // A reused request UUID may retry its position, but may never move another record.
+            if let collision = try ReadingBookmark.fetchOne(db, key: id.uuidString) {
+                guard collision.bookID == anchor.bookID, collision.versionID == anchor.versionID,
+                      collision.unit == anchor.unit, collision.rawByteOffset == anchor.rawByteOffset else {
+                    throw LibraryError.invalidAnchor
+                }
+            }
+            if let existing = try Self.bookmark(db, at: anchor) { return existing }
+            let value = ReadingBookmark(id: id.uuidString, bookID: book.id, versionID: book.versionID,
+                rawByteOffset: anchor.rawByteOffset, createdAt: Date().timeIntervalSince1970,
+                chapterTitleSnapshot: chapterTitle.map { String($0.prefix(80)) })
+            try value.insert(db)
+            return value
+        }
+        afterCommit?() // Internal deterministic test seam; cannot throw or change committed truth.
+        return result
+    }
+
+    func deleteBookmark(session: ReadingSession, id: String, request: BookmarkRequest) throws {
+        try queue.write { db in
+            _ = try admitBookmark(db, session: session, request: request)
+            // Intentionally no bookmark-version predicate: incompatible records remain user-deletable.
+            try db.execute(sql: "DELETE FROM bookmarks WHERE id = ? AND bookID = ?", arguments: [id, session.bookID])
+        }
+    }
+
+    private static func checkBookmarkPosition(_ anchor: ReadingAnchor, book: LibraryBook) throws {
+        guard anchor.bookID == book.id, anchor.versionID == book.versionID, anchor.unit == "raw-byte-v1",
+              anchor.rawByteOffset >= 0, anchor.rawByteOffset < book.byteCount else { throw LibraryError.invalidAnchor }
+    }
+    private static func bookmark(_ db: Database, at anchor: ReadingAnchor) throws -> ReadingBookmark? {
+        try ReadingBookmark.fetchOne(db, sql: """
+            SELECT * FROM bookmarks WHERE bookID = ? AND versionID = ? AND unit = ? AND rawByteOffset = ?
+            """, arguments: [anchor.bookID, anchor.versionID, anchor.unit, anchor.rawByteOffset])
+    }
+}

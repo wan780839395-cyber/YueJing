@@ -70,7 +70,7 @@ struct ReaderScreen: View {
             // Secondary layout: tool content cannot resize or recenter the reading viewport.
             .overlay(alignment: .bottomTrailing) {
                 ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
-                    directoryAvailable: model.chapterTotal > 0, settingsAvailable: model.window != nil,
+                    directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
                     exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
                     open: openPanel, focusedControl: $focusedControl)
                     .padding(.horizontal, 16).padding(.bottom, 8)
@@ -94,7 +94,7 @@ struct ReaderScreen: View {
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
         .sheet(item: panelPresentation) { session in
             ReaderPanelHost(session: session, model: model, active: panelActive,
-                close: closePanel, selected: selectChapter)
+                close: closePanel, selected: selectChapter, selectedBookmark: selectBookmark)
         }
         .task(id: routeID) { await model.load() }
         .task(id: tools.intent) {
@@ -205,14 +205,21 @@ struct ReaderScreen: View {
             loading: model.loading, saveFailed: model.exitSaveFailed, tools: tools)
         // END READER DIAGNOSTICS tools observation
         let next = tools.panel == .directory ? tools.panelID : nil
-        if let old, old != next { model.directory.dismiss(presentation: old) }
+        if let old, old != next {
+            model.directory.dismiss(presentation: old)
+            model.endBookmarkPanel(old)
+        }
     }
     private func openPanel(_ panel: ReadingToolPanel) {
         guard !model.exitSaveFailed else { return }
-        if panel == .directory, model.chapterTotal == 0 { return }
+        if panel == .directory, model.window == nil { return }
         if panel == .settings, model.window == nil { return }
         lastPanelControl = panel == .directory ? "directory" : "settings"
+        let previous = tools.panelID
         mutateTools { $0.open(panel) }
+        if panel == .directory, let id = tools.panelID, id != previous, tools.owns(.directory, id: id) {
+            model.beginBookmarkPanel(id)
+        }
     }
     private func closePanel(_ id: UUID) { mutateTools { _ = $0.closePanel(id: id) } }
     private func selectChapter(_ chapter: TXTChapter, _ id: UUID) {
@@ -220,6 +227,12 @@ struct ReaderScreen: View {
         var accepted = false
         mutateTools { accepted = $0.chapterSelected(id: id) }
         if accepted { model.go(to: chapter) }
+    }
+    private func selectBookmark(_ rendered: ReadingWindow, _ id: UUID) -> Bool {
+        guard panelActive(.directory, id), model.applyBookmarkWindow(rendered, presentation: id) else { return false }
+        var accepted = false
+        mutateTools { accepted = $0.chapterSelected(id: id) }
+        return accepted
     }
     private func handleToolsInteraction(_ event: ReadingToolsInteraction) {
         switch event {

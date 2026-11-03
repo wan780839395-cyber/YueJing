@@ -40,6 +40,21 @@ enum LibrarySchema {
                 t.column("byteCount", .integer).notNull()
             }
         }
+        migrator.registerMigration("v4-bookmarks") { db in
+            try db.execute(sql: """
+                CREATE TABLE bookmarks (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    bookID TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                    versionID TEXT NOT NULL,
+                    unit TEXT NOT NULL CHECK (unit = 'raw-byte-v1'),
+                    rawByteOffset INTEGER NOT NULL CHECK (rawByteOffset >= 0),
+                    createdAt DOUBLE NOT NULL,
+                    chapterTitleSnapshot TEXT,
+                    UNIQUE (bookID, versionID, unit, rawByteOffset)
+                );
+                CREATE INDEX bookmarks_book_created_id ON bookmarks(bookID, createdAt DESC, id ASC);
+                """)
+        }
         return migrator
     }
 }
