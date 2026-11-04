@@ -77,8 +77,55 @@ def synthetic_fixture(root):
         put(native / (target + "-settings.json"), dict(source_commit="synthetic-sha", fixture_environment="D052AE4B-7823-447E-BE63-986028A7F54C", testables=sorted(ui.GROUPS),
             scheme_sha256=gate.digest(schemes / "YueJingUI.xcscheme"), targets={"YueJing": dict(base, PRODUCT_TYPE="com.apple.product-type.application", SWIFT_ACTIVE_COMPILATION_CONDITIONS="DEBUG"), target: settings}))
 
+def check_system_swift_runtime():
+    """Synthetic SDK headers only; no downloaded SDK or native execution."""
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        sdk, out = root / "SDK", root / "evidence"
+        folder = sdk / "usr/lib/swift"
+        folder.mkdir(parents=True)
+        def header(name, target="arm64-ios"):
+            return ("--- !tapi-tbd\ntbd-version: 4\ntargets: [ " + target + " ]\n"
+                    "install-name: '/usr/lib/swift/" + name + "'\n...\n")
+        for name in sorted(gate.SYSTEM_SWIFT_RPATH_LIBRARIES):
+            stub = folder / (name.removesuffix(".dylib") + ".tbd")
+            stub.write_text(header(name), encoding="utf-8")
+            result = gate.system_swift_runtime("@rpath/" + name, ["/usr/lib/swift"], sdk, out)
+            assert result["resolved_system_path"] == "/usr/lib/swift/" + name
+            assert result["stub_sha256"] == gate.digest(out / result["stub_evidence"]) == gate.digest(stub)
+            assert gate.system_swift_runtime("@rpath/" + name, ["/usr/lib/swift"], sdk, out) == result
+        for link in ("@rpath/libswiftWebKit.dylib", "@rpath/libswiftUnknown.dylib",
+                     "@rpath/Private.framework/Private", "@rpath/../libswiftCore.dylib",
+                     "@loader_path/libswiftCore.dylib", "/usr/lib/swift/libswiftCore.dylib"):
+            assert gate.system_swift_runtime(link, ["/usr/lib/swift"], sdk, out) is None
+        for paths in ([], ["@executable_path/Frameworks"], ["/tmp/usr/lib/swift"], ["/usr/lib/swift-extra"]):
+            assert gate.system_swift_runtime("@rpath/libswiftCore.dylib", paths, sdk, out) is None
+        stub = folder / "libswiftCore.tbd"
+        good = header("libswiftCore.dylib")
+        for bad in (header("libswiftCore.dylib", "arm64-ios-simulator"),
+                    header("libswiftCore.dylib", "arm64-macos"), header("libswiftWrong.dylib"),
+                    good.replace("tbd-version: 4", "tbd-version: 3"),
+                    header("libswiftWrong.dylib", "arm64-macos") + good, ""):
+            stub.write_text(bad, encoding="utf-8")
+            try:
+                gate.system_swift_runtime("@rpath/libswiftCore.dylib", ["/usr/lib/swift"], sdk, out)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Invalid system runtime stub accepted")
+        stub.unlink()
+        try:
+            gate.system_swift_runtime("@rpath/libswiftCore.dylib", ["/usr/lib/swift"], sdk, out)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Absent system runtime stub accepted")
+
+
 def main():
     checked = []
+    check_system_swift_runtime()
+    checked.append("system-swift-rpath-positive-negative-and-sdk-evidence")
     inventory.validate_source()
     checked.append("reviewed-source-identity-and-disjoint-union")
     for name in ("task3_test_inventory.py", "run_reading_ui_tests.py", "validate_task3.py", "check_task3_validation.py"):

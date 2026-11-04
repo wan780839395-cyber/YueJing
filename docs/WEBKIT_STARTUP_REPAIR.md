@@ -32,3 +32,10 @@ Xcode16.4/Swift6.1.2 构建出的 App 在 arm64 iOS18.5 模拟器启动时，dyl
 - `-dead_strip_dylibs`只保留在App目标，撤销Host/Canvas目标该选项。Canvas原包丢失XCTest及libXCTestSwiftSupport加载依赖且实际执行0项；恢复默认测试发现，不改测试或计数。
 - 实际二进制检查支持FAT32/FAT64容器，校验切片范围、重叠与架构并检查唯一arm64切片；`nm -arch arm64`交叉核对。仍保留完整原始文件，不跳过Xcode系统测试库，不放宽overlay零导入要求。
 - 上述问题须在新轮次以原205项重新验证。第二轮原始失败、下载恢复和完整性证据单独保留；真机验收仍未完成。
+
+## 第三轮实际启动通过及剩余打包校验修复
+
+- `d2110a9` / Actions `41843348986/1`：原始事件独立核对为 **205 passed、其余状态全部 0**。Host17、TXTUI12、Canvas3、EPUBUI3 全部实际执行通过，包括两项原失败 Host 和先前未执行的 Canvas3。模拟器实际启动、阅读、退出及进程重启已验证；设备 Release 编译与模拟器/设备 WebKit 二进制检查均通过。
+- 工作流整体仍为 failure，未产出 IPA：`package-gate` 报 `Unresolved bundled dynamic dependency: @rpath/libswiftCore.dylib`。保存的设备 Mach-O 表明 ZIPFoundation 有 `/usr/lib/swift` LC_RPATH，而旧校验只寻找 App 包内文件，未识别该系统运行时路径。
+- 下一修复仅涉及 `validate_task3.py`、`check_task3_validation.py` 和本文，不改变 App、工具链、依赖版本、原生测试断言/数量/超时。仅接受七个明确的 Swift 5 系统运行时（Core/CoreFoundation/Darwin/Dispatch/ObjectiveC/XPC/Foundation，iOS 12.2+ 已提供），并要求真实系统 rpath、固定 iPhoneOS SDK 的 arm64-ios/绝对 install-name 证明；保存 stub 原文与哈希。未知库、WebKit、路径逃逸、错误平台或缺失证明仍拒绝。
+- 离线合成正反例不代表设备运行。必须继续以新提交完整原生测试、依赖门与同源码打包核验为准；不把第三轮 205 测试通过写成整条发布链成功。物理 iPhone/A06 真机验收仍未执行。

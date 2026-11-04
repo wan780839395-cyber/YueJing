@@ -419,6 +419,47 @@ def write_all_test_evidence():
     return result
 
 
+# These Swift 5 runtime libraries ship with iOS 12.2+, below this App's 16.6
+# minimum. This is deliberately not a libswift* wildcard (notably not WebKit).
+SYSTEM_SWIFT_RPATH_LIBRARIES = frozenset(
+    "libswift" + name + ".dylib"
+    for name in ("Core", "CoreFoundation", "Darwin", "Dispatch", "ObjectiveC", "XPC", "Foundation")
+)
+
+
+def system_swift_runtime(link, search_paths, sdk, output):
+    """Resolve only known OS runtime aliases, retaining the selected SDK proof."""
+    name = link.removeprefix("@rpath/")
+    if link != "@rpath/" + name or name not in SYSTEM_SWIFT_RPATH_LIBRARIES:
+        return None
+    if "/usr/lib/swift" not in search_paths:
+        return None
+    relative = Path("usr/lib/swift") / (name.removesuffix(".dylib") + ".tbd")
+    stub = sdk / relative
+    require(stub.is_file() and stub.resolve().is_relative_to(sdk.resolve()),
+            "Missing selected iPhoneOS SDK Swift runtime stub: " + name)
+    text = stub.read_text(encoding="utf-8")
+    # Read the primary v4 document only, never a reexport's target/install-name.
+    primary = re.split(r"(?m)^---", text, maxsplit=2)
+    header = primary[1] if len(primary) > 1 else ""
+    targets = re.search(r"(?m)^targets:\s*\[([^\]]+)\]", header)
+    install = re.search(r"(?m)^install-name:\s*['\"]?([^'\"\s]+)['\"]?\s*$", header)
+    system_path = "/usr/lib/swift/" + name
+    require(header.startswith(" !tapi-tbd") and re.search(r"(?m)^tbd-version:\s*4\s*$", header)
+            and targets and "arm64-ios" in [v.strip().strip("'\"") for v in targets[1].split(",")]
+            and install and install[1] == system_path,
+            "SDK stub does not prove the arm64 iOS system runtime: " + name)
+    destination = output / "system-swift-stubs" / stub.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        require(destination.read_bytes() == stub.read_bytes(), "SDK stub evidence drift")
+    else:
+        destination.write_bytes(stub.read_bytes())
+    return dict(dependency=link, resolved_system_path=system_path,
+                sdk_stub=relative.as_posix(), stub_evidence=destination.relative_to(output).as_posix(),
+                stub_sha256=digest(stub), target="arm64-ios", availability="iOS 12.2+ Swift 5 runtime")
+
+
 def package_gate():
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
     # Reparse every selected group and exact identity union, including Canvas and new UI.
@@ -459,8 +500,9 @@ def package_gate():
         links = run(["xcrun", "otool", "-L", str(binary)]).splitlines()[1:]
         images[binary] = [line.strip().split(" (", 1)[0] for line in links if line.strip()]
     graph, evidence = {}, []
+    sdk = Path(run(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"]))
     for binary, links in images.items():
-        edges = []
+        edges, system_dependencies = [], []
         for link in links:
             if link.startswith(("/System/Library/", "/usr/lib/")):
                 continue
@@ -472,11 +514,16 @@ def package_gate():
             elif link.startswith(("@executable_path/", "@loader_path/")):
                 paths.append(Path(link.replace("@executable_path", str(APP)).replace("@loader_path", str(binary.parent))))
             matches = [path.resolve() for path in paths if path.is_file() and path.resolve().is_relative_to(APP.resolve())]
+            if not matches:
+                system = system_swift_runtime(link, rpaths[binary] + rpaths[binaries[0]], sdk, OUT)
+                if system is not None:
+                    system_dependencies.append(system)
+                    continue
             require(matches and matches[0] in images, "Unresolved bundled dynamic dependency: " + link)
             edges.append(matches[0])
         graph[binary] = edges
         evidence.append(dict(binary=str(binary.relative_to(APP)), sha256=digest(binary),
-                             rpaths=rpaths[binary], dependencies=links))
+                             rpaths=rpaths[binary], dependencies=links, system_dependencies=system_dependencies))
     reached, pending = set(), [binaries[0]]
     while pending:
         binary = pending.pop()
