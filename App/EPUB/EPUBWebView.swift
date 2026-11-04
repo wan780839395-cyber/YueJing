@@ -273,8 +273,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 preserveTargetAnchor: request.preserveTargetAnchor
             )
             let combined = EPUBLocationScript.bootstrapSource + "\n" + invoke
-            webView.evaluateJavaScript(combined, in: nil, in: EPUBLocationScript.world) { [weak self] outcome in
-                guard case .failure(let error) = outcome else { return }
+            // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
+            webView.__evaluateJavaScript(combined, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
+                guard let error else { return }
                 Task { @MainActor [weak self] in
                     guard let self, self.activeRequest?.token == request.token else { return }
                     self.onLoadFailure?(error, request.token)
@@ -303,12 +304,12 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func sampleVisibleNow() async -> EPUBLocatorPayload? {
         guard let current = activeRequest, webView != nil else { return nil }
         return await withCheckedContinuation { continuation in
-            webView.evaluateJavaScript(
+            webView.__evaluateJavaScript(
                 "window.__yjEpub && window.__yjEpub.sampleNow ? window.__yjEpub.sampleNow() : null;",
-                in: nil,
+                inFrame: nil,
                 in: EPUBLocationScript.world
-            ) { [weak self] outcome in
-                guard case .success(let raw) = outcome,
+            ) { [weak self] raw, error in
+                guard error == nil, let raw,
                       let self, let payload = EPUBLocationScript.parseMessage(raw),
                       self.activeRequest?.token == current.token,
                       payload.sessionID == current.token.sessionID,
@@ -335,14 +336,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private func evaluateJSONForTesting(_ script: String, world: WKContentWorld) async throws -> Any? {
         setupWebViewIfNeeded()
         let data: Data = try await withCheckedThrowingContinuation { continuation in
-            webView.evaluateJavaScript(script, in: nil, in: world) { outcome in
-                switch outcome {
-                case .success(let value):
-                    do {
-                        continuation.resume(returning: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]))
-                    } catch { continuation.resume(throwing: error) }
-                case .failure(let error): continuation.resume(throwing: error)
+            webView.__evaluateJavaScript(script, inFrame: nil, in: world) { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
                 }
+                do {
+                    continuation.resume(returning: try JSONSerialization.data(withJSONObject: value ?? NSNull(), options: [.fragmentsAllowed]))
+                } catch { continuation.resume(throwing: error) }
             }
         }
         return try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])

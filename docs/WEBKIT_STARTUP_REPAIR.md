@@ -4,10 +4,12 @@
 
 Xcode16.4/Swift6.1.2 构建出的 App 在 arm64 iOS18.5 模拟器启动时，dyld 要求加载 `/usr/lib/swift/libswiftWebKit.dylib`，但运行时及 App 中均不存在该库。引用方是 `YueJing.debug.dylib`。Host/Canvas 在测试执行前SIGABRT；两组UI同样有缺库输出，随后无进程/初始书架等待失败并超时。原来的主actor常量编译错误已经另批修复，不是此次启动错误。
 
-## 最小修复
+## 修正后的最小修复
 
-- `project.yml` 只在 App、App-host测试和Canvas测试目标加入继承原标志的 `-Wl,-weak-lswiftWebKit`。不弱化系统 `WebKit.framework`，不嵌入来源不明的动态库，不提升iOS16.6部署目标或更换固定工具链。
-- 兼容前提是现有WebKit调用代码不需要从该Swift overlay导入符号，而由客户端实现调用系统Objective-C WebKit API。**不能只凭弱链接或启动成功认定这个前提成立。**
+- 第一轮显式 `-Wl,-weak-lswiftWebKit` 在实际链接时返回 `library 'swiftWebKit' not found`，35项App用例未执行。不能声称该方案修复启动。
+- 先前“现有API由客户端内联”的注释没有成立依据。Swift6.1.2接口声明中的隔离世界 `evaluateJavaScript` 是外部overlay方法；改用公开 `NS_REFINED_FOR_SWIFT` Objective-C入口 `__evaluateJavaScript(_:inFrame:in:completionHandler:)`，直接调用系统WebKit。同一内容世界、错误优先、会话/epoch/path校验不变；不转到page world，不开启书籍JavaScript。
+- `project.yml` 仅在App、Host及Canvas目标以 `-Wl,-dead_strip_dylibs` 替换失败的弱链接选项，删除真正未使用的动态库依赖。仍须实际二进制证明没有overlay符号导入，并以真实WebKit测试证明运行正常。
+- 不修改SDK、不使用私有API、不复制第三方运行库、不弱化系统WebKit.framework、不提升iOS16.6或更换工具链。公开SDK镜像只提供诊断线索，不作为构建输入；最终以固定Xcode实际编译、二进制和运行结果为准。
 - 新增 `scripts/check_webkit_linkage.py`：检查实际App及其嵌入framework/test bundle的arm64 Mach-O；该overlay若仍为强依赖，或者有任何指向该库的未定义符号（包括弱导入），检查失败。另运行 `xcrun nm -m -u`交叉检查并保存实际二进制与输出。没有库加载命令且无该库导入也可接受。
 - 工作流在所有独立测试组完成后检查两套模拟器App；全部测试通过后的设备Release产物在打包前再检查一次。检查不重建、不启动额外测试、不修改产物。
 
