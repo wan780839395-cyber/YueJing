@@ -382,6 +382,33 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertFalse(add.isEnabled)
             Self.captureEvidence(app, testName: name, stage: "bookmarks-restored")
             closePanel(app)
+        }
+    }
+
+    @MainActor func testNearbyBookmarksKeepIndependentNamesAndExactJumps() {
+        // Independent fixture: no bookmark, position or process state is inherited from another case.
+        withFixture { app in
+            open("UITest-Long-A", app); openDirectory(app)
+            let section = app.buttons["reader.contents.bookmarks"]
+            waitHittable(section); section.tap()
+            let add = app.buttons["reader.bookmarks.add"]
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                add.exists && add.isHittable && add.isEnabled
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
+            add.tap()
+            saveBookmarkNameEditor("添加书签", name: "第一章起点", app)
+            let rows = app.buttons.matching(NSPredicate(format:
+                "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
+                "reader.bookmark.", "reader.bookmark.delete."))
+            waitHittable(rows.firstMatch)
+            let identifier = rows.firstMatch.identifier
+            let saved = app.buttons[identifier]
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertTrue(saved.label.contains("第一章起点"))
+            XCTAssertFalse(add.isEnabled)
+            Self.captureEvidence(app, testName: name, stage: "bookmarks-nearby-initial")
+            closePanel(app)
             let beforeNearby = visibleCanvases(app)
             let start = viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
             let end = start.withOffset(CGVector(dx: 0, dy: -80))
