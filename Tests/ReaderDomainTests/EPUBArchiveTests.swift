@@ -47,6 +47,7 @@ struct EPUBArchiveTests {
             "/OPS/one.xhtml",
             "OPS/one.xhtml/",
             "../outside.xhtml",
+            "../../escape.xhtml",
             "OPS/../two.xhtml",
             "OPS/./two.xhtml",
             "OPS//two.xhtml",
@@ -85,8 +86,13 @@ struct EPUBArchiveTests {
         let sameDoc = try EPUBResourcePath.resolve("#section-2", relativeTo: "OPS/Text/ch1.xhtml")
         #expect(sameDoc.path == "OPS/Text/ch1.xhtml" && sameDoc.fragment == "section-2")
 
+        // Relative hrefs may reach the archive root; raw ZIP names above must never traverse.
+        let rootRelative = try EPUBResourcePath.resolve("../../escape.xhtml", relativeTo: "OPS/Text/ch1.xhtml")
+        #expect(rootRelative.path == "escape.xhtml" && rootRelative.fragment == nil)
+
         for unsafeHref in [
-            "../../escape.xhtml",
+            "../../../escape.xhtml",
+            "../../../../escape.xhtml",
             "/absolute.xhtml",
             "https://example.com/a.xhtml",
             "javascript:alert(1)",
@@ -95,7 +101,7 @@ struct EPUBArchiveTests {
             "a%2Fb.xhtml",
             "%2e%2e/escape.xhtml"
         ] {
-            #expect(throws: EPUBError.unsafePath) {
+            #expect(throws: EPUBError.unsafePath, "Rejected href: \(unsafeHref)") {
                 _ = try EPUBResourcePath.resolve(unsafeHref, relativeTo: "OPS/Text/ch1.xhtml")
             }
         }

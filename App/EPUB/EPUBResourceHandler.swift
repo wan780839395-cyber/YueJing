@@ -46,7 +46,8 @@ struct EPUBResourceCapability: Sendable, Equatable {
 /// Serves only validated package resources for the current session+epoch over yjepub:.
 @MainActor
 final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
-    static let scheme = "yjepub"
+    // Immutable Sendable value; URL construction does not access MainActor-owned state.
+    nonisolated static let scheme = "yjepub"
     static let contentSecurityPolicy =
         "default-src 'none'; img-src yjepub:; style-src 'unsafe-inline'; " +
         "script-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; " +
