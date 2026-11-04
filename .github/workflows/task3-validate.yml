@@ -35,6 +35,7 @@ jobs:
           fetch-depth: ${{ inputs.validation_scope == 'host-natural-root-5c88543-exact3' && 2 || 1 }}
 
       - name: Guard the approved Host-only scope before native preparation
+        id: scope
         env:
           VALIDATION_SCOPE: ${{ inputs.validation_scope || 'full' }}
         run: |
@@ -89,6 +90,7 @@ jobs:
           PY
 
       - name: Verify the selected native toolchain
+        id: toolchain
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -106,6 +108,7 @@ jobs:
           test "$(uname -m)" = arm64
 
       - name: Verify XcodeGen and generate the project
+        id: project
         run: |
           set -euo pipefail
           mkdir -p _tooling
@@ -121,6 +124,7 @@ jobs:
             2>&1 | tee artifacts/task3/project-generation.log
 
       - name: Resolve the official pinned GRDB and ZIPFoundation dependencies once
+        id: dependencies
         run: |
           set -uo pipefail
           set +e
@@ -134,6 +138,7 @@ jobs:
           python3 scripts/validate_task3.py resolved
 
       - name: Select an installed arm64 iPhone simulator and verify test targets
+        id: simulator
         run: |
           set -euo pipefail
           xcrun simctl list devices available -j > artifacts/task3/devices.json
@@ -142,6 +147,7 @@ jobs:
           python3 scripts/validate_task3.py settings
 
       - name: Freeze reviewed case inventory and this committed candidate
+        id: candidate
         run: |
           set -euo pipefail
           test "$GITHUB_RUN_ATTEMPT" = 1
@@ -149,10 +155,12 @@ jobs:
           python3 -B scripts/run_reading_ui_tests.py --preflight --self-check > artifacts/task3/app-parser-preflight.json.log
           python3 -B scripts/check_epub_batch.py --self-check > artifacts/task3/epub-batch-preflight.json
           python3 -B scripts/audit_native_case_events.py --self-check > artifacts/task3/native-event-parser-preflight.json
+          python3 -B scripts/check_validation_aggregation.py > artifacts/task3/aggregation-preflight.log
           python3 -B scripts/validate_task3.py freeze-candidate
 
       - name: Run the original 25 TXTCore tests once
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: core
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           selection_text="$(python3 -B scripts/task3_test_inventory.py --selection TXTCoreTests)" || exit "$?"
@@ -173,7 +181,8 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts TXTCoreTests
 
       - name: Run 138 ReaderDomain cases including EPUB and fixed A06 regression
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: domain
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           selection_text="$(python3 -B scripts/task3_test_inventory.py --selection ReaderDomainTests)" || exit "$?"
@@ -194,7 +203,8 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts ReaderDomainTests
 
       - name: Run the 6 decoder differential tests and one timed pair in Release
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: block
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py decoder-comparison-settings || exit "$?"
@@ -217,7 +227,8 @@ jobs:
           python3 scripts/validate_task3.py decoder-comparison
 
       - name: Measure one sequential synthetic reuse path in Release
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: measurement
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 scripts/validate_task3.py measurement-settings || exit "$?"
@@ -240,6 +251,7 @@ jobs:
           python3 scripts/validate_task3.py processing-measurements
 
       - name: Confirm the prepared Host-only dependency and frozen selection
+        id: host_preflight
         if: ${{ success() && inputs.validation_scope == 'host-natural-root-5c88543-exact3' }}
         run: |
           set -euo pipefail
@@ -264,6 +276,8 @@ jobs:
           PY
 
       - name: Run the 17 real App-host UIKit and WebKit tests once
+        id: host
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && ((inputs.validation_scope == 'full' || inputs.validation_scope == '') || (inputs.validation_scope == 'host-natural-root-5c88543-exact3' && steps.host_preflight.outcome == 'success')) }}
         timeout-minutes: 12
         run: |
           set -euo pipefail
@@ -342,7 +356,8 @@ jobs:
           PY
 
       - name: Run 12 real App UI flows including 3 bookmark flows
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: txt_ui
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         timeout-minutes: 23
         run: |
           set -euo pipefail
@@ -351,7 +366,8 @@ jobs:
             --evidence-dir artifacts/reading-ui-native
 
       - name: Run 3 independent EPUB App UI flows in the same attempt
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: epub_ui
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         timeout-minutes: 10
         run: |
           set -euo pipefail
@@ -360,7 +376,8 @@ jobs:
             --evidence-dir artifacts/epub-ui-native
 
       - name: Run the 3 existing Canvas App-host regressions in the same attempt
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: canvas
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           python3 -B scripts/validate_task3.py canvas-settings || exit "$?"
@@ -382,13 +399,15 @@ jobs:
           python3 -B scripts/validate_task3.py test-counts YueJingCanvasTests
 
       - name: Require the exact reviewed 205-case union before device App compilation
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: test_gate
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -euo pipefail
           python3 scripts/validate_task3.py all-test-gate
 
       - name: Compile the actual unsigned iPhoneOS arm64 App
-        if: ${{ success() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        id: device_build
+        if: ${{ success() && steps.test_gate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
           set -uo pipefail
           set +e
@@ -415,6 +434,17 @@ jobs:
           python3 scripts/validate_task3.py verify-ipa 2>&1 | tee artifacts/task3/ipa-verification.log
           ipa_file="$(python3 -c 'import json, re; from pathlib import Path; name = json.loads(Path("artifacts/manifest.json").read_text(encoding="utf-8"))["ipa_file"]; assert re.fullmatch(r"YueJing-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?\.ipa", name) and "TESTS-NOT-RUN" not in name and (Path("artifacts") / name).is_file(); print(name)')"
           printf 'ipa_file=%s\nipa_path=artifacts/%s\n' "$ipa_file" "$ipa_file" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize every validation group and all discovered issues
+        id: validation_summary
+        if: ${{ always() && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        env:
+          VALIDATION_STEPS: ${{ toJSON(steps) }}
+        run: |
+          python3 -B scripts/task3_validation_report.py \
+            --evidence artifacts --source-commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --output artifacts/task3/validation-summary.json \
+            --markdown artifacts/task3/validation-summary.md
 
       - name: Preserve raw evidence from this single attempt
         if: always()

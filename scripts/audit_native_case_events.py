@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 EVENT = re.compile(r"\bTest (\w+)\(\) (started|passed|failed|skipped)\b")
+ISSUE = re.compile(r"^(?:✘ )?Test (\w+)\(\) recorded an issue at (.+)$")
 UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
 EPUB_UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?EPUBFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
 # Only the observed UIKit warning is admissible, and only inside a START record.
@@ -27,7 +28,7 @@ def parse_events(raw, names, ui=False, ui_class="ReadingFlowUITests"):
     text = raw.decode('utf-8')
     original = text.splitlines(keepends=True)
     lines = text.splitlines()
-    events = {n: dict(starts=[], finishes=[], skips=[]) for n in names}
+    events = {n: dict(starts=[], finishes=[], skips=[], issues=[]) for n in names}
     unexpected, unknown, derived = [], [], []
     consumed = set()
     if ui_class not in ("ReadingFlowUITests", "EPUBFlowUITests"):
@@ -55,6 +56,15 @@ def parse_events(raw, names, ui=False, ui_class="ReadingFlowUITests"):
         if ui and re.match(r'^(?:\d{4}-\d\d-\d\dT\S+ )?Test Case\b', line):
             unknown.append(dict(line=i+1, text=line))
         if not ui:
+            issue = ISSUE.fullmatch(line)
+            if issue:
+                name, detail = issue.groups()
+                row = dict(line=i+1, text=line, detail=detail)
+                if name in events:
+                    events[name]['issues'].append(row)
+                else:
+                    unexpected.append(dict(name=name, event='issue', **row))
+                continue
             before = BROKEN_START.fullmatch(line)
             after = START_TAIL.fullmatch(lines[i+1]) if i+1 < len(lines) else None
             if before and after:
@@ -78,7 +88,9 @@ def parse_events(raw, names, ui=False, ui_class="ReadingFlowUITests"):
             status = 'skipped'
         elif len(starts) == len(ends) == 1 and starts[0]['line'] < ends[0]['line']:
             status = ends[0]['status']
-        elif not starts and not ends:
+            if item['issues'] and status != 'failed':
+                status = 'ambiguous'  # An issue can never be hidden by a green finish.
+        elif not starts and not ends and not item['issues']:
             status = 'unexecuted'
         elif len(starts) == 1 and not ends:
             status = 'unfinished'
@@ -149,37 +161,68 @@ def self_check():
 
 
 def audit_evidence(evidence, head, run):
+    """Inspect every group/receipt independently; errors deny acceptance, not inspection."""
     import task3_test_inventory as inventory
-    reviewed = inventory.validate_source()
+    errors = []
+    try:
+        reviewed = inventory.validate_source()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        reviewed = dict(selected=inventory.TOTAL)
+        errors.append(dict(target='inventory', artifact='source', message=str(error)))
     groups = []
     for target in inventory.COUNTS:
         folder = evidence / ('epub-ui-native' if target == 'YueJingEPUBUITests' else
                              'reading-ui-native' if target in ('YueJingHostTests', 'YueJingUITests') else 'task3')
+        group_errors = []
+        def problem(path, error):
+            group_errors.append(dict(target=target, artifact=str(path), message=str(error)))
+        names = inventory.expected_names(target)
+        def parse(raw):
+            return parse_events(raw, names, target in ('YueJingUITests', 'YueJingEPUBUITests'),
+                                'EPUBFlowUITests' if target == 'YueJingEPUBUITests' else 'ReadingFlowUITests')
         log = folder / (target+'.log')
-        raw = log.read_bytes() if log.exists() else b''
-        parsed = parse_events(raw, inventory.expected_names(target), target in ('YueJingUITests', 'YueJingEPUBUITests'),
-                              'EPUBFlowUITests' if target == 'YueJingEPUBUITests' else 'ReadingFlowUITests')
+        raw = b''
+        try:
+            raw = log.read_bytes()
+            parsed = parse(raw)
+        except (OSError, ValueError) as error:
+            problem(log, error)
+            parsed = parse(b'')
+            parsed['raw_sha256'] = digest(raw)
+            parsed['parser_complete'] = False
         native_exit_path = folder / (target+'-exit-code.txt')
-        native_exit = int(native_exit_path.read_text().strip()) if native_exit_path.exists() else None
+        native_exit = None
+        try:
+            native_exit = int(native_exit_path.read_text().strip())
+        except (OSError, ValueError) as error:
+            problem(native_exit_path, error)
+        required = ('counts', 'execution', 'selection') if target in ('YueJingHostTests', 'YueJingUITests', 'YueJingEPUBUITests') else ('counts',)
         for suffix in ('counts', 'execution', 'selection'):
             p = folder / (target+'-'+suffix+'.json')
-            if not p.exists():
+            if not p.exists() and suffix not in required:
                 continue
-            receipt = json.loads(p.read_bytes())
-            if not (receipt['source_commit'] == head and str(receipt['run_id']) == str(run) and str(receipt['run_attempt']) == '1'):
-                raise ValueError('Receipt provenance mismatch: '+str(p))
-            if suffix == 'counts':
-                passed = {c['name'] for c in parsed['cases'] if c['status'] == 'passed'}
-                if receipt['log_sha256'] != digest(raw) or set(receipt['passed']) != passed:
-                    raise ValueError('Count receipt/raw identities differ: '+target)
-            if suffix == 'execution' and receipt['native_exit'] != native_exit:
-                raise ValueError('Native exit receipt differs: '+target)
-        groups.append(dict(target=target, log=str(log) if log.exists() else None, native_exit=native_exit, **parsed))
+            try:
+                receipt = json.loads(p.read_bytes())
+                if not isinstance(receipt, dict):
+                    raise ValueError('Receipt must be an object')
+                if not (receipt['source_commit'] == head and str(receipt['run_id']) == str(run) and str(receipt['run_attempt']) == '1'):
+                    problem(p, 'Receipt provenance mismatch')
+                if suffix == 'counts':
+                    passed = {c['name'] for c in parsed['cases'] if c['status'] == 'passed'}
+                    if receipt['log_sha256'] != digest(raw) or set(receipt['passed']) != passed:
+                        problem(p, 'Count receipt/raw identities differ')
+                if suffix == 'execution' and receipt['native_exit'] != native_exit:
+                    problem(p, 'Native exit receipt differs')
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                problem(p, error)
+        groups.append(dict(target=target, log=str(log) if log.exists() else None, native_exit=native_exit,
+                           errors=group_errors, **parsed))
+        errors.extend(group_errors)
     totals = {s: sum(g['totals'][s] for g in groups) for s in groups[0]['totals']}
-    complete = all(g['parser_complete'] for g in groups)
+    complete = not errors and all(g['parser_complete'] for g in groups)
     full_pass = complete and totals['passed'] == inventory.TOTAL and all(not v for k,v in totals.items() if k != 'passed') and all(g['native_exit'] == 0 for g in groups)
     return dict(source_commit=head, run_id=str(run), attempt=1, selected=reviewed['selected'], groups=groups,
-                totals=totals, audit_complete=complete, full_selected_passed=full_pass,
+                totals=totals, errors=errors, audit_complete=complete, full_selected_passed=full_pass,
                 full146_passed=full_pass and inventory.TOTAL == 146,
                 status='AUDIT_COMPLETED' if complete else 'AUDIT_INCOMPLETE',
                 native_validation='passed' if full_pass else 'not passed', raw_logs_modified=False,

@@ -33,7 +33,10 @@ def synthetic_fixture(root):
     put(out / "candidate-sources.json", dict(source_commit="synthetic-sha", run_id="synthetic-run", run_attempt="1",
         files=gate.candidate_files(), inventory=inventory.validate_source()))
     for group in inventory.SWIFT_GROUPS:
-        log = "\n".join("Test " + n + "() passed after 0.1 seconds." for n in inventory.expected_names(group))
+        log = "\n".join(
+            f"Test {n}() started.\nTest {n}() passed after 0.1 seconds."
+            for n in inventory.expected_names(group)
+        )
         log += f"\nTest run with {inventory.COUNTS[group]} tests passed after 1 seconds.\n** TEST SUCCEEDED **"
         path = out / (group + ".log")
         path.write_text(log, encoding="utf-8")
@@ -42,16 +45,24 @@ def synthetic_fixture(root):
             expected=inventory.COUNTS[group], inventory_sha256=gate.digest(Path(inventory.__file__)),
             selection=inventory.selection(group), log_sha256=gate.digest(path), **inventory.parse_swift_log(group, log, 0)))
     put(out / "canvas-settings.json", dict(source_commit="synthetic-sha", scheme_sha256=gate.digest(schemes / "YueJingCanvas.xcscheme")))
-    native = root / "artifacts/reading-ui-native"
     base = dict(SWIFT_VERSION="6.0", SWIFT_STRICT_CONCURRENCY="complete", IPHONEOS_DEPLOYMENT_TARGET="16.6")
+    source_paths = sorted((root / "App").rglob("*.swift")) + [root / "project.yml"]
+    source_paths += [p for group in ui.GROUPS for p in sorted((root / "Tests" / group).glob("*.swift"))]
+    source_files = {p.relative_to(root).as_posix(): gate.digest(p) for p in source_paths}
     for target, count in ui.GROUPS.items():
+        native = root / "artifacts" / ("epub-ui-native" if target == "YueJingEPUBUITests" else "reading-ui-native")
         names = inventory.expected_names(target)
         if target == "YueJingHostTests":
-            log = "\n".join("Test " + n + "() passed after 0.1 seconds." for n in names)
+            log = "\n".join(f"Test {n}() started.\nTest {n}() passed after 0.1 seconds." for n in names)
             log += f"\nTest run with {count} tests passed after 1 seconds."
             settings = dict(base, PRODUCT_TYPE="com.apple.product-type.bundle.unit-test", TEST_HOST="/synthetic/YueJing.app/YueJing", BUNDLE_LOADER="/synthetic/YueJing.app/YueJing")
         else:
-            log = "\n".join("Test Case '-[YueJingUITests.ReadingFlowUITests " + n + "]' passed (0.1 seconds)." for n in names)
+            ui_class = ui.UI_CLASSES[target]
+            log = "\n".join(
+                f"Test Case '-[{target}.{ui_class} {n}]' started.\n"
+                f"Test Case '-[{target}.{ui_class} {n}]' passed (0.1 seconds)."
+                for n in names
+            )
             settings = dict(base, PRODUCT_TYPE="com.apple.product-type.bundle.ui-testing", TEST_TARGET_NAME="YueJing")
         log += "\n** TEST SUCCEEDED **"
         provenance = dict(source_commit="synthetic-sha", run_id="synthetic-run", run_attempt="1", target=target,
@@ -62,10 +73,9 @@ def synthetic_fixture(root):
         log_path = native / (target + ".log")
         log_path.write_text(log, encoding="utf-8")
         put(native / (target + "-counts.json"), dict(provenance, **{k: v for k, v in ui.count_log(target, log, 0).items() if k != "target"}, log_sha256=gate.digest(log_path)))
-        put(native / (target + "-source-hashes.json"), dict(source_commit="synthetic-sha", files={"project.yml": gate.digest(root / "project.yml")}))
+        put(native / (target + "-source-hashes.json"), dict(source_commit="synthetic-sha", files=source_files))
         put(native / (target + "-settings.json"), dict(source_commit="synthetic-sha", fixture_environment="D052AE4B-7823-447E-BE63-986028A7F54C", testables=sorted(ui.GROUPS),
             scheme_sha256=gate.digest(schemes / "YueJingUI.xcscheme"), targets={"YueJing": dict(base, PRODUCT_TYPE="com.apple.product-type.application", SWIFT_ACTIVE_COMPILATION_CONDITIONS="DEBUG"), target: settings}))
-
 
 def main():
     checked = []
@@ -82,18 +92,18 @@ def main():
         if not match:
             continue
         group = match[1]
-        assert '"${selection[@]}"' in block and "|| exit" in block
+        assert '"${selection[@]}"' in block
         assert "test-counts " + group in block
         assert ("-configuration Release" in block) == (group in ("TXTBlockDecoderTests", "ProcessingReuseMeasurementTests"))
         assert ("-scheme YueJingCanvas" in block) == (group == "YueJingCanvasTests")
         selected.append(group)
     assert sorted(selected) == sorted(inventory.SWIFT_GROUPS)
-    assert "--target YueJingHostTests" in workflow and "--target YueJingUITests" in workflow
+    assert "--target YueJingHostTests" in workflow and "--target YueJingUITests" in workflow and "--target YueJingEPUBUITests" in workflow
     assert workflow.index("freeze-candidate") < workflow.index("--selection TXTCoreTests")
     assert workflow.index("test-counts YueJingCanvasTests") < workflow.index("all-test-gate") < workflow.index("generic/platform=iOS")
     assert "workflow_dispatch:" in workflow and "runs-on: macos-15" in workflow
     # Approved aggregate UI headroom; Host and individual case deadlines stay unchanged.
-    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "23"]
+    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "23", "10"]
     runner = (ROOT / "scripts/run_reading_ui_tests.py").read_text(encoding="utf-8")
     assert 'timeout_seconds = 480 if target == "YueJingHostTests" else 1200' in runner
     assert '"-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180"' in runner
@@ -115,11 +125,12 @@ def main():
         with patch.object(gate, "ROOT", root), patch.object(gate, "OUT", root / "task3"), patch.dict(os.environ, env):
             synthetic_fixture(root)
             result = gate.all_test_evidence()
-            assert result["native_passed"] == inventory.TOTAL
-            checked.append("synthetic-seven-group-aggregate-accept")
+            assert result["passed"] is True and not result["errors"]
+            assert result["native_passed"] == inventory.TOTAL == 205 and len(result["groups"]) == 8
+            checked.append("synthetic-eight-group-aggregate-accept")
             target = root / "task3/ReaderDomainTests-counts.json"
             for field, value in (("source_commit", "old-sha"), ("run_id", "old-run"), ("expected", 89), ("selection", [])):
-                original = json.loads(target.read_text())
+                original = json.loads(target.read_text(encoding="utf-8"))
                 altered = copy.deepcopy(original); altered[field] = value
                 put(target, altered)
                 try:
@@ -130,9 +141,9 @@ def main():
                     raise AssertionError("Aggregate accepted " + field)
                 put(target, original)
             path = root / "task3/YueJingCanvasTests.log"
-            original = path.read_text()
-            for label, value in (("missing-canvas-case", original.split("\n", 1)[1]),
-                                 ("duplicate-canvas-case", original + "\n" + original.splitlines()[0]),
+            original = path.read_text(encoding="utf-8")
+            for label, value in (("missing-canvas-case", "\n".join(original.splitlines()[2:])),
+                                 ("duplicate-canvas-case", original + "\n" + "\n".join(original.splitlines()[:2])),
                                  ("canvas-skip", original + "\nTest example skipped")):
                 path.write_text(value, encoding="utf-8")
                 try:
@@ -143,7 +154,7 @@ def main():
                     raise AssertionError("Aggregate accepted " + label)
                 path.write_text(original, encoding="utf-8")
             project = root / "project.yml"
-            original = project.read_text(); project.write_text("drift", encoding="utf-8")
+            original = project.read_text(encoding="utf-8"); project.write_text("drift", encoding="utf-8")
             try:
                 gate.all_test_evidence()
             except ValueError:
