@@ -156,6 +156,12 @@ extension OpenedReader {
         try await store.deleteBookmark(session: reading.session, id: id, request: request)
     }
 
+    public func renameBookmark(id: String, name: String, request: BookmarkRequest) async throws -> ReadingBookmark {
+        try checkBookmarkRequest(request)
+        // A rename changes only display metadata; it needs no source mapping or compatible stored version.
+        return try await store.renameBookmark(session: reading.session, id: id, name: name, request: request)
+    }
+
     public func bookmarkAnchor(id: String, request: BookmarkRequest) async throws -> ReadingAnchor {
         try checkBookmarkRequest(request)
         let value = try await store.bookmark(session: reading.session, id: id, request: request)
@@ -165,7 +171,7 @@ extension OpenedReader {
         // Mapping suspends: reload again so a deletion or superseding session cannot win unnoticed.
         let current = try await store.bookmark(session: reading.session, id: id, request: request)
         try checkBookmarkRequest(request)
-        guard current == value else { throw LibraryError.invalidAnchor }
+        guard let current, current.hasSamePosition(as: value) else { throw LibraryError.invalidAnchor }
         return position
     }
 

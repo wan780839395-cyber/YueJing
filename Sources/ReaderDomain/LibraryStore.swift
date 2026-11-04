@@ -472,6 +472,24 @@ extension LibraryStore {
         }
     }
 
+    func renameBookmark(session: ReadingSession, id: String, name: String, request: BookmarkRequest,
+                        afterCommit: (@Sendable () -> Void)? = nil) throws -> ReadingBookmark {
+        try request.check()
+        let customName = try ReadingBookmark.validatedCustomName(name)
+        let result = try queue.write { db in
+            _ = try admitBookmark(db, session: session, request: request)
+            guard try ReadingBookmark.fetchOne(db, sql: "SELECT * FROM bookmarks WHERE id = ? AND bookID = ?",
+                                              arguments: [id, session.bookID]) != nil else { throw LibraryError.invalidAnchor }
+            try db.execute(sql: "UPDATE bookmarks SET customName = ? WHERE id = ? AND bookID = ?",
+                           arguments: [customName, id, session.bookID])
+            guard let updated = try ReadingBookmark.fetchOne(db, sql: "SELECT * FROM bookmarks WHERE id = ? AND bookID = ?",
+                                                            arguments: [id, session.bookID]) else { throw LibraryError.invalidAnchor }
+            return updated
+        }
+        afterCommit?() // Same committed-truth boundary as addition; no late cancellation check.
+        return result
+    }
+
     private static func checkBookmarkPosition(_ anchor: ReadingAnchor, book: LibraryBook) throws {
         guard anchor.bookID == book.id, anchor.versionID == book.versionID, anchor.unit == "raw-byte-v1",
               anchor.rawByteOffset >= 0, anchor.rawByteOffset < book.byteCount else { throw LibraryError.invalidAnchor }

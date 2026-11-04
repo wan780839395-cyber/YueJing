@@ -50,7 +50,10 @@ struct ReaderContentsSheet: View {
         .accessibilityIdentifier("reader.contents.directory")
         .disabled(!isActive() || bookmarks.isBusy)
         Button {
-            if isActive() && !bookmarks.isBusy { showingBookmarks = true }
+            if isActive() && !bookmarks.isBusy && !showingBookmarks {
+                model.refreshBookmarkCapture(presentationID)
+                showingBookmarks = true
+            }
         } label: {
             Text("书签").fontWeight(showingBookmarks ? .semibold : .regular)
                 .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())

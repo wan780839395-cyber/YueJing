@@ -542,8 +542,10 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     /// Read-only snapshot for explicit bookmarks; never substitutes a saved/default anchor.
     func bookmarkAnchor() -> ReadingAnchor? {
-        guard isViewLoaded, viewIfLoaded?.window != nil, !restoring, !interacting,
-              let visible = actualVisibleAnchor() else { return nil }
+        guard isViewLoaded, viewIfLoaded?.window != nil, !restoring, !interacting else { return nil }
+        // Finish pending row layout before sampling the explicit bookmark position.
+        table.layoutIfNeeded()
+        guard let visible = actualVisibleAnchor() else { return nil }
         return ReadingAnchor(bookID: visible.bookID, versionID: visible.versionID,
                              rawByteOffset: visible.rawByteOffset, lineFraction: 0)
     }

@@ -41,6 +41,25 @@ struct ReadingBookmarkTests {
         #expect(try state(old) == before)
         let count = try await old.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM bookmarks") }
         #expect(count == 0)
+        let v4 = try DatabaseQueue(path: f.root.appendingPathComponent("v4.sqlite").path)
+        try LibrarySchema.migrator().migrate(v4, upTo: "v4-bookmarks")
+        let legacy = ReadingBookmark(id: UUID().uuidString, bookID: f.book.id, versionID: f.book.versionID,
+                                     rawByteOffset: 3, createdAt: 123, chapterTitleSnapshot: "旧章节")
+        try await v4.write { db in
+            try f.book.insert(db)
+            try db.execute(sql: "INSERT INTO progress VALUES (?, ?, 'raw-byte-v1', 3, 0.2, 'v4-session', 11)", arguments: [f.book.id, f.book.versionID])
+            try db.execute(sql: "INSERT INTO preferences VALUES (1, ?)", arguments: [try JSONEncoder().encode(ReaderPreferences())])
+            try db.execute(sql: "INSERT INTO derivedArtifacts VALUES (?, ?, ?, ?, 4096)", arguments: [f.book.id, f.book.versionID, UUID().uuidString.lowercased(), String(repeating: "b", count: 64)])
+            try db.execute(sql: "INSERT INTO bookmarks VALUES (?, ?, ?, ?, ?, ?, ?)",
+                arguments: [legacy.id, legacy.bookID, legacy.versionID, legacy.unit,
+                            legacy.rawByteOffset, legacy.createdAt, legacy.chapterTitleSnapshot])
+        }
+        let v4State = try state(v4)
+        try LibrarySchema.migrator().migrate(v4)
+        let migrated = try await v4.read { db in try ReadingBookmark.fetchOne(db, key: legacy.id) }
+        #expect(migrated == legacy)
+        #expect(migrated?.customName == nil && migrated?.displayTitle == "旧章节")
+        #expect(try state(v4) == v4State)
     }
 
     @Test func bookmarkConcurrentRetriesKeepOriginalIdentityAndTime() async throws {
@@ -56,6 +75,18 @@ struct ReadingBookmarkTests {
         #expect(try await reader.bookmarkAnchor(id: a.id, request: BookmarkRequest()).lineFraction == 0)
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).total == 1)
         try await reader.close()
+        let long = try await DerivedBookFixture(bytes: Data(("Chapter 1\n" + String(repeating: "abcdef", count: 2000)).utf8))
+        defer { long.remove() }
+        let nearbyReader = try await long.service.openReader(id: long.book.id, budget: long.budget)
+        #expect(nearbyReader.source.metadata.chapterCount == 1)
+        let near = try await nearbyReader.addBookmark(at: anchor(long.book, 12), request: BookmarkRequest())
+        let next = try await nearbyReader.addBookmark(at: anchor(long.book, 15), request: BookmarkRequest())
+        #expect(near.id != next.id && near.chapterTitleSnapshot == next.chapterTitleSnapshot)
+        #expect(try await nearbyReader.addBookmark(at: anchor(long.book, 12), request: BookmarkRequest()) == near)
+        #expect(try await nearbyReader.bookmarkPage(start: 0, request: BookmarkRequest()).total == 2)
+        #expect(try await nearbyReader.bookmarkAnchor(id: near.id, request: BookmarkRequest()).rawByteOffset == 12)
+        #expect(try await nearbyReader.bookmarkAnchor(id: next.id, request: BookmarkRequest()).rawByteOffset == 15)
+        try await nearbyReader.close()
     }
 
     @Test func bookmarkUUIDCollisionAndDatabaseConstraintsNeverReplaceRows() async throws {
@@ -79,6 +110,30 @@ struct ReadingBookmarkTests {
             }
         }
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [first])
+        let emoji = String(repeating: "👩‍👩‍👧‍👦", count: 80)
+        #expect(try ReadingBookmark.validatedCustomName(" \n" + emoji + "\t ") == emoji)
+        #expect(try ReadingBookmark.validatedCustomName(String(repeating: "e\u{301}", count: 80))?.count == 80)
+        #expect(try ReadingBookmark.validatedCustomName(" \n\t ") == nil)
+        #expect(first.displayTitle == "阅读位置")
+        let named = try await reader.renameBookmark(id: first.id, name: emoji, request: BookmarkRequest())
+        #expect(named.customName == emoji && named.displayTitle == emoji)
+        #expect(named.hasSamePosition(as: first) && named.createdAt == first.createdAt)
+        #expect(try await reader.bookmarkAnchor(id: named.id, request: BookmarkRequest()).rawByteOffset == first.rawByteOffset)
+        await #expect(throws: ReadingBookmark.NameValidationError.tooLong) {
+            try await reader.renameBookmark(id: first.id, name: emoji + "a", request: BookmarkRequest())
+        }
+        for invalid in ["a\nb", "a\rb", "a\tb", "a\u{0}b", "a\u{7F}b", "a\u{85}b", "a\u{2028}b", "a\u{2029}b"] {
+            await #expect(throws: ReadingBookmark.NameValidationError.invalidCharacters) {
+                try await reader.renameBookmark(id: first.id, name: invalid, request: BookmarkRequest())
+            }
+        }
+        #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [named])
+        let cleared = try await reader.renameBookmark(id: first.id, name: " \n\t ", request: BookmarkRequest())
+        #expect(cleared == first && cleared.displayTitle == "阅读位置")
+        await #expect(throws: LibraryError.invalidAnchor) {
+            try await reader.renameBookmark(id: UUID().uuidString, name: "missing", request: BookmarkRequest())
+        }
+        #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [first])
         try await reader.close()
     }
 
@@ -100,6 +155,10 @@ struct ReadingBookmarkTests {
         try await reader.deleteBookmark(id: expected[64].id, request: BookmarkRequest())
         let clamped = try await reader.bookmarkPage(start: 64, request: BookmarkRequest())
         #expect(clamped.start == 32 && clamped.total == 64 && clamped.items == middle.items)
+        let renamed = try await reader.renameBookmark(id: expected[0].id, name: "排序不变", request: BookmarkRequest())
+        let renamedPage = try await reader.bookmarkPage(start: 0, request: BookmarkRequest())
+        #expect(renamedPage.items.map(\.id) == first.items.map(\.id))
+        #expect(renamed.createdAt == expected[0].createdAt && renamedPage.total == 64)
         for invalid in [-32, 1, 33] {
             await #expect(throws: LibraryError.invalidAnchor) { try await reader.bookmarkPage(start: invalid, request: BookmarkRequest()) }
         }
@@ -116,6 +175,9 @@ struct ReadingBookmarkTests {
         try await second.deleteBookmark(id: a.id, request: BookmarkRequest())
         await #expect(throws: LibraryError.invalidAnchor) { try await second.bookmarkAnchor(id: a.id, request: BookmarkRequest()) }
         await #expect(throws: LibraryError.invalidAnchor) { try await second.addBookmark(at: anchor(f.book), request: BookmarkRequest()) }
+        await #expect(throws: LibraryError.invalidAnchor) {
+            try await second.renameBookmark(id: a.id, name: "wrong book", request: BookmarkRequest())
+        }
         #expect(try await first.bookmarkPage(start: 0, request: BookmarkRequest()).items == [a])
         #expect(try await second.bookmarkPage(start: 0, request: BookmarkRequest()).items == [b])
         try await first.close(); try await second.close()
@@ -139,6 +201,9 @@ struct ReadingBookmarkTests {
                     let value = try await reader.addBookmark(at: position, request: BookmarkRequest())
                     let restored = try await reader.bookmarkAnchor(id: value.id, request: BookmarkRequest())
                     #expect(restored.rawByteOffset == raw && restored.lineFraction == 0)
+                    let named = try await reader.renameBookmark(id: value.id, name: "坐标😀", request: BookmarkRequest())
+                    #expect(named.hasSamePosition(as: value) && named.createdAt == value.createdAt)
+                    #expect(try await reader.bookmarkAnchor(id: value.id, request: BookmarkRequest()) == restored)
                 } else {
                     await #expect(throws: (any Error).self) { try await reader.addBookmark(at: position, request: BookmarkRequest()) }
                 }
@@ -169,6 +234,10 @@ struct ReadingBookmarkTests {
         }
         await #expect(throws: LibraryError.invalidAnchor) { try await reader.bookmarkAnchor(id: UUID().uuidString, request: BookmarkRequest()) }
         #expect(try await reader.bookmarkPage(start: 32, request: BookmarkRequest()).start == 0)
+        await #expect(throws: LibraryError.invalidAnchor) {
+            try await reader.renameBookmark(id: UUID().uuidString, name: "missing", request: BookmarkRequest())
+        }
+        #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).total == 0)
         try await reader.close()
     }
 
@@ -179,6 +248,10 @@ struct ReadingBookmarkTests {
         try await db.write { db in try old.insert(db) }
         #expect(old.anchor(matching: f.book) == nil)
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [old])
+        await #expect(throws: LibraryError.invalidAnchor) { try await reader.bookmarkAnchor(id: old.id, request: BookmarkRequest()) }
+        let renamedOld = try await reader.renameBookmark(id: old.id, name: "旧版本", request: BookmarkRequest())
+        #expect(renamedOld.hasSamePosition(as: old) && renamedOld.createdAt == old.createdAt)
+        #expect(renamedOld.customName == "旧版本" && renamedOld.anchor(matching: f.book) == nil)
         await #expect(throws: LibraryError.invalidAnchor) { try await reader.bookmarkAnchor(id: old.id, request: BookmarkRequest()) }
         try await reader.deleteBookmark(id: old.id, request: BookmarkRequest())
         try await reader.deleteBookmark(id: old.id, request: BookmarkRequest())
@@ -204,7 +277,17 @@ struct ReadingBookmarkTests {
         #expect(reopened.cacheDisposition == .rebuilt)
         #expect(try await reopened.bookmarkPage(start: 0, request: BookmarkRequest()).items == [value])
         #expect(try await reopened.bookmarkAnchor(id: value.id, request: BookmarkRequest()).rawByteOffset == value.rawByteOffset)
+        let named = try await reopened.renameBookmark(id: value.id, name: " \n重启名称 \t", request: BookmarkRequest())
+        #expect(named.customName == "重启名称" && named.displayTitle == "重启名称")
+        #expect(named.hasSamePosition(as: value) && named.createdAt == value.createdAt)
         try await reopened.close()
+        let restartStore = try LibraryStore(root: f.managed)
+        let restartReader = try await LibraryService(store: restartStore).openReader(id: f.book.id, budget: f.budget)
+        #expect(try await restartReader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [named])
+        #expect(try await restartReader.bookmarkAnchor(id: named.id, request: BookmarkRequest()).rawByteOffset == value.rawByteOffset)
+        let restored = try await restartReader.renameBookmark(id: named.id, name: "", request: BookmarkRequest())
+        #expect(restored == value && restored.displayTitle == value.chapterTitleSnapshot)
+        try await restartReader.close()
         // A fresh Store in-process tests persistence, not actual App process-restart behavior.
     }
 
@@ -216,6 +299,19 @@ struct ReadingBookmarkTests {
         let before = try state(db)
         let value = try await reader.addBookmark(at: anchor(f.book, 3), request: BookmarkRequest())
         #expect(try state(db) == before)
+        let renamed = try await reader.renameBookmark(id: value.id, name: "精确位置", request: BookmarkRequest())
+        #expect(renamed.hasSamePosition(as: value))
+        #expect(renamed.createdAt == value.createdAt && renamed.chapterTitleSnapshot == value.chapterTitleSnapshot)
+        #expect(try await reader.bookmarkAnchor(id: value.id, request: BookmarkRequest()) == value.anchor(matching: f.book))
+        #expect(try state(db) == before)
+        #expect(try await reader.addBookmark(at: anchor(f.book, 3), request: BookmarkRequest()) == renamed)
+        for changed in [
+            ReadingBookmark(id: UUID().uuidString, bookID: value.bookID, versionID: value.versionID, rawByteOffset: value.rawByteOffset, createdAt: value.createdAt),
+            ReadingBookmark(id: value.id, bookID: "other", versionID: value.versionID, rawByteOffset: value.rawByteOffset, createdAt: value.createdAt),
+            ReadingBookmark(id: value.id, bookID: value.bookID, versionID: "other", rawByteOffset: value.rawByteOffset, createdAt: value.createdAt),
+            ReadingBookmark(id: value.id, bookID: value.bookID, versionID: value.versionID, unit: "utf16", rawByteOffset: value.rawByteOffset, createdAt: value.createdAt),
+            ReadingBookmark(id: value.id, bookID: value.bookID, versionID: value.versionID, rawByteOffset: 4, createdAt: value.createdAt)
+        ] { #expect(renamed.hasSamePosition(as: changed) == false) }
         try await reader.deleteBookmark(id: value.id, request: BookmarkRequest())
         try await reader.deleteBookmark(id: value.id, request: BookmarkRequest())
         #expect(try state(db) == before)
@@ -233,6 +329,14 @@ struct ReadingBookmarkTests {
         await #expect(throws: CancellationError.self) { try await reader.addBookmark(at: anchor(f.book, 1), request: request) }
         await #expect(throws: CancellationError.self) { try await reader.deleteBookmark(id: saved.id, request: request) }
         await #expect(throws: CancellationError.self) { try await reader.bookmarkPage(start: 0, request: request) }
+        await #expect(throws: CancellationError.self) { try await reader.renameBookmark(id: saved.id, name: "cancelled", request: request) }
+        let renameGate = ReaderTestGate()
+        let renameTask = Task {
+            await renameGate.pause()
+            return try await reader.renameBookmark(id: saved.id, name: "cancelled task", request: BookmarkRequest())
+        }
+        try await renameGate.wait(); renameTask.cancel(); await renameGate.release()
+        await #expect(throws: CancellationError.self) { try await renameTask.value }
         let gate = ReaderTestGate(), position = anchor(f.book, 2)
         let task = Task { await gate.pause(); return try await reader.addBookmark(at: position, request: BookmarkRequest()) }
         try await gate.wait(); task.cancel(); await gate.release()
@@ -249,11 +353,13 @@ struct ReadingBookmarkTests {
         await #expect(throws: CancellationError.self) { try await old.addBookmark(at: anchor(f.book, 1), request: BookmarkRequest()) }
         await #expect(throws: CancellationError.self) { try await old.deleteBookmark(id: saved.id, request: BookmarkRequest()) }
         await #expect(throws: CancellationError.self) { try await old.bookmarkPage(start: 0, request: BookmarkRequest()) }
+        await #expect(throws: CancellationError.self) { try await old.renameBookmark(id: saved.id, name: "superseded", request: BookmarkRequest()) }
         try await old.close()
         await #expect(throws: DerivedStorageError.closed) { try await old.bookmarkAnchor(id: saved.id, request: BookmarkRequest()) }
         #expect(try await current.bookmarkPage(start: 0, request: BookmarkRequest()).items == [saved])
         try await current.close()
         await #expect(throws: DerivedStorageError.closed) { try await current.addBookmark(at: anchor(f.book, 2), request: BookmarkRequest()) }
+        await #expect(throws: DerivedStorageError.closed) { try await current.renameBookmark(id: saved.id, name: "closed", request: BookmarkRequest()) }
         await #expect(throws: CancellationError.self) {
             try await f.store.deleteBookmark(session: current.reading.session, id: saved.id, request: BookmarkRequest())
         }
@@ -275,6 +381,15 @@ struct ReadingBookmarkTests {
         #expect(committed.chapterTitleSnapshot?.count == 80)
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [committed])
         #expect(try await reader.addBookmark(at: position, request: BookmarkRequest()) == committed)
+        let renameRequest = BookmarkRequest()
+        let renameTask = Task {
+            try await f.store.renameBookmark(session: reader.reading.session, id: committed.id, name: "committed rename",
+                request: renameRequest, afterCommit: { renameRequest.cancel(); withUnsafeCurrentTask { $0?.cancel() } })
+        }
+        let renamed = try await renameTask.value
+        #expect(renameRequest.isCancelled && renamed.customName == "committed rename")
+        #expect(renamed.hasSamePosition(as: committed) && renamed.createdAt == committed.createdAt)
+        #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [renamed])
         try await reader.close()
     }
 
@@ -286,12 +401,19 @@ struct ReadingBookmarkTests {
         try await db.write { db in
             try db.execute(sql: "CREATE TRIGGER bookmark_insert_failure AFTER INSERT ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
             try db.execute(sql: "CREATE TRIGGER bookmark_delete_failure AFTER DELETE ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
+            try db.execute(sql: "CREATE TRIGGER bookmark_rename_failure AFTER UPDATE OF customName ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
         }
         await #expect(throws: (any Error).self) { try await reader.addBookmark(at: anchor(f.book, 1), request: BookmarkRequest()) }
         await #expect(throws: (any Error).self) { try await reader.deleteBookmark(id: saved.id, request: BookmarkRequest()) }
+        await #expect(throws: (any Error).self) { try await reader.renameBookmark(id: saved.id, name: "rollback", request: BookmarkRequest()) }
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [saved])
         #expect(try state(db) == before)
         try await db.write { db in try db.execute(sql: "DROP TRIGGER bookmark_insert_failure; DROP TRIGGER bookmark_delete_failure") }
+        try await db.write { db in try db.execute(sql: "DROP TRIGGER bookmark_rename_failure") }
+        let renamed = try await reader.renameBookmark(id: saved.id, name: "retry rename", request: BookmarkRequest())
+        #expect(renamed.customName == "retry rename" && renamed.hasSamePosition(as: saved))
+        #expect(renamed.createdAt == saved.createdAt)
+        #expect(try state(db) == before)
         let retry = try await reader.addBookmark(at: anchor(f.book, 1), request: BookmarkRequest())
         #expect(retry.rawByteOffset == 1 && retry.chapterTitleSnapshot == nil)
         try await reader.deleteBookmark(id: retry.id, request: BookmarkRequest())

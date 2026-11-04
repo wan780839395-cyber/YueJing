@@ -27,29 +27,39 @@ def contracts(text):
     required = {
         DOMAIN + "LibrarySchema.swift": [
             'registerMigration("v4-bookmarks")', 'UNIQUE (bookID, versionID, unit, rawByteOffset)',
-            'REFERENCES books(id) ON DELETE CASCADE', "CHECK (unit = 'raw-byte-v1')"],
+            'REFERENCES books(id) ON DELETE CASCADE', "CHECK (unit = 'raw-byte-v1')",
+            'registerMigration("v5-bookmark-names")', '$0.add(column: "customName", .text)'],
         DOMAIN + "LibraryStore.swift": [
             '!closedSessions.contains(session.id)', 'book.activeSession == session.id',
             'book.versionID == session.versionID', 'request.check()',
             'ORDER BY createdAt DESC, id ASC LIMIT ? OFFSET ?',
             'DELETE FROM bookmarks WHERE id = ? AND bookID = ?',
-            'if let existing = try Self.bookmark(db, at: anchor) { return existing }'],
+            'if let existing = try Self.bookmark(db, at: anchor) { return existing }',
+            'UPDATE bookmarks SET customName = ? WHERE id = ? AND bookID = ?'],
         DOMAIN + "OpenedReader.swift": [
             'anchor.rawByteOffset >= metadata.bomByteCount', 'anchor.rawByteOffset < metadata.byteCount',
             'source.utf16Offset(for:', 'source.composedStart(at:', 'start == utf16.value',
             'source.rawByteOffset(for:', 'raw.value == anchor.rawByteOffset',
-            'guard current == value', 'lineFraction: 0'],
+            'current.hasSamePosition(as: value)', 'lineFraction: 0', 'public func renameBookmark('],
+        DOMAIN + "ReadingBookmark.swift": ['public let customName: String?', 'name.count <= 80',
+            '.generalCategory == .control', 'CharacterSet.newlines.contains($0)', 'func hasSamePosition(as'],
         DOMAIN + "ReadingBookmarkPage.swift": ['pageSize = 32'],
         DOMAIN + "BookmarkRequest.swift": ['NSLock()', 'Task.checkCancellation()', 'lock.lock()', 'lock.unlock()'],
         APP + "ReaderViewController.swift": ['func bookmarkAnchor()', '!restoring, !interacting', 'let visible = actualVisibleAnchor()'],
         APP + "ReaderViewModel.swift": ['func prepareBookmarkWindow(', 'func applyBookmarkWindow(',
             'preparedBookmarkWindow == rendered.id', 'bookmarkPositionIsCurrent(context)',
-            'viewport.controller?.sceneBindingID == context.binding', 'navigationGate.expect(window: rendered.id, navigation: navigation)'],
+            'viewport.controller?.sceneBindingID == context.binding', 'navigationGate.expect(window: rendered.id, navigation: navigation)',
+            'let panel = bookmarkContext', 'let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,',
+            'preparedBookmarkContext = context', 'let context = preparedBookmarkContext',
+            'if anchor != value', 'func refreshBookmarkCapture('],
         APP + "ReaderBookmarksViewModel.swift": ['@MainActor', 'ObservableObject', 'cancelOperation()',
-            'defer { finish(operation.id) }', 'operationID == id', 'reader === owner'],
+            'defer { finish(operation.id) }', 'operationID == id', 'reader === owner',
+            'if activity == .adding { cancelOperation() }', 'func rename(', 'catch is ReaderViewModel.BookmarkJumpError'],
         APP + "ReaderBookmarksView.swift": ['.confirmationDialog(', 'role: .destructive',
-            '.buttonStyle(.borderless)', 'reader.bookmarks.confirmDelete', 'reader.bookmarks.empty'],
-        APP + "ReaderContentsSheet.swift": ['showingBookmarks = false', 'ReaderDirectorySheet(', 'ReaderBookmarksView('],
+            '.buttonStyle(.borderless)', 'reader.bookmarks.confirmDelete', 'reader.bookmarks.empty',
+            'Text(bookmark.displayTitle)', 'reader.bookmarks.confirmRename', 'ReadingBookmark.validatedCustomName(editedName)'],
+        APP + "ReaderContentsSheet.swift": ['showingBookmarks = false', 'ReaderDirectorySheet(', 'ReaderBookmarksView(',
+            'model.refreshBookmarkCapture(presentationID)'],
         APP + "ReaderScreen.swift": ['model.beginBookmarkPanel(id)', 'model.endBookmarkPanel(old)', 'selectedBookmark: selectBookmark'],
     }
     checked = []
@@ -64,6 +74,14 @@ def contracts(text):
         require(not re.search(r'\b(?:saveProgress|savePreferences|finishReading)\s*\(', appended),
                 path + ': bookmark operations write reader state')
     require('saveProgress(' not in text[APP + 'ReaderBookmarksViewModel.swift'], 'UI bookmark mutation writes progress')
+    prepare = text[APP + 'ReaderViewModel.swift'].split('func prepareBookmarkWindow(', 1)[1].split('func applyBookmarkWindow(', 1)[0]
+    require(prepare.index('let context = BookmarkPanelContext(') < prepare.index('bookmarkPositionIsCurrent(context)'),
+            'jump still uses stale add context')
+    require(prepare.count('bookmarkPositionIsCurrent(context)') == 3, 'jump lease missing await boundary checks')
+    require(not re.search(r'\b(?:anchor|window) =', prepare), 'prepare mutates current position/window')
+    same_position = text[DOMAIN + 'ReadingBookmark.swift'].split('func hasSamePosition(', 1)[1].split('public init(', 1)[0]
+    require('customName' not in same_position and 'rawByteOffset == other.rawByteOffset' in same_position,
+            'rename must not invalidate strict anchor identity')
     return checked
 
 
@@ -126,6 +144,37 @@ def sql_smoke(text):
             raise ValueError('injected deletion did not fail')
         require(db.execute(page, ('a', 100, 0)).fetchall() == before, 'failed deletion changed rows')
         checks.append('extracted_delete_rollback')
+        # GRDB alter DSL is checked above; this SQL is its explicit smoke model, NOT native migration execution.
+        db.execute('ALTER TABLE bookmarks ADD COLUMN customName TEXT')
+        upgraded = db.execute(page, ('a', 100, 0)).fetchall()
+        require([r[:-1] for r in upgraded] == before and all(r[-1] is None for r in upgraded), 'v5 model changed old rows')
+        checks.append('v5_alter_model_preserves_old_rows_not_grdb')
+        rename = re.search(r'UPDATE bookmarks SET customName = \? WHERE id = \? AND bookID = \?', store).group()
+        original = db.execute('SELECT * FROM bookmarks WHERE id = ?', (expected[0][0],)).fetchone()
+        db.execute(rename, ('新的名称 👩‍💻', original[0], 'a'))
+        renamed = db.execute('SELECT * FROM bookmarks WHERE id = ?', (original[0],)).fetchone()
+        require(renamed[:-1] == original[:-1] and renamed[-1] == '新的名称 👩‍💻', 'rename changed anchor/time')
+        db.execute(rename, ('cross-book', original[0], 'b'))
+        require(db.execute('SELECT * FROM bookmarks WHERE id = ?', (original[0],)).fetchone() == renamed, 'cross-book rename')
+        db.execute(rename, (None, original[0], 'a'))
+        require(db.execute('SELECT * FROM bookmarks WHERE id = ?', (original[0],)).fetchone() == original, 'reset name')
+        checks.append('extracted_rename_only_name_reset_and_book_isolation')
+        db.execute("CREATE TRIGGER fail_name AFTER UPDATE OF customName ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
+        db.execute('BEGIN')
+        try:
+            db.execute(rename, ('must rollback', original[0], 'a'))
+        except sqlite3.IntegrityError:
+            db.execute('ROLLBACK')
+        else:
+            raise ValueError('injected rename did not fail')
+        require(db.execute('SELECT * FROM bookmarks WHERE id = ?', (original[0],)).fetchone() == original, 'rename rollback')
+        checks.append('extracted_rename_rollback')
+        db.executemany('INSERT INTO bookmarks VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
+            ('near1', 'a', 'v1', 'raw-byte-v1', 1000, 10, 'same chapter', None),
+            ('near2', 'a', 'v1', 'raw-byte-v1', 1003, 10, 'same chapter', None)])
+        require(db.execute("SELECT COUNT(*) FROM bookmarks WHERE chapterTitleSnapshot = 'same chapter'").fetchone()[0] == 2,
+                'same chapter nearby positions')
+        checks.append('same_chapter_three_byte_distance_sql')
         db.execute('DROP TABLE bookmarks')
         db.execute('CREATE INDEX bookmarks_book_created_id ON books(id)')
         db.execute('BEGIN')
@@ -153,6 +202,11 @@ def negative_contracts(text):
         (DOMAIN + 'LibrarySchema.swift', 'UNIQUE (bookID, versionID, unit, rawByteOffset)', ''),
         (APP + 'ReaderViewModel.swift', 'preparedBookmarkWindow == rendered.id', 'true'),
         (APP + 'ReaderBookmarksView.swift', '.confirmationDialog(', '.alert('),
+        (DOMAIN + 'LibraryStore.swift', 'UPDATE bookmarks SET customName = ? WHERE id = ? AND bookID = ?', 'UPDATE bookmarks SET customName = ? WHERE id = ?'),
+        (APP + 'ReaderViewModel.swift', 'preparedBookmarkContext = context', ''),
+        (APP + 'ReaderViewModel.swift', 'if anchor != value', 'if true'),
+        (APP + 'ReaderBookmarksView.swift', 'reader.bookmarks.confirmRename', 'missingRename'),
+        (DOMAIN + 'ReadingBookmark.swift', 'name.count <= 80', 'true'),
     ]
     for path, before, after in mutations:
         changed = dict(text); changed[path] = changed[path].replace(before, after)

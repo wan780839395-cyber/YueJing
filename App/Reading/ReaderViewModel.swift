@@ -28,6 +28,8 @@ final class ReaderViewModel: ObservableObject {
     }
     private var bookmarkContext: BookmarkPanelContext?
     private var preparedBookmarkWindow: UUID?
+    private var preparedBookmarkContext: BookmarkPanelContext?
+    enum BookmarkJumpError: Error { case stateChanged }
     private let bookID: String
     private let service: LibraryService
     private var reader: OpenedReader?
@@ -104,8 +106,12 @@ final class ReaderViewModel: ObservableObject {
         guard !closing, !suspended, !exitSaveFailed, let reader,
               navigationGate.accepts(window: windowID),
               value.bookID == reader.reading.session.bookID, value.versionID == reader.reading.session.versionID else { return }
-        bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
-        anchor = value; userPosition = true; sequence += 1; positionRevision &+= 1
+        // Duplicate UIKit callbacks must not revoke an otherwise unchanged capture.
+        if anchor != value {
+            bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
+            positionRevision &+= 1
+        }
+        anchor = value; userPosition = true; sequence += 1
         let serial = sequence, request = lifecycle
         saveTask?.cancel()
         saveTask = Task {
@@ -303,41 +309,57 @@ extension ReaderViewModel {
     func beginBookmarkPanel(_ presentation: UUID) {
         endBookmarkPanel()
         guard let owner = reader, !closing, !suspended, !exitSaveFailed else { return }
+        // Sampling may finish pending UIKit layout and synchronously publish an anchor callback.
+        // Build the lease afterwards, then validate it against the now-current window.
+        let visible = viewport.controller?.bookmarkAnchor()
         let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,
             generation: generation, positionRevision: positionRevision, owner: owner,
             controller: viewport.controller.map(ObjectIdentifier.init),
             binding: viewport.controller?.sceneBindingID, window: window?.id)
         bookmarkContext = context
-        let captured = bookmarkPositionIsCurrent(context) ? viewport.controller?.bookmarkAnchor() : nil
+        let captured = bookmarkPositionIsCurrent(context) ? visible : nil
         bookmarks.present(reader: owner, anchor: captured, presentation: presentation,
             current: { [weak self] in self?.bookmarkOwnerIsCurrent(context) ?? false },
             positionValid: { [weak self] in self?.bookmarkPositionIsCurrent(context) ?? false })
     }
+    /// Refresh only on explicit tab selection; never revive a replaced owner or an in-flight operation.
+    func refreshBookmarkCapture(_ presentation: UUID) {
+        guard let context = bookmarkContext, context.presentation == presentation,
+              bookmarkOwnerIsCurrent(context), !bookmarks.isBusy else { return }
+        beginBookmarkPanel(presentation)
+    }
     func endBookmarkPanel(_ presentation: UUID? = nil) {
         if let presentation, bookmarkContext?.presentation != presentation { return }
         bookmarks.dismiss(presentation: presentation)
-        bookmarkContext = nil; preparedBookmarkWindow = nil
+        bookmarkContext = nil; preparedBookmarkWindow = nil; preparedBookmarkContext = nil
     }
     func prepareBookmarkWindow(id: String, presentation: UUID,
                                request: BookmarkRequest) async throws -> ReadingWindow {
-        guard let context = bookmarkContext, context.presentation == presentation,
-              bookmarkPositionIsCurrent(context) else { throw LibraryError.invalidAnchor }
+        guard let panel = bookmarkContext, panel.presentation == presentation,
+              bookmarkOwnerIsCurrent(panel) else { throw LibraryError.invalidAnchor }
+        // The add-position snapshot is not a navigation lease. Capture a fresh lease at click time.
+        let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,
+            generation: generation, positionRevision: positionRevision, owner: panel.owner,
+            controller: viewport.controller.map(ObjectIdentifier.init),
+            binding: viewport.controller?.sceneBindingID, window: window?.id)
+        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         let target = try await context.owner.bookmarkAnchor(id: id, request: request)
         try request.check()
-        guard bookmarkPositionIsCurrent(context) else { throw CancellationError() }
+        guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         let rendered = try await context.owner.window(around: target, width: width, preferences: preferences)
         try request.check()
-        guard bookmarkPositionIsCurrent(context) else { throw CancellationError() }
-        preparedBookmarkWindow = rendered.id
+        guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
+        preparedBookmarkWindow = rendered.id; preparedBookmarkContext = context
         return rendered
     }
     /// No progress write until the existing windowApplied -> visibleChanged navigation path.
     func applyBookmarkWindow(_ rendered: ReadingWindow, presentation: UUID) -> Bool {
-        guard let context = bookmarkContext, context.presentation == presentation,
+        guard let context = preparedBookmarkContext, context.presentation == presentation,
               preparedBookmarkWindow == rendered.id, bookmarkPositionIsCurrent(context),
               rendered.anchor.bookID == context.owner.book.id,
               rendered.anchor.versionID == context.owner.book.versionID else { return false }
-        preparedBookmarkWindow = nil
+        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
         layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
         navigationGate.begin()
         guard let navigation = navigationGate.navigation else { return false }

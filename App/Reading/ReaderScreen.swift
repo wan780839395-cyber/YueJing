@@ -216,10 +216,12 @@ struct ReaderScreen: View {
         if panel == .settings, model.window == nil { return }
         lastPanelControl = panel == .directory ? "directory" : "settings"
         let previous = tools.panelID
-        mutateTools { $0.open(panel) }
-        if panel == .directory, let id = tools.panelID, id != previous, tools.owns(.directory, id: id) {
+        var next = tools
+        next.open(panel)
+        if panel == .directory, let id = next.panelID, id != previous, next.owns(.directory, id: id) {
             model.beginBookmarkPanel(id)
         }
+        mutateTools { $0 = next }
     }
     private func closePanel(_ id: UUID) { mutateTools { _ = $0.closePanel(id: id) } }
     private func selectChapter(_ chapter: TXTChapter, _ id: UUID) {

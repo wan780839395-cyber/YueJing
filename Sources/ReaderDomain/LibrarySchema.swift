@@ -55,6 +55,9 @@ enum LibrarySchema {
                 CREATE INDEX bookmarks_book_created_id ON bookmarks(bookID, createdAt DESC, id ASC);
                 """)
         }
+        migrator.registerMigration("v5-bookmark-names") { db in
+            try db.alter(table: "bookmarks") { $0.add(column: "customName", .text) }
+        }
         return migrator
     }
 }

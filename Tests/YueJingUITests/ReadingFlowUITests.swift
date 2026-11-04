@@ -344,6 +344,7 @@ final class ReadingFlowUITests: XCTestCase {
             let identifier = rows.firstMatch.identifier
             XCTAssertEqual(rows.count, 1)
             XCTAssertFalse(add.isEnabled)
+            renameBookmark(identifier, to: "第一章起点", app)
             closePanel(app); openDirectory(app)
             scrollTo(app.buttons["下一组"], in: app.tables.firstMatch)
             app.buttons["下一组"].tap()
@@ -363,6 +364,7 @@ final class ReadingFlowUITests: XCTestCase {
             let saved = app.buttons[identifier]
             waitHittable(saved)
             XCTAssertEqual(rows.count, 1)
+            XCTAssertTrue(saved.label.contains("第一章起点"))
             saved.tap()
             XCTAssertTrue(endMarker("UI_CHAPTER_1", app).waitForExistence(timeout: 10))
             XCTAssertFalse(endMarker("UI_CHAPTER_33", app).exists)
@@ -371,6 +373,56 @@ final class ReadingFlowUITests: XCTestCase {
             waitHittable(app.buttons[identifier])
             XCTAssertFalse(add.isEnabled)
             Self.captureEvidence(app, testName: name, stage: "bookmarks-restored")
+            closePanel(app)
+            let beforeNearby = visibleCanvases(app)
+            let start = viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+            let end = start.withOffset(CGVector(dx: 0, dy: -80))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+            XCTAssertNotEqual(visibleCanvases(app), beforeNearby)
+            showTools(app)
+            let nearbyCanvas = visibleCanvases(app).first
+            XCTAssertNotNil(nearbyCanvas)
+            guard let nearbyCanvas, let initialCanvas = beforeNearby.first else { return }
+            XCTAssertEqual(nearbyCanvas.label, initialCanvas.label)
+            XCTAssertGreaterThan(initialCanvas.frame.minY - nearbyCanvas.frame.minY, 44)
+            openDirectory(app); waitHittable(section); section.tap()
+            let nearbyReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                add.exists && add.isHittable && add.isEnabled
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [nearbyReady], timeout: 10), .completed)
+            add.tap()
+            let twoRows = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in rows.count == 2 }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [twoRows], timeout: 10), .completed)
+            let nearby = rows.allElementsBoundByIndex.first { $0.identifier != identifier }
+            XCTAssertNotNil(nearby)
+            guard let nearby else { return }
+            XCTAssertTrue(nearby.label.contains("UI_CHAPTER_1"), "The second bookmark must still belong to chapter 1")
+            let nearbyID = nearby.identifier
+            renameBookmark(nearbyID, to: "第一章附近", app)
+            scrollTo(saved, in: app.tables["reader.bookmarks.list"]); saved.tap()
+            XCTAssertTrue(endMarker("UI_CHAPTER_1", app).waitForExistence(timeout: 10))
+            let firstReturned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                guard let canvas = self.visibleCanvases(app).first else { return false }
+                return canvas.label == initialCanvas.label && abs(canvas.frame.minY - initialCanvas.frame.minY) < 2
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [firstReturned], timeout: 10), .completed)
+            showTools(app); openDirectory(app); waitHittable(section); section.tap()
+            let secondSaved = app.buttons[nearbyID]
+            scrollTo(secondSaved, in: app.tables["reader.bookmarks.list"]); secondSaved.tap()
+            XCTAssertTrue(viewport(app).waitForExistence(timeout: 10))
+            // Default 20pt font + 7pt spacing: allow at most one line for lineFraction=0 normalization.
+            // Staying at bookmark one cannot pass: the saved displacement above exceeds this bound.
+            let secondReturned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                guard let canvas = self.visibleCanvases(app).first else { return false }
+                return canvas.label == nearbyCanvas.label &&
+                    abs(canvas.frame.minY - nearbyCanvas.frame.minY) <= 44 &&
+                    initialCanvas.frame.minY - canvas.frame.minY > 2
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [secondReturned], timeout: 10), .completed)
+            XCTAssertFalse(app.staticTexts["reader.bookmarks.error"].exists)
+            showTools(app); openDirectory(app); waitHittable(section); section.tap()
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertTrue(app.buttons[nearbyID].label.contains("第一章附近"))
             closePanel(app)
         }
     }
@@ -391,9 +443,12 @@ final class ReadingFlowUITests: XCTestCase {
                 "reader.bookmark.", "reader.bookmark.delete."))
             XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10))
             let identifier = rows.firstMatch.identifier
+            renameBookmark(identifier, to: "短文标记", app)
             waitHittable(app.buttons["reader.panel.close"]); closePanel(app)
             openDirectory(app); waitHittable(section); section.tap()
             let saved = app.buttons[identifier]
+            XCTAssertTrue(saved.waitForExistence(timeout: 10))
+            XCTAssertTrue(saved.label.contains("短文标记"))
             scrollTo(saved, in: app.tables["reader.bookmarks.list"]); saved.tap()
             XCTAssertTrue(endMarker("UI-END-B", app).waitForExistence(timeout: 10))
             showTools(app); openDirectory(app); waitHittable(section); section.tap()
@@ -411,6 +466,20 @@ final class ReadingFlowUITests: XCTestCase {
             Self.captureEvidence(app, testName: name, stage: "bookmarks-accessibility-deleted")
             closePanel(app); exitReader(app, shelfBook: "UITest-Short-B")
         }
+    }
+
+    @MainActor private func renameBookmark(_ identifier: String, to name: String, _ app: XCUIApplication) {
+        let id = String(identifier.dropFirst("reader.bookmark.".count))
+        let rename = app.buttons["reader.bookmarks.rename." + id]
+        scrollTo(rename, in: app.tables["reader.bookmarks.list"]); rename.tap()
+        let field = app.alerts.textFields["reader.bookmarks.name"]
+        waitHittable(field); field.tap(); field.typeText(name)
+        let save = app.alerts.buttons["reader.bookmarks.confirmRename"]
+        waitHittable(save); save.tap()
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.buttons[identifier].exists && app.buttons[identifier].label.contains(name)
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
     }
 
     @MainActor private func sceneRoundTripPID(_ app: XCUIApplication) -> Int {

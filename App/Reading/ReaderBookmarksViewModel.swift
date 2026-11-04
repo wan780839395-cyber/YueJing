@@ -5,7 +5,7 @@ import ReaderDomain
 /// Presentation-scoped operations. This model never writes reading progress or settings.
 @MainActor
 final class ReaderBookmarksViewModel: ObservableObject {
-    enum Activity: Equatable { case loading, adding, deleting, jumping }
+    enum Activity: Equatable { case loading, adding, deleting, renaming, jumping }
     @Published private(set) var page: ReadingBookmarkPage?
     @Published private(set) var activity: Activity?
     @Published private(set) var message: String?
@@ -45,7 +45,8 @@ final class ReaderBookmarksViewModel: ObservableObject {
     }
     func invalidatePosition() {
         guard presentationID != nil else { return }
-        cancelOperation(); capture = nil; existingAtCapture = nil
+        if activity == .adding { cancelOperation() }
+        capture = nil; existingAtCapture = nil
         positionMessage = "阅读位置已变化，请关闭面板后重新添加。"
     }
     func show() { if page == nil && !isBusy { loadPage(0) } }
@@ -127,6 +128,32 @@ final class ReaderBookmarksViewModel: ObservableObject {
             }
         }
     }
+    func rename(_ bookmark: ReadingBookmark, name: String) {
+        guard let owner = reader, bookmark.bookID == owner.book.id,
+              let presentation = presentationID, let operation = begin(.renaming) else { return }
+        let start = page?.start ?? 0
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { finish(operation.id) }
+            guard accepts(operation.id, presentation: presentation, owner: owner) else {
+                operation.request.cancel(); return
+            }
+            do {
+                let saved = try await owner.renameBookmark(id: bookmark.id, name: name, request: operation.request)
+                guard accepts(operation.id, presentation: presentation, owner: owner) else { return }
+                if existingAtCapture?.id == saved.id { existingAtCapture = saved }
+                notice = saved.customName == nil ? "已恢复默认书签名称。" : "书签名称已保存。"
+                finish(operation.id); loadPage(start)
+            } catch is CancellationError { }
+            catch is ReadingBookmark.NameValidationError {
+                fail("名称最多80个字，不可包含换行或控制字符。", operation: operation.id,
+                     presentation: presentation, owner: owner)
+            } catch {
+                fail("书签名称未保存，可重试。原位置和阅读进度未改变。", operation: operation.id,
+                     presentation: presentation, owner: owner)
+            }
+        }
+    }
     func jump(_ bookmark: ReadingBookmark,
               prepare: @escaping @MainActor (String, BookmarkRequest) async throws -> ReadingWindow,
               apply: @escaping @MainActor (ReadingWindow) -> Bool) {
@@ -148,6 +175,9 @@ final class ReaderBookmarksViewModel: ObservableObject {
                 } else { finish(operation.id) }
             } catch is CancellationError {
                 finish(operation.id)
+            } catch is ReaderViewModel.BookmarkJumpError {
+                fail("阅读状态正在变化，请稍后重试。原阅读进度未改变。", operation: operation.id,
+                     presentation: presentation, owner: owner)
             } catch {
                 fail("无法定位这条书签。文字版本或位置可能已不匹配，原阅读进度未改变。",
                      operation: operation.id, presentation: presentation, owner: owner)
