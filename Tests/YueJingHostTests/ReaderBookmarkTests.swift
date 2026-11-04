@@ -14,6 +14,12 @@ struct ReaderBookmarkTests {
             let presentation = UUID()
             model.beginBookmarkPanel(presentation)
             #expect(model.bookmarks.canAdd)
+            model.bookmarks.add(name: String(repeating: "a", count: 81))
+            try await waitUntil { !model.bookmarks.isBusy }
+            #expect(model.bookmarks.message != nil && model.bookmarks.canAdd)
+            model.bookmarks.show()
+            try await waitUntil { !model.bookmarks.isBusy }
+            #expect(model.bookmarks.page?.total == 0)
             model.bookmarks.add()
             try await waitUntil { !model.bookmarks.isBusy }
             let saved = try #require(model.bookmarks.page?.items.first)
@@ -59,6 +65,16 @@ struct ReaderBookmarkTests {
             model.bookmarks.delete(saved)
             try await waitUntil { !model.bookmarks.isBusy }
             #expect(model.bookmarks.page?.total == 0 && model.bookmarks.canAdd)
+            model.bookmarks.add(name: "  创建时直接命名  ")
+            try await waitUntil { !model.bookmarks.isBusy }
+            let direct = try #require(model.bookmarks.page?.items.first)
+            #expect(direct.displayTitle == "创建时直接命名" && direct.rawByteOffset == visible.rawByteOffset)
+            model.endBookmarkPanel(presentation)
+            model.beginBookmarkPanel(UUID()); model.bookmarks.show()
+            try await waitUntil { !model.bookmarks.isBusy }
+            #expect(model.bookmarks.page?.items.first?.customName == "创建时直接命名")
+            model.bookmarks.delete(direct)
+            try await waitUntil { !model.bookmarks.isBusy }
             #expect(await model.close())
             let reopened = try await service.openReader(id: book.id, budget: ReaderStoragePolicy.budget())
             #expect(reopened.reading.anchor == nil)
@@ -90,6 +106,11 @@ struct ReaderBookmarkTests {
             #expect(model.bookmarks.canAdd)
             model.endBookmarkPanel(old)
             #expect(model.bookmarks.presentationID == current)
+            model.bookmarks.add(name: "不应创建")
+            model.endBookmarkPanel(current)
+            model.beginBookmarkPanel(UUID()); model.bookmarks.show()
+            try await waitUntil { !model.bookmarks.isBusy }
+            #expect(model.bookmarks.page?.total == 0)
         }
     }
 

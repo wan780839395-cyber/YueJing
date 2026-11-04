@@ -82,6 +82,21 @@ def contracts(text):
     same_position = text[DOMAIN + 'ReadingBookmark.swift'].split('func hasSamePosition(', 1)[1].split('public init(', 1)[0]
     require('customName' not in same_position and 'rawByteOffset == other.rawByteOffset' in same_position,
             'rename must not invalidate strict anchor identity')
+    addition = text[DOMAIN + 'LibraryStore.swift'].split('func addBookmark(', 1)[1].split('func deleteBookmark(', 1)[0]
+    require('customName: customName' in addition and 'ReadingBookmark.validatedCustomName(name)' in addition,
+            'named creation must validate and insert the name')
+    require(addition.count('queue.write') == 1 and addition.count('value.insert(db)') == 1 and
+            'renameBookmark(' not in addition and 'UPDATE bookmarks' not in addition, 'creation is not one insert transaction')
+    require('chapterTitle: title, name: name, request: request' in text[DOMAIN + 'OpenedReader.swift'], 'reader drops initial name')
+    require('id: bookmarkID, name: name, request: operation.request' in text[APP + 'ReaderBookmarksViewModel.swift'], 'UI model drops initial name')
+    view = text[APP + 'ReaderBookmarksView.swift']
+    require('if active && model.canAdd { editName() }' in view and 'model.add()' not in view,
+            'add button must edit before writing')
+    for token in ['model.add(name: editedName)', 'reader.bookmarks.confirmAdd', 'presenting: nameEditor',
+                  'editor.presentation == presentationID', 'bookmarkActions(bookmark, ordinal: ordinal)',
+                  'HStack(spacing: 12)', 'VStack(alignment: .leading, spacing: 8)',
+                  'Label("重命名", systemImage: "pencil")', 'Label("删除", systemImage: "trash")']:
+        require(token in view, 'name editor/action layout missing: '+token)
     return checked
 
 
@@ -175,6 +190,23 @@ def sql_smoke(text):
         require(db.execute("SELECT COUNT(*) FROM bookmarks WHERE chapterTitleSnapshot = 'same chapter'").fetchone()[0] == 2,
                 'same chapter nearby positions')
         checks.append('same_chapter_three_byte_distance_sql')
+        # Explicit INSERT smoke model for the Codable/GRDB insertion, not Swift execution.
+        named_insert = 'INSERT INTO bookmarks VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        row = ('named-create', 'a', 'v1', 'raw-byte-v1', 1010, 11, 'chapter', '创建时名称')
+        db.execute(named_insert, row)  # fail_name UPDATE trigger remains active: no second update needed.
+        require(db.execute('SELECT * FROM bookmarks WHERE id = ?', (row[0],)).fetchone() == row, 'initial name not persisted')
+        checks.append('named_creation_single_insert_sql_model')
+        before_named_failure = db.execute(page, ('a', 100, 0)).fetchall()
+        db.execute("CREATE TRIGGER fail_named_insert AFTER INSERT ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
+        db.execute('BEGIN')
+        try:
+            db.execute(named_insert, ('named-failure', 'a', 'v1', 'raw-byte-v1', 1011, 11, None, '一起回滚'))
+        except sqlite3.IntegrityError:
+            db.execute('ROLLBACK')
+        else:
+            raise ValueError('named insert unexpectedly succeeded')
+        require(db.execute(page, ('a', 100, 0)).fetchall() == before_named_failure, 'named creation partially committed')
+        checks.append('named_creation_rollback_sql_model')
         db.execute('DROP TABLE bookmarks')
         db.execute('CREATE INDEX bookmarks_book_created_id ON books(id)')
         db.execute('BEGIN')
@@ -207,6 +239,11 @@ def negative_contracts(text):
         (APP + 'ReaderViewModel.swift', 'if anchor != value', 'if true'),
         (APP + 'ReaderBookmarksView.swift', 'reader.bookmarks.confirmRename', 'missingRename'),
         (DOMAIN + 'ReadingBookmark.swift', 'name.count <= 80', 'true'),
+        (DOMAIN + 'LibraryStore.swift', 'customName: customName)', 'customName: nil)'),
+        (DOMAIN + 'OpenedReader.swift', 'chapterTitle: title, name: name, request: request', 'chapterTitle: title, request: request'),
+        (APP + 'ReaderBookmarksViewModel.swift', 'id: bookmarkID, name: name, request: operation.request', 'id: bookmarkID, request: operation.request'),
+        (APP + 'ReaderBookmarksView.swift', 'if active && model.canAdd { editName() }', 'if active { model.add() }'),
+        (APP + 'ReaderBookmarksView.swift', 'editor.presentation == presentationID', 'true'),
     ]
     for path, before, after in mutations:
         changed = dict(text); changed[path] = changed[path].replace(before, after)

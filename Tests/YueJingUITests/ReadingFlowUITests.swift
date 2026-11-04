@@ -337,11 +337,19 @@ final class ReadingFlowUITests: XCTestCase {
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
             add.tap()
+            let addEditor = app.alerts["添加书签"]
+            waitHittable(addEditor.buttons["取消"]); addEditor.buttons["取消"].tap()
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format:
+                "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
+                "reader.bookmark.", "reader.bookmark.delete.")).count, 0)
+            waitHittable(add); add.tap()
+            saveBookmarkNameEditor("添加书签", name: "创建时名称", app)
             let rows = app.buttons.matching(NSPredicate(format:
                 "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
                 "reader.bookmark.", "reader.bookmark.delete."))
             waitHittable(rows.firstMatch)
             let identifier = rows.firstMatch.identifier
+            XCTAssertTrue(rows.firstMatch.label.contains("创建时名称"))
             XCTAssertEqual(rows.count, 1)
             XCTAssertFalse(add.isEnabled)
             renameBookmark(identifier, to: "第一章起点", app)
@@ -391,6 +399,7 @@ final class ReadingFlowUITests: XCTestCase {
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [nearbyReady], timeout: 10), .completed)
             add.tap()
+            saveBookmarkNameEditor("添加书签", name: "", app)
             let twoRows = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in rows.count == 2 }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [twoRows], timeout: 10), .completed)
             let nearby = rows.allElementsBoundByIndex.first { $0.identifier != identifier }
@@ -399,7 +408,7 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertTrue(nearby.label.contains("UI_CHAPTER_1"), "The second bookmark must still belong to chapter 1")
             let nearbyID = nearby.identifier
             renameBookmark(nearbyID, to: "第一章附近", app)
-            scrollTo(saved, in: app.tables["reader.bookmarks.list"]); saved.tap()
+            scrollTo(saved, in: bookmarkList(app)); saved.tap()
             XCTAssertTrue(endMarker("UI_CHAPTER_1", app).waitForExistence(timeout: 10))
             let firstReturned = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                 guard let canvas = self.visibleCanvases(app).first else { return false }
@@ -408,7 +417,7 @@ final class ReadingFlowUITests: XCTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [firstReturned], timeout: 10), .completed)
             showTools(app); openDirectory(app); waitHittable(section); section.tap()
             let secondSaved = app.buttons[nearbyID]
-            scrollTo(secondSaved, in: app.tables["reader.bookmarks.list"]); secondSaved.tap()
+            scrollTo(secondSaved, in: bookmarkList(app)); secondSaved.tap()
             XCTAssertTrue(viewport(app).waitForExistence(timeout: 10))
             // Default 20pt font + 7pt spacing: allow at most one line for lineFraction=0 normalization.
             // Staying at bookmark one cannot pass: the saved displacement above exceeds this bound.
@@ -438,23 +447,25 @@ final class ReadingFlowUITests: XCTestCase {
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
             add.tap()
+            saveBookmarkNameEditor("添加书签", name: "创建时短文", app)
             let rows = app.buttons.matching(NSPredicate(format:
                 "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)",
                 "reader.bookmark.", "reader.bookmark.delete."))
             XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10))
             let identifier = rows.firstMatch.identifier
+            XCTAssertTrue(rows.firstMatch.label.contains("创建时短文"))
             renameBookmark(identifier, to: "短文标记", app)
             waitHittable(app.buttons["reader.panel.close"]); closePanel(app)
             openDirectory(app); waitHittable(section); section.tap()
             let saved = app.buttons[identifier]
             XCTAssertTrue(saved.waitForExistence(timeout: 10))
             XCTAssertTrue(saved.label.contains("短文标记"))
-            scrollTo(saved, in: app.tables["reader.bookmarks.list"]); saved.tap()
+            scrollTo(saved, in: bookmarkList(app)); saved.tap()
             XCTAssertTrue(endMarker("UI-END-B", app).waitForExistence(timeout: 10))
             showTools(app); openDirectory(app); waitHittable(section); section.tap()
             let id = String(identifier.dropFirst("reader.bookmark.".count))
             let delete = app.buttons["reader.bookmark.delete." + id]
-            scrollTo(delete, in: app.tables["reader.bookmarks.list"]); delete.tap()
+            scrollTo(delete, in: bookmarkList(app)); delete.tap()
             let cancel = app.buttons["取消"]
             waitHittable(cancel); cancel.tap()
             XCTAssertTrue(saved.exists)
@@ -471,15 +482,37 @@ final class ReadingFlowUITests: XCTestCase {
     @MainActor private func renameBookmark(_ identifier: String, to name: String, _ app: XCUIApplication) {
         let id = String(identifier.dropFirst("reader.bookmark.".count))
         let rename = app.buttons["reader.bookmarks.rename." + id]
-        scrollTo(rename, in: app.tables["reader.bookmarks.list"]); rename.tap()
-        let field = app.alerts.textFields["reader.bookmarks.name"]
-        waitHittable(field); field.tap(); field.typeText(name)
-        let save = app.alerts.buttons["reader.bookmarks.confirmRename"]
-        waitHittable(save); save.tap()
+        scrollTo(rename, in: bookmarkList(app)); rename.tap()
+        saveBookmarkNameEditor("重命名书签", name: name, app)
         let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             app.buttons[identifier].exists && app.buttons[identifier].label.contains(name)
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
+    }
+
+    @MainActor private func bookmarkList(_ app: XCUIApplication) -> XCUIElement {
+        // SwiftUI List is a CollectionView on the observed native runtime, not a Table.
+        let matches = app.descendants(matching: .any).matching(identifier: "reader.bookmarks.list")
+        XCTAssertEqual(matches.count, 1)
+        return matches.firstMatch
+    }
+    @MainActor private func saveBookmarkNameEditor(_ title: String, name: String, _ app: XCUIApplication) {
+        let alert = app.alerts[title]
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        XCTAssertEqual(alert.textFields.count, 1)
+        let field = alert.textFields.firstMatch
+        waitHittable(field)
+        XCTAssertEqual(field.placeholderValue, "书签名称")
+        field.tap()
+        let existing = field.value as? String ?? ""
+        if !existing.isEmpty && existing != "书签名称" {
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.count))
+        }
+        if !name.isEmpty { field.typeText(name) }
+        let save = alert.buttons["保存"]
+        waitHittable(save); XCTAssertTrue(save.isEnabled); save.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !alert.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 10), .completed)
     }
 
     @MainActor private func sceneRoundTripPID(_ app: XCUIApplication) -> Int {

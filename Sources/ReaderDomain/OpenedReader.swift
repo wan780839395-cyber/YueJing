@@ -136,7 +136,8 @@ extension OpenedReader {
         return value
     }
 
-    public func addBookmark(at anchor: ReadingAnchor, id: UUID = UUID(), request: BookmarkRequest) async throws -> ReadingBookmark {
+    public func addBookmark(at anchor: ReadingAnchor, id: UUID = UUID(), name: String = "",
+                            request: BookmarkRequest) async throws -> ReadingBookmark {
         let position = try await strictBookmarkAnchor(anchor, request: request)
         // Optional metadata only: the bounded directory query cannot repair an invalid position.
         let directoryPage = try? await directory(around: position)
@@ -148,7 +149,7 @@ extension OpenedReader {
         }
         // No post-write checks: admission wins over a later UI cancellation or close.
         return try await store.addBookmark(session: reading.session, anchor: position, id: id,
-                                           chapterTitle: title, request: request)
+                                           chapterTitle: title, name: name, request: request)
     }
 
     public func deleteBookmark(id: String, request: BookmarkRequest) async throws {

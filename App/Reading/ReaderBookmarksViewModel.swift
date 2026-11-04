@@ -81,7 +81,7 @@ final class ReaderBookmarksViewModel: ObservableObject {
             }
         }
     }
-    func add() {
+    func add(name: String = "") {
         guard canAdd, let captured = capture, let owner = reader, let presentation = presentationID,
               let operation = begin(.adding) else { return }
         let bookmarkID = UUID()
@@ -92,13 +92,16 @@ final class ReaderBookmarksViewModel: ObservableObject {
                 guard accepts(operation.id, presentation: presentation, owner: owner), positionValid() else {
                     operation.request.cancel(); finish(operation.id); return
                 }
-                let saved = try await owner.addBookmark(at: captured, id: bookmarkID, request: operation.request)
+                let saved = try await owner.addBookmark(at: captured, id: bookmarkID, name: name, request: operation.request)
                 // SQLite commit is authoritative. A cancelled presentation only suppresses stale UI.
                 guard accepts(operation.id, presentation: presentation, owner: owner) else { return }
                 existingAtCapture = saved; notice = "书签已保存。"
                 finish(operation.id); loadPage(0)
             } catch is CancellationError {
                 finish(operation.id)
+            } catch is ReadingBookmark.NameValidationError {
+                fail("名称最多80个字，不可包含换行或控制字符。书签未创建。", operation: operation.id,
+                     presentation: presentation, owner: owner)
             } catch {
                 fail("书签未保存，可重试。原书和阅读进度未改变。", operation: operation.id,
                      presentation: presentation, owner: owner)

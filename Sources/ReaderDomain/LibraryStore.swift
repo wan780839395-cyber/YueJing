@@ -442,7 +442,9 @@ extension LibraryStore {
     }
 
     func addBookmark(session: ReadingSession, anchor: ReadingAnchor, id: UUID, chapterTitle: String?,
-                     request: BookmarkRequest, afterCommit: (@Sendable () -> Void)? = nil) throws -> ReadingBookmark {
+                     name: String = "", request: BookmarkRequest, afterCommit: (@Sendable () -> Void)? = nil) throws -> ReadingBookmark {
+        try request.check()
+        let customName = try ReadingBookmark.validatedCustomName(name)
         let result = try queue.write { db in
             let book = try admitBookmark(db, session: session, request: request)
             try Self.checkBookmarkPosition(anchor, book: book)
@@ -456,7 +458,7 @@ extension LibraryStore {
             if let existing = try Self.bookmark(db, at: anchor) { return existing }
             let value = ReadingBookmark(id: id.uuidString, bookID: book.id, versionID: book.versionID,
                 rawByteOffset: anchor.rawByteOffset, createdAt: Date().timeIntervalSince1970,
-                chapterTitleSnapshot: chapterTitle.map { String($0.prefix(80)) })
+                chapterTitleSnapshot: chapterTitle.map { String($0.prefix(80)) }, customName: customName)
             try value.insert(db)
             return value
         }

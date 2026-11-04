@@ -74,6 +74,14 @@ struct ReadingBookmarkTests {
         #expect(try await reader.bookmark(at: position, request: BookmarkRequest()) == a)
         #expect(try await reader.bookmarkAnchor(id: a.id, request: BookmarkRequest()).lineFraction == 0)
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).total == 1)
+        let named = try await reader.addBookmark(at: anchor(f.book, 1), name: "  添加时命名 👩‍💻  ", request: BookmarkRequest())
+        #expect(named.customName == "添加时命名 👩‍💻" && named.displayTitle == "添加时命名 👩‍💻")
+        #expect(try await reader.addBookmark(at: anchor(f.book, 1), name: "不得覆盖原名", request: BookmarkRequest()) == named)
+        #expect(try await reader.bookmark(at: anchor(f.book, 1), request: BookmarkRequest()) == named)
+        try await reader.deleteBookmark(id: named.id, request: BookmarkRequest())
+        let blank = try await reader.addBookmark(at: anchor(f.book, 2), name: " \n\t ", request: BookmarkRequest())
+        #expect(blank.customName == nil && blank.displayTitle == "阅读位置")
+        try await reader.deleteBookmark(id: blank.id, request: BookmarkRequest())
         try await reader.close()
         let long = try await DerivedBookFixture(bytes: Data(("Chapter 1\n" + String(repeating: "abcdef", count: 2000)).utf8))
         defer { long.remove() }
@@ -133,6 +141,14 @@ struct ReadingBookmarkTests {
         await #expect(throws: LibraryError.invalidAnchor) {
             try await reader.renameBookmark(id: UUID().uuidString, name: "missing", request: BookmarkRequest())
         }
+        for invalid in [String(repeating: "a", count: 81), "a\nb", "a\u{0}b"] {
+            await #expect(throws: ReadingBookmark.NameValidationError.self) {
+                try await reader.addBookmark(at: anchor(f.book, 1), name: invalid, request: BookmarkRequest())
+            }
+        }
+        let namedOnInsert = try await reader.addBookmark(at: anchor(f.book, 1), name: emoji, request: BookmarkRequest())
+        #expect(namedOnInsert.customName == emoji && namedOnInsert.customName?.count == 80)
+        try await reader.deleteBookmark(id: namedOnInsert.id, request: BookmarkRequest())
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [first])
         try await reader.close()
     }
@@ -314,6 +330,10 @@ struct ReadingBookmarkTests {
         ] { #expect(renamed.hasSamePosition(as: changed) == false) }
         try await reader.deleteBookmark(id: value.id, request: BookmarkRequest())
         try await reader.deleteBookmark(id: value.id, request: BookmarkRequest())
+        let directlyNamed = try await reader.addBookmark(at: anchor(f.book, 5), name: "创建时名称", request: BookmarkRequest())
+        #expect(directlyNamed.customName == "创建时名称")
+        #expect(try state(db) == before)
+        try await reader.deleteBookmark(id: directlyNamed.id, request: BookmarkRequest())
         #expect(try state(db) == before)
         #expect(try await reader.saveProgress(anchor(f.book, 4), sequence: 6) == false)
         #expect(try Data(contentsOf: await f.store.fileURL(bookID: f.book.id)) == f.document.originalBytes)
@@ -327,6 +347,9 @@ struct ReadingBookmarkTests {
         let request = BookmarkRequest(); request.cancel()
         #expect(request.isCancelled)
         await #expect(throws: CancellationError.self) { try await reader.addBookmark(at: anchor(f.book, 1), request: request) }
+        await #expect(throws: CancellationError.self) {
+            try await reader.addBookmark(at: anchor(f.book, 1), name: "取消新增名称", request: request)
+        }
         await #expect(throws: CancellationError.self) { try await reader.deleteBookmark(id: saved.id, request: request) }
         await #expect(throws: CancellationError.self) { try await reader.bookmarkPage(start: 0, request: request) }
         await #expect(throws: CancellationError.self) { try await reader.renameBookmark(id: saved.id, name: "cancelled", request: request) }
@@ -390,6 +413,11 @@ struct ReadingBookmarkTests {
         #expect(renameRequest.isCancelled && renamed.customName == "committed rename")
         #expect(renamed.hasSamePosition(as: committed) && renamed.createdAt == committed.createdAt)
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [renamed])
+        let namedRequest = BookmarkRequest()
+        let namedCommit = try await f.store.addBookmark(session: reader.reading.session, anchor: anchor(f.book, 1),
+            id: UUID(), chapterTitle: nil, name: "原子命名", request: namedRequest, afterCommit: { namedRequest.cancel() })
+        #expect(namedRequest.isCancelled && namedCommit.customName == "原子命名")
+        #expect(try await reader.bookmark(at: anchor(f.book, 1), request: BookmarkRequest()) == namedCommit)
         try await reader.close()
     }
 
@@ -404,11 +432,18 @@ struct ReadingBookmarkTests {
             try db.execute(sql: "CREATE TRIGGER bookmark_rename_failure AFTER UPDATE OF customName ON bookmarks BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
         }
         await #expect(throws: (any Error).self) { try await reader.addBookmark(at: anchor(f.book, 1), request: BookmarkRequest()) }
+        await #expect(throws: (any Error).self) {
+            try await reader.addBookmark(at: anchor(f.book, 2), name: "名称与书签一起回滚", request: BookmarkRequest())
+        }
         await #expect(throws: (any Error).self) { try await reader.deleteBookmark(id: saved.id, request: BookmarkRequest()) }
         await #expect(throws: (any Error).self) { try await reader.renameBookmark(id: saved.id, name: "rollback", request: BookmarkRequest()) }
         #expect(try await reader.bookmarkPage(start: 0, request: BookmarkRequest()).items == [saved])
         #expect(try state(db) == before)
         try await db.write { db in try db.execute(sql: "DROP TRIGGER bookmark_insert_failure; DROP TRIGGER bookmark_delete_failure") }
+        // The UPDATE-name failure is still installed: named creation must not call rename.
+        let atomic = try await reader.addBookmark(at: anchor(f.book, 2), name: "一次插入", request: BookmarkRequest())
+        #expect(atomic.customName == "一次插入")
+        try await reader.deleteBookmark(id: atomic.id, request: BookmarkRequest())
         try await db.write { db in try db.execute(sql: "DROP TRIGGER bookmark_rename_failure") }
         let renamed = try await reader.renameBookmark(id: saved.id, name: "retry rename", request: BookmarkRequest())
         #expect(renamed.customName == "retry rename" && renamed.hasSamePosition(as: saved))

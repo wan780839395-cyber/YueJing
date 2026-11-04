@@ -12,7 +12,13 @@ struct ReaderBookmarksView: View {
     let prepare: @MainActor (String, BookmarkRequest) async throws -> ReadingWindow
     let apply: @MainActor (ReadingWindow) -> Bool
     @State private var pendingDeletion: ReadingBookmark?
-    @State private var pendingRename: ReadingBookmark?
+    private struct NameEditor {
+        let bookmark: ReadingBookmark?
+        let presentation: UUID
+        var title: String { bookmark == nil ? "添加书签" : "重命名书签" }
+    }
+    @State private var nameEditor: NameEditor?
+    @State private var showingNameEditor = false
     @State private var editedName = ""
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -34,7 +40,7 @@ struct ReaderBookmarksView: View {
             }
             List {
                 Section {
-                    Button { if active { model.add() } } label: {
+                    Button { if active && model.canAdd { editName() } } label: {
                         Label(model.existingAtCapture == nil ? "添加当前阅读位置" : "此位置已有书签",
                               systemImage: model.existingAtCapture == nil ? "bookmark" : "bookmark.fill")
                             .fixedSize(horizontal: false, vertical: true)
@@ -101,19 +107,22 @@ struct ReaderBookmarksView: View {
                 }
                 Button("取消", role: .cancel) { pendingDeletion = nil }
             } message: { Text("不会删除书籍或阅读进度。") }
-        .alert("重命名书签", isPresented: Binding(
-            get: { pendingRename != nil }, set: { if !$0 { pendingRename = nil } })) {
+        .alert(nameEditor?.title ?? "书签名称", isPresented: $showingNameEditor, presenting: nameEditor) { editor in
             TextField("书签名称", text: $editedName)
                 .accessibilityIdentifier("reader.bookmarks.name")
             Button("保存") {
-                if active, let bookmark = pendingRename { model.rename(bookmark, name: editedName) }
-                pendingRename = nil
+                guard active, editor.presentation == presentationID else { return }
+                if let bookmark = editor.bookmark { model.rename(bookmark, name: editedName) }
+                else { model.add(name: editedName) }
+                nameEditor = nil
             }
-            .disabled(!validName)
-            .accessibilityIdentifier("reader.bookmarks.confirmRename")
-            Button("取消", role: .cancel) { pendingRename = nil }
-        } message: {
-            Text(validName ? "最多80个字；留空恢复默认名称。" : "名称最多80个字，不可包含换行或控制字符。")
+            .disabled(!validName || !active || editor.presentation != presentationID ||
+                      (editor.bookmark == nil && !model.canAdd))
+            .accessibilityIdentifier(editor.bookmark == nil ? "reader.bookmarks.confirmAdd" : "reader.bookmarks.confirmRename")
+            Button("取消", role: .cancel) { nameEditor = nil }
+        } message: { editor in
+            Text(validName ? (editor.bookmark == nil ? "可先填写名称再保存；留空使用默认名称，最多80个字。" :
+                "最多80个字；留空恢复默认名称。") : "名称最多80个字，不可包含换行或控制字符。")
         }
         .task(id: presentationID) {
             guard active else { return }
@@ -125,7 +134,7 @@ struct ReaderBookmarksView: View {
                 UIAccessibility.post(notification: .announcement, argument: value)
             }
         }
-        .onDisappear { pendingDeletion = nil; pendingRename = nil; closeFocused = false }
+        .onDisappear { pendingDeletion = nil; nameEditor = nil; showingNameEditor = false; closeFocused = false }
         .accessibilityAction(.escape) { if isActive() { close() } }
     }
     private func bookmarkRow(_ bookmark: ReadingBookmark, ordinal: Int) -> some View {
@@ -150,24 +159,52 @@ struct ReaderBookmarksView: View {
             .buttonStyle(.plain).disabled(!active || model.isBusy || !compatible)
             .accessibilityIdentifier("reader.bookmark.\(bookmark.id)")
             .accessibilityHint("跳转到此书签的文字位置")
-            Button("重命名") {
-                if active { editedName = bookmark.customName ?? ""; pendingRename = bookmark }
+            Group {
+                if dynamicType.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 8) { bookmarkActions(bookmark, ordinal: ordinal) }
+                } else {
+                    HStack(spacing: 12) {
+                        bookmarkActions(bookmark, ordinal: ordinal)
+                        Spacer(minLength: 0)
+                    }
+                }
             }
-            .buttonStyle(.borderless)
-            .frame(minWidth: 44, minHeight: 44)
-            .disabled(!active || model.isBusy)
-            .accessibilityLabel("重命名书签 \(ordinal)")
-            .accessibilityIdentifier("reader.bookmarks.rename.\(bookmark.id)")
-            Button("删除") { if active { pendingDeletion = bookmark } }
-                .buttonStyle(.borderless)
-                .frame(minWidth: 44, minHeight: 44)
-                .disabled(!active || model.isBusy)
-                .accessibilityLabel("删除书签 \(ordinal)")
-                .accessibilityIdentifier("reader.bookmark.delete.\(bookmark.id)")
+            .font(.subheadline)
+            .padding(.top, 6)
+            .padding(.bottom, 4)
         }
         .accessibilityAction(named: Text("删除书签")) {
             if active && !model.isBusy { pendingDeletion = bookmark }
         }
+    }
+    private func editName(_ bookmark: ReadingBookmark? = nil) {
+        editedName = bookmark?.customName ?? ""
+        nameEditor = NameEditor(bookmark: bookmark, presentation: presentationID)
+        showingNameEditor = true
+    }
+    @ViewBuilder private func bookmarkActions(_ bookmark: ReadingBookmark, ordinal: Int) -> some View {
+        Button { if active { editName(bookmark) } } label: {
+            Label("重命名", systemImage: "pencil")
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(appearance.foreground)
+        .background(appearance.selection, in: RoundedRectangle(cornerRadius: 10))
+        .disabled(!active || model.isBusy)
+        .accessibilityLabel("重命名书签 \(ordinal)")
+        .accessibilityIdentifier("reader.bookmarks.rename.\(bookmark.id)")
+        Button(role: .destructive) { if active { pendingDeletion = bookmark } } label: {
+            Label("删除", systemImage: "trash")
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.red)
+        .background(appearance.selection, in: RoundedRectangle(cornerRadius: 10))
+        .disabled(!active || model.isBusy)
+        .accessibilityLabel("删除书签 \(ordinal)")
+        .accessibilityIdentifier("reader.bookmark.delete.\(bookmark.id)")
     }
     private var validName: Bool {
         do { _ = try ReadingBookmark.validatedCustomName(editedName); return true }
