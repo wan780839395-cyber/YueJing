@@ -197,7 +197,18 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func releaseProcessingCache() async { await service?.releaseProcessingCache() }
+    var coverLoader: (@Sendable (String) async -> Data?)? {
+        guard let store = service?.store else { return nil }
+        return { bookID in
+            try? await store.epubCover(bookID: bookID)
+        }
+    }
+
+    func releaseProcessingCache() async {
+        LibraryCoverMemoryCache.shared.clear()
+        await service?.releaseProcessingCache()
+        await EPUBCoverProcessor.shared.clear()
+    }
 
     private func collectTiming(_ trace: ProcessingTrace, id: UUID) async {
         let values = await trace.finish()
@@ -215,7 +226,7 @@ final class LibraryViewModel: ObservableObject {
         ticket = nil; importing = false; encodingChoice = nil
         importPresentation.finish(id)
         importDiagnostics.fail(error, for: id)
-        showImportMessage("未能导入：\(ImportSafeFailure(error).summary)", id: id)
+        showImportMessage("未能导入：\(Self.safeImportFailureSummary(error))", id: id)
         await reload()
     }
 
@@ -238,5 +249,27 @@ final class LibraryViewModel: ObservableObject {
         importDiagnostics.record(.alertRequested, for: id)
         notice = nil
         message = value
+    }
+
+    static func safeImportFailureSummary(_ error: Error) -> String {
+        if let epubError = error as? EPUBError {
+            switch epubError {
+            case .invalidArchive:
+                return "EPUB 归档结构无效或已损坏（EPUB）"
+            case .limitExceeded:
+                return "EPUB 文件或资源超出安全体积限制（EPUB）"
+            case .corruptResource:
+                return "EPUB 资源校验未通过或已损坏（EPUB）"
+            case .invalidPackage:
+                return "EPUB 元数据、目录或章节列表无效（EPUB）"
+            case .invalidPosition:
+                return "EPUB 位置坐标无效（EPUB）"
+            case .staleSession:
+                return "EPUB 会话已过期（EPUB）"
+            default:
+                return "暂不支持该 EPUB 内容（如 DRM、固定版式、脚本或外部资源）（EPUB）"
+            }
+        }
+        return ImportSafeFailure(error).summary
     }
 }

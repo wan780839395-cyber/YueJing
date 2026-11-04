@@ -5,7 +5,7 @@ import UIKit
 @MainActor
 struct ContentView: View {
     @StateObject private var model: LibraryViewModel
-    @StateObject private var readerRoutes = ReaderRouteOwner()
+    @StateObject private var readerRoutes = BookReadingRouteOwner()
     @State private var plannedNavigation = LibraryPlannedNavigation()
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.defaultAppearance.rawValue
     @State private var selectedSection: LibrarySection = .shelf
@@ -37,6 +37,9 @@ struct ContentView: View {
 
     private static func makeLibraryService() async throws -> LibraryService {
         #if DEBUG
+        if EPUBUITestFixture.isRequested {
+            return try await EPUBUITestFixture.makeService()
+        }
         if ReadingUITestFixture.isRequested {
             return try await ReadingUITestFixture.makeService()
         }
@@ -74,7 +77,7 @@ struct ContentView: View {
                         .accessibilityLabel("导入书籍")
                         .disabled(!model.canBeginFileSelection || !canChangeManagement)
                         .accessibilityHidden(drawerPresented)
-                        .accessibilityHint("当前仅支持 TXT；EPUB 规划中，未接入")
+                        .accessibilityHint("支持导入 TXT 与本地非 DRM 可重排 EPUB")
                     }
                 }
             }
@@ -102,12 +105,19 @@ struct ContentView: View {
         .accessibilityIdentifier("library.screen")
         .overlay(alignment: .topLeading) {
             #if DEBUG
-            if ReadingUITestFixture.isRequested { ReadingUITestSchemeProbe() }
+            if ReadingUITestFixture.isRequested || EPUBUITestFixture.isRequested { ReadingUITestSchemeProbe() }
             #endif
         }
         .fullScreenCover(item: readerPresentation) { route in
-            ReaderScreen(model: route.model, routeID: route.id) { readerRoutes.finishExit(route.id) }
-                .id(route.id)
+            Group {
+                switch route.content {
+                case .txt(let txtRoute):
+                    ReaderScreen(model: txtRoute.model, routeID: txtRoute.id) { readerRoutes.finishExit(txtRoute.id) }
+                case .epub(let epubModel):
+                    EPUBReaderScreen(model: epubModel, routeID: route.id) { readerRoutes.finishExit(route.id) }
+                }
+            }
+            .id(route.id)
         }
         .task { await model.start() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -136,9 +146,10 @@ struct ContentView: View {
         LibraryShelfContent(books: model.books, notice: model.notice, importing: model.importing,
             importPresentation: model.importPresentation, serviceUnavailable: model.service == nil,
             appearance: appearance,
+            coverLoader: model.coverLoader,
             onOpenBook: { book in
                 guard canChangeManagement else { return }
-                if let service = model.service { readerRoutes.open(bookID: book.id, service: service) }
+                if let service = model.service { readerRoutes.open(book: book, service: service) }
             },
             onDismissNotice: { model.notice = nil },
             onCancelImport: { Task { await model.cancelImport() } },
@@ -198,7 +209,7 @@ struct ContentView: View {
         })
     }
 
-    private var readerPresentation: Binding<ReaderPresentation?> {
+    private var readerPresentation: Binding<BookReadingRoute?> {
         let expected = readerRoutes.presentation
         return Binding(get: { readerRoutes.presentation }, set: { value in
             guard value == nil, let expected else { return }

@@ -72,17 +72,11 @@ def select_simulator():
 
 def resolved():
     pins = json.loads(RESOLVED.read_text())["pins"]
-    require(len(pins) == 1, "Expected only the approved GRDB dependency")
-    pin = pins[0]
-    require(pin["identity"].lower() == "grdb.swift" and pin["kind"] == "remoteSourceControl", "Unexpected package identity")
-    require(pin["location"] == "https://github.com/groue/GRDB.swift.git", "Unexpected dependency source")
-    state = pin["state"]
-    require(state["version"] == "7.0.0" and re.fullmatch(r"[0-9a-f]{40}", state["revision"]), "GRDB pin differs from 7.0.0")
-    checkout = grdb_checkout()
-    require(run(["git", "-C", str(checkout), "rev-parse", "HEAD"]) == state["revision"], "Dependency checkout differs from resolved revision")
+    from check_epub_batch import validate_checkouts
+    packages = validate_checkouts(pins, ROOT)
     shutil.copyfile(RESOLVED, OUT / "Package.resolved")
-    report("dependency-resolution.json", dict(package=pin, checkout_revision=state["revision"],
-           package_manifest_sha256=digest(checkout / "Package.swift")))
+    # Keep the legacy GRDB fields for readers of old receipts, with an explicit exact-two closure.
+    report("dependency-resolution.json", {**packages["grdb.swift"], "packages": packages})
 
 
 def grdb_checkout():
@@ -252,7 +246,7 @@ def unsigned(path):
 
 
 def all_test_evidence():
-    """Reparse all seven selected groups; never creates or repairs native evidence."""
+    """Reparse all eight selected groups; never creates or repairs native evidence."""
     import run_reading_ui_tests as ui
     require(os.environ.get("GITHUB_RUN_ATTEMPT") == "1" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
             "Only the single authorized dispatch attempt is accepted")
@@ -276,8 +270,8 @@ def all_test_evidence():
     canvas = json.loads((OUT / "canvas-settings.json").read_text())
     require(canvas["source_commit"] == os.environ["GITHUB_SHA"] and canvas["scheme_sha256"] == digest(
         ROOT / "YueJing.xcodeproj/xcshareddata/xcschemes/YueJingCanvas.xcscheme"), "Canvas settings provenance mismatch")
-    native = ROOT / "artifacts/reading-ui-native"
     for target, expected in ui.GROUPS.items():
+        native = ROOT / "artifacts" / ("epub-ui-native" if target == "YueJingEPUBUITests" else "reading-ui-native")
         counts = json.loads((native / (target + "-counts.json")).read_text())
         selection = json.loads((native / (target + "-selection.json")).read_text())
         execution = json.loads((native / (target + "-execution.json")).read_text())
@@ -314,8 +308,8 @@ def all_test_evidence():
         log = log_path.read_text(encoding="utf-8", errors="replace")
         actual = ui.count_log(target, log, execution["native_exit"])
         all_xctest = re.findall(r"Test Case '-\[[^\r\n]+\]' passed \(", log)
-        require(len(all_xctest) == (expected if target == "YueJingUITests" else 0), "Unexpected XCTest execution outside selection")
-        require(target != "YueJingUITests" or not re.findall(r"\bTest (\w+)\(\) passed after\b", log), "Unexpected Swift Testing execution in UI selection")
+        require(len(all_xctest) == (expected if target in ui.UI_CLASSES else 0), "Unexpected XCTest execution outside selection")
+        require(target not in ui.UI_CLASSES or not re.findall(r"\bTest (\w+)\(\) passed after\b", log), "Unexpected Swift Testing execution in UI selection")
         require(counts["native_exit"] == 0 and counts["passed"] == actual["passed"] and counts["log_sha256"] == digest(log_path)
                 and counts["failed"] == counts["skipped"] == counts["unexecuted"] == 0, "App suite native count mismatch")
         groups.append(dict(target=target, expected=expected, passed=actual["passed"], failed=0, skipped=0, unexecuted=0,
@@ -323,6 +317,15 @@ def all_test_evidence():
         selected.extend(actual["passed"])
     require(sorted(selected) == sorted(n for g in inventory.COUNTS for n in inventory.expected_names(g))
             and len(selected) == len(set(selected)) == inventory.TOTAL, "Selected native union must exactly match reviewed cases")
+    from audit_native_case_events import parse_events
+    for target, expected in inventory.COUNTS.items():
+        folder = ROOT / "artifacts" / ("epub-ui-native" if target == "YueJingEPUBUITests" else
+                                      "reading-ui-native" if target in ui.GROUPS else "task3")
+        events = parse_events((folder / (target + ".log")).read_bytes(), inventory.expected_names(target),
+                              ui=target in ui.UI_CLASSES, ui_class=ui.UI_CLASSES.get(target, "ReadingFlowUITests"))
+        require(events["parser_complete"] and events["totals"]["passed"] == expected
+                and all(v == 0 for k, v in events["totals"].items() if k != "passed"),
+                "Native start/finish event chain incomplete: " + target)
     return dict(source_commit=os.environ["GITHUB_SHA"], run_id=os.environ["GITHUB_RUN_ID"], run_attempt="1",
                 native_passed=inventory.TOTAL, failed=0, skipped=0, unexecuted=0, groups=groups,
                 inventory_sha256=digest(Path(inventory.__file__)))
@@ -401,8 +404,17 @@ def package_gate():
     license_path = APP / "GRDB-LICENSE.txt"
     require(license_path.is_file() and digest(license_path) == digest(ROOT / "App/Resources/GRDB-LICENSE.txt")
             and digest(license_path) == digest(checkout / "LICENSE"), "GRDB license resource is missing or changed")
+    from check_epub_batch import validate_checkouts, ZIP_LICENSE_SHA256
+    packages = validate_checkouts(json.loads(RESOLVED.read_text())["pins"], ROOT)
+    zip_license = APP / "ZIPFoundation-LICENSE.txt"
+    zip_checkout = next(p for p in (ROOT / "build/SourcePackages/checkouts").iterdir() if p.name.lower() == "zipfoundation")
+    require(zip_license.is_file() and digest(zip_license) == ZIP_LICENSE_SHA256
+            and digest(zip_checkout / "LICENSE") == ZIP_LICENSE_SHA256
+            and digest(ROOT / "App/Resources/ZIPFoundation-LICENSE.txt") == ZIP_LICENSE_SHA256,
+            "ZIPFoundation official license resource is missing or changed")
     report("app-dependency-gate.json", dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence,
            grdb_linkage="dynamic" if any(path.name == "GRDB" for path in binaries) else "SPM automatic/static",
+           packages=packages, zipfoundation_license_sha256=digest(zip_license),
            grdb_privacy_resources=[str(path.relative_to(APP)) for path in resources],
            grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned"))
 

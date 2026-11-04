@@ -13,6 +13,7 @@ public actor LibraryService {
     public nonisolated let store: LibraryStore
     private let processor = TXTProcessor()
     private let derivedStorage = DerivedBookStorage()
+    private let epubImporter = EPUBImportService()
     private struct Pending { let bytes: Data; let title: String; let encodings: [TXTEncoding] }
     private var pending: [UUID: Pending] = [:]
     private var cancelled: Set<UUID> = []
@@ -53,7 +54,10 @@ public actor LibraryService {
     public func prepareReadingImport(url: URL, ticket: UUID, budget: DerivedBookBudget,
                                     measure: ProcessingMeasurementObserver? = nil,
                                     observe: ImportStageObserver? = nil) async throws -> ImportPreparation {
-        try await prepareImportCore(url: url, ticket: ticket, derivedBudget: budget, measure: measure, observe: observe)
+        if url.isFileURL, url.pathExtension.lowercased() == "epub" {
+            return try await prepareEPUBImport(url: url, ticket: ticket, observe: observe)
+        }
+        return try await prepareImportCore(url: url, ticket: ticket, derivedBudget: budget, measure: measure, observe: observe)
     }
     private func prepareImportCore(url: URL, ticket: UUID, derivedBudget: DerivedBookBudget?,
                                   measure: ProcessingMeasurementObserver?, observe: ImportStageObserver?) async throws -> ImportPreparation {
@@ -248,7 +252,7 @@ public actor LibraryService {
                     versionID: document.versionID, byteCount: document.originalBytes.count, utf16Count: document.utf16Count)
     }
 
-    private static func copyReadOnlySource(_ source: URL, to destination: URL, observe: ImportStageObserver?) throws {
+    private static func copyReadOnlySource(_ source: URL, to destination: URL, observe: ImportStageObserver?, maximumBytes: Int? = nil) throws {
         observe?(.scopeRequested)
         let access = source.startAccessingSecurityScopedResource()
         defer { if access { source.stopAccessingSecurityScopedResource() } }
@@ -264,7 +268,8 @@ public actor LibraryService {
             do {
                 try Self.requireRegularFile(readable)
                 observe?(.coordinatedMetadataChecked)
-                try FileManager.default.copyItem(at: readable, to: destination)
+                if let maximumBytes { try EPUBImportService.copyBounded(readable, to: destination, maximumBytes: maximumBytes) }
+                else { try FileManager.default.copyItem(at: readable, to: destination) }
                 // copyItem must never leave an external symbolic link as the managed "copy".
                 try Self.requireRegularFile(destination)
                 observe?(.copyCompleted)
@@ -541,6 +546,63 @@ extension LibraryService {
             if let session { try? await store.finishReading(session: session, anchor: nil, sequence: 1) }
             if let source { await source.close() }
             await store.endReaderOpen(permit); throw error
+        }
+    }
+}
+
+extension LibraryService {
+    private func prepareEPUBImport(url: URL, ticket: UUID, observe: ImportStageObserver?) async throws -> ImportPreparation {
+        try await store.beginImport(ticket)
+        let staging = await store.epubStagingURL(ticket: ticket)
+        let work = await store.epubWorkURL(id: ticket)
+        defer { Self.removeStaging(staging); Self.removeStaging(work) }
+        try check(ticket)
+        try Self.copyReadOnlySource(url, to: staging, observe: observe, maximumBytes: EPUBLimits().compressedBytes)
+        observe?(.stagedReadStarted)
+        let publication = try await epubImporter.prepare(archiveURL: staging, destination: work)
+        observe?(.stagedReadCompleted)
+        try check(ticket)
+        var cover: Data?
+        if let path = publication.package.coverPath, publication.package.resource(at: path) != nil {
+            // Integrity errors are fatal; only image decoding itself is optional.
+            let data = try EPUBResourceStore.data(path: path, publication: publication)
+            cover = await EPUBCoverProcessor.shared.thumbnail(data)
+        }
+        try check(ticket)
+        let package = publication.package
+        let size = try staging.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        let book = LibraryBook(id: package.sourceSHA256, title: package.title, encodingRaw: "epub",
+                               versionID: package.versionID, byteCount: size, utf16Count: 0, format: .epub)
+        let receipt = try await store.commitEPUB(ticket: ticket, proposed: book, package: package, cover: cover)
+        observe?(.committed)
+        return .completed(receipt)
+    }
+
+    public func openEPUB(id: String) async throws -> OpenedEPUBReader {
+        guard let book = try await store.book(id: id), book.format == .epub else { throw LibraryError.missingBook }
+        let permit = try await store.reserveReaderOpen(bookID: id)
+        let work = await store.epubWorkURL(id: UUID())
+        var keep = false
+        defer { if !keep { Self.removeStaging(work) } }
+        do {
+            let source = try await store.epubFileURL(bookID: id)
+            guard try EPUBResourceStore.sourceDigest(source) == book.id else { throw LibraryError.changedFile }
+            let publication = try await epubImporter.prepare(archiveURL: source, destination: work)
+            let preferences = try await store.preferences()
+            let start = try await store.beginEPUB(permit, package: publication.package)
+            do {
+                try await store.confirmReaderOpen(permit, session: start.session)
+                try Task.checkCancellation()
+            } catch {
+                try? await store.abandonEPUB(session: start.session)
+                throw error
+            }
+            await store.endReaderOpen(permit)
+            keep = true
+            return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences, store: store)
+        } catch {
+            await store.endReaderOpen(permit)
+            throw error
         }
     }
 }

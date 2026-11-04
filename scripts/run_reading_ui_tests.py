@@ -17,7 +17,8 @@ import task3_test_inventory as inventory
 from reading_launch_diagnostics import LaunchDiagnostics, ProcessLifecycleDiagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
-GROUPS = {target: inventory.COUNTS[target] for target in ("YueJingHostTests", "YueJingUITests")}
+GROUPS = {target: inventory.COUNTS[target] for target in ("YueJingHostTests", "YueJingUITests", "YueJingEPUBUITests")}
+UI_CLASSES = {"YueJingUITests": "ReadingFlowUITests", "YueJingEPUBUITests": "EPUBFlowUITests"}
 
 
 def declarations(target):
@@ -35,7 +36,10 @@ def count_log(target, log, native_exit):
         if summaries != [(str(GROUPS[target]), "passed")]:
             raise ValueError("Missing or failed Swift Testing summary")
     else:
-        passed = re.findall(r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests (test\w+)\]' passed \(", log)
+        passed = re.findall(r"Test Case '-\[(?:\w+\.)?" + re.escape(UI_CLASSES[target]) + r" (test\w+)\]' passed \(", log)
+        all_passed = re.findall(r"Test Case '-\[[^\r\n]+\]' passed \(", log)
+        if len(all_passed) != len(passed):
+            raise ValueError("Unexpected XCTest class outside selection")
     if native_exit != 0 or "** TEST SUCCEEDED **" not in log:
         raise ValueError("Native test command did not succeed")
     if re.search(r"^.*\b(?:Test|Suite)[^\r\n]*\b(?:skipped|failed)\b", log, re.MULTILINE):
@@ -54,7 +58,7 @@ def self_check():
             lines = ["Test " + n + "() passed after 0.1 seconds." for n in names]
             tail = f"Test run with {GROUPS[target]} tests passed after 0.2 seconds.\n** TEST SUCCEEDED **"
         else:
-            lines = ["Test Case '-[YueJingUITests.ReadingFlowUITests " + n + "]' passed (0.1 seconds)." for n in names]
+            lines = ["Test Case '-[" + target + "." + UI_CLASSES[target] + " " + n + "]' passed (0.1 seconds)." for n in names]
             tail = "** TEST SUCCEEDED **"
         good = "\n".join(lines + [tail])
         count_log(target, good, 0); checked.append(target + ":accept")
@@ -63,6 +67,9 @@ def self_check():
                ("skip", good + "\nTest Case skipped", 0),
                ("failed", good + "\nTest example failed", 0),
                ("exit", good, 65)]
+        if target in UI_CLASSES:
+            bad += [("wrong_class", good.replace(UI_CLASSES[target], "UnapprovedTests"), 0),
+                    ("extra_class", good + "\nTest Case '-[UnapprovedTests testAlien]' passed (0.1 seconds).", 0)]
         for label, log, code in bad:
             try:
                 count_log(target, log, code)
@@ -177,7 +184,7 @@ class _UIProcessTimeline:
         self._first_test = False
         self._identity = {}
         for key, pattern in (("source_commit", r"[0-9a-f]{40}"), ("run_id", r"[1-9][0-9]{0,19}"),
-                             ("run_attempt", r"[1-9][0-9]{0,5}"), ("target", r"YueJingUITests")):
+                             ("run_attempt", r"[1-9][0-9]{0,5}"), ("target", r"YueJing(?:EPUB)?UITests")):
             value = provenance.get(key)
             if value is not None and (not isinstance(value, str) or not re.fullmatch(pattern, value)):
                 value = None
@@ -215,7 +222,7 @@ class _UIProcessTimeline:
         with self._lock:
             self._lines = min(self._lines + 1, 2**63 - 1)
             if not self._first_test and len(line) <= 512 and re.fullmatch(
-                    r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests test\w+\]' started\.\s*", line):
+                    r"Test Case '-\[(?:\w+\.)?" + UI_CLASSES.get(self._identity.get("target"), "ReadingFlowUITests") + r" test\w+\]' started\.\s*", line):
                 self._first_test = True
                 first = True
         if first:
@@ -289,11 +296,12 @@ def _ui_export_exit(out, provenance, native_exit):
 
 def _run_ui_attempt(args, out, provenance, timeout_seconds):
     """One UI native command and one export entry; original result wins over export errors."""
-    if provenance.get("target") != "YueJingUITests":
+    target = provenance.get("target")
+    if target not in UI_CLASSES:
         raise ValueError("UI coordinator cannot run a different target")
     timeline = None
     try:
-        timeline = _UIProcessTimeline(out / "YueJingUITests-process-timeline.json", provenance)
+        timeline = _UIProcessTimeline(out / (target + "-process-timeline.json"), provenance)
     except Exception:
         pass  # Observation availability is never acceptance.
     code, timed_out = None, None
@@ -301,14 +309,14 @@ def _run_ui_attempt(args, out, provenance, timeout_seconds):
     export_exit = None
     try:
         try:
-            code, timed_out = stream_native(args, out / "YueJingUITests.log", timeout_seconds,
+            code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
                                            process_lifecycle=timeline)
         except BaseException as error:
             native_error = error
         if native_error is None:
             try:
-                (out / "YueJingUITests-exit-code.txt").write_text(str(code) + "\n", encoding="utf-8")
-                write_new(out / "YueJingUITests-execution.json",
+                (out / (target + "-exit-code.txt")).write_text(str(code) + "\n", encoding="utf-8")
+                write_new(out / (target + "-execution.json"),
                           {**provenance, "native_exit": code, "timed_out": timed_out})
                 _diagnostic_call(timeline, "record", "native_receipt_written")
             except BaseException as error:
@@ -324,7 +332,7 @@ def _run_ui_attempt(args, out, provenance, timeout_seconds):
     finally:
         _diagnostic_call(timeline, "persist")
     kind = _ui_failure_kind(code, timed_out, native_error, receipt_error, export_error)
-    note = (f"{kind}: target=YueJingUITests native_exit={code!r} timed_out={timed_out!r}; "
+    note = (f"{kind}: target={target} native_exit={code!r} timed_out={timed_out!r}; "
             f"receipt_error={receipt_error is not None} export_error={export_error is not None} export_exit={export_exit!r}")
     if kind:
         try:
@@ -417,8 +425,11 @@ def stream_native(args, path, timeout_seconds, launch_diagnostics=None, process_
 
 def export_ui_evidence(out, provenance, native_exit):
     """Export native attachments once, including after failed tests; never rerun tests."""
-    bundle = out / "YueJingUITests.xcresult"
-    exported = out / "YueJingUITests-attachments"
+    target = provenance["target"]
+    if target not in UI_CLASSES:
+        raise ValueError("Unapproved UI evidence target")
+    bundle = out / (target + ".xcresult")
+    exported = out / (target + "-attachments")
     help_args = ["xcrun", "xcresulttool", "export", "attachments", "--help"]
     help_code, help_timeout = stream_native(help_args, out / "attachment-export-help.log", 30)
     write_new(out / "attachment-export-help.json", {"command": help_args, "exit": help_code, "timed_out": help_timeout})
@@ -436,7 +447,7 @@ def export_ui_evidence(out, provenance, native_exit):
     if len(manifests) != 1:
         raise ValueError("Expected one native attachment manifest")
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
-    cases = {name: {"png": [], "ax": []} for name in declarations("YueJingUITests")}
+    cases = {name: {"png": [], "ax": []} for name in declarations(target)}
     files = {}
     for path in sorted(exported.rglob("*")):
         if path.is_symlink() or not path.resolve().is_relative_to(exported.resolve()):
@@ -479,6 +490,8 @@ def export_ui_evidence(out, provenance, native_exit):
 
 
 def run_native(destination, target=None, evidence_dir=None):
+    if target not in GROUPS:
+        raise ValueError("Native execution requires one explicit --target; UI evidence groups must not share a run")
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         raise ValueError("Native execution not run: macOS and the pinned Xcode toolchain are required")
     if not destination or not re.fullmatch(r"platform=iOS Simulator,id=[0-9a-fA-F-]{36}", destination):
@@ -490,9 +503,8 @@ def run_native(destination, target=None, evidence_dir=None):
     resolved = ROOT / "YueJing.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
     if not resolved.is_file() or not (ROOT / "build/SourcePackages/checkouts/GRDB.swift").is_dir():
         raise ValueError("Generate project and prepare the approved pinned dependency separately; this script never resolves or installs")
-    pins = json.loads(resolved.read_text())["pins"]
-    if len(pins) != 1 or pins[0]["location"] != "https://github.com/groue/GRDB.swift.git" or pins[0]["state"]["version"] != "7.0.0":
-        raise ValueError("Pinned GRDB resolution mismatch")
+    from check_epub_batch import validate_checkouts
+    validate_checkouts(json.loads(resolved.read_text())["pins"], ROOT)
     out = (ROOT / evidence_dir).resolve() if evidence_dir else ROOT / "artifacts/reading-ui-native" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
     if not out.is_relative_to((ROOT / "artifacts").resolve()):
         raise ValueError("Evidence must stay inside this project's artifacts")
@@ -503,9 +515,11 @@ def run_native(destination, target=None, evidence_dir=None):
     paths = sorted((ROOT / "App").rglob("*.swift")) + [ROOT / "project.yml"]
     paths += [p for t in GROUPS for p in sorted((ROOT / "Tests" / t).glob("*.swift"))]
     source = {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-    selected_targets = [target] if target else list(GROUPS)
+    selected_targets = [target]
     for target in selected_targets:
         timeout_seconds = 480 if target == "YueJingHostTests" else 1200
+        if target == "YueJingEPUBUITests":
+            timeout_seconds = 480
         args = ["xcodebuild", "test", "-project", "YueJing.xcodeproj", "-scheme", "YueJingUI", "-configuration", "Debug",
                 "-destination", destination, "-only-testing:" + target, "-parallel-testing-enabled", "NO",
                 "-clonedSourcePackagesDirPath", "build/SourcePackages", "-disableAutomaticPackageResolution", "-skipPackageUpdates",
@@ -532,7 +546,7 @@ def run_native(destination, target=None, evidence_dir=None):
                 process_lifecycle = ProcessLifecycleDiagnostics(out, provenance)
             except Exception:
                 pass  # Lifecycle observations never authorize or replace a native result.
-        if target == "YueJingUITests":
+        if target in UI_CLASSES:
             code, timed_out = _run_ui_attempt(args, out, provenance, timeout_seconds)
         else:
             code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
@@ -557,7 +571,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight", action="store_true", help="Read-only inventory; no native execution")
     parser.add_argument("--self-check", action="store_true", help="Synthetic log-parser checks; not UI tests")
-    parser.add_argument("--run", action="store_true", help="Explicitly run only the two new targets on an installed macOS simulator")
+    parser.add_argument("--run", action="store_true", help="Explicitly run one selected target on an installed macOS simulator")
     parser.add_argument("--destination")
     parser.add_argument("--target", choices=tuple(GROUPS), help="Select one target, exactly once")
     parser.add_argument("--evidence-dir", help="Explicit project artifacts directory for CI evidence")

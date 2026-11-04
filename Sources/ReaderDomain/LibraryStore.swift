@@ -13,6 +13,7 @@ public actor LibraryStore {
     private var derivedLeases: [UUID: DerivedPointer] = [:]
     private var readerOpens: [String: UUID] = [:]
     private var readerPreferenceSequences: [String: Int64] = [:]
+    private var epubSessions: [String: (package: EPUBPackage, token: EPUBNavigationToken?, ready: Bool)] = [:]
 
     public init(root: URL) throws {
         self.root = root
@@ -26,10 +27,10 @@ public actor LibraryStore {
         let bookIDs = try queue.read { db in Set(try String.fetchAll(db, sql: "SELECT id FROM books")) }
         for url in try files.contentsOfDirectory(at: root.appendingPathComponent("Books"), includingPropertiesForKeys: nil) {
             let id = url.deletingPathExtension().lastPathComponent
-            if url.pathExtension == "txt", Self.isBookID(id), !bookIDs.contains(id) { try files.removeItem(at: url) }
+            if ["txt", "epub"].contains(url.pathExtension), Self.isBookID(id), !bookIDs.contains(id) { try files.removeItem(at: url) }
         }
         for url in try files.contentsOfDirectory(at: root.appendingPathComponent("Imports"), includingPropertiesForKeys: nil) {
-            if url.pathExtension == "txt", UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil {
+            if ["txt", "epub", "epubwork"].contains(url.pathExtension), UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil {
                 try files.removeItem(at: url)
             }
         }
@@ -500,5 +501,160 @@ extension LibraryStore {
         try ReadingBookmark.fetchOne(db, sql: """
             SELECT * FROM bookmarks WHERE bookID = ? AND versionID = ? AND unit = ? AND rawByteOffset = ?
             """, arguments: [anchor.bookID, anchor.versionID, anchor.unit, anchor.rawByteOffset])
+    }
+}
+
+// EPUB has independent resources and progress units. Existing TXT transactions are not repurposed.
+extension LibraryStore {
+    public func epubFileURL(bookID: String) throws -> URL {
+        guard Self.isBookID(bookID) else { throw LibraryError.missingBook }
+        return root.appendingPathComponent("Books").appendingPathComponent(bookID + ".epub")
+    }
+    func epubStagingURL(ticket: UUID) -> URL {
+        root.appendingPathComponent("Imports").appendingPathComponent(ticket.uuidString + ".epub")
+    }
+    func epubWorkURL(id: UUID) -> URL {
+        root.appendingPathComponent("Imports").appendingPathComponent(id.uuidString + ".epubwork", isDirectory: true)
+    }
+
+    func commitEPUB(ticket: UUID, proposed: LibraryBook, package: EPUBPackage, cover: Data?) throws -> ImportReceipt {
+        switch tickets[ticket] {
+        case .committed(let receipt)?: return receipt
+        case .open?: break
+        default: throw CancellationError()
+        }
+        try Task.checkCancellation()
+        guard proposed.format == .epub, proposed.id == package.sourceSHA256,
+              proposed.versionID == package.versionID, package.parserVersion == EPUBFormat.parserVersion,
+              !package.spine.isEmpty, (cover?.count ?? 0) <= 2 * 1024 * 1024 else { throw EPUBError.invalidPackage }
+        let staging = epubStagingURL(ticket: ticket), destination = try epubFileURL(bookID: proposed.id)
+        let files = FileManager.default
+        guard try EPUBResourceStore.sourceDigest(staging) == proposed.id else { throw EPUBError.corruptResource }
+        if let existing = try book(id: proposed.id) {
+            guard existing.format == .epub, existing.versionID == proposed.versionID else { throw EPUBError.invalidPackage }
+            if !files.fileExists(atPath: destination.path) { try files.moveItem(at: staging, to: destination) }
+            else { try files.removeItem(at: staging) }
+            let receipt = ImportReceipt(book: existing, duplicate: true)
+            tickets[ticket] = .committed(receipt)
+            return receipt
+        }
+        let metadata = try JSONEncoder().encode(package)
+        guard !files.fileExists(atPath: destination.path) else { throw LibraryError.changedFile }
+        try files.moveItem(at: staging, to: destination)
+        do {
+            try queue.write { db in
+                try proposed.insert(db)
+                try db.execute(sql: "INSERT INTO bookFormats(bookID,format) VALUES(?,'epub')", arguments: [proposed.id])
+                try db.execute(sql: "INSERT INTO epubPackages(bookID,versionID,metadata,cover) VALUES(?,?,?,?)",
+                               arguments: [proposed.id, proposed.versionID, metadata, cover])
+                try Task.checkCancellation()
+            }
+        } catch {
+            try? files.removeItem(at: destination)
+            throw error
+        }
+        let receipt = ImportReceipt(book: proposed, duplicate: false)
+        tickets[ticket] = .committed(receipt)
+        return receipt
+    }
+
+    public func epubCover(bookID: String) throws -> Data? {
+        try queue.read { db in
+            let data = try Data.fetchOne(db, sql: "SELECT cover FROM epubPackages WHERE bookID=?", arguments: [bookID])
+            return (data?.count ?? 0) <= 2 * 1024 * 1024 ? data : nil
+        }
+    }
+
+    func beginEPUB(_ permit: ReaderOpenPermit, package: EPUBPackage) throws -> EPUBReadingStart {
+        try Task.checkCancellation()
+        guard readerOpens[permit.bookID] == permit.id, permit.bookID == package.sourceSHA256 else { throw CancellationError() }
+        let session = ReadingSession(id: UUID().uuidString, bookID: permit.bookID, versionID: package.versionID)
+        let start = try queue.write { db -> EPUBReadingStart in
+            guard let book = try LibraryBook.fetchOne(db, key: permit.bookID), book.format == .epub,
+                  try String.fetchOne(db, sql: "SELECT format FROM bookFormats WHERE bookID=?", arguments: [permit.bookID]) == "epub",
+                  book.versionID == package.versionID,
+                  let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [book.id]),
+                  try JSONDecoder().decode(EPUBPackage.self, from: metadata) == package else { throw EPUBError.corruptResource }
+            let data = try Data.fetchOne(db, sql: "SELECT anchor FROM epubProgress WHERE bookID=?", arguments: [book.id])
+            let decoded = data.flatMap { try? JSONDecoder().decode(EPUBReadingPosition.self, from: $0) }
+            let valid = decoded.flatMap { (try? $0.validate(in: package)) != nil ? $0 : nil }
+            try db.execute(sql: "UPDATE books SET activeSession=?,lastReadAt=? WHERE id=?",
+                           arguments: [session.id, Date().timeIntervalSince1970, book.id])
+            return EPUBReadingStart(session: session, position: valid, ignoredIncompatibleProgress: data != nil && valid == nil)
+        }
+        epubSessions[session.id] = (package, nil, false)
+        return start
+    }
+
+    func beginEPUBNavigation(session: ReadingSession, path: String) throws -> EPUBNavigationToken {
+        try Task.checkCancellation()
+        guard var authority = epubSessions[session.id], !closedSessions.contains(session.id),
+              authority.package.spine.contains(path),
+              let book = try book(id: session.bookID), book.activeSession == session.id else { throw EPUBError.staleSession }
+        let token = EPUBNavigationToken(sessionID: session.id, path: path)
+        authority.token = token; authority.ready = false; epubSessions[session.id] = authority
+        return token
+    }
+
+    func markEPUBReady(session: ReadingSession, token: EPUBNavigationToken) throws -> Bool {
+        guard var authority = epubSessions[session.id], authority.token == token,
+              !closedSessions.contains(session.id),
+              let book = try book(id: session.bookID), book.activeSession == session.id else { return false }
+        authority.ready = true; epubSessions[session.id] = authority; return true
+    }
+
+    @discardableResult
+    func saveEPUB(session: ReadingSession, position: EPUBReadingPosition, sequence: Int64,
+                  token: EPUBNavigationToken) throws -> Bool {
+        guard !closedSessions.contains(session.id), let authority = epubSessions[session.id],
+              authority.token == token, authority.ready, token.path == position.path else { return false }
+        try position.validate(in: authority.package)
+        return try queue.write { db in try Self.saveEPUBRow(db, session: session, position: position, sequence: sequence) }
+    }
+
+    private static func saveEPUBRow(_ db: Database, session: ReadingSession, position: EPUBReadingPosition,
+                                    sequence: Int64) throws -> Bool {
+        guard position.bookID == session.bookID, position.versionID == session.versionID, sequence > 0,
+              let book = try LibraryBook.fetchOne(db, key: session.bookID), book.format == .epub,
+              book.versionID == session.versionID else { throw EPUBError.invalidPosition }
+        guard book.activeSession == session.id else { return false }
+        if let old = try Row.fetchOne(db, sql: "SELECT sessionID,sequence FROM epubProgress WHERE bookID=?", arguments: [book.id]),
+           (old["sessionID"] as String) == session.id, sequence <= (old["sequence"] as Int64) { return false }
+        let data = try JSONEncoder().encode(position)
+        try db.execute(sql: """
+            INSERT INTO epubProgress(bookID,versionID,unit,anchor,sessionID,sequence) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(bookID) DO UPDATE SET versionID=excluded.versionID,unit=excluded.unit,
+                anchor=excluded.anchor,sessionID=excluded.sessionID,sequence=excluded.sequence
+            """, arguments: [book.id, position.versionID, position.unit, data, session.id, sequence])
+        return true
+    }
+
+    func finishEPUB(session: ReadingSession, position: EPUBReadingPosition?, sequence: Int64,
+                    token: EPUBNavigationToken?, preferences: ReaderPreferences) throws {
+        let authority = epubSessions.removeValue(forKey: session.id)
+        closedSessions.insert(session.id)
+        defer { readerPreferenceSequences.removeValue(forKey: session.id) }
+        try queue.write { db in
+            guard let book = try LibraryBook.fetchOne(db, key: session.bookID), book.activeSession == session.id else { return }
+            if let position, let token, let authority, authority.ready, authority.token == token,
+               position.path == token.path {
+                try position.validate(in: authority.package)
+                _ = try Self.saveEPUBRow(db, session: session, position: position, sequence: sequence)
+            }
+            let data = try JSONEncoder().encode(preferences.validated)
+            try db.execute(sql: "INSERT INTO preferences(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", arguments: [data])
+            try db.execute(sql: "UPDATE books SET activeSession=NULL WHERE id=? AND activeSession=?", arguments: [session.bookID, session.id])
+        }
+    }
+}
+
+extension LibraryStore {
+    func abandonEPUB(session: ReadingSession) throws {
+        epubSessions.removeValue(forKey: session.id)
+        closedSessions.insert(session.id)
+        readerPreferenceSequences.removeValue(forKey: session.id)
+        try queue.write { db in
+            try db.execute(sql: "UPDATE books SET activeSession=NULL WHERE id=? AND activeSession=?", arguments: [session.bookID, session.id])
+        }
     }
 }

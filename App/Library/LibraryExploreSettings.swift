@@ -114,12 +114,19 @@ struct LibraryManagementOptions: View {
 @MainActor
 struct LibraryLicenseView: View {
     let appearance: LibraryAppearance
-    // One immutable bundled resource, read on demand; never replaces or invents license text.
-    private static let text: String = {
-        guard let url = Bundle.main.url(forResource: "GRDB-LICENSE", withExtension: "txt"),
-              let value = try? String(contentsOf: url, encoding: .utf8) else { return "许可文件读取失败。" }
-        return value
-    }()
+
+    // Immutable bundled resources, read on demand; never replaces or invents license text.
+    static func bundledLicenseText() -> String {
+        guard let grdbURL = Bundle.main.url(forResource: "GRDB-LICENSE", withExtension: "txt"),
+              let grdb = try? String(contentsOf: grdbURL, encoding: .utf8), !grdb.isEmpty,
+              let zipURL = Bundle.main.url(forResource: "ZIPFoundation-LICENSE", withExtension: "txt"),
+              let zip = try? String(contentsOf: zipURL, encoding: .utf8), !zip.isEmpty else {
+            return "许可文件读取失败。"
+        }
+        return "GRDB.swift · MIT\n\n" + grdb + "\n\n---\n\nZIPFoundation · MIT\n\n" + zip
+    }
+
+    private static let text: String = bundledLicenseText()
 
     var body: some View {
         ScrollView {
@@ -127,7 +134,7 @@ struct LibraryLicenseView: View {
                 .frame(maxWidth: .infinity, alignment: .leading).padding(22)
         }
         .foregroundStyle(appearance.foreground).background(appearance.page.ignoresSafeArea())
-        .navigationTitle("GRDB · MIT").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("GRDB & ZIPFoundation · MIT").navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(appearance.page, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarColorScheme(appearance.controlColorScheme, for: .navigationBar)

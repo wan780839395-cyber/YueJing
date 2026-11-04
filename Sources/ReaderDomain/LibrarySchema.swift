@@ -58,6 +58,29 @@ enum LibrarySchema {
         migrator.registerMigration("v5-bookmark-names") { db in
             try db.alter(table: "bookmarks") { $0.add(column: "customName", .text) }
         }
+        migrator.registerMigration("v6-epub") { db in
+            try db.execute(sql: """
+                CREATE TABLE bookFormats (
+                    bookID TEXT NOT NULL PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+                    format TEXT NOT NULL DEFAULT 'txt' CHECK(format IN ('txt','epub'))
+                );
+                INSERT INTO bookFormats(bookID) SELECT id FROM books;
+                CREATE TABLE epubPackages (
+                    bookID TEXT NOT NULL PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+                    versionID TEXT NOT NULL,
+                    metadata BLOB NOT NULL,
+                    cover BLOB
+                );
+                CREATE TABLE epubProgress (
+                    bookID TEXT NOT NULL PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+                    versionID TEXT NOT NULL,
+                    unit TEXT NOT NULL CHECK(unit = 'epub-text-node-utf16-v1'),
+                    anchor BLOB NOT NULL,
+                    sessionID TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0)
+                );
+                """)
+        }
         return migrator
     }
 }

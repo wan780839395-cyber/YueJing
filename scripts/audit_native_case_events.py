@@ -7,6 +7,7 @@ import re
 
 EVENT = re.compile(r"\bTest (\w+)\(\) (started|passed|failed|skipped)\b")
 UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
+EPUB_UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?EPUBFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
 # Only the observed UIKit warning is admissible, and only inside a START record.
 BROKEN_START = re.compile(
     r"^(?:◇ )?Test (?P<prefix>[A-Za-z_]\w*)"
@@ -20,7 +21,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def parse_events(raw, names, ui=False):
+def parse_events(raw, names, ui=False, ui_class="ReadingFlowUITests"):
     if len(names) != len(set(names)):
         raise ValueError('Nonunique expected identities')
     text = raw.decode('utf-8')
@@ -29,7 +30,9 @@ def parse_events(raw, names, ui=False):
     events = {n: dict(starts=[], finishes=[], skips=[]) for n in names}
     unexpected, unknown, derived = [], [], []
     consumed = set()
-    pattern = UI_EVENT if ui else EVENT
+    if ui_class not in ("ReadingFlowUITests", "EPUBFlowUITests"):
+        raise ValueError('Unapproved UI class')
+    pattern = (EPUB_UI_EVENT if ui_class == "EPUBFlowUITests" else UI_EVENT) if ui else EVENT
     for i, line in enumerate(lines):
         if i in consumed:
             continue
@@ -134,7 +137,15 @@ def self_check():
     }
     for label, text in ui_variants.items():
         assert not parse_events(text.encode(), ['testAlpha'], ui=True)['parser_complete'], label
-    return dict(passed=True, positive_controls=7, negative_controls=len(variants)+len(ui_variants), native_executions=0)
+    epub_good = ui_good.replace('ReadingFlowUITests', 'EPUBFlowUITests')
+    parsed = parse_events(epub_good.encode(), ['testAlpha'], ui=True, ui_class='EPUBFlowUITests')
+    assert parsed['parser_complete'] and parsed['totals']['passed'] == 1
+    for text in ui_variants.values():
+        variant = text.replace('ReadingFlowUITests', 'EPUBFlowUITests')
+        assert not parse_events(variant.encode(), ['testAlpha'], ui=True, ui_class='EPUBFlowUITests')['parser_complete']
+    assert not parse_events(ui_good.encode(), ['testAlpha'], ui=True, ui_class='EPUBFlowUITests')['parser_complete']
+    assert not parse_events(epub_good.encode(), ['testAlpha'], ui=True)['parser_complete']
+    return dict(passed=True, positive_controls=8, negative_controls=len(variants)+2*len(ui_variants)+2, native_executions=0)
 
 
 def audit_evidence(evidence, head, run):
@@ -142,10 +153,12 @@ def audit_evidence(evidence, head, run):
     reviewed = inventory.validate_source()
     groups = []
     for target in inventory.COUNTS:
-        folder = evidence / ('reading-ui-native' if target in ('YueJingHostTests', 'YueJingUITests') else 'task3')
+        folder = evidence / ('epub-ui-native' if target == 'YueJingEPUBUITests' else
+                             'reading-ui-native' if target in ('YueJingHostTests', 'YueJingUITests') else 'task3')
         log = folder / (target+'.log')
         raw = log.read_bytes() if log.exists() else b''
-        parsed = parse_events(raw, inventory.expected_names(target), target == 'YueJingUITests')
+        parsed = parse_events(raw, inventory.expected_names(target), target in ('YueJingUITests', 'YueJingEPUBUITests'),
+                              'EPUBFlowUITests' if target == 'YueJingEPUBUITests' else 'ReadingFlowUITests')
         native_exit_path = folder / (target+'-exit-code.txt')
         native_exit = int(native_exit_path.read_text().strip()) if native_exit_path.exists() else None
         for suffix in ('counts', 'execution', 'selection'):
@@ -164,9 +177,10 @@ def audit_evidence(evidence, head, run):
         groups.append(dict(target=target, log=str(log) if log.exists() else None, native_exit=native_exit, **parsed))
     totals = {s: sum(g['totals'][s] for g in groups) for s in groups[0]['totals']}
     complete = all(g['parser_complete'] for g in groups)
-    full_pass = complete and totals['passed'] == 146 and all(not v for k,v in totals.items() if k != 'passed') and all(g['native_exit'] == 0 for g in groups)
+    full_pass = complete and totals['passed'] == inventory.TOTAL and all(not v for k,v in totals.items() if k != 'passed') and all(g['native_exit'] == 0 for g in groups)
     return dict(source_commit=head, run_id=str(run), attempt=1, selected=reviewed['selected'], groups=groups,
-                totals=totals, audit_complete=complete, full146_passed=full_pass,
+                totals=totals, audit_complete=complete, full_selected_passed=full_pass,
+                full146_passed=full_pass and inventory.TOTAL == 146,
                 status='AUDIT_COMPLETED' if complete else 'AUDIT_INCOMPLETE',
                 native_validation='passed' if full_pass else 'not passed', raw_logs_modified=False,
                 qualification='Derived starts are explicitly sourced; they are not original intact event lines')
@@ -189,7 +203,7 @@ def main():
         with args.output.open('x', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
             f.write('\n')
-        print(json.dumps({k:result[k] for k in ('status','audit_complete','totals','full146_passed')}, indent=2))
+        print(json.dumps({k:result[k] for k in ('status','audit_complete','totals','full_selected_passed')}, indent=2))
 
 
 if __name__ == '__main__':

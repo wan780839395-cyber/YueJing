@@ -41,12 +41,19 @@ FILES = {
     "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion""",
     "YueJingCanvasTests/ReadingCanvasRenderingTests.swift": """dirtyRegionCoversTheSentinelInEveryThemeAndPreservesOutsidePixels reuseRemovesOldInkAndAccessibilityActionsWithoutResettingTheTheme fractionalResizeRerasterizesToTheSameImageAsAFreshCanvas""",
     "TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift": """automaticDecodeAndChaptersBaseline""",
+    "ReaderDomainTests/EPUBLibraryTests.swift": """epubOriginalArchiveAndValidatedResourcesSurviveReopen epubDuplicateKeepsProgressAndRepairsMissingArchive epubCancellationBeforeCommitLeavesNoBook epubCancellationAfterCommitReturnsReceipt epubFailedImportCleansOnlyItsWorkspace epubV6MigrationPreservesTXTProgressBookmarksAndPreferences epubCoverThumbnailBoundsAndDamagedFallback epubBooksAndTXTStayIsolated""",
+    "ReaderDomainTests/EPUBProgressTests.swift": """epubPositionsRejectForeignVersionsUnitsAndInvalidUTF16Boundaries epubProgressRequiresReadinessAndIncreasingSequence epubOldNavigationSupersededSessionAndClosedCallbacksCannotWrite epubTypographyEpochRestoresSameTextPositionAndSettings""",
+    "ReaderDomainTests/LongBookAcceptanceTests.swift": """a06FixedTenMiB128ChaptersImportNavigateAndReopen""",
+    "ReaderDomainTests/EPUBArchiveTests.swift": """epubArchiveExtractsStoredAndDeflatedEntriesWithVerifiedDigests epubArchiveRejectsUnsafePathsAndEncodedTraversals epubArchiveRejectsDuplicateAndUnicodeCollidingCanonicalPaths epubArchiveRejectsSymbolicLinksAndDestinationLinkEscapes epubArchiveRejectsCRCMismatchesAfterStreamingExtraction epubArchiveRejectsTruncatedAndInconsistentHeaders epubArchiveEnforcesCompressedAndStreamedExpansionBudgets epubArchiveEnforcesMaximumEntryCountBudget epubArchiveRejectsEncryptedAndUnsupportedCompressionEntries epubArchiveRespectsTaskCancellationAndCleansDestination""",
+    "ReaderDomainTests/EPUBPackageTests.swift": """epubPackageParsesEPUB3AndEPUB2ContainersInExactSpineOrder epubPackageResolvesNavAndNCXHierarchyWithValidatedFragments epubPackageRejectsXXEDTDAndEntityDeclarationsAcrossUTF8AndUTF16 epubPackageRejectsMissingMetadataEmptyBodyAndDuplicateManifestItems epubPackageRejectsBrokenSpineAndBodyResourceReferences epubPackageRejectsEncryptedFixedLayoutAndActiveContent epubPackageSelectsValidCoversAndFallsBackOnOptionalCoverProblems epubPackageFailsFatallyOnCorruptBodyImageOrArchiveIntegrityError""" ,
+    "YueJingHostTests/EPUBReaderHostTests.swift": """epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly""",
+    "YueJingEPUBUITests/EPUBFlowUITests.swift": """testEPUBShelfCoverAndDirectoryCrossChapterNavigation testEPUBProgressSurvivesExitAndProcessRelaunch testEPUBTypographyNoCoverFallbackAndTXTIsolation""" ,
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 107, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 13,
-          "YueJingUITests": 12, "YueJingCanvasTests": 3}
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 138, "TXTBlockDecoderTests": 6,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 17,
+          "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 167  # 168 declared; original 166 identities retained plus one independent bookmark scenario
+TOTAL = 205  # 206 declared; original167 identities retained plus38 A06/EPUB cases
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 
@@ -63,7 +70,7 @@ def expected_names(group):
 def source_names(path, text):
     # Bounded to this repository's declaration style, including @Test(.timeLimit(...)).
     # A changed/unsupported annotation fails the full @Test-count cross-check below.
-    if path.startswith("YueJingUITests/"):
+    if path.startswith(("YueJingUITests/", "YueJingEPUBUITests/")):
         return re.findall(r"\bfunc\s+(test\w+)\s*\(", text)
     names = re.findall(r"@Test(?:\([^\r\n]*\))?\s+func\s+(\w+)\s*\(", text)
     if len(names) != len(re.findall(r"@Test\b", text)):

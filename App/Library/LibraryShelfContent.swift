@@ -10,11 +10,11 @@ struct LibraryShelfContent: View {
     let importPresentation: LibraryImportPresentation
     let serviceUnavailable: Bool
     let appearance: LibraryAppearance
+    var coverLoader: (@Sendable (String) async -> Data?)? = nil
     let onOpenBook: (LibraryBook) -> Void
     let onDismissNotice: () -> Void
     let onCancelImport: () -> Void
     let onRetry: () -> Void
-
     var body: some View {
         List {
             Section {
@@ -50,7 +50,7 @@ struct LibraryShelfContent: View {
                 Section {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("把第一本书放进阅境", systemImage: "books.vertical").font(.title3)
-                        Text("从“文件”选择 TXT。应用只管理自己的副本，原文件保持不变。EPUB 规划中，未接入。")
+                        Text("从“文件”选择 TXT 或非 DRM 可重排 EPUB。应用只管理自己的副本，原文件保持不变。")
                             .foregroundStyle(appearance.secondary).fixedSize(horizontal: false, vertical: true)
                     }.padding(.vertical, 8)
                 }
@@ -59,7 +59,7 @@ struct LibraryShelfContent: View {
                 Section("最近阅读与新加入") {
                     ForEach(books) { book in
                         Button { onOpenBook(book) } label: {
-                            LibraryBookRow(book: book, appearance: appearance)
+                            LibraryBookRow(book: book, appearance: appearance, coverLoader: coverLoader)
                         }
                         .buttonStyle(.plain)
                         .accessibilityElement(children: .combine)

@@ -25,6 +25,9 @@ packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift.git
     exactVersion: "7.0.0"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    exactVersion: "0.9.19"
 
 targets:
   YueJing:
@@ -40,6 +43,8 @@ targets:
     dependencies:
       - target: ReaderDomain
       - target: TXTCore
+      - package: ZIPFoundation
+        product: ZIPFoundation
     settings:
       base:
         PRODUCT_NAME: YueJing
@@ -79,6 +84,8 @@ targets:
       - target: TXTCore
       - package: GRDB
         product: GRDB
+      - package: ZIPFoundation
+        product: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain
@@ -97,6 +104,8 @@ targets:
       - target: TXTCore
       - package: GRDB
         product: GRDB
+      - package: ZIPFoundation
+        product: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain.tests
@@ -146,6 +155,20 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.ui-tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: YueJing
+
+  YueJingEPUBUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Tests/YueJingEPUBUITests
+    dependencies:
+      - target: YueJing
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.epub-ui-tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: YueJing
 
@@ -218,6 +241,7 @@ schemes:
         YueJing: all
         YueJingHostTests: [test]
         YueJingUITests: [test]
+        YueJingEPUBUITests: [test]
     test:
       config: Debug
       environmentVariables:
@@ -226,6 +250,8 @@ schemes:
         - name: YueJingHostTests
           parallelizable: false
         - name: YueJingUITests
+          parallelizable: false
+        - name: YueJingEPUBUITests
           parallelizable: false
 
   TXTCorePerformance:
