@@ -142,7 +142,6 @@ targets:
       - target: ReaderDomain
     settings:
       base:
-        OTHER_LDFLAGS: "$(inherited) -Wl,-dead_strip_dylibs"
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.host-tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YueJing.app/YueJing"
@@ -188,7 +187,6 @@ targets:
       - target: TXTCore
     settings:
       base:
-        OTHER_LDFLAGS: "$(inherited) -Wl,-dead_strip_dylibs"
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.canvas-tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YueJing.app/YueJing"

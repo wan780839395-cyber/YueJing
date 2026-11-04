@@ -22,3 +22,13 @@ Xcode16.4/Swift6.1.2 构建出的 App 在 arm64 iOS18.5 模拟器启动时，dyl
 - 设备IPA仍须原完整回归、依赖和产物门禁通过；模拟器运行不代替iPhone13/iOS16.6.1真机验收。
 
 结果仅保存于ignored artifacts；本文件描述修复和验收合同，不预先宣称启动/运行成功。
+
+## 启动恢复后发现的运行验证问题
+
+第二轮已实际通过TXT12和EPUB3个UI流程，Host17进入执行；两套App二进制不再加载或导入Swift WebKit overlay。但原205项仍有200通过、2失败、3未执行，不能宣布完整回归通过。
+
+- 两个WKNavigationDelegate可选方法的回调类型补齐SDK要求的 `@MainActor @Sendable`，修复nearly-matches警告及导航拒绝回调未执行。保留所有拒绝条件与原安全断言。
+- 为输出XHTML加入 `width=device-width, initial-scale=1.0` viewport，避免手机采用桌面宽度布局、正文恢复后可见采样偏离预期。不改持久化node/UTF16坐标，不伪造可见正文。
+- `-dead_strip_dylibs`只保留在App目标，撤销Host/Canvas目标该选项。Canvas原包丢失XCTest及libXCTestSwiftSupport加载依赖且实际执行0项；恢复默认测试发现，不改测试或计数。
+- 实际二进制检查支持FAT32/FAT64容器，校验切片范围、重叠与架构并检查唯一arm64切片；`nm -arch arm64`交叉核对。仍保留完整原始文件，不跳过Xcode系统测试库，不放宽overlay零导入要求。
+- 上述问题须在新轮次以原205项重新验证。第二轮原始失败、下载恢复和完整性证据单独保留；真机验收仍未完成。

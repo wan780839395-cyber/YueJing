@@ -379,7 +379,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
         preferences: WKWebpagePreferences,
-        decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
     ) {
         preferences.allowsContentJavaScript = false
         guard let url = navigationAction.request.url else {
@@ -429,7 +429,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationResponse: WKNavigationResponse,
-        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
     ) {
         guard navigationResponse.isForMainFrame,
               navigationResponse.canShowMIMEType,

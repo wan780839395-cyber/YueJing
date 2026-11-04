@@ -209,7 +209,9 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         let cspMeta = xhtml.contains("Content-Security-Policy")
             ? ""
             : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(contentSecurityPolicy)\"/>"
-        let injection = cspMeta + "<style id=\"yj-epub-style\">\(css)</style>"
+        // XHTML otherwise uses WebKit's desktop-width layout viewport on iPhone.
+        let viewport = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        let injection = cspMeta + viewport + "<style id=\"yj-epub-style\">\(css)</style>"
         if let headClose = xhtml.range(of: "</head>", options: .caseInsensitive) {
             xhtml.insert(contentsOf: injection, at: headClose.lowerBound)
         } else if let htmlOpen = xhtml.range(of: "<body", options: .caseInsensitive) {

@@ -21,7 +21,39 @@ def require(ok, message):
         raise ValueError(message)
 
 
+def arm64_slice(data):
+    formats = {b'\xca\xfe\xba\xbe': ('>', False), b'\xbe\xba\xfe\xca': ('<', False),
+               b'\xca\xfe\xba\xbf': ('>', True), b'\xbf\xba\xfe\xca': ('<', True)}
+    if data[:4] not in formats:
+        return data
+    endian, wide = formats[data[:4]]
+    require(len(data) >= 8, 'Truncated FAT header')
+    count = struct.unpack_from(endian + 'I', data, 4)[0]
+    width = 32 if wide else 20
+    table_end = 8 + count * width
+    require(0 < count <= 64 and table_end <= len(data), 'Invalid FAT architecture table')
+    ranges, architectures, selected = [], set(), []
+    for i in range(count):
+        values = struct.unpack_from(endian + ('IIQQII' if wide else 'IIIII'), data, 8 + i * width)
+        cpu, subtype, offset, size, alignment = values[:5]
+        require(not wide or values[5] == 0, 'Invalid FAT reserved field')
+        require((cpu, subtype) not in architectures, 'Duplicate FAT architecture')
+        architectures.add((cpu, subtype))
+        require(alignment <= 31 and offset % (1 << alignment) == 0, 'Invalid FAT alignment')
+        require(offset >= table_end and size >= 32 and offset + size <= len(data), 'Invalid FAT slice bounds')
+        require(all(offset + size <= lo or offset >= hi for lo, hi in ranges), 'Overlapping FAT slices')
+        ranges.append((offset, offset + size))
+        if cpu == 0x0100000C:
+            payload = data[offset:offset + size]
+            require(payload[:4] == MAGIC and struct.unpack_from('<II', payload, 4) == (cpu, subtype),
+                    'FAT arm64 header does not match architecture table')
+            selected.append(payload)
+    require(len(selected) == 1, 'Expected exactly one arm64 FAT slice')
+    return selected[0]
+
+
 def inspect_macho(data):
+    data = arm64_slice(data)
     require(len(data) >= 32 and data[:4] == MAGIC, 'Expected thin little-endian Mach-O 64')
     _, cpu, _, _, count, size, _, _ = struct.unpack_from('<8I', data)
     require(cpu == 0x0100000C, 'Expected arm64')
@@ -73,6 +105,23 @@ def synthetic(cmd=WEAK_LOAD, symbol=False, ordinal=1, name=OVERLAY):
     return header + load + table + entry + strings
 
 
+def synthetic_fat(payload=None, endian='>', wide=False, cpus=(0x01000007, 0x0100000C)):
+    payload = synthetic() if payload is None else payload
+    width = 32 if wide else 20
+    offset = (8 + len(cpus) * width + 7) // 8 * 8
+    table, bodies = b'', b''
+    for cpu in cpus:
+        body = bytearray(payload)
+        struct.pack_into('<I', body, 4, cpu)
+        values = (cpu, 0, offset, len(body), 3) + ((0,) if wide else ())
+        table += struct.pack(endian + ('IIQQII' if wide else 'IIIII'), *values)
+        padded = (len(body) + 7) // 8 * 8
+        bodies += body + bytes(padded - len(body))
+        offset += padded
+    header = struct.pack(endian + 'II', 0xCAFEBABF if wide else 0xCAFEBABE, len(cpus)) + table
+    return header + bytes((len(header) + 7) // 8 * 8 - len(header)) + bodies
+
+
 def self_check():
     require(inspect_macho(synthetic())['passed'], 'Weak unused overlay must pass')
     require(not inspect_macho(synthetic(0xC))['passed'], 'Strong overlay must fail')
@@ -86,7 +135,26 @@ def self_check():
             pass
         else:
             raise AssertionError('Malformed Mach-O accepted')
-    print(json.dumps(dict(self_check='passed', synthetic_cases=9, native_invocations=0)))
+    for endian in ('>', '<'):
+        for wide in (False, True):
+            require(inspect_macho(synthetic_fat(endian=endian, wide=wide))['passed'], 'Valid FAT arm64')
+            require(not inspect_macho(synthetic_fat(synthetic(0xC), endian, wide))['passed'], 'FAT strong overlay')
+            require(not inspect_macho(synthetic_fat(synthetic(symbol=True), endian, wide))['passed'], 'FAT overlay import')
+    overlap = bytearray(synthetic_fat())
+    struct.pack_into('>I', overlap, 36, struct.unpack_from('>I', overlap, 16)[0])
+    mismatch = bytearray(synthetic_fat())
+    arm_offset = struct.unpack_from('>I', mismatch, 36)[0]
+    struct.pack_into('<I', mismatch, arm_offset + 4, 0x01000007)
+    malformed = (synthetic_fat(cpus=(0x01000007,)), synthetic_fat(cpus=(0x0100000C, 0x0100000C)),
+                 bytes(overlap), bytes(mismatch), synthetic_fat()[:20], synthetic_fat()[:-24])
+    for bad in malformed:
+        try:
+            inspect_macho(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Malformed FAT accepted')
+    print(json.dumps(dict(self_check='passed', synthetic_cases=27, native_invocations=0)))
 
 
 def inspect_apps(apps, out):
@@ -117,7 +185,7 @@ def inspect_apps(apps, out):
                 result['binaries'].append(record)
                 try:
                     record.update(inspect_macho(data))
-                    command = ['xcrun', 'nm', '-m', '-u', str(path)]
+                    command = ['xcrun', 'nm', '-arch', 'arm64', '-m', '-u', str(path)]
                     native = subprocess.run(command, capture_output=True, text=True, timeout=60)
                     log = out / ('nm-' + str(len(result['binaries'])) + '.log')
                     log.write_text(native.stdout + native.stderr, encoding='utf-8')
