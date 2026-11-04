@@ -47,6 +47,9 @@ targets:
         product: ZIPFoundation
     settings:
       base:
+        # Xcode 16.4 autolinks an overlay absent from older runtimes; APIs used here
+        # are client-emitted. Binary validation rejects any overlay symbol import.
+        OTHER_LDFLAGS: "$(inherited) -Wl,-weak-lswiftWebKit"
         PRODUCT_NAME: YueJing
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.app
         MARKETING_VERSION: "0.2.0"
@@ -139,6 +142,7 @@ targets:
       - target: ReaderDomain
     settings:
       base:
+        OTHER_LDFLAGS: "$(inherited) -Wl,-weak-lswiftWebKit"
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.host-tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YueJing.app/YueJing"
@@ -184,6 +188,7 @@ targets:
       - target: TXTCore
     settings:
       base:
+        OTHER_LDFLAGS: "$(inherited) -Wl,-weak-lswiftWebKit"
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.canvas-tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/YueJing.app/YueJing"

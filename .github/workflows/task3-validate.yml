@@ -156,6 +156,7 @@ jobs:
           python3 -B scripts/check_epub_batch.py --self-check > artifacts/task3/epub-batch-preflight.json
           python3 -B scripts/audit_native_case_events.py --self-check > artifacts/task3/native-event-parser-preflight.json
           python3 -B scripts/check_validation_aggregation.py > artifacts/task3/aggregation-preflight.log
+          python3 -B scripts/check_webkit_linkage.py --self-check > artifacts/task3/webkit-linkage-preflight.json
           python3 -B scripts/validate_task3.py freeze-candidate
 
       - name: Run the original 25 TXTCore tests once
@@ -398,6 +399,16 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 -B scripts/validate_task3.py test-counts YueJingCanvasTests
 
+      - name: Verify and preserve actual simulator WebKit overlay linkage
+        id: webkit_linkage
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
+            --app build/Task3Canvas/Build/Products/Debug-iphonesimulator/YueJing.app \
+            --output artifacts/task3/webkit-simulator-linkage
+
       - name: Require the exact reviewed 205-case union before device App compilation
         id: test_gate
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
@@ -429,6 +440,9 @@ jobs:
         id: package
         run: |
           set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/DerivedData/Build/Products/Release-iphoneos/YueJing.app \
+            --output artifacts/task3/webkit-device-linkage
           python3 scripts/validate_task3.py package-gate 2>&1 | tee artifacts/task3/dependency-gate.log
           python3 scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
           python3 scripts/validate_task3.py verify-ipa 2>&1 | tee artifacts/task3/ipa-verification.log
