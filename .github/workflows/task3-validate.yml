@@ -924,6 +924,31 @@ jobs:
           python3 -B scripts/validate_task3.py select-simulator
           python3 -B scripts/validate_task3.py settings
 
+      - name: Boot the selected simulator once before native execution
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json, os, subprocess, time
+          from pathlib import Path
+          out = Path('artifacts/task3')
+          selected = json.loads((out / 'simulator-selection.json').read_text())
+          assert selected['udid'] == os.environ['SIMULATOR_UDID']
+          command = ['xcrun', 'simctl', 'bootstatus', selected['udid'], '-b']
+          started = time.monotonic()
+          code, timed_out = None, False
+          try:
+              with (out / 'simulator-boot.log').open('x') as log:
+                  code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=120).returncode
+          except subprocess.TimeoutExpired:
+              timed_out = True
+          receipt = dict(command=command, exit_code=code, timed_out=timed_out,
+                         timeout_seconds=120, elapsed_seconds=time.monotonic()-started,
+                         source_commit=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                         run_attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+          (out / 'simulator-boot.json').write_text(json.dumps(receipt, indent=2))
+          assert code == 0 and not timed_out, 'Selected simulator did not become ready'
+          PY
+
       - name: Run only 8 EPUB cache and progress Domain cases once
         run: |
           set -euo pipefail
