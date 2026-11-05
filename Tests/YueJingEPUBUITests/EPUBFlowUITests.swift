@@ -32,7 +32,7 @@ final class EPUBFlowUITests: XCTestCase {
                 },
                 object: nil
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [coverLoaded], timeout: 10), .completed)
+            XCTAssertEqual(waitForPredicates([coverLoaded], timeout: 10), .completed)
 
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open", app)
             openDirectory(app)
@@ -54,7 +54,7 @@ final class EPUBFlowUITests: XCTestCase {
                 },
                 object: nil
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [movedToChapter2Mid], timeout: 15), .completed)
+            XCTAssertEqual(waitForPredicates([movedToChapter2Mid], timeout: 15), .completed)
             Self.captureEvidence(app, testName: name, stage: "after-chapter-jump", expectedBook: "EPUBTest-Illustrated-A")
 
             showTools(app)
@@ -86,7 +86,7 @@ final class EPUBFlowUITests: XCTestCase {
                 },
                 object: nil
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [ch2Loaded], timeout: 15), .completed)
+            XCTAssertEqual(waitForPredicates([ch2Loaded], timeout: 15), .completed)
 
             let view = viewport(app)
             for _ in 0..<3 {
@@ -108,7 +108,7 @@ final class EPUBFlowUITests: XCTestCase {
                 },
                 object: nil
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [scrolledExpectation], timeout: 12), .completed)
+            XCTAssertEqual(waitForPredicates([scrolledExpectation], timeout: 12), .completed)
             XCTAssertGreaterThan(scrolledNode, 0)
 
             showTools(app)
@@ -179,7 +179,7 @@ final class EPUBFlowUITests: XCTestCase {
                 },
                 object: nil
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [updatedTypography], timeout: 10), .completed)
+            XCTAssertEqual(waitForPredicates([updatedTypography], timeout: 10), .completed)
             exitReader(app, shelfBook: "EPUBTest-NoCover-B")
 
             openTXT("TXTTest-Companion-C", expectedMarker: "TXT_COMPANION_START", stage: "open-txt", app)
@@ -244,7 +244,7 @@ final class EPUBFlowUITests: XCTestCase {
         }
         let ready = XCTNSPredicateExpectation(predicate: visiblePredicate, object: nil)
         XCTAssertEqual(
-            XCTWaiter.wait(for: [ready], timeout: max(0.1, deadline.timeIntervalSinceNow)),
+            waitForPredicates([ready], timeout: max(0.1, deadline.timeIntervalSinceNow)),
             .completed,
             "Expected EPUB chapter content must be visible in the WebKit reader"
         )
@@ -290,7 +290,7 @@ final class EPUBFlowUITests: XCTestCase {
                 object: nil
             )
             XCTAssertEqual(
-                XCTWaiter.wait(for: [presented], timeout: max(0.1, deadline.timeIntervalSinceNow)),
+                waitForPredicates([presented], timeout: max(0.1, deadline.timeIntervalSinceNow)),
                 .completed
             )
         }
@@ -304,7 +304,7 @@ final class EPUBFlowUITests: XCTestCase {
             object: nil
         )
         XCTAssertEqual(
-            XCTWaiter.wait(for: [expanded], timeout: max(0.1, deadline.timeIntervalSinceNow)),
+            waitForPredicates([expanded], timeout: max(0.1, deadline.timeIntervalSinceNow)),
             .completed
         )
     }
@@ -383,7 +383,7 @@ final class EPUBFlowUITests: XCTestCase {
                 predicate: NSPredicate { _, _ in self.hasVisibleDockControl(app) },
                 object: nil
             )
-            let result = XCTWaiter.wait(for: [firstTouch], timeout: min(10, max(0.1, deadline.timeIntervalSinceNow)))
+            let result = waitForPredicates([firstTouch], timeout: min(10, max(0.1, deadline.timeIntervalSinceNow)))
             if result != .completed {
                 viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             }
@@ -403,7 +403,7 @@ final class EPUBFlowUITests: XCTestCase {
             },
             object: nil
         )
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: max(0.1, deadline.timeIntervalSinceNow)), .completed)
+        XCTAssertEqual(waitForPredicates([ready], timeout: max(0.1, deadline.timeIntervalSinceNow)), .completed)
         exit.tap()
         waitHittable(shelfRow(titled: title, app), timeout: max(0.1, deadline.timeIntervalSinceNow))
         XCTAssertFalse(app.staticTexts["暂时无法显示正文"].exists)
@@ -422,6 +422,20 @@ final class EPUBFlowUITests: XCTestCase {
         waitHittable(element)
     }
 
+    @MainActor private func waitForPredicates(
+        _ expectations: [XCTNSPredicateExpectation], timeout: TimeInterval
+    ) -> XCTWaiter.Result {
+        // All callers use one real UI predicate. Avoid a scheduling tick when it
+        // already holds; otherwise retain XCTest's normal wait and original budget.
+        let deadline = Date().addingTimeInterval(timeout)
+        if expectations.count == 1,
+           let expectation = expectations.first,
+           expectation.predicate.evaluate(with: expectation.object) {
+            return .completed
+        }
+        return XCTWaiter.wait(for: expectations, timeout: max(0, deadline.timeIntervalSinceNow))
+    }
+
     @MainActor private func waitHittable(_ element: XCUIElement, timeout: TimeInterval = 10) {
         // Avoid the predicate waiter's scheduling delay when the real control is ready.
         if element.exists && element.isHittable && element.isEnabled { return }
@@ -431,7 +445,7 @@ final class EPUBFlowUITests: XCTestCase {
             },
             object: nil
         )
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: timeout), .completed)
+        XCTAssertEqual(waitForPredicates([ready], timeout: timeout), .completed)
     }
 
     private static func parseCanvasValue(_ raw: String) -> [String: String] {
@@ -518,7 +532,7 @@ final class EPUBFlowUITests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             Self.parseCanvasValue(canvas.value as? String ?? "")["mode"] == rawValue
         }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 12), .completed)
+        XCTAssertEqual(waitForPredicates([ready], timeout: 12), .completed)
         let collapse = app.buttons["reader.tools.collapse"]
         if collapse.exists && collapse.isHittable { collapse.tap() }
     }
@@ -537,7 +551,7 @@ final class EPUBFlowUITests: XCTestCase {
         }
         func waitFor(_ condition: @escaping () -> Bool, timeout: TimeInterval = 12) {
             let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
-            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed)
+            XCTAssertEqual(waitForPredicates([expectation], timeout: timeout), .completed)
         }
         waitFor { coordinate("window") == 3 }
         let initialLoads = coordinate("loads")
