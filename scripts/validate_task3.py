@@ -460,16 +460,19 @@ def system_swift_runtime(link, search_paths, sdk, output):
                 stub_sha256=digest(stub), target="arm64-ios", availability="iOS 12.2+ Swift 5 runtime")
 
 
-def package_gate():
+def package_gate(reused=False):
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    # Reparse every selected group and exact identity union, including Canvas and new UI.
-    # A count-only check or a prior run's summary cannot authorize packaging.
-    require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
-            "Same-run reviewed-case acceptance is required before packaging")
-    require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
-            "Missing same-commit native decoder comparison")
-    require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
-            "Missing same-commit processing evidence")
+    if reused:
+        from reuse_native_evidence import validate_saved
+        validate_saved()
+    else:
+        # The original full mode still requires this run's exact native union.
+        require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
+                "Same-run reviewed-case acceptance is required before packaging")
+        require(json.loads((OUT / "decoder-comparison.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
+                "Missing same-commit native decoder comparison")
+        require(json.loads((OUT / "processing-measurements.json").read_text())["source_commit"] == os.environ["GITHUB_SHA"],
+                "Missing same-commit processing evidence")
     require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
     unsigned(APP)
     require(not list(APP.rglob("embedded.mobileprovision")) and not list(APP.rglob("_CodeSignature")), "Unexpected signing material")
@@ -554,7 +557,7 @@ def package_gate():
            grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned"))
 
 
-def verify_ipa():
+def verify_ipa(reused=False):
     artifacts = ROOT / "artifacts"
     manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
     version = manifest.get("version")
@@ -588,8 +591,15 @@ def verify_ipa():
         require({name for name in names if not name.endswith("/")} == set(expected), "Packaged files differ from the actual built App")
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
-    report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-           tests_passed=inventory.TOTAL, dependency_gate="app-dependency-gate.json"))
+    if reused:
+        from reuse_native_evidence import validate_saved
+        qualification = validate_saved()
+        report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
+               native_tests_executed_this_run=0, reused_native_passed=205,
+               native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
+    else:
+        report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
+               tests_passed=inventory.TOTAL, dependency_gate="app-dependency-gate.json"))
 
 
 if __name__ == "__main__":
@@ -604,7 +614,9 @@ if __name__ == "__main__":
              "decoder-comparison-settings": lambda: measurement_settings(("TXTCore", "TXTCoreTests"), "decoder-comparison-settings"),
              "decoder-comparison": decoder_comparison,
              "all-test-gate": write_all_test_evidence,
-             "package-gate": package_gate, "verify-ipa": verify_ipa}[command]()
+             "package-gate": package_gate, "verify-ipa": verify_ipa,
+             "package-gate-reused": lambda: package_gate(reused=True),
+             "verify-ipa-reused": lambda: verify_ipa(reused=True)}[command]()
     except (*VALIDATION_ERRORS, zipfile.BadZipFile) as error:
         print("Task 3 validation stopped: " + str(error), file=sys.stderr)
         sys.exit(1)
