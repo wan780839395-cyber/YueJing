@@ -786,7 +786,20 @@ struct EPUBReaderHostTests {
                 #expect(!model.loading)
                 let retained = try await controller.evaluateLocatorJavaScriptForTesting("document === window.__continuousDocument && document.querySelector('[data-yj-chapter]') === window.__continuousNode") as? Bool
                 #expect(retained == true)
-                let afterCrossing = try #require(await controller.sampleVisibleNow())
+                let crossingSample = await controller.sampleVisibleNow()
+                if crossingSample == nil {
+                    let diagnostic = try await controller.evaluateLocatorJavaScriptForTesting("""
+                    (function() {
+                        var p = window.__yjEpub.sampleNow();
+                        return JSON.stringify({status: window.__yjEpub.sampleStatus(), sampled: p !== null,
+                            epochMatches: p ? p.epoch === "\(ch2Token.epoch.uuidString)" : null,
+                            pathMatches: p ? p.path === "\(ch2Token.path)" : null,
+                            scrollY: window.scrollY, expectedY: \(crossed.scrollY)});
+                    })();
+                    """)
+                    print("EPUB_SYNTHETIC_CROSSING tokenMatches=\(model.currentToken == ch2Token) ready=\(model.ready) diagnostic=\(String(describing: diagnostic))")
+                }
+                let afterCrossing = try #require(crossingSample)
                 #expect(abs(afterCrossing.scrollY - crossed.scrollY) < 2)
                 let positionBeforeStale = model.currentPosition
                 model.handleLocatorEvent(boundarySample) // old epoch cannot move progress back

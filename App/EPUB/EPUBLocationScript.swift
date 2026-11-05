@@ -1083,6 +1083,11 @@ enum EPUBLocationScript {
             syncWindow: syncWindow,
             windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,
+            sampleStatus: function() {
+                return {ready: state.ready, reflow: state.suppressingReflow, syncing: state.syncing,
+                    chapters: state.chapters.length, revision: state.reflowRevision,
+                    configuredPathVisible: (sampleVisible() || {}).path === state.path};
+            },
             realignAnchorIfStationary: function() {
                 // Native callers must not pull a reader back after a horizontal user move.
                 sampleScrollPayload();
