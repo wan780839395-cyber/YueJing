@@ -163,6 +163,34 @@ final class EPUBReaderViewModel: ObservableObject {
         }
     }
 
+    /// Called only by the live viewport at a chapter boundary. Never wrap the spine.
+    @discardableResult
+    func turnChapter(_ direction: EPUBPageDirection, from token: EPUBNavigationToken) -> Bool {
+        guard ready, !loading, !closing, !suspended, !exitSaveFailed,
+              currentToken == token, let reader,
+              let index = reader.publication.package.spine.firstIndex(of: token.path) else { return false }
+        let nextIndex = index + direction.rawValue
+        let paths = reader.publication.package.spine
+        guard paths.indices.contains(nextIndex) else { return false }
+        // Close the old epoch's UI admission synchronously, before the task can suspend.
+        ready = false
+        currentToken = nil
+        generation = UUID()
+        hasUserPosition = true
+        currentFragment = nil
+        saveTask?.cancel()
+        navigationTask?.cancel()
+        navigationTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            await self?.beginChapterNavigation(
+                path: paths[nextIndex], targetPosition: nil, fragment: nil,
+                preserveTargetAnchor: false, persistOnReady: true, reloadDocument: true,
+                startAtEnd: direction == .previous
+            )
+        }
+        return true
+    }
+
     func navigateToInternalLink(path: String, fragment: String?) {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               reader.publication.package.spine.contains(path) else {
@@ -228,7 +256,8 @@ final class EPUBReaderViewModel: ObservableObject {
         fragment: String?,
         preserveTargetAnchor: Bool,
         persistOnReady: Bool,
-        reloadDocument: Bool
+        reloadDocument: Bool,
+        startAtEnd: Bool = false
     ) async {
         guard let reader, !closing, !suspended, !exitSaveFailed else { return }
         saveTask?.cancel()
@@ -251,7 +280,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 fragment: fragment,
                 preferences: preferences.validated,
                 preserveTargetAnchor: preserveTargetAnchor,
-                reloadDocument: reloadDocument
+                reloadDocument: reloadDocument,
+                startAtEnd: startAtEnd
             )
         } catch is CancellationError {
         } catch {

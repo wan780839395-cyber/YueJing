@@ -210,7 +210,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
             ? ""
             : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(contentSecurityPolicy)\"/>"
         // XHTML otherwise uses WebKit's desktop-width layout viewport on iPhone.
-        let viewport = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/>"
+        let viewport = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no\"/>"
         let injection = cspMeta + viewport + "<style id=\"yj-epub-style\">\(css)</style>"
         if let headClose = xhtml.range(of: "</head>", options: .caseInsensitive) {
             xhtml.insert(contentsOf: injection, at: headClose.lowerBound)

@@ -460,14 +460,17 @@ def system_swift_runtime(link, search_paths, sdk, output):
                 stub_sha256=digest(stub), target="arm64-ios", availability="iOS 12.2+ Swift 5 runtime")
 
 
-def package_gate(reused=False, epub_compat=False):
+def package_gate(reused=False, epub_compat=False, epub_paging=False):
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    require(not (reused and epub_compat), "Native qualification modes are mutually exclusive")
+    require(sum(map(bool, (reused, epub_compat, epub_paging))) <= 1, "Native qualification modes are mutually exclusive")
     if reused:
         from reuse_native_evidence import validate_saved
         validate_saved()
     elif epub_compat:
         from run_epub_compat_validation import validate_saved
+        validate_saved()
+    elif epub_paging:
+        from run_epub_paging_validation import validate_saved
         validate_saved()
     else:
         # The original full mode still requires this run's exact native union.
@@ -561,8 +564,8 @@ def package_gate(reused=False, epub_compat=False):
            grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned"))
 
 
-def verify_ipa(reused=False, epub_compat=False):
-    require(not (reused and epub_compat), "Native qualification modes are mutually exclusive")
+def verify_ipa(reused=False, epub_compat=False, epub_paging=False):
+    require(sum(map(bool, (reused, epub_compat, epub_paging))) <= 1, "Native qualification modes are mutually exclusive")
     artifacts = ROOT / "artifacts"
     manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
     version = manifest.get("version")
@@ -603,6 +606,13 @@ def verify_ipa(reused=False, epub_compat=False):
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=33, coverage="EPUB_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
+    elif epub_paging:
+        from run_epub_paging_validation import validate_saved
+        qualification = validate_saved()
+        require(version == "0.2.3" and build == "5", "EPUB paging release identity differs")
+        report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
+               native_tests_executed_this_run=6, coverage="EPUB_PAGING_TARGETED_NOT_FULL",
+               native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
     elif reused:
         from reuse_native_evidence import validate_saved
         qualification = validate_saved()
@@ -629,6 +639,8 @@ if __name__ == "__main__":
              "package-gate": package_gate, "verify-ipa": verify_ipa,
              "package-gate-epub-compat": lambda: package_gate(epub_compat=True),
              "verify-ipa-epub-compat": lambda: verify_ipa(epub_compat=True),
+             "package-gate-epub-paging": lambda: package_gate(epub_paging=True),
+             "verify-ipa-epub-paging": lambda: verify_ipa(epub_paging=True),
              "package-gate-reused": lambda: package_gate(reused=True),
              "verify-ipa-reused": lambda: verify_ipa(reused=True)}[command]()
     except (*VALIDATION_ERRORS, zipfile.BadZipFile) as error:

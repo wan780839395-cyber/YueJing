@@ -62,6 +62,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(midAnchorChapter.waitForExistence(timeout: 10))
             XCTAssertEqual(midAnchorChapter.value as? String, "当前章节")
             closePanel(app)
+            verifyPagingAndCrossChapterNavigation(app)
             exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
         }
     }
@@ -487,5 +488,124 @@ final class EPUBFlowUITests: XCTestCase {
         XCTContext.runActivity(named: prefix + "--ax") { activity in
             activity.add(text)
         }
+    }
+
+    @MainActor private func verifyPagingAndCrossChapterNavigation(_ app: XCUIApplication) {
+        let view = viewport(app)
+        let canvas = readerCanvas(app)
+
+        let initialFrame = view.frame
+        view.pinch(withScale: 1.5, velocity: 1.0)
+        XCTAssertEqual(view.frame.size.width, initialFrame.size.width, accuracy: 1.0)
+        XCTAssertEqual(view.frame.size.height, initialFrame.size.height, accuracy: 1.0)
+
+        let collapse = app.buttons["reader.tools.collapse"]
+        if collapse.exists && collapse.isHittable {
+            collapse.tap()
+        }
+
+        let initialParsed = Self.parseCanvasValue(canvas.value as? String ?? "")
+        let initialScrollY = Int(initialParsed["scrollY"] ?? "0") ?? 0
+
+        view.swipeLeft(velocity: .default)
+        let swipedNext = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let currentY = Int(Self.parseCanvasValue(raw)["scrollY"] ?? "0") ?? 0
+                return currentY > initialScrollY
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [swipedNext], timeout: 8), .completed)
+        let afterSwipeY = Int(Self.parseCanvasValue(canvas.value as? String ?? "")["scrollY"] ?? "0") ?? 0
+        XCTAssertGreaterThan(afterSwipeY, initialScrollY)
+
+        view.swipeRight(velocity: .default)
+        let swipedPrevious = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard canvas.exists else { return false }
+            return (Int(Self.parseCanvasValue(canvas.value as? String ?? "")["scrollY"] ?? "0") ?? 0) < afterSwipeY
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [swipedPrevious], timeout: 8), .completed)
+        view.swipeLeft(velocity: .default)
+        let swipedAgain = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard canvas.exists else { return false }
+            return abs((Int(Self.parseCanvasValue(canvas.value as? String ?? "")["scrollY"] ?? "0") ?? 0) - afterSwipeY) <= 2
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [swipedAgain], timeout: 8), .completed)
+
+        view.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.4)).tap()
+        let tappedPrev = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let currentY = Int(Self.parseCanvasValue(raw)["scrollY"] ?? "0") ?? 0
+                return currentY < afterSwipeY
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [tappedPrev], timeout: 8), .completed)
+        let afterPrevTapY = Int(Self.parseCanvasValue(canvas.value as? String ?? "")["scrollY"] ?? "0") ?? 0
+        XCTAssertLessThan(afterPrevTapY, afterSwipeY)
+
+        view.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)).tap()
+        let tappedNext = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let currentY = Int(Self.parseCanvasValue(raw)["scrollY"] ?? "0") ?? 0
+                return currentY > afterPrevTapY
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [tappedNext], timeout: 8), .completed)
+
+        showTools(app)
+        openDirectory(app)
+        let chapter3Button = app.buttons["reader.chapter.3"]
+        waitHittable(chapter3Button, timeout: 10)
+        chapter3Button.tap()
+
+        let ch3Loaded = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let parsed = Self.parseCanvasValue(raw)
+                return parsed["path"] == "OEBPS/text/ch3.xhtml" && canvas.label.contains("EPUB_CH3_START")
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [ch3Loaded], timeout: 15), .completed)
+        if (Int(Self.parseCanvasValue(canvas.value as? String ?? "")["scrollY"] ?? "0") ?? 0) > 2 {
+            view.swipeDown(velocity: .slow)
+            let atChapterTop = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                guard canvas.exists else { return false }
+                let value = Self.parseCanvasValue(canvas.value as? String ?? "")
+                return value["path"] == "OEBPS/text/ch3.xhtml" && (Int(value["scrollY"] ?? "999") ?? 999) <= 2
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [atChapterTop], timeout: 8), .completed)
+        }
+
+        let backToCh2End = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let parsed = Self.parseCanvasValue(raw)
+                return parsed["path"] == "OEBPS/text/ch2.xhtml" && canvas.label.contains("EPUB_CH2_END")
+            },
+            object: nil
+        )
+        view.swipeDown(velocity: .slow)
+        XCTAssertEqual(XCTWaiter.wait(for: [backToCh2End], timeout: 12), .completed)
+
+        let forwardToCh3 = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard canvas.exists, let raw = canvas.value as? String else { return false }
+                let parsed = Self.parseCanvasValue(raw)
+                return parsed["path"] == "OEBPS/text/ch3.xhtml" && canvas.label.contains("EPUB_CH3_START")
+            },
+            object: nil
+        )
+        view.swipeUp(velocity: .slow)
+        XCTAssertEqual(XCTWaiter.wait(for: [forwardToCh3], timeout: 12), .completed)
+
+        Self.captureEvidence(app, testName: name, stage: "after-paging-cross-chapter", expectedBook: "EPUBTest-Illustrated-A")
+
+        showTools(app)
     }
 }

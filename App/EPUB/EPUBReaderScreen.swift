@@ -38,6 +38,9 @@ struct EPUBReaderScreen: View {
                     onLocatorEvent: model.handleLocatorEvent,
                     onLoadFailure: model.handleLoadFailure,
                     onInternalLink: model.navigateToInternalLink,
+                    onChapterBoundary: model.turnChapter,
+                    interactionEnabled: model.ready && !model.loading && !model.exitSaveFailed &&
+                        tools.canInteract && tools.panel == nil,
                     toolIntent: { tools.intent },
                     onToolsInteraction: handleToolsInteraction
                 )
@@ -45,6 +48,8 @@ struct EPUBReaderScreen: View {
                 .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
                 .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
                 .accessibilityAction(named: Text("退出阅读")) { exitReader() }
+                .accessibilityAction(named: Text("下一屏")) { _ = model.webView.controller?.turnPage(.next) }
+                .accessibilityAction(named: Text("上一屏")) { _ = model.webView.controller?.turnPage(.previous) }
 
                 if model.loading && tools.exitRequest == nil && tools.valid {
                     VStack(alignment: .leading, spacing: 12) {

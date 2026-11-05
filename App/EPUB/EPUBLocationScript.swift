@@ -155,7 +155,8 @@ enum EPUBLocationScript {
         targetPosition: EPUBReadingPosition?,
         fragment: String?,
         preferences: ReaderPreferences,
-        preserveTargetAnchor: Bool
+        preserveTargetAnchor: Bool,
+        startAtEnd: Bool = false
     ) throws -> String {
         guard let nodes = package.textNodes[token.path] else {
             throw EPUBError.invalidPackage
@@ -171,6 +172,7 @@ enum EPUBLocationScript {
             "targetOffset": targetPosition?.path == token.path ? (targetPosition?.utf16Offset ?? 0) : 0,
             "fragment": fragment ?? "",
             "preserveTargetAnchor": preserveTargetAnchor && (targetPosition?.path == token.path),
+            "startAtEnd": startAtEnd && targetPosition == nil && fragment == nil,
             "css": trustedStyleSheet(for: preferences)
         ]
         if targetPosition == nil {
@@ -327,6 +329,12 @@ enum EPUBLocationScript {
                 }
             }
             window.scrollTo(0, 0);
+            return true;
+        }
+
+        function scrollToChapterEnd() {
+            var height = Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0);
+            window.scrollTo(0, height);
             return true;
         }
 
@@ -496,7 +504,9 @@ enum EPUBLocationScript {
             var mySession = state.sessionID;
             var myEpoch = state.epoch;
             waitForImagesAndTwoFrames(mySession, myEpoch, function() {
-                var ok = scrollToTarget(state.targetNode, state.targetOffset, config.fragment || "");
+                var ok = config.startAtEnd === true && state.targetNode < 0 && !config.fragment
+                    ? scrollToChapterEnd()
+                    : scrollToTarget(state.targetNode, state.targetOffset, config.fragment || "");
                 if (!ok) {
                     post({
                         kind: "error",

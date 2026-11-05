@@ -14,6 +14,7 @@ struct EPUBNavigationRequest: Equatable {
     let preferences: ReaderPreferences
     let preserveTargetAnchor: Bool
     let reloadDocument: Bool
+    var startAtEnd: Bool = false
 
     static func == (lhs: EPUBNavigationRequest, rhs: EPUBNavigationRequest) -> Bool {
         lhs.id == rhs.id &&
@@ -24,7 +25,7 @@ struct EPUBNavigationRequest: Equatable {
             lhs.fragment == rhs.fragment &&
             lhs.preferences == rhs.preferences &&
             lhs.preserveTargetAnchor == rhs.preserveTargetAnchor &&
-            lhs.reloadDocument == rhs.reloadDocument
+            lhs.reloadDocument == rhs.reloadDocument && lhs.startAtEnd == rhs.startAtEnd
     }
 }
 
@@ -115,6 +116,22 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var loadingNavigation: WKNavigation?
     private var beganTapDuringDeceleration = false
     private(set) var deniedNavigations: [String] = []
+    private var readyToken: EPUBNavigationToken?
+    private var pageAnimationToken: EPUBNavigationToken?
+    private var dragOrigin: (token: EPUBNavigationToken, offset: CGFloat)?
+    private var pagePan: UIPanGestureRecognizer?
+    private var pagePanToken: EPUBNavigationToken?
+    private var interactionGeneration = UUID()
+    var interactionEnabled = true {
+        didSet {
+            if oldValue != interactionEnabled {
+                interactionGeneration = UUID()
+                pagePanToken = nil
+                dragOrigin = nil
+            }
+        }
+    }
+    var onChapterBoundary: (@MainActor (EPUBPageDirection, EPUBNavigationToken) -> Bool)?
 
     var onLocatorEvent: (@MainActor (EPUBLocatorPayload) -> Void)?
     var onLoadFailure: (@MainActor (Error, EPUBNavigationToken) -> Void)?
@@ -151,6 +168,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         created.uiDelegate = self
         created.scrollView.delegate = self
         created.scrollView.contentInsetAdjustmentBehavior = .never
+        created.scrollView.alwaysBounceVertical = true
+        created.scrollView.panGestureRecognizer.maximumNumberOfTouches = 1
+        created.scrollView.pinchGestureRecognizer?.isEnabled = false
         created.isOpaque = false
         created.allowsBackForwardNavigationGestures = false
         created.allowsLinkPreview = false
@@ -169,11 +189,20 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         tap.cancelsTouchesInView = false
         tap.delegate = self
         created.addGestureRecognizer(tap)
+
+        let horizontal = UIPanGestureRecognizer(target: self, action: #selector(handlePagePan(_:)))
+        horizontal.minimumNumberOfTouches = 1
+        horizontal.maximumNumberOfTouches = 1
+        horizontal.delegate = self
+        pagePan = horizontal
+        created.addGestureRecognizer(horizontal)
+        created.scrollView.panGestureRecognizer.require(toFail: horizontal)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         webView?.frame = view.bounds
+        webView?.scrollView.pinchGestureRecognizer?.isEnabled = false
         let insetBounds = view.bounds.inset(by: UIEdgeInsets(top: 56, left: 16, bottom: 56, right: 16))
         if insetBounds.width > 0 && insetBounds.height > 0 {
             canvasAccessibilityView.frame = insetBounds
@@ -197,6 +226,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         webView.stopLoading()
 
         activeRequest = request
+        readyToken = nil
+        pageAnimationToken = nil
+        dragOrigin = nil
+        pagePanToken = nil
         let capability = EPUBResourceCapability(
             token: request.token,
             publication: request.publication,
@@ -227,6 +260,11 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         loadTask?.cancel()
         loadTask = nil
         activeRequest = nil
+        readyToken = nil
+        pageAnimationToken = nil
+        dragOrigin = nil
+        pagePanToken = nil
+        onChapterBoundary = nil
         loadedDocumentPath = nil
         loadedDocumentToken = nil
         loadingNavigation = nil
@@ -270,7 +308,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 targetPosition: request.targetPosition,
                 fragment: request.fragment,
                 preferences: request.preferences,
-                preserveTargetAnchor: request.preserveTargetAnchor
+                preserveTargetAnchor: request.preserveTargetAnchor,
+                startAtEnd: request.startAtEnd
             )
             let combined = EPUBLocationScript.bootstrapSource + "\n" + invoke
             // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
@@ -295,6 +334,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
               payload.path == current.token.path else {
             return
         }
+        if payload.kind == .ready { readyToken = current.token }
+        if payload.kind == .error { readyToken = nil }
         if payload.kind == .ready || payload.kind == .scroll {
             updateAccessibilityCanvas(with: payload, preferences: current.preferences)
         }
@@ -449,6 +490,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
               webView.url == EPUBResourceCapability.url(for: current.token) else { return }
         loadedDocumentPath = current.token.path
         loadedDocumentToken = current.token
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         configureLoadedDOM(for: current)
     }
 
@@ -485,11 +527,108 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     // MARK: - UIScrollViewDelegate & Tap Gesture
 
+    private var pageGeometry: EPUBPageGeometry {
+        let scroll = webView.scrollView
+        return EPUBPageGeometry(
+            offset: scroll.contentOffset.y, contentHeight: scroll.contentSize.height,
+            viewportHeight: scroll.bounds.height,
+            topInset: scroll.adjustedContentInset.top, bottomInset: scroll.adjustedContentInset.bottom
+        )
+    }
+
+    @discardableResult
+    func turnPage(_ direction: EPUBPageDirection, animated: Bool = true) -> Bool {
+        guard interactionEnabled, let token = activeRequest?.token, readyToken == token,
+              pageAnimationToken == nil, webView != nil, pageGeometry.valid else { return false }
+        let scroll = webView.scrollView
+        if let destination = pageGeometry.destination(direction) {
+            onToolsInteraction?(.scrollingBegan)
+            let animate = animated && !UIAccessibility.isReduceMotionEnabled
+            pageAnimationToken = animate ? token : nil
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: destination), animated: animate)
+            if !animate { reportVisiblePosition(for: token) }
+            return true
+        }
+        return onChapterBoundary?(direction, token) ?? false
+    }
+
+    private func reportVisiblePosition(for token: EPUBNavigationToken) {
+        Task { @MainActor [weak self] in
+            guard let self, let payload = await self.sampleVisibleNow(),
+                  self.activeRequest?.token == token, self.readyToken == token else { return }
+            self.onLocatorEvent?(payload)
+        }
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        guard let token = pageAnimationToken else { return }
+        pageAnimationToken = nil
+        reportVisiblePosition(for: token)
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === pagePan, let pan = pagePan else { return true }
+        let velocity = pan.velocity(in: view)
+        return interactionEnabled && readyToken != nil && readyToken == activeRequest?.token &&
+            pageAnimationToken == nil && !UIAccessibility.isVoiceOverRunning &&
+            abs(velocity.x) > abs(velocity.y) * 1.5
+    }
+
+    @objc private func handlePagePan(_ recognizer: UIPanGestureRecognizer) {
+        if recognizer.state == .began {
+            pagePanToken = readyToken
+            return
+        }
+        guard recognizer.state == .ended || recognizer.state == .cancelled || recognizer.state == .failed else { return }
+        let token = pagePanToken
+        pagePanToken = nil
+        guard recognizer.state == .ended, let token, token == readyToken, token == activeRequest?.token else { return }
+        let delta = recognizer.translation(in: view)
+        guard abs(delta.x) >= 48, abs(delta.x) > abs(delta.y) * 1.5 else { return }
+        _ = turnPage(delta.x < 0 ? .next : .previous)
+    }
+
+    private func turnPageAtEdge(_ direction: EPUBPageDirection, point: CGPoint) {
+        guard interactionEnabled, let token = readyToken, token == activeRequest?.token else { return }
+        let interaction = interactionGeneration
+        // Preserve actual publication links and text selection rather than consuming their taps.
+        let script = """
+        (function() {
+            var selection = window.getSelection();
+            var element = document.elementFromPoint(\(point.x), \(point.y));
+            return Boolean(element && !element.closest('a, button, input, textarea, select') &&
+                (!selection || selection.isCollapsed));
+        })();
+        """
+        webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] value, error in
+            guard error == nil, value as? Bool == true, let self,
+                  self.interactionGeneration == interaction,
+                  self.activeRequest?.token == token, self.readyToken == token else { return }
+            _ = self.turnPage(direction)
+        }
+    }
+
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        pageAnimationToken = nil
+        if interactionEnabled, let token = readyToken, token == activeRequest?.token {
+            dragOrigin = (token, scrollView.contentOffset.y)
+        } else {
+            dragOrigin = nil
+        }
         onToolsInteraction?(.scrollingBegan)
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        let origin = dragOrigin
+        dragOrigin = nil
+        if interactionEnabled, let origin, readyToken == origin.token,
+           activeRequest?.token == origin.token,
+           let direction = pageGeometry.boundaryTurn(
+               from: origin.offset, translation: scrollView.panGestureRecognizer.translation(in: view)
+           ), onChapterBoundary?(direction, origin.token) == true {
+            scrollView.setContentOffset(CGPoint(x: 0, y: min(max(scrollView.contentOffset.y, pageGeometry.minimum), pageGeometry.maximum)), animated: false)
+            return
+        }
         if !decelerate {
             Task { [weak self] in
                 guard let self, let payload = await self.sampleVisibleNow() else { return }
@@ -509,7 +648,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        true
+        gestureRecognizer !== pagePan && otherGestureRecognizer !== pagePan
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -520,6 +659,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     @objc private func handleViewportTap(_ recognizer: UITapGestureRecognizer) {
         guard recognizer.state == .ended, let webView else { return }
         let location = recognizer.location(in: view)
+        let scroll = webView.scrollView
+        if let direction = EPUBPageGeometry.edgeDirection(at: location, size: view.bounds.size) {
+            let canTurn = !beganTapDuringDeceleration && !scroll.isDragging && !scroll.isDecelerating &&
+                !UIAccessibility.isVoiceOverRunning
+            beganTapDuringDeceleration = false
+            if canTurn { turnPageAtEdge(direction, point: recognizer.location(in: webView)) }
+            return
+        }
         guard ReadingToolsGesturePolicy.central(
             x: location.x,
             y: location.y,
@@ -558,6 +705,8 @@ struct EPUBWebView: UIViewControllerRepresentable {
     let onLocatorEvent: @MainActor (EPUBLocatorPayload) -> Void
     let onLoadFailure: @MainActor (Error, EPUBNavigationToken) -> Void
     let onInternalLink: @MainActor (String, String?) -> Void
+    let onChapterBoundary: @MainActor (EPUBPageDirection, EPUBNavigationToken) -> Bool
+    let interactionEnabled: Bool
     let toolIntent: @MainActor () -> UUID
     let onToolsInteraction: @MainActor (ReadingToolsInteraction) -> Void
 
@@ -571,6 +720,8 @@ struct EPUBWebView: UIViewControllerRepresentable {
         controller.onLocatorEvent = onLocatorEvent
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink
+        controller.onChapterBoundary = onChapterBoundary
+        controller.interactionEnabled = interactionEnabled
         controller.toolIntent = toolIntent
         controller.onToolsInteraction = onToolsInteraction
         controller.applyTheme(preferences.theme)
@@ -582,6 +733,8 @@ struct EPUBWebView: UIViewControllerRepresentable {
         controller.onLocatorEvent = onLocatorEvent
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink
+        controller.onChapterBoundary = onChapterBoundary
+        controller.interactionEnabled = interactionEnabled
         controller.toolIntent = toolIntent
         controller.onToolsInteraction = onToolsInteraction
         controller.applyTheme(preferences.theme)
