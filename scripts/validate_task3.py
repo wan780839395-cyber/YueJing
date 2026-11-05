@@ -460,9 +460,9 @@ def system_swift_runtime(link, search_paths, sdk, output):
                 stub_sha256=digest(stub), target="arm64-ios", availability="iOS 12.2+ Swift 5 runtime")
 
 
-def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_reading=False):
+def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False):
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading))) <= 1, "Native qualification modes are mutually exclusive")
+    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic))) <= 1, "Native qualification modes are mutually exclusive")
     if reused:
         from reuse_native_evidence import validate_saved
         validate_saved()
@@ -474,6 +474,9 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
         validate_saved()
     elif epub_reading:
         from run_epub_reading_validation import validate_saved
+        validate_saved()
+    elif diagnostic:
+        from epub_diagnostic_package import validate_saved
         validate_saved()
     else:
         # The original full mode still requires this run's exact native union.
@@ -567,8 +570,8 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
            grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned"))
 
 
-def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=False):
-    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading))) <= 1, "Native qualification modes are mutually exclusive")
+def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False):
+    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic))) <= 1, "Native qualification modes are mutually exclusive")
     artifacts = ROOT / "artifacts"
     manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
     version = manifest.get("version")
@@ -623,6 +626,14 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=15, coverage="EPUB_READING_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
+    elif diagnostic:
+        from epub_diagnostic_package import validate_saved
+        qualification = validate_saved()
+        require(version == "0.2.4" and build == "6", "Diagnostic package identity differs")
+        report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
+               native_tests_executed_this_run=0, coverage="UI_NOT_QUALIFIED",
+               qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,
+               dependency_gate="app-dependency-gate.json"))
     elif reused:
         from reuse_native_evidence import validate_saved
         qualification = validate_saved()
@@ -653,6 +664,8 @@ if __name__ == "__main__":
              "verify-ipa-epub-paging": lambda: verify_ipa(epub_paging=True),
              "package-gate-epub-reading": lambda: package_gate(epub_reading=True),
              "verify-ipa-epub-reading": lambda: verify_ipa(epub_reading=True),
+             "package-gate-epub-diagnostic": lambda: package_gate(diagnostic=True),
+             "verify-ipa-epub-diagnostic": lambda: verify_ipa(diagnostic=True),
              "package-gate-reused": lambda: package_gate(reused=True),
              "verify-ipa-reused": lambda: verify_ipa(reused=True)}[command]()
     except (*VALIDATION_ERRORS, zipfile.BadZipFile) as error:
