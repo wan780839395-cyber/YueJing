@@ -673,7 +673,7 @@ struct EPUBReaderHostTests {
         #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: -10, y: 400), size: screenSize) == nil)
         #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: 450, y: 400), size: screenSize) == nil)
         #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: 40, y: 400), size: CGSize(width: 400, height: 100)) == nil)
-        #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: .nan, y: 400), size: screenSize) == nil)
+        #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: CGFloat.nan, y: 400), size: screenSize) == nil)
     }
 
     private func verifyPagingAndChapterBoundaryNavigation() async throws {
