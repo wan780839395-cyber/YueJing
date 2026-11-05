@@ -218,12 +218,28 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         super.viewDidLayoutSubviews()
         webView?.frame = view.bounds
         webView?.scrollView.pinchGestureRecognizer?.isEnabled = false
+        applyReadingGesturePolicy()
         let insetBounds = view.bounds.inset(by: UIEdgeInsets(top: 56, left: 16, bottom: 56, right: 16))
         if insetBounds.width > 0 && insetBounds.height > 0 {
             canvasAccessibilityView.frame = insetBounds
         } else {
             canvasAccessibilityView.frame = view.bounds
         }
+    }
+
+    private func applyReadingGesturePolicy() {
+        guard let webView, let request = activeRequest else { return }
+        let vertical = request.readingMode == .scroll
+        // WebKit may reset UIScrollView gesture state while installing new content.
+        // Reassert the policy at lifecycle boundaries, without resetting an active vertical drag.
+        if webView.scrollView.isScrollEnabled != vertical { webView.scrollView.isScrollEnabled = vertical }
+        if webView.scrollView.panGestureRecognizer.isEnabled != vertical {
+            webView.scrollView.panGestureRecognizer.isEnabled = vertical
+        }
+        pagePan?.isEnabled = !vertical
+        webView.scrollView.alwaysBounceVertical = vertical
+        webView.scrollView.showsVerticalScrollIndicator = vertical
+        webView.scrollView.showsHorizontalScrollIndicator = false
     }
 
     func applyTheme(_ theme: ReaderTheme) {
@@ -260,11 +276,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         dragOrigin = nil
         pagePanToken = nil
         scrollDirection = nil
-        pagePan?.isEnabled = request.readingMode == .paged
-        webView.scrollView.panGestureRecognizer.isEnabled = request.readingMode == .scroll
-        webView.scrollView.alwaysBounceVertical = request.readingMode == .scroll
-        webView.scrollView.showsVerticalScrollIndicator = request.readingMode == .scroll
-        webView.scrollView.showsHorizontalScrollIndicator = false
+        applyReadingGesturePolicy()
         let capability = EPUBResourceCapability(
             token: request.token,
             publication: request.publication,
@@ -487,6 +499,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowInFlight = false
         windowTask?.cancel()
         windowTask = nil
+        applyReadingGesturePolicy()
         if body["error"] as? Bool == true {
             failChapterWindow(current.token)
         } else if body["needsMore"] as? Bool == true, windowChapterCount < EPUBChapterWindow.maximumChapters {
@@ -520,6 +533,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
         if payload.kind == .ready {
             readyToken = current.token
+            applyReadingGesturePolicy()
             renderedChapterPaths.insert(current.token.path)
             transitionSnapshot?.removeFromSuperview()
             transitionSnapshot = nil
@@ -538,6 +552,18 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     func sampleVisibleNow() async -> EPUBLocatorPayload? {
         guard let current = activeRequest, webView != nil else { return nil }
+        // A ready document can still be in a two-frame resize/preload transaction.
+        // Wait briefly for a real sample; never bridge a session/epoch change with stale data.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+        repeat {
+            guard !Task.isCancelled, activeRequest?.token == current.token else { return nil }
+            if let payload = await sampleVisibleOnce(for: current) { return payload }
+            guard activeRequest?.token == current.token, ContinuousClock.now < deadline else { return nil }
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return nil }
+        } while true
+    }
+
+    private func sampleVisibleOnce(for current: EPUBNavigationRequest) async -> EPUBLocatorPayload? {
         return await withCheckedContinuation { continuation in
             webView.__evaluateJavaScript(
                 "window.__yjEpub && window.__yjEpub.sampleNow ? window.__yjEpub.sampleNow() : null;",
@@ -688,6 +714,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         loadedDocumentToken = current.token
         renderedChapterPaths = [current.token.path]
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
+        applyReadingGesturePolicy()
         configureLoadedDOM(for: current)
     }
 
