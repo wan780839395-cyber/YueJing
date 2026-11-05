@@ -11,6 +11,7 @@ import XCTest
 @Suite(.serialized)
 struct EPUBReaderHostTests {
     @Test func epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position() async throws {
+        verifyLargeDirectorySelection()
         try await withHostFixture { fixture in
             let archiveURL = fixture.root.appendingPathComponent("Illustrated.epub")
             try EPUBUITestFixture.writeIllustratedEPUB(to: archiveURL, title: "Host Illustrated")
@@ -433,6 +434,7 @@ struct EPUBReaderHostTests {
     @Test func epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor() async throws {
         try await verifyStaticImagePageAndRestore(mislabeledJPEG: false)
         try await verifyStaticImagePageAndRestore(mislabeledJPEG: true)
+        try await verifyClampedShortChapterReadiness()
     }
 
     private func verifyStaticImagePageAndRestore(mislabeledJPEG: Bool) async throws {
@@ -632,6 +634,76 @@ struct EPUBReaderHostTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(model.navigationRequest?.token != nil && model.navigationRequest?.token != previous)
+    }
+
+    private func verifyClampedShortChapterReadiness() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("ClampedShortChapter.epub")
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 80), format: format).pngData { context in
+                UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 80))
+            }
+            let container = "<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\" version=\"1.0\"><rootfiles><rootfile full-path=\"OPS/package.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>"
+            let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"uid\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"uid\">clamped-short</dc:identifier><dc:title>Clamped short</dc:title><dc:language>en</dc:language></metadata><manifest><item id=\"long\" href=\"long.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"short\" href=\"short.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/><item id=\"image\" href=\"image.png\" media-type=\"image/png\"/></manifest><spine toc=\"ncx\"><itemref idref=\"long\"/><itemref idref=\"short\"/></spine></package>"
+            let ncx = "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><docTitle><text>Clamped short</text></docTitle><navMap><navPoint id=\"p1\" playOrder=\"1\"><navLabel><text>Long</text></navLabel><content src=\"long.xhtml\"/></navPoint><navPoint id=\"p2\" playOrder=\"2\"><navLabel><text>Short</text></navLabel><content src=\"short.xhtml\"/></navPoint></navMap></ncx>"
+            let longBody = (0..<60).map { "<p>Synthetic paragraph \($0) repeated to fill the viewport.</p>" }.joined()
+            let long = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Long</title></head><body>\(longBody)</body></html>"
+            let short = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Short</title></head><body><img src=\"image.png\" alt=\"\"/><img src=\"image.png\" alt=\"\"/></body></html>"
+            try EPUBUITestFixture.writeArchive(entries: [
+                ("mimetype", Data("application/epub+zip".utf8)), ("META-INF/container.xml", Data(container.utf8)),
+                ("OPS/package.opf", Data(opf.utf8)), ("OPS/toc.ncx", Data(ncx.utf8)),
+                ("OPS/long.xhtml", Data(long.utf8)), ("OPS/short.xhtml", Data(short.utf8)), ("OPS/image.png", image)
+            ], to: archive)
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let controller = EPUBWebViewController()
+            try await fixture.withHostedController(controller) {
+                let firstToken = try await reader.beginNavigation(path: "OPS/long.xhtml")
+                _ = try await loadAndAwaitReady(controller: controller, request: EPUBNavigationRequest(
+                    id: UUID(), token: firstToken, publication: reader.publication, targetPosition: nil,
+                    fragment: nil, preferences: reader.preferences, preserveTargetAnchor: false, reloadDocument: true))
+                try await waitForChapterWindow(controller, count: 2)
+                let shortToken = try await reader.beginNavigation(path: "OPS/short.xhtml")
+                let payload = try await loadAndAwaitReady(controller: controller, request: EPUBNavigationRequest(
+                    id: UUID(), token: shortToken, publication: reader.publication, targetPosition: nil,
+                    fragment: nil, preferences: reader.preferences, preserveTargetAnchor: false, reloadDocument: false))
+                #expect(payload.path == shortToken.path && payload.epoch == shortToken.epoch)
+                #expect(payload.restoredNode == 0 && payload.restoredOffset == 0)
+                #expect(controller.documentLoadCount == 1)
+                #expect(controller.webView.scrollView.isScrollEnabled)
+                let visible = try #require(await controller.sampleVisibleNow())
+                #expect(visible.path == "OPS/long.xhtml") // Real viewport still begins in the predecessor.
+                let before = controller.webView.scrollView.contentOffset.y
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("window.scrollBy(0, -100); true;")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                while controller.webView.scrollView.contentOffset.y >= before, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(controller.webView.scrollView.contentOffset.y < before)
+                #expect(try await reader.markReady(shortToken))
+                try await reader.close(position: nil, sequence: 1, token: shortToken, preferences: reader.preferences)
+            }
+        }
+    }
+
+    private func verifyLargeDirectorySelection() {
+        let items = (0..<1633).map {
+            EPUBNavigationItem(title: "Synthetic chapter \($0)", path: "Text/c\($0).xhtml")
+        }
+        for index in [0, 816, 1632] {
+            #expect(EPUBContentsView.currentIndex(in: items, path: items[index].path, fragment: nil) == index)
+        }
+        #expect(EPUBContentsView.currentIndex(in: items, path: nil, fragment: nil) == nil)
+        #expect(EPUBContentsView.currentIndex(in: items, path: "missing.xhtml", fragment: nil) == nil)
+        #expect(EPUBContentsView.currentIndex(in: [], path: "empty.xhtml", fragment: nil) == nil)
+        let anchors = [
+            EPUBNavigationItem(title: "Chapter", path: "c.xhtml"),
+            EPUBNavigationItem(title: "Middle", path: "c.xhtml", fragment: "middle"),
+            EPUBNavigationItem(title: "End", path: "c.xhtml", fragment: "end")
+        ]
+        #expect(EPUBContentsView.currentIndex(in: anchors, path: "c.xhtml", fragment: "end") == 2)
+        #expect(EPUBContentsView.currentIndex(in: anchors, path: "c.xhtml", fragment: "unknown") == 0)
+        #expect(EPUBContentsView.currentIndex(in: anchors, path: "c.xhtml", fragment: "") == 0)
     }
 
     private func verifyPageGeometry() {

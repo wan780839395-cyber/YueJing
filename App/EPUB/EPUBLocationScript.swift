@@ -472,9 +472,10 @@ enum EPUBLocationScript {
             return true;
         }
 
-        function sampleVisible() {
+        function sampleVisible(path) {
+            var chapters = path ? state.chapters.filter(function(c) { return c.path === path; }) : state.chapters;
             var entries = [];
-            state.chapters.forEach(function(c) {
+            chapters.forEach(function(c) {
                 c.spans.forEach(function(span, node) { entries.push({span: span, node: node, path: c.path}); });
             });
             var spans = entries.map(function(e) { return e.span; });
@@ -529,8 +530,8 @@ enum EPUBLocationScript {
             // A visible image can precede the first visible text (including an adjacent chapter).
             var chosenPath = chosenIndex >= 0 ? entries[chosenIndex].path : null;
             var chosenNode = chosenIndex >= 0 ? entries[chosenIndex].node : 0;
-            for (var c = 0; c < state.chapters.length; c++) {
-                var chapter = state.chapters[c];
+            for (var c = 0; c < chapters.length; c++) {
+                var chapter = chapters[c];
                 if (chapter.path === chosenPath) { break; }
                 var images = chapter.element.querySelectorAll("img");
                 if (Array.prototype.some.call(images, function(img) { return intersects(img.getClientRects()); })) {
@@ -538,7 +539,7 @@ enum EPUBLocationScript {
                 }
             }
             if (!chosenPath) {
-                var visibleChapter = state.chapters.find(function(c) { return intersects(c.element.getClientRects()); });
+                var visibleChapter = chapters.find(function(c) { return intersects(c.element.getClientRects()); });
                 chosenPath = visibleChapter ? visibleChapter.path : state.path;
                 if (state.lastAnchor && state.lastAnchor.path === chosenPath) {
                     chosenNode = state.lastAnchor.node; offset = state.lastAnchor.utf16Offset;
@@ -951,7 +952,10 @@ enum EPUBLocationScript {
                     if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
                     window.requestAnimationFrame(function() {
                         if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
-                        var sample = sampleVisible();
+                        // A short target near the window end cannot always reach the viewport
+                        // top. Acknowledge the configured chapter, not a visible predecessor;
+                        // ordinary scroll sampling remains unscoped and reports the real view.
+                        var sample = sampleVisible(state.path);
                         if (!sample) {
                             post({
                                 kind: "error",

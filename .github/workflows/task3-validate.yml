@@ -17,13 +17,15 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
+          - epub-freeze-3
+          - epub-freeze-diagnostic
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-freeze-3' && inputs.validation_scope != 'epub-freeze-diagnostic' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1125,5 +1127,171 @@ jobs:
             artifacts/task3/app-dependency-gate.json
             artifacts/task3/ipa-verification.json
             artifacts/task3/epub-diagnostic-scope.json
+          retention-days: 3
+          if-no-files-found: error
+
+  epub_freeze:
+    if: ${{ inputs.validation_scope == 'epub-freeze-3' || inputs.validation_scope == 'epub-freeze-diagnostic' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the approved short-chapter and directory candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Freeze exact release boundary and check selection contracts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          python3 -B scripts/check_epub_freeze_validation.py 2>&1 | tee artifacts/task3/epub-freeze-self-check.log
+          python3 -B scripts/run_epub_freeze_validation.py scope
+
+      - name: Verify pinned toolchain and generate project
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
+          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
+          test "$(uname -m)" = arm64
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
+          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+
+      - name: Resolve and verify fixed dependencies
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies -project YueJing.xcodeproj -scheme YueJing \
+            -clonedSourcePackagesDirPath build/SourcePackages 2>&1 | tee artifacts/task3/dependency-resolution.log
+          python3 -B scripts/validate_task3.py resolved
+
+      - name: Select installed arm64 simulator and verify test settings
+        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > artifacts/task3/devices.json
+          xcrun simctl list runtimes --json > artifacts/task3/runtimes.json
+          python3 -B scripts/validate_task3.py select-simulator
+          python3 -B scripts/validate_task3.py settings
+
+      - name: Boot selected simulator once with original readiness budget
+        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json, os, subprocess, time
+          from pathlib import Path
+          out = Path('artifacts/task3')
+          selected = json.loads((out / 'simulator-selection.json').read_text())
+          assert selected['udid'] == os.environ['SIMULATOR_UDID']
+          command = ['xcrun', 'simctl', 'bootstatus', selected['udid'], '-b']
+          started = time.monotonic()
+          code, timed_out = None, False
+          try:
+              with (out / 'simulator-boot.log').open('x') as log:
+                  code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=120).returncode
+          except subprocess.TimeoutExpired:
+              timed_out = True
+          receipt = dict(command=command, exit_code=code, timed_out=timed_out,
+                         timeout_seconds=120, elapsed_seconds=time.monotonic()-started,
+                         source_commit=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                         run_attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+          (out / 'simulator-boot.json').write_text(json.dumps(receipt, indent=2))
+          assert code == 0 and not timed_out, 'Selected simulator did not become ready'
+          PY
+
+      - name: Run only 2 affected EPUB Host cases
+        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        run: |
+          set -euo pipefail
+          python3 -u -B scripts/run_epub_freeze_validation.py run host \
+            --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+
+      - name: Run only 1 directory and cross-chapter UI case
+        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        run: |
+          set -euo pipefail
+          python3 -u -B scripts/run_epub_freeze_validation.py run ui \
+            --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+
+      - name: Verify actual simulator WebKit linkage
+        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
+            --output artifacts/task3/webkit-simulator-linkage
+
+      - name: Validate exact native evidence or disclose explicit diagnostic-only mode
+        run: |
+          set -euo pipefail
+          python3 -B scripts/run_epub_freeze_validation.py gate
+
+      - name: Compile actual unsigned iPhoneOS arm64 Release
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
+      - name: Verify device dependency graph and every IPA payload byte
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/DerivedData/Build/Products/Release-iphoneos/YueJing.app \
+            --output artifacts/task3/webkit-device-linkage
+          python3 -B scripts/validate_task3.py package-gate-epub-freeze 2>&1 | tee artifacts/task3/dependency-gate.log
+          python3 -B scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
+          python3 -B scripts/validate_task3.py verify-ipa-epub-freeze 2>&1 | tee artifacts/task3/ipa-verification.log
+
+      - name: Preserve targeted validation and build evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Publish verified unsigned IPA with explicit qualification receipt
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/*.ipa
+            artifacts/manifest.json
+            artifacts/SHA256SUMS
+            artifacts/task3/app-dependency-gate.json
+            artifacts/task3/ipa-verification.json
+            artifacts/task3/epub-freeze-gate.json
+            artifacts/task3/epub-freeze-scope.json
           retention-days: 3
           if-no-files-found: error

@@ -14,7 +14,7 @@ struct EPUBContentsView: View {
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
 
-    private var currentIndex: Int? {
+    static func currentIndex(in items: [EPUBNavigationItem], path currentPath: String?, fragment currentFragment: String?) -> Int? {
         guard let currentPath else { return nil }
         if let currentFragment, !currentFragment.isEmpty,
            let exact = items.firstIndex(where: { $0.path == currentPath && $0.fragment == currentFragment }) {
@@ -24,6 +24,8 @@ struct EPUBContentsView: View {
     }
 
     var body: some View {
+        // Resolve once for the whole render, never once per lazy row/header branch.
+        let selectedIndex = Self.currentIndex(in: items, path: currentPath, fragment: currentFragment)
         VStack(spacing: 0) {
             ReaderPanelHeader(title: "目录", appearance: appearance) {
                 Button {
@@ -44,17 +46,16 @@ struct EPUBContentsView: View {
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
-            summaryHeader
+            summaryHeader(currentIndex: selectedIndex)
             List {
                 if items.isEmpty {
                     Text("暂无目录。")
                         .foregroundStyle(appearance.secondary)
                         .listRowBackground(appearance.surface)
                 } else {
-                    ForEach(Array(items.enumerated()), id: \.offset) { entry in
-                        let index = entry.offset
-                        let item = entry.element
-                        let isCurrent = (currentIndex == index)
+                    ForEach(items.indices, id: \.self) { index in
+                        let item = items[index]
+                        let isCurrent = (selectedIndex == index)
                         Button {
                             guard isActive() else { return }
                             selected(item)
@@ -102,12 +103,12 @@ struct EPUBContentsView: View {
         }
     }
 
-    private var summaryHeader: some View {
+    private func summaryHeader(currentIndex: Int?) -> some View {
         VStack(spacing: 8) {
             if dynamicType.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 6) {
                     totalCountBadge
-                    summaryDetailText
+                    summaryDetailText(currentIndex: currentIndex)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
@@ -116,12 +117,12 @@ struct EPUBContentsView: View {
                         totalCountBadge
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer(minLength: 12)
-                        summaryDetailText
+                        summaryDetailText(currentIndex: currentIndex)
                             .fixedSize(horizontal: true, vertical: false)
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         totalCountBadge
-                        summaryDetailText
+                        summaryDetailText(currentIndex: currentIndex)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -145,7 +146,7 @@ struct EPUBContentsView: View {
             .accessibilityIdentifier("reader.directory.total")
     }
 
-    private var summaryDetailText: some View {
+    private func summaryDetailText(currentIndex: Int?) -> some View {
         let text: String
         if let currentIndex {
             text = "当前第 \(currentIndex + 1) 章 · 共 \(items.count) 章"

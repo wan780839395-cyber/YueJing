@@ -217,6 +217,33 @@ async function fixture(source, css, pagedCSS) {
     ok(w.__yjEpub.sampleNow().path === tiny(0).path, 'reverse short chapter crossing');
     ok(!w.__yjEpub.syncWindow({sessionID:'session',epoch:'tiny',limit:65,chapters:[],keepPaths:w.__yjEpub.windowPaths()}), 'hard chapter cap rejected');
     ok(d.documentElement.scrollHeight > w.innerHeight, 'short chapters must allow natural progress beyond the first window');
+    // At the end of a window, scrolling to a short chapter is clamped: an older
+    // chapter remains at the viewport top. Readiness acknowledges the requested
+    // chapter, not whichever chapter the visible-position sampler finds first.
+    const lastIndex = w.__yjEpub.windowPaths().length - 1;
+    for (const withImage of [false, true]) {
+        if (withImage) {
+            // Geometry fixture only: decoded image in the last, shorter-than-viewport chapter.
+            const image = d.createElementNS('http://www.w3.org/1999/xhtml', 'img');
+            image.src = dataURL;
+            d.querySelector(`[data-yj-chapter="${tiny(lastIndex).path}"]`).appendChild(image);
+            await image.decode(); await settle();
+        }
+        for (const preserveTargetAnchor of [false, true]) {
+            const readyStart = tinyMessages.length;
+            w.__yjEpub.configure({sessionID:'session',epoch:'tiny',path:tiny(lastIndex).path,chapterIndex:lastIndex,
+                expectedNodeCount:1,expectedNodeLengths:[2],targetNode:preserveTargetAnchor ? 0 : -1,targetOffset:0,
+                preserveTargetAnchor,readingMode:'scroll',css});
+            await settle();
+            const lastReady = tinyMessages.slice(readyStart).find(m=>m.kind==='ready');
+            ok(w.__yjEpub.sampleNow().path !== tiny(lastIndex).path, 'fixture must retain earlier chapter at clamped viewport top');
+            ok(lastReady && lastReady.path === tiny(lastIndex).path && lastReady.restoredNode === 0 && lastReady.restoredOffset === 0,
+                'short last chapter readiness must acknowledge requested path, not visible predecessor');
+            const priorY = w.scrollY; w.scrollBy(0, -100); await settle();
+            ok(w.scrollY < priorY && w.__yjEpub.sampleNow() !== null, 'scroll remains responsive after clamped navigation');
+        }
+    }
+    results.push('clamped text/image chapters acknowledge request; actual locator and subsequent scroll remain independent');
     frame.remove(); URL.revokeObjectURL(xmlURL);
     results.push('one-line chapters can continue beyond the first window');
     return results;
