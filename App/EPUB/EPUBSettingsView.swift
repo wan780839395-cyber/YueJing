@@ -70,7 +70,7 @@ struct EPUBSettingsView: View {
                                 Text(mode.title).tag(mode)
                             }
                         }
-                        .pickerStyle(.menu)
+                        .pickerStyle(.segmented)
                         .disabled(!isActive())
                         .accessibilityIdentifier("epub.readingMode")
                     }

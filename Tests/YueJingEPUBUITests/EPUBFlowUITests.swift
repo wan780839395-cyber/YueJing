@@ -506,10 +506,9 @@ final class EPUBFlowUITests: XCTestCase {
         }
         showTools(app)
         openSettings(app)
-        let picker = app.buttons["epub.readingMode"]
+        let picker = app.segmentedControls["epub.readingMode"]
         revealSetting(picker, app)
-        picker.tap()
-        let option = app.buttons.matching(identifier: title).firstMatch
+        let option = picker.buttons[title]
         waitHittable(option)
         option.tap()
         closePanel(app)
