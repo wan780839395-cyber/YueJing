@@ -74,11 +74,11 @@ class AggregationTests(unittest.TestCase):
         self.no_native.start()
         self.addCleanup(self.no_native.stop)
 
-    def test_all_205_positive_and_no_native_process(self):
+    def test_full_inventory_positive_and_no_native_process(self):
         fake_evidence(self.root)
         result = reporting.build_report(self.root, HEAD, RUN, step_outcomes())
         self.assertTrue(result['passed'])
-        self.assertEqual(result['totals']['passed'], 205)
+        self.assertEqual(result['totals']['passed'], 214)
         self.assertEqual(result['native_commands_started'], 0)
 
     def test_multiple_groups_and_multiple_cases_all_reported(self):
@@ -115,7 +115,7 @@ class AggregationTests(unittest.TestCase):
         steps['dependencies']['outcome'] = 'failure'
         result = reporting.build_report(self.root, HEAD, RUN, steps)
         self.assertFalse(result['passed'])
-        self.assertEqual(result['totals']['unexecuted'], 205)
+        self.assertEqual(result['totals']['unexecuted'], 214)
         self.assertEqual(len(result['groups']), 8)
         self.assertTrue(any(p['target']=='dependencies' for p in result['problems']))
 
@@ -194,7 +194,7 @@ class AggregationTests(unittest.TestCase):
         for key in reporting.GROUP_STEPS.values():
             self.assertFalse(condition(key), key)
         self.assertTrue(condition('validation_summary'))
-        self.assertEqual(re.findall(r'^\s+timeout-minutes: (\d+)\s*$',workflow,re.M),['60','12','23','10'])
+        self.assertEqual(re.findall(r'^\s+timeout-minutes: (\d+)\s*$',workflow,re.M),['60','12','23','10','30','45'])
         self.assertEqual(workflow.count('id: validation_summary'),1)
         self.assertEqual(workflow.count('python3 -B scripts/task3_validation_report.py'),1)
 

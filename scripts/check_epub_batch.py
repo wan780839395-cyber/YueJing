@@ -177,7 +177,7 @@ def ui_failure_check():
 def batch_check():
     import task3_test_inventory as inventory
     inventory.validate_source()
-    require(inventory.TOTAL == 205 and sum(inventory.COUNTS.values()) == 205, "Batch count differs")
+    require(inventory.TOTAL == 214 and sum(inventory.COUNTS.values()) == 214, "Full inventory count differs")
     python_files = ["check_epub_batch", "make_epub_acceptance_samples", "task3_test_inventory", "run_reading_ui_tests", "audit_native_case_events", "validate_task3"]
     for name in python_files:
         ast.parse((ROOT/"scripts"/(name+".py")).read_text(encoding="utf-8"))
@@ -188,7 +188,7 @@ def batch_check():
             require(not any(s in text for s in ["import Observation", "import SwiftData", "@Observable"]), "Unsupported deployment API")
     return dict(kind="LOCAL_BATCH_CHECK_NOT_NATIVE", dependency=dependency_self_check(), migration=migration_check(),
                 samples=sample_check(), failure_precedence=ui_failure_check(), python_ast_files=len(python_files),
-                selected=205, declared=206, native_executions=0, physical_acceptance="not performed")
+                selected=214, declared=215, native_executions=0, physical_acceptance="not performed")
 
 
 if __name__ == "__main__":

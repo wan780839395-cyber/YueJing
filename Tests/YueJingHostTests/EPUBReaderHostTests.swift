@@ -406,6 +406,76 @@ struct EPUBReaderHostTests {
         }
     }
 
+    @Test func epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("SyntheticImagePage.epub")
+            let webp = try #require(Data(base64Encoded: "UklGRh4AAABXRUJQVlA4TBEAAAAvAUAAAAfQtI4UtP+BiOh/AAA="))
+            let container = "<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\" version=\"1.0\"><rootfiles><rootfile full-path=\"OPS/package.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>"
+            let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"uid\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"uid\">synthetic-image-page</dc:identifier><dc:title>Synthetic image page</dc:title><dc:language>en</dc:language></metadata><manifest><item id=\"page\" href=\"page.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/><item id=\"image\" href=\"page.webp\" media-type=\"image/webp\"/></manifest><spine toc=\"ncx\"><itemref idref=\"page\"/></spine></package>"
+            let ncx = "<!DOCTYPE ncx PUBLIC \"-//NISO//DTD ncx 2005-1//EN\" \"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd\"><ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><docTitle><text>Synthetic image page</text></docTitle><navMap><navPoint id=\"p1\" playOrder=\"1\"><navLabel><text>Image page</text></navLabel><content src=\"page.xhtml#plate\"/></navPoint></navMap></ncx>"
+            let page = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\"><html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Synthetic image page</title></head><body><svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" id=\"plate\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 2 2\" preserveAspectRatio=\"xMidYMid meet\"><image width=\"2\" height=\"2\" xlink:href=\"page.webp\"/></svg></body></html>"
+            try EPUBUITestFixture.writeArchive(entries: [
+                ("mimetype", Data("application/epub+zip".utf8)),
+                ("META-INF/container.xml", Data(container.utf8)),
+                ("OPS/package.opf", Data(opf.utf8)), ("OPS/toc.ncx", Data(ncx.utf8)),
+                ("OPS/page.xhtml", Data(page.utf8)), ("OPS/page.webp", webp)
+            ], to: archive)
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let path = "OPS/page.xhtml"
+            #expect(reader.publication.package.textNodes[path] == ["图片页"])
+            let position = EPUBReadingPosition(bookID: reader.book.id, versionID: reader.book.versionID,
+                                               path: path, node: 0, utf16Offset: 0)
+            let token = try await reader.beginNavigation(path: path)
+            let controller = EPUBWebViewController()
+            try await fixture.withHostedController(controller) {
+                let payload = try await loadAndAwaitReady(controller: controller, request: EPUBNavigationRequest(
+                    id: UUID(), token: token, publication: reader.publication, targetPosition: nil,
+                    fragment: nil, preferences: reader.preferences, preserveTargetAnchor: false, reloadDocument: true))
+                #expect(payload.kind == .ready && payload.path == path)
+                #expect(payload.sessionID == reader.reading.session.id && payload.epoch == token.epoch)
+                #expect(payload.visibleText.contains("图片页"))
+                try await expectSyntheticImagePageLoaded(controller)
+                #expect(try await reader.markReady(token))
+                #expect(try await reader.save(position, sequence: 1, token: token))
+                try await reader.close(position: position, sequence: 2, token: token, preferences: reader.preferences)
+            }
+            let freshService = LibraryService(store: try LibraryStore(root: fixture.root.appendingPathComponent("Managed", isDirectory: true)))
+            let reopened = try await freshService.openEPUB(id: receipt.book.id)
+            let saved = try #require(reopened.reading.position)
+            #expect(saved == position)
+            let reopenToken = try await reopened.beginNavigation(path: path)
+            let reopenController = EPUBWebViewController()
+            try await fixture.withHostedController(reopenController) {
+                let restored = try await loadAndAwaitReady(controller: reopenController, request: EPUBNavigationRequest(
+                    id: UUID(), token: reopenToken, publication: reopened.publication, targetPosition: saved,
+                    fragment: nil, preferences: reopened.preferences, preserveTargetAnchor: true, reloadDocument: true))
+                #expect(restored.restoredNode == 0 && restored.restoredOffset == 0)
+                #expect(restored.visibleText.contains("图片页"))
+                try await expectSyntheticImagePageLoaded(reopenController)
+                #expect(try await reopened.markReady(reopenToken))
+                try await reopened.close(position: saved, sequence: 1, token: reopenToken, preferences: reopened.preferences)
+            }
+        }
+    }
+
+    private func expectSyntheticImagePageLoaded(_ controller: EPUBWebViewController) async throws {
+        let summary = try await controller.evaluateLocatorJavaScriptForTesting("""
+            (function() {
+                var image = document.querySelector('img');
+                return { loaded: Boolean(image && image.complete && image.naturalWidth === 2 && image.naturalHeight === 2),
+                         svg: document.querySelectorAll('svg').length,
+                         anchors: document.querySelectorAll('#yj-t0').length,
+                         text: document.getElementById('yj-t0')?.textContent };
+            })();
+            """) as? [String: Any]
+        #expect(summary?["loaded"] as? Bool == true)
+        #expect(summary?["svg"] as? Int == 0)
+        #expect(summary?["anchors"] as? Int == 1)
+        #expect(summary?["text"] as? String == "图片页")
+        #expect(controller.resourceHandler.servedPaths.contains("OPS/page.webp"))
+    }
+
     // MARK: - Helpers
 
     private struct HostFixture {

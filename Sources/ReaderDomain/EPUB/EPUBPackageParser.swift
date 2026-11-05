@@ -219,12 +219,27 @@ public enum EPUBPackageParser {
 
             let resolvedCoverPath: String?
             if let candidate = coverCandidate,
-               (candidate.mediaType == "image/jpeg" || candidate.mediaType == "image/png"),
+               ["image/jpeg", "image/png", "image/webp"].contains(candidate.mediaType),
                let coverEntry = extraction.entries[candidate.path] {
                 guard coverEntry.byteCount <= limits.imageBytes else {
                     throw EPUBError.limitExceeded
                 }
-                resolvedCoverPath = candidate.path
+                if candidate.mediaType == "image/webp", !referencedBodyImages.contains(candidate.path) {
+                    // Optional covers retain their fallback behavior, but never publish
+                    // animated or malformed WebP as a validated static resource.
+                    do {
+                        let handle = try FileHandle(forReadingFrom: fileURL(for: candidate.path, under: destination))
+                        defer { try? handle.close() }
+                        let data = try handle.read(upToCount: limits.imageBytes + 1) ?? Data()
+                        guard data.count == coverEntry.byteCount else { throw EPUBError.corruptResource }
+                        try EPUBContentPolicy.verifyImageData(data, mediaType: candidate.mediaType)
+                        resolvedCoverPath = candidate.path
+                    } catch {
+                        resolvedCoverPath = nil
+                    }
+                } else {
+                    resolvedCoverPath = candidate.path
+                }
             } else {
                 resolvedCoverPath = nil
             }
@@ -255,7 +270,7 @@ public enum EPUBPackageParser {
             }
             for imagePath in imagePaths.sorted() {
                 guard let item = manifestByPath[imagePath],
-                      (item.mediaType == "image/jpeg" || item.mediaType == "image/png"),
+                      ["image/jpeg", "image/png", "image/webp"].contains(item.mediaType),
                       let imgEntry = extraction.entries[imagePath] else {
                     throw EPUBError.invalidPackage
                 }

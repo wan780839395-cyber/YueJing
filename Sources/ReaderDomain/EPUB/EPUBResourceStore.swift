@@ -6,7 +6,7 @@ public enum EPUBResourceStore {
     public static func data(path: String, publication: EPUBPublication) throws -> Data {
         guard try EPUBResourcePath.canonical(path) == path,
               let resource = publication.package.resource(at: path),
-              ["application/xhtml+xml", "image/jpeg", "image/png"].contains(resource.mediaType),
+              ["application/xhtml+xml", "image/jpeg", "image/png", "image/webp"].contains(resource.mediaType),
               resource.byteCount >= 0,
               resource.byteCount <= (resource.mediaType == "application/xhtml+xml" ? 8 : 16) * 1024 * 1024
         else { throw EPUBError.corruptResource }

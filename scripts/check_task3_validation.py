@@ -150,7 +150,7 @@ def main():
     assert workflow.index("test-counts YueJingCanvasTests") < workflow.index("all-test-gate") < workflow.index("generic/platform=iOS")
     assert "workflow_dispatch:" in workflow and "runs-on: macos-15" in workflow
     # Approved aggregate UI headroom; Host and individual case deadlines stay unchanged.
-    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "23", "10"]
+    assert re.findall(r"^\s+timeout-minutes: (\d+)\s*$", workflow, re.MULTILINE) == ["60", "12", "23", "10", "30", "45"]
     runner = (ROOT / "scripts/run_reading_ui_tests.py").read_text(encoding="utf-8")
     assert 'timeout_seconds = 480 if target == "YueJingHostTests" else 1200' in runner
     assert '"-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180"' in runner
@@ -173,7 +173,7 @@ def main():
             synthetic_fixture(root)
             result = gate.all_test_evidence()
             assert result["passed"] is True and not result["errors"]
-            assert result["native_passed"] == inventory.TOTAL == 205 and len(result["groups"]) == 8
+            assert result["native_passed"] == inventory.TOTAL == 214 and len(result["groups"]) == 8
             checked.append("synthetic-eight-group-aggregate-accept")
             target = root / "task3/ReaderDomainTests-counts.json"
             for field, value in (("source_commit", "old-sha"), ("run_id", "old-run"), ("expected", 89), ("selection", [])):

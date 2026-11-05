@@ -113,7 +113,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
               let canonical = try? EPUBResourcePath.canonical(rawPath),
               canonical == rawPath,
               let resource = capability.publication.package.resource(at: canonical),
-              ["application/xhtml+xml", "image/jpeg", "image/png"].contains(resource.mediaType) else {
+              ["application/xhtml+xml", "image/jpeg", "image/png", "image/webp"].contains(resource.mediaType) else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.corruptResource)
             return

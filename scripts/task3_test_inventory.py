@@ -46,14 +46,15 @@ FILES = {
     "ReaderDomainTests/LongBookAcceptanceTests.swift": """a06FixedTenMiB128ChaptersImportNavigateAndReopen""",
     "ReaderDomainTests/EPUBArchiveTests.swift": """epubArchiveExtractsStoredAndDeflatedEntriesWithVerifiedDigests epubArchiveRejectsUnsafePathsAndEncodedTraversals epubArchiveRejectsDuplicateAndUnicodeCollidingCanonicalPaths epubArchiveRejectsSymbolicLinksAndDestinationLinkEscapes epubArchiveRejectsCRCMismatchesAfterStreamingExtraction epubArchiveRejectsTruncatedAndInconsistentHeaders epubArchiveEnforcesCompressedAndStreamedExpansionBudgets epubArchiveEnforcesMaximumEntryCountBudget epubArchiveRejectsEncryptedAndUnsupportedCompressionEntries epubArchiveRespectsTaskCancellationAndCleansDestination""",
     "ReaderDomainTests/EPUBPackageTests.swift": """epubPackageParsesEPUB3AndEPUB2ContainersInExactSpineOrder epubPackageResolvesNavAndNCXHierarchyWithValidatedFragments epubPackageRejectsXXEDTDAndEntityDeclarationsAcrossUTF8AndUTF16 epubPackageRejectsMissingMetadataEmptyBodyAndDuplicateManifestItems epubPackageRejectsBrokenSpineAndBodyResourceReferences epubPackageRejectsEncryptedFixedLayoutAndActiveContent epubPackageSelectsValidCoversAndFallsBackOnOptionalCoverProblems epubPackageFailsFatallyOnCorruptBodyImageOrArchiveIntegrityError""" ,
-    "YueJingHostTests/EPUBReaderHostTests.swift": """epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly""",
+    "YueJingHostTests/EPUBReaderHostTests.swift": """epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor""",
     "YueJingEPUBUITests/EPUBFlowUITests.swift": """testEPUBShelfCoverAndDirectoryCrossChapterNavigation testEPUBProgressSurvivesExitAndProcessRelaunch testEPUBTypographyNoCoverFallbackAndTXTIsolation""" ,
+    "ReaderDomainTests/EPUBCompatibilityTests.swift": """epubCompatibilityStandardDoctypesPreserveAcceptedTextBytesAndNodes epubCompatibilityRejectsEntitiesUnknownDuplicateAndMisplacedDoctypes epubCompatibilityStaticSVGBecomesLocalJPEGAndPreservesIDs epubCompatibilityRejectsComplexActiveAndEscapingSVG epubCompatibilityImageOnlyPagesHaveStableAnchorButBlankPagesFail epubCompatibilityWebPRequiresRealBoundedSingleFrameDecode epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen epubCompatibilityWebPResourcesStillEnforceSizeAndDigestIntegrity""",
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 138, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 17,
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 146, "TXTBlockDecoderTests": 6,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 18,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 205  # 206 declared; original167 identities retained plus38 A06/EPUB cases
+TOTAL = 214  # Full inventory only; epub-compat-33 executes its explicit 33-case subset.
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

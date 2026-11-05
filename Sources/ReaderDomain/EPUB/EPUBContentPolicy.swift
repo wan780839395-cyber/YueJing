@@ -93,8 +93,13 @@ public enum EPUBContentPolicy {
         var textNodes: [String] = []
         var bodyMarkup = ""
         serializeChildren(of: bodyRoot, into: &bodyMarkup, textNodes: &textNodes)
-        guard !textNodes.isEmpty else {
-            throw EPUBError.invalidPackage
+        if textNodes.isEmpty {
+            guard !delegate.referencedImages.isEmpty else { throw EPUBError.invalidPackage }
+            // Previously rejected image-only pages receive one explicit, stable text anchor.
+            // Already supported text pages remain byte-for-byte unchanged.
+            bodyRoot.children.insert(.text("图片页"), at: 0)
+            bodyMarkup = ""
+            serializeChildren(of: bodyRoot, into: &bodyMarkup, textNodes: &textNodes)
         }
 
         let cleanTitle = delegate.titleText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -134,6 +139,8 @@ public enum EPUBContentPolicy {
                   Array(data.prefix(signature.count)) == signature else {
                 throw EPUBError.corruptResource
             }
+        case "image/webp":
+            try EPUBCompatibility.verifyStaticWebP(data)
         default:
             throw EPUBError.unsupportedContent
         }
@@ -253,6 +260,10 @@ public enum EPUBContentPolicy {
         var fragmentIDs: Set<String> = []
         var referencedImages: Set<String> = []
         var referencedLinks: [EPUBResolvedLink] = []
+        private var namespaceStack: [[String: String]] = []
+        private var staticSVG: DOMElement?
+        private var svgImageOpen = false
+        private var svgImageSeen = false
 
         init(
             documentPath: String,
@@ -287,6 +298,16 @@ public enum EPUBContentPolicy {
             flushPendingText()
             let lowerLocal = localName.lowercased()
             let lowerPrefix = prefix?.lowercased()
+            var namespaces = namespaceStack.last ?? [:]
+            for (key, value) in attributes {
+                if key == "xmlns" { namespaces[""] = value }
+                else if key.hasPrefix("xmlns:") { namespaces[String(key.dropFirst(6))] = value }
+            }
+            namespaceStack.append(namespaces)
+            if lowerLocal == "svg" || staticSVG != nil {
+                try beginStaticSVGElement(name: localName, prefix: prefix, attributes: attributes, namespaces: namespaces)
+                return
+            }
 
             if lowerPrefix == "svg" || lowerPrefix == "math" {
                 throw EPUBError.unsupportedContent
@@ -299,9 +320,8 @@ public enum EPUBContentPolicy {
                 if lowerAttr.hasPrefix("on") {
                     throw EPUBError.unsupportedContent
                 }
-                if lowerAttr == "xmlns:svg" || lowerAttr == "xmlns:math" ||
-                    attrValue == "http://www.w3.org/2000/svg" ||
-                    attrValue == "http://www.w3.org/1998/Math/MathML" {
+                if lowerAttr == "xmlns:math" || attrValue == "http://www.w3.org/1998/Math/MathML" ||
+                    (attrValue == "http://www.w3.org/2000/svg" && !lowerAttr.hasPrefix("xmlns:")) {
                     throw EPUBError.unsupportedContent
                 }
                 if lowerAttr == "srcdoc" || lowerAttr == "formaction" || lowerAttr == "xlink:href" {
@@ -397,27 +417,7 @@ public enum EPUBContentPolicy {
             }
 
             if lowerLocal == "img" {
-                guard let rawSrc = attributes["src"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !rawSrc.isEmpty else {
-                    throw EPUBError.invalidPackage
-                }
-                try rejectActiveOrExternalScheme(rawSrc)
-                let resolved = try EPUBResourcePath.resolve(rawSrc, relativeTo: documentPath)
-                guard resolved.fragment == nil else {
-                    throw EPUBError.invalidPackage
-                }
-                guard let mediaType = manifestByPath[resolved.path] else {
-                    throw EPUBError.invalidPackage
-                }
-                guard mediaType == "image/jpeg" || mediaType == "image/png" else {
-                    throw EPUBError.unsupportedContent
-                }
-                try validateExtractedImage(at: resolved.path, mediaType: mediaType)
-                referencedImages.insert(resolved.path)
-
-                let relSrc = EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path)
-                sanitizedAttrs.append(("src", relSrc))
-                sanitizedAttrs.append(("alt", attributes["alt"] ?? ""))
+                sanitizedAttrs.append(contentsOf: try imageAttributes(source: attributes["src"], alt: attributes["alt"] ?? ""))
             } else if lowerLocal == "a" {
                 if let rawHref = attributes["href"]?.trimmingCharacters(in: .whitespacesAndNewlines) {
                     guard !rawHref.isEmpty else {
@@ -454,6 +454,18 @@ public enum EPUBContentPolicy {
         override func handleEndElement(name: String, localName: String, prefix: String?, parser: XMLParser) throws {
             flushPendingText()
             let lowerLocal = localName.lowercased()
+            defer { if !namespaceStack.isEmpty { namespaceStack.removeLast() } }
+            if staticSVG != nil {
+                if svgImageOpen {
+                    guard localName == "image" else { throw EPUBError.unsupportedContent }
+                    svgImageOpen = false
+                } else {
+                    guard localName == "svg", svgImageSeen else { throw EPUBError.unsupportedContent }
+                    staticSVG = nil
+                    svgImageSeen = false
+                }
+                return
+            }
 
             if lowerLocal == "html" {
                 return
@@ -494,6 +506,10 @@ public enum EPUBContentPolicy {
         }
 
         override func handleCharacters(_ string: String, parser: XMLParser) throws {
+            if staticSVG != nil {
+                guard string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw EPUBError.unsupportedContent }
+                return
+            }
             if ignoredStyleDepth > 0 {
                 currentStyleText.append(string)
             } else if inTitle {
@@ -567,6 +583,73 @@ public enum EPUBContentPolicy {
             }
         }
 
+        private func beginStaticSVGElement(name: String, prefix: String?, attributes: [String: String],
+                                           namespaces: [String: String]) throws {
+            guard inBody, ignoredStyleDepth == 0,
+                  namespaces[prefix ?? ""] == "http://www.w3.org/2000/svg" else { throw EPUBError.unsupportedContent }
+            let declarations: Set<String> = ["xmlns", "xmlns:svg", "xmlns:xlink"]
+            if staticSVG == nil {
+                let allowed = declarations.union(["width", "height", "viewBox", "version", "preserveAspectRatio", "id", "xml:id"])
+                guard name == "svg", Set(attributes.keys).isSubset(of: allowed),
+                      let parent = elementStack.last, !voidElements.contains(parent.name),
+                      attributes["version"] == nil || attributes["version"] == "1.1",
+                      attributes["preserveAspectRatio"] == nil || attributes["preserveAspectRatio"] == "xMidYMid meet" else {
+                    throw EPUBError.unsupportedContent
+                }
+                if let viewBox = attributes["viewBox"] {
+                    let tokens = viewBox.split(whereSeparator: { $0.isWhitespace || $0 == "," })
+                    let parts = tokens.compactMap { Double($0) }
+                    guard tokens.count == 4, parts.count == 4, parts.allSatisfy(\.isFinite), parts[0] == 0, parts[1] == 0,
+                          parts[2] > 0, parts[3] > 0 else { throw EPUBError.unsupportedContent }
+                }
+                try validateStaticImageDimensions(attributes)
+                let id = try extractAndRecordID(from: attributes)
+                let wrapper = DOMElement(name: "div", attributes: id.map { [("id", $0)] } ?? [])
+                parent.children.append(.element(wrapper))
+                staticSVG = wrapper
+                svgImageSeen = false
+                svgImageOpen = false
+            } else {
+                let allowed = declarations.union(["href", "xlink:href", "width", "height", "x", "y", "id", "xml:id"])
+                guard name == "image", !svgImageOpen, !svgImageSeen, Set(attributes.keys).isSubset(of: allowed),
+                      attributes["x"] == nil || Double(attributes["x"] ?? "") == 0,
+                      attributes["y"] == nil || Double(attributes["y"] ?? "") == 0 else { throw EPUBError.unsupportedContent }
+                try validateStaticImageDimensions(attributes)
+                if attributes["xlink:href"] != nil {
+                    guard namespaces["xlink"] == "http://www.w3.org/1999/xlink" else { throw EPUBError.unsupportedContent }
+                }
+                if let href = attributes["href"], let xlink = attributes["xlink:href"], href != xlink {
+                    throw EPUBError.unsupportedContent
+                }
+                let id = try extractAndRecordID(from: attributes)
+                var clean = id.map { [("id", $0)] } ?? []
+                clean.append(contentsOf: try imageAttributes(source: attributes["href"] ?? attributes["xlink:href"], alt: ""))
+                staticSVG?.children.append(.element(DOMElement(name: "img", attributes: clean)))
+                svgImageSeen = true
+                svgImageOpen = true
+            }
+        }
+
+        private func validateStaticImageDimensions(_ attributes: [String: String]) throws {
+            for key in ["width", "height"] {
+                if let value = attributes[key] {
+                    if value == "100%" { continue }
+                    guard let number = Double(value), number.isFinite, number > 0 else { throw EPUBError.unsupportedContent }
+                }
+            }
+        }
+
+        private func imageAttributes(source: String?, alt: String) throws -> [(String, String)] {
+            guard let raw = source?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { throw EPUBError.invalidPackage }
+            try rejectActiveOrExternalScheme(raw)
+            let resolved = try EPUBResourcePath.resolve(raw, relativeTo: documentPath)
+            guard resolved.fragment == nil, let mediaType = manifestByPath[resolved.path] else { throw EPUBError.invalidPackage }
+            guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType) else { throw EPUBError.unsupportedContent }
+            try validateExtractedImage(at: resolved.path, mediaType: mediaType)
+            referencedImages.insert(resolved.path)
+            return [("src", EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path)), ("alt", alt)]
+        }
+
         private func validateExtractedImage(at canonicalPath: String, mediaType: String) throws {
             var fileURL = destination
             for segment in canonicalPath.split(separator: "/") {
@@ -587,8 +670,9 @@ public enum EPUBContentPolicy {
             }
             let handle = try FileHandle(forReadingFrom: fileURL)
             defer { try? handle.close() }
-            let header = try handle.read(upToCount: 16) ?? Data()
-            try verifyImageData(header, mediaType: mediaType)
+            let data = try handle.read(upToCount: mediaType == "image/webp" ? size + 1 : 16) ?? Data()
+            if mediaType == "image/webp" { guard data.count == size else { throw EPUBError.corruptResource } }
+            try verifyImageData(data, mediaType: mediaType)
         }
 
         private func attributeValue(_ attributes: [String: String], named target: String) -> String? {
@@ -612,8 +696,9 @@ enum EPUBXMLSupport {
         guard let decoded = decodeStrictXMLString(rawData) else {
             throw EPUBError.invalidPackage
         }
-        try validateXMLCharactersAndProlog(in: decoded)
-        let normalized = normalizeXMLDeclaration(in: decoded)
+        let inertXML = try EPUBCompatibility.removingStandardDoctype(from: decoded)
+        try validateXMLCharactersAndProlog(in: inertXML)
+        let normalized = normalizeXMLDeclaration(in: inertXML)
         return Data(normalized.utf8)
     }
 

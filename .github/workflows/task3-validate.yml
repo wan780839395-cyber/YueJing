@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: Full regression or the approved exact-three-file natural-root Host check
+        description: Full regression, exact historical scopes, or EPUB compatibility targeted33
         required: true
         type: choice
         default: full
@@ -13,13 +13,14 @@ on:
           - full
           - host-natural-root-5c88543-exact3
           - reuse-native-205-d2110a9
+          - epub-compat-33
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -599,5 +600,135 @@ jobs:
             artifacts/task3/app-dependency-gate.json
             artifacts/task3/ipa-verification.json
             artifacts/task3/reused-native-gate.json
+          retention-days: 3
+          if-no-files-found: error
+
+  epub_compat:
+    if: ${{ inputs.validation_scope == 'epub-compat-33' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      VALIDATION_SCOPE: epub-compat-33
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the approved candidate and scope baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Freeze source and validate targeted selection contracts without native execution
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/task3
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          python3 -B scripts/check_epub_compat_validation.py 2>&1 | tee artifacts/task3/epub-compat-self-check.log
+          python3 -B scripts/task3_test_inventory.py --self-check > artifacts/task3/reviewed-inventory.json.log
+          python3 -B scripts/audit_native_case_events.py --self-check > artifacts/task3/native-event-parser-preflight.json
+          python3 -B scripts/validate_task3.py freeze-candidate
+          python3 -B scripts/run_epub_compat_validation.py scope
+
+      - name: Verify the pinned native toolchain and generate the project
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
+          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
+          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
+          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
+          test "$(uname -m)" = arm64
+          mkdir -p _tooling
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
+          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
+          ditto -x -k _tooling/xcodegen.zip _tooling
+          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
+          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
+          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+
+      - name: Resolve fixed dependencies and select an installed arm64 simulator
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies -project YueJing.xcodeproj -scheme YueJing \
+            -clonedSourcePackagesDirPath build/SourcePackages 2>&1 | tee artifacts/task3/dependency-resolution.log
+          python3 -B scripts/validate_task3.py resolved
+          xcrun simctl list devices available --json > artifacts/task3/devices.json
+          xcrun simctl list runtimes --json > artifacts/task3/runtimes.json
+          python3 -B scripts/validate_task3.py select-simulator
+          python3 -B scripts/validate_task3.py settings
+
+      - name: Run only 28 EPUB Domain cases once
+        run: |
+          set -euo pipefail
+          python3 -u -B scripts/run_epub_compat_validation.py run domain \
+            --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+
+      - name: Run only 5 EPUB WebKit Host cases once
+        run: |
+          set -euo pipefail
+          python3 -u -B scripts/run_epub_compat_validation.py run host \
+            --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+
+      - name: Require real simulator linkage and exact same-run targeted33 acceptance
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
+            --output artifacts/task3/webkit-simulator-linkage
+          python3 -B scripts/run_epub_compat_validation.py gate
+
+      - name: Compile the actual unsigned iPhoneOS arm64 release
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
+      - name: Validate device linkage and package versioned IPA with targeted qualification
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/DerivedData/Build/Products/Release-iphoneos/YueJing.app \
+            --output artifacts/task3/webkit-device-linkage
+          python3 -B scripts/validate_task3.py package-gate-epub-compat 2>&1 | tee artifacts/task3/dependency-gate.log
+          python3 -B scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
+          python3 -B scripts/validate_task3.py verify-ipa-epub-compat 2>&1 | tee artifacts/task3/ipa-verification.log
+
+      - name: Preserve all targeted native and build evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Publish the verified unsigned EPUB compatibility IPA
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/*.ipa
+            artifacts/manifest.json
+            artifacts/SHA256SUMS
+            artifacts/task3/app-dependency-gate.json
+            artifacts/task3/ipa-verification.json
+            artifacts/task3/epub-compat-gate.json
           retention-days: 3
           if-no-files-found: error

@@ -91,8 +91,8 @@ def check():
     branch = next(n for n in gate.body if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'reused')
     assert 'all_test_evidence()' in ast.unparse(ast.Module(body=branch.orelse, type_ignores=[]))
     workflow = (reuse.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding='utf-8')
-    assert "    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' }}" in workflow
-    new_job = workflow.split('\n  package_reused:\n', 1)[1]
+    assert "    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' }}" in workflow
+    new_job = workflow.split('\n  package_reused:\n', 1)[1].split('\n  epub_compat:\n', 1)[0]
     assert "    if: ${{ inputs.validation_scope == 'reuse-native-205-d2110a9' }}" in new_job
     assert all(s not in new_job for s in ('xcodebuild test', 'simctl', 'run_reading_ui_tests.py', 'all-test-gate'))
     assert all(s in new_job for s in ('package-gate-reused', 'verify-ipa-reused', 'reuse_native_evidence.py qualify',
