@@ -177,7 +177,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             name: EPUBLocationScript.handlerName
         )
 
-        let created = WKWebView(frame: view.bounds, configuration: config)
+        // Accessing view here can synchronously reenter via viewDidLoad before
+        // webView is assigned. Publish the instance before loading the root view.
+        let created = WKWebView(frame: .zero, configuration: config)
         created.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         created.navigationDelegate = self
         created.uiDelegate = self
@@ -191,6 +193,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         created.allowsLinkPreview = false
         created.accessibilityIdentifier = "reader.viewport"
         webView = created
+        created.frame = view.bounds
         view.addSubview(created)
 
         canvasAccessibilityView.backgroundColor = .clear

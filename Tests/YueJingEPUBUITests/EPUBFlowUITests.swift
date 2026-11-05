@@ -248,6 +248,8 @@ final class EPUBFlowUITests: XCTestCase {
             .completed,
             "Expected EPUB chapter content must be visible in the WebKit reader"
         )
+        XCTAssertEqual(app.webViews.matching(identifier: "reader.viewport").count, 1,
+                       "The EPUB reader must install exactly one interactive WebView")
         expandCDock(app, deadline: deadline, startsCollapsed: true)
         revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
         waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.1, deadline.timeIntervalSinceNow))

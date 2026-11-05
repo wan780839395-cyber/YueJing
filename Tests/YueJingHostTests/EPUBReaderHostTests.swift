@@ -28,7 +28,18 @@ struct EPUBReaderHostTests {
             #expect(EPUBLocationScript.snapUTF16OffsetToCharacterBoundary(4, in: sampleText) == 3)
 
             let controller = EPUBWebViewController()
+            // Match SwiftUI's makeUIViewController: theme arrives before UIKit hosts the view.
+            #expect(!controller.isViewLoaded)
+            controller.applyTheme(reader.preferences.theme)
+            let installedWebView = try #require(controller.webView)
+            #expect(controller.view.subviews.compactMap { $0 as? WKWebView }.count == 1)
+            controller.setupWebViewIfNeeded()
+            controller.applyTheme(reader.preferences.theme)
+            #expect(controller.webView === installedWebView)
+            #expect(controller.view.subviews.compactMap { $0 as? WKWebView }.count == 1)
             try await fixture.withHostedController(controller) {
+                #expect(controller.webView === installedWebView)
+                #expect(controller.view.subviews.compactMap { $0 as? WKWebView }.count == 1)
                 let firstPayload = try await loadAndAwaitReady(
                     controller: controller,
                     request: EPUBNavigationRequest(
