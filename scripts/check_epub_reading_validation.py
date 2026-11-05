@@ -92,6 +92,8 @@ class EPUBReadingChecks(unittest.TestCase):
         self.assertEqual(list(reading.SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"]),
                          reading.inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split())
         self.assertEqual([len(reading.SELECTED_FILES[f]) for f in reading.GROUP_SPECS["domain"]["files"]], [3, 1, 4])
+        self.assertEqual({s["derived_data"] for s in reading.GROUP_SPECS.values()},
+                         {"build/ReadingUIDerivedData"})
         for group, count, budget in (("domain", 8, 480), ("host", 4, 480), ("ui", 3, 1200)):
             cmd = reading.expected_command(group, DEST, "synthetic.xcresult")
             flags = [a for a in cmd if a.startswith("-only-testing:")]

@@ -101,9 +101,11 @@ SELECTED_FILES = {
         "testEPUBTypographyNoCoverFallbackAndTXTIsolation",
     ),
 }
+# One job/source/toolchain shares intermediate products; no cross-run cache is restored.
+# Avoid recompiling ReaderDomain/GRDB before Host while retaining every native time budget.
 GROUP_SPECS = {
     "domain": {"target": "ReaderDomainTests", "scheme": "ReaderDomain",
-               "derived_data": "build/Task3Tests", "timeout_seconds": 480, "expected_count": 8},
+               "derived_data": "build/ReadingUIDerivedData", "timeout_seconds": 480, "expected_count": 8},
     "host": {"target": "YueJingHostTests", "scheme": "YueJingUI",
              "derived_data": "build/ReadingUIDerivedData", "timeout_seconds": 480, "expected_count": 4},
     "ui": {"target": "YueJingEPUBUITests", "scheme": "YueJingUI",
