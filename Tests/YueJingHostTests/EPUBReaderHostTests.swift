@@ -813,7 +813,20 @@ struct EPUBReaderHostTests {
                 window.scrollTo(0, window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top - 100);
                 true;
                 """)
-                let backwards = try #require(await controller.sampleVisibleNow())
+                let backwardSample = await controller.sampleVisibleNow()
+                if backwardSample == nil {
+                    let diagnostic = try await controller.evaluateLocatorJavaScriptForTesting("""
+                    (function() {
+                        var p = window.__yjEpub.sampleNow();
+                        return JSON.stringify({status: window.__yjEpub.sampleStatus(), sampled: p !== null,
+                            epochMatches: p ? p.epoch === "\(ch2Token.epoch.uuidString)" : null,
+                            pathMatches: p ? p.path === "OEBPS/text/ch1.xhtml" : null,
+                            scrollY: window.scrollY});
+                    })();
+                    """)
+                    print("EPUB_SYNTHETIC_BACKWARD tokenMatches=\(model.currentToken == ch2Token) ready=\(model.ready) diagnostic=\(String(describing: diagnostic))")
+                }
+                let backwards = try #require(backwardSample)
                 model.handleLocatorEvent(backwards)
                 try await waitForNewToken(model: model, previous: ch2Token)
                 let backRequest = try #require(model.navigationRequest)

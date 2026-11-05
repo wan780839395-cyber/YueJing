@@ -551,14 +551,21 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func sampleVisibleNow() async -> EPUBLocatorPayload? {
-        guard let current = activeRequest, webView != nil else { return nil }
-        // A ready document can still be in a two-frame resize/preload transaction.
-        // Wait briefly for a real sample; never bridge a session/epoch change with stale data.
+        guard let initial = activeRequest, webView != nil else { return nil }
+        let initialLoadCount = documentLoadCount
+        // A real scroll sample can promote a visible chapter while this IPC is in flight.
+        // Discard that old callback, then sample anew under the promoted token; never
+        // relabel stale data or retry across a new session/document/explicit navigation.
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
         repeat {
-            guard !Task.isCancelled, activeRequest?.token == current.token else { return nil }
+            guard !Task.isCancelled, let current = activeRequest,
+                  current.token.sessionID == initial.token.sessionID,
+                  documentLoadCount == initialLoadCount,
+                  current.publication.package == initial.publication.package,
+                  current.publication.resourceRoot == initial.publication.resourceRoot,
+                  current.token == initial.token || (current.preserveViewport && !current.reloadDocument) else { return nil }
             if let payload = await sampleVisibleOnce(for: current) { return payload }
-            guard activeRequest?.token == current.token, ContinuousClock.now < deadline else { return nil }
+            guard ContinuousClock.now < deadline else { return nil }
             do { try await Task.sleep(for: .milliseconds(10)) } catch { return nil }
         } while true
     }
