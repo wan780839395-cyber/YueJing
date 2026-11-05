@@ -49,7 +49,8 @@ struct EPUBReaderHostTests {
                 #expect(firstPayload.visibleText.contains("EPUB_CH1_START"))
                 #expect(controller.resourceHandler.servedPaths.contains(path))
                 #expect(controller.resourceHandler.servedPaths.contains("OEBPS/images/cover.png"))
-                #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled == false)
+                #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
+                #expect(controller.webView.scrollView.zoomScale == 1)
                 let domSummary = try await controller.evaluateLocatorJavaScriptForTesting(
                     """
                     (function() {
@@ -107,7 +108,8 @@ struct EPUBReaderHostTests {
                 #expect(restoredPayload.restoredOffset == saved.utf16Offset)
                 #expect(restoredPayload.scrollY > 50)
                 #expect(restoredPayload.visibleText.contains("EPUB_A_C1_P18"))
-                #expect(reopenController.webView.scrollView.pinchGestureRecognizer?.isEnabled == false)
+                #expect(reopenController.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
+                #expect(reopenController.webView.scrollView.zoomScale == 1)
             }
             try await reopened.close(position: saved, sequence: 1, token: reopenToken, preferences: reopened.preferences)
         }
@@ -489,7 +491,8 @@ struct EPUBReaderHostTests {
         #expect(summary?["svg"] as? Int == 0)
         #expect(summary?["anchors"] as? Int == 1)
         #expect(summary?["text"] as? String == "图片页")
-        #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled == false)
+        #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
+        #expect(controller.webView.scrollView.zoomScale == 1)
         #expect(controller.resourceHandler.servedPaths.contains("OPS/page.webp"))
     }
 
@@ -695,7 +698,9 @@ struct EPUBReaderHostTests {
             }
 
             try await fixture.withHostedController(controller) {
-                #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled == false)
+                // UIKit may omit the recognizer entirely when zooming is unavailable.
+                #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
+                #expect(controller.webView.scrollView.zoomScale == 1)
                 #expect(controller.webView.scrollView.alwaysBounceVertical == true)
 
                 await model.load()
@@ -713,7 +718,14 @@ struct EPUBReaderHostTests {
                 let nextTurned = controller.turnPage(.next, animated: false)
                 #expect(nextTurned == true)
                 #expect(controller.webView.scrollView.contentOffset.y > 0)
-                let sampleAfterTurn = await controller.sampleVisibleNow()
+                // UIScrollView updates synchronously; WebKit's DOM scroll position crosses IPC.
+                // Wait for the observable result, not an arbitrary immediate JS sample.
+                var sampleAfterTurn = await controller.sampleVisibleNow()
+                let scrollDeadline = Date().addingTimeInterval(2)
+                while (sampleAfterTurn?.scrollY ?? 0) <= 0 && Date() < scrollDeadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                    sampleAfterTurn = await controller.sampleVisibleNow()
+                }
                 #expect(sampleAfterTurn != nil)
                 #expect((sampleAfterTurn?.scrollY ?? 0) > 0)
 
