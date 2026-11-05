@@ -236,7 +236,10 @@ struct EPUBReaderHostTests {
             let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service)
             let controller = EPUBWebViewController()
             model.webView.attach(controller)
-            controller.onLocatorEvent = { [weak model] payload in model?.handleLocatorEvent(payload) }
+            controller.onLocatorEvent = { [weak model] payload in
+                print("EPUB_SYNTHETIC_REFLOW_EVENT kind=\(payload.kind) path=\(payload.path) node=\(payload.node) restored=\(payload.restoredNode) epoch=\(payload.epoch) current=\(String(describing: model?.currentToken)) ready=\(model?.ready ?? false)")
+                model?.handleLocatorEvent(payload)
+            }
             controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
             controller.onInternalLink = { [weak model] path, fragment in model?.navigateToInternalLink(path: path, fragment: fragment) }
 
@@ -592,6 +595,7 @@ struct EPUBReaderHostTests {
         expectedToken: EPUBNavigationToken,
         minimumNode: Int? = nil
     ) async throws {
+        print("EPUB_SYNTHETIC_READY_WAIT expected=\(expectedToken) minimumNode=\(String(describing: minimumNode))")
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         // DOM ready and the asynchronous scroll-position report are separate callbacks.
         // Await the requested observable position within the same original deadline.
@@ -600,6 +604,9 @@ struct EPUBReaderHostTests {
         }
         while !(model.ready && !model.loading && model.currentToken == expectedToken && positionReady()), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
+        }
+        if !(model.ready && !model.loading && model.currentToken == expectedToken && positionReady()) {
+            print("EPUB_SYNTHETIC_READY_FAILURE expected=\(expectedToken) current=\(String(describing: model.currentToken)) position=\(String(describing: model.currentPosition)) minimumNode=\(String(describing: minimumNode))")
         }
         try #require(model.ready && !model.loading && model.currentToken == expectedToken)
         try #require(positionReady())
