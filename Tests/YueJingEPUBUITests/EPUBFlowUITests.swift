@@ -421,6 +421,8 @@ final class EPUBFlowUITests: XCTestCase {
     }
 
     @MainActor private func waitHittable(_ element: XCUIElement, timeout: TimeInterval = 10) {
+        // Avoid the predicate waiter's scheduling delay when the real control is ready.
+        if element.exists && element.isHittable && element.isEnabled { return }
         let ready = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
                 element.exists && element.isHittable && element.isEnabled
@@ -496,6 +498,12 @@ final class EPUBFlowUITests: XCTestCase {
     }
 
     @MainActor private func selectReadingMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
+        // Mode selection is setup here; do not repeat a no-op menu round trip.
+        // The cross-chapter flow still exercises both actual mode transitions.
+        if Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")["mode"] == rawValue {
+            XCTAssertEqual(Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")["mode"], rawValue)
+            return
+        }
         showTools(app)
         openSettings(app)
         let picker = app.buttons["epub.readingMode"]
@@ -570,7 +578,16 @@ final class EPUBFlowUITests: XCTestCase {
         // in one continuous swipe. No second boundary swipe is issued by the test.
         selectReadingMode("上下滚动", rawValue: "scroll", app)
         XCTAssertEqual(Self.parseCanvasValue(canvas.value as? String ?? "")["path"], "OEBPS/text/ch2.xhtml")
-        view.swipeUp(velocity: .fast)
+        // A fast flick can legitimately carry the viewport past the chapter heading.
+        // Cross once with a measured drag, holding at the end to remove inertial overshoot.
+        let heading = view.staticTexts.matching(NSPredicate(format: "label == %@", "第三章 EPUB_CH3_START")).firstMatch
+        XCTAssertTrue(heading.exists)
+        let distance = heading.frame.minY - view.frame.minY + 8
+        XCTAssertGreaterThan(distance, 0)
+        XCTAssertLessThan(distance, view.frame.height - 40)
+        let start = view.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.95))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -distance)),
+                    withVelocity: .slow, thenHoldForDuration: 0.3)
         waitFor {
             Self.parseCanvasValue(canvas.value as? String ?? "")["path"] == "OEBPS/text/ch3.xhtml" &&
                 canvas.label.contains("EPUB_CH3_START")
