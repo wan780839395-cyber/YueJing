@@ -407,21 +407,34 @@ struct EPUBReaderHostTests {
     }
 
     @Test func epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor() async throws {
+        try await verifyStaticImagePageAndRestore(mislabeledJPEG: false)
+        try await verifyStaticImagePageAndRestore(mislabeledJPEG: true)
+    }
+
+    private func verifyStaticImagePageAndRestore(mislabeledJPEG: Bool) async throws {
         try await withHostFixture { fixture in
             let archive = fixture.root.appendingPathComponent("SyntheticImagePage.epub")
             let webp = try #require(Data(base64Encoded: "UklGRh4AAABXRUJQVlA4TBEAAAAvAUAAAAfQtI4UtP+BiOh/AAA="))
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+            let jpeg = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2), format: format).jpegData(withCompressionQuality: 1) { context in
+                UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            }
+            let imageData = mislabeledJPEG ? jpeg : webp
             let container = "<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\" version=\"1.0\"><rootfiles><rootfile full-path=\"OPS/package.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>"
             let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"uid\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"uid\">synthetic-image-page</dc:identifier><dc:title>Synthetic image page</dc:title><dc:language>en</dc:language></metadata><manifest><item id=\"page\" href=\"page.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/><item id=\"image\" href=\"page.webp\" media-type=\"image/webp\"/></manifest><spine toc=\"ncx\"><itemref idref=\"page\"/></spine></package>"
+            // Keep the URL unchanged: acceptance must use bytes, never the suffix.
+            let packageXML = mislabeledJPEG ? opf.replacingOccurrences(of: "media-type=\"image/webp\"", with: "media-type=\"image/png\"") : opf
             let ncx = "<!DOCTYPE ncx PUBLIC \"-//NISO//DTD ncx 2005-1//EN\" \"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd\"><ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\"><head/><docTitle><text>Synthetic image page</text></docTitle><navMap><navPoint id=\"p1\" playOrder=\"1\"><navLabel><text>Image page</text></navLabel><content src=\"page.xhtml#plate\"/></navPoint></navMap></ncx>"
             let page = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\"><html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Synthetic image page</title></head><body><svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" id=\"plate\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 2 2\" preserveAspectRatio=\"xMidYMid meet\"><image width=\"2\" height=\"2\" xlink:href=\"page.webp\"/></svg></body></html>"
             try EPUBUITestFixture.writeArchive(entries: [
                 ("mimetype", Data("application/epub+zip".utf8)),
                 ("META-INF/container.xml", Data(container.utf8)),
-                ("OPS/package.opf", Data(opf.utf8)), ("OPS/toc.ncx", Data(ncx.utf8)),
-                ("OPS/page.xhtml", Data(page.utf8)), ("OPS/page.webp", webp)
+                ("OPS/package.opf", Data(packageXML.utf8)), ("OPS/toc.ncx", Data(ncx.utf8)),
+                ("OPS/page.xhtml", Data(page.utf8)), ("OPS/page.webp", imageData)
             ], to: archive)
             let receipt = try await fixture.install(archive)
             let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            #expect(reader.publication.package.resource(at: "OPS/page.webp")?.mediaType == (mislabeledJPEG ? "image/jpeg" : "image/webp"))
             let path = "OPS/page.xhtml"
             #expect(reader.publication.package.textNodes[path] == ["图片页"])
             let position = EPUBReadingPosition(bookID: reader.book.id, versionID: reader.book.versionID,
@@ -442,6 +455,7 @@ struct EPUBReaderHostTests {
             }
             let freshService = LibraryService(store: try LibraryStore(root: fixture.root.appendingPathComponent("Managed", isDirectory: true)))
             let reopened = try await freshService.openEPUB(id: receipt.book.id)
+            #expect(reopened.publication.package.resource(at: "OPS/page.webp")?.mediaType == (mislabeledJPEG ? "image/jpeg" : "image/webp"))
             let saved = try #require(reopened.reading.position)
             #expect(saved == position)
             let reopenToken = try await reopened.beginNavigation(path: path)

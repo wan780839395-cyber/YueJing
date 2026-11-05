@@ -30,48 +30,34 @@ SCOPE_JSON = OUT / "epub-compat-scope.json"
 GATE_JSON = OUT / "epub-compat-gate.json"
 RESOLVED = ROOT / "YueJing.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 
-BASE = "4d26ecf62b50014d97cd02d4fd512a617dfcbf1e"
+BASE = "e9615ca90445ff53afd285363233e9678465799c"
 SCOPE = "epub-compat-33"
-EXPECTED_VERSION = "0.2.1"
-EXPECTED_BUILD = "3"
+EXPECTED_VERSION = "0.2.2"
+EXPECTED_BUILD = "4"
 
 OLD_VERSION_LINES = (
-    b'        MARKETING_VERSION: "0.2.0"\n'
-    b'        CURRENT_PROJECT_VERSION: "2"\n'
-)
-NEW_VERSION_LINES = (
     b'        MARKETING_VERSION: "0.2.1"\n'
     b'        CURRENT_PROJECT_VERSION: "3"\n'
+)
+NEW_VERSION_LINES = (
+    b'        MARKETING_VERSION: "0.2.2"\n'
+    b'        CURRENT_PROJECT_VERSION: "4"\n'
 )
 
 ALLOWED = frozenset({
     "Sources/ReaderDomain/EPUB/EPUBCompatibility.swift",
     "Sources/ReaderDomain/EPUB/EPUBContentPolicy.swift",
     "Sources/ReaderDomain/EPUB/EPUBPackageParser.swift",
-    "Sources/ReaderDomain/EPUB/EPUBResourceStore.swift",
-    "App/EPUB/EPUBResourceHandler.swift",
-    "Tests/ReaderDomainTests/EPUBCompatibilityTests.swift",
+    "Tests/ReaderDomainTests/EPUBPackageTests.swift",
     "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
-    ".github/workflows/task3-validate.yml",
     "project.yml",
-    "scripts/task3_test_inventory.py",
     "scripts/validate_task3.py",
-    "scripts/check_task3_validation.py",
-    "scripts/check_validation_aggregation.py",
-    "scripts/check_epub_batch.py",
-    "scripts/check_reuse_native_evidence.py",
     "scripts/run_epub_compat_validation.py",
     "scripts/check_epub_compat_validation.py",
     "docs/EPUB_COMPATIBILITY.md",
 })
 
-NEW_ALLOWED = frozenset({
-    "Sources/ReaderDomain/EPUB/EPUBCompatibility.swift",
-    "Tests/ReaderDomainTests/EPUBCompatibilityTests.swift",
-    "scripts/run_epub_compat_validation.py",
-    "scripts/check_epub_compat_validation.py",
-    "docs/EPUB_COMPATIBILITY.md",
-})
+NEW_ALLOWED = frozenset()
 
 # Fixed reviewed 33 case identities (28 Domain across 4 suites + 5 Host in 1 suite).
 SELECTED_FILES = {
@@ -264,12 +250,12 @@ def validate_selected_cases(root=ROOT):
 
 def validate_project_version(base_bytes, current_bytes):
     require(isinstance(base_bytes, bytes) and isinstance(current_bytes, bytes), "project.yml inputs must be bytes")
-    require(base_bytes.count(OLD_VERSION_LINES) == 1, "Baseline project.yml lacks unique 0.2.0/build2 version lines")
-    require(current_bytes.count(NEW_VERSION_LINES) == 1, "Candidate project.yml lacks unique 0.2.1/build3 version lines")
+    require(base_bytes.count(OLD_VERSION_LINES) == 1, "Baseline project.yml lacks unique 0.2.1/build3 version lines")
+    require(current_bytes.count(NEW_VERSION_LINES) == 1, "Candidate project.yml lacks unique 0.2.2/build4 version lines")
     expected_current = base_bytes.replace(OLD_VERSION_LINES, NEW_VERSION_LINES, 1)
     require(
         current_bytes == expected_current,
-        "project.yml must differ from BASE only by MARKETING_VERSION 0.2.0->0.2.1 and CURRENT_PROJECT_VERSION 2->3",
+        "project.yml must differ from BASE only by MARKETING_VERSION 0.2.1->0.2.2 and CURRENT_PROJECT_VERSION 3->4",
     )
 
 
@@ -314,9 +300,9 @@ def validate_scope_boundaries(
     require(not missing_allowed, "Approved whitelist files missing in HEAD: " + repr(sorted(missing_allowed)))
     changed = {p for p in set(previous) | set(current) if previous.get(p) != current.get(p)}
     require(changed, "No changes relative to BASE")
-    require(changed <= ALLOWED, "Uncovered file changes outside 18-path whitelist: " + repr(sorted(changed - ALLOWED)))
+    require(changed <= ALLOWED, "Uncovered file changes outside 10-path whitelist: " + repr(sorted(changed - ALLOWED)))
     added = set(current) - set(previous)
-    require(added == NEW_ALLOWED, "Added tracked paths must match exact 5 new whitelist files: " + repr(sorted(added ^ NEW_ALLOWED)))
+    require(added == NEW_ALLOWED, "Added tracked paths must match the empty new-file whitelist: " + repr(sorted(added ^ NEW_ALLOWED)))
     require("project.yml" in changed, "project.yml version update is required")
     validate_project_version(base_project_bytes, current_project_bytes)
     require(
@@ -1005,7 +991,7 @@ def validate_saved():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("scope", help="Verify git/worktree 18-file scope and write epub-compat-scope.json")
+    subparsers.add_parser("scope", help="Verify git/worktree 10-file scope and write epub-compat-scope.json")
     run_parser = subparsers.add_parser("run", help="Run one targeted native group once")
     run_parser.add_argument("group", choices=("domain", "host"))
     run_parser.add_argument("--destination", required=True)

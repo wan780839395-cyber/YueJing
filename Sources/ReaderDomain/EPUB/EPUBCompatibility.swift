@@ -48,6 +48,35 @@ enum EPUBCompatibility {
         return result
     }
 
+    /// Only a known PNG/JPEG disagreement is eligible. This header decision is
+    /// not acceptance: callers must read the bounded full file and decode it.
+    static func rasterMediaTypeCorrection(for header: Data, declared: String) -> String? {
+        if declared == "image/png", header.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+        if declared == "image/jpeg", header.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return "image/png"
+        }
+        return nil
+    }
+
+    static func verifyCorrectedRaster(_ data: Data, mediaType: String) throws {
+        guard ["image/png", "image/jpeg"].contains(mediaType) else { throw EPUBError.unsupportedContent }
+        guard !data.isEmpty, data.count <= EPUBLimits().imageBytes else { throw EPUBError.limitExceeded }
+        try EPUBContentPolicy.verifyImageData(data, mediaType: mediaType)
+        let expectedType = mediaType == "image/png" ? "public.png" : "public.jpeg"
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let sourceType = CGImageSourceGetType(source), sourceType as String == expectedType,
+              CGImageSourceGetCount(source) == 1, CGImageSourceGetStatus(source) == .statusComplete,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { throw EPUBError.corruptResource }
+        let w = width.int64Value, h = height.int64Value
+        guard w > 0, h > 0, w <= 16_384, h <= 16_384, w * h <= 40_000_000 else { throw EPUBError.limitExceeded }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0,
+                [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              image.width == Int(w), image.height == Int(h),
+              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw EPUBError.corruptResource }
+    }
+
     /// WebP is new input, so unlike legacy PNG/JPEG headers it must be fully decoded
     /// within finite byte/pixel bounds before being published as a served resource.
     static func verifyStaticWebP(_ data: Data) throws {

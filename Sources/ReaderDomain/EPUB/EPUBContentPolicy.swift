@@ -17,6 +17,7 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
     public let fragmentIDs: Set<String>
     public let referencedImages: Set<String>
     public let referencedLinks: [EPUBResolvedLink]
+    public let imageMediaTypes: [String: String]
 
     public init(
         path: String,
@@ -24,7 +25,8 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         textNodes: [String],
         fragmentIDs: Set<String>,
         referencedImages: Set<String>,
-        referencedLinks: [EPUBResolvedLink]
+        referencedLinks: [EPUBResolvedLink],
+        imageMediaTypes: [String: String] = [:]
     ) {
         self.path = path
         self.xhtmlData = xhtmlData
@@ -32,6 +34,7 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         self.fragmentIDs = fragmentIDs
         self.referencedImages = referencedImages
         self.referencedLinks = referencedLinks
+        self.imageMediaTypes = imageMediaTypes
     }
 }
 
@@ -120,7 +123,8 @@ public enum EPUBContentPolicy {
             textNodes: textNodes,
             fragmentIDs: delegate.fragmentIDs,
             referencedImages: delegate.referencedImages,
-            referencedLinks: delegate.referencedLinks
+            referencedLinks: delegate.referencedLinks,
+            imageMediaTypes: delegate.imageMediaTypes
         )
     }
 
@@ -259,6 +263,7 @@ public enum EPUBContentPolicy {
         var elementStack: [DOMElement] = []
         var fragmentIDs: Set<String> = []
         var referencedImages: Set<String> = []
+        var imageMediaTypes: [String: String] = [:]
         var referencedLinks: [EPUBResolvedLink] = []
         private var namespaceStack: [[String: String]] = []
         private var staticSVG: DOMElement?
@@ -645,12 +650,12 @@ public enum EPUBContentPolicy {
             let resolved = try EPUBResourcePath.resolve(raw, relativeTo: documentPath)
             guard resolved.fragment == nil, let mediaType = manifestByPath[resolved.path] else { throw EPUBError.invalidPackage }
             guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType) else { throw EPUBError.unsupportedContent }
-            try validateExtractedImage(at: resolved.path, mediaType: mediaType)
+            imageMediaTypes[resolved.path] = try validateExtractedImage(at: resolved.path, mediaType: mediaType)
             referencedImages.insert(resolved.path)
             return [("src", EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path)), ("alt", alt)]
         }
 
-        private func validateExtractedImage(at canonicalPath: String, mediaType: String) throws {
+        private func validateExtractedImage(at canonicalPath: String, mediaType: String) throws -> String {
             var fileURL = destination
             for segment in canonicalPath.split(separator: "/") {
                 fileURL.appendPathComponent(String(segment))
@@ -670,9 +675,19 @@ public enum EPUBContentPolicy {
             }
             let handle = try FileHandle(forReadingFrom: fileURL)
             defer { try? handle.close() }
+            let header = try handle.read(upToCount: 16) ?? Data()
+            if let corrected = EPUBCompatibility.rasterMediaTypeCorrection(for: header, declared: mediaType) {
+                try handle.seek(toOffset: 0)
+                let data = try handle.read(upToCount: size + 1) ?? Data()
+                guard data.count == size else { throw EPUBError.corruptResource }
+                try EPUBCompatibility.verifyCorrectedRaster(data, mediaType: corrected)
+                return corrected
+            }
+            try handle.seek(toOffset: 0)
             let data = try handle.read(upToCount: mediaType == "image/webp" ? size + 1 : 16) ?? Data()
             if mediaType == "image/webp" { guard data.count == size else { throw EPUBError.corruptResource } }
             try verifyImageData(data, mediaType: mediaType)
+            return mediaType
         }
 
         private func attributeValue(_ attributes: [String: String], named target: String) -> String? {

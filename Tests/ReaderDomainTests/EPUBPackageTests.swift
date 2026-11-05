@@ -105,6 +105,7 @@ struct EPUBPackageTests {
         #expect(pkg2.spine == ["OEBPS/Text/partC.xhtml", "OEBPS/Text/partB.xhtml", "OEBPS/Text/partA.xhtml"])
         #expect(pkg2.coverPath == "OEBPS/images/cover.jpg")
         #expect(pkg2.navigation.count == 3)
+        try expectCorrectedRasterResources()
     }
 
     @Test func epubPackageResolvesNavAndNCXHierarchyWithValidatedFragments() throws {
@@ -535,5 +536,75 @@ struct EPUBPackageTests {
             _ = try EPUBPackageParser.parse(archiveURL: crcArchiveURL, destination: dest2)
         }
         #expect(!FileManager.default.fileExists(atPath: dest2.path))
+        try expectInvalidRasterCorrectionsRejected()
+    }
+    private func writeRasterEPUB(at url: URL, data: Data, declared: String) throws {
+        let body = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Synthetic</title></head><body><h1 id=\"heading\">Synthetic</h1><img src=\"cover.png\"/></body></html>"
+        try EPUBTestSupport.writeEPUB3(at: url,
+            chapters: [EPUBSyntheticChapter(id: "one", path: "one.xhtml", title: "Synthetic", bodyXHTML: body)],
+            coverData: data, coverHref: "cover.png", coverMediaType: declared)
+    }
+
+    private func expectCorrectedRasterResources() throws {
+        let root = try EPUBTestSupport.makeWorkspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let cases: [(String, String, Data)] = [
+            ("image/png", "image/jpeg", try EPUBTestSupport.jpegData(width: 2, height: 2)),
+            ("image/jpeg", "image/png", try EPUBTestSupport.pngData(width: 2, height: 2))
+        ]
+        for (index, value) in cases.enumerated() {
+            let (declared, actual, data) = value
+            // The general validator stays strict. Correction belongs to bounded import only.
+            #expect(throws: EPUBError.corruptResource) { try EPUBContentPolicy.verifyImageData(data, mediaType: declared) }
+            #expect(EPUBCompatibility.rasterMediaTypeCorrection(for: data, declared: declared) == actual)
+            let archive = root.appendingPathComponent("mismatch-\(index).epub")
+            try writeRasterEPUB(at: archive, data: data, declared: declared)
+            let original = try Data(contentsOf: archive)
+            let destination = root.appendingPathComponent("mismatch-\(index)", isDirectory: true)
+            let package = try EPUBPackageParser.parse(archiveURL: archive, destination: destination)
+            let restored = try JSONDecoder().decode(EPUBPackage.self, from: JSONEncoder().encode(package))
+            #expect(restored == package)
+            let resource = try #require(restored.resource(at: "OPS/cover.png"))
+            #expect(resource.mediaType == actual)
+            #expect(resource.byteCount == data.count && resource.sha256 == EPUBResourceStore.digest(data))
+            #expect(restored.coverPath == "OPS/cover.png")
+            let publication = EPUBPublication(package: restored, resourceRoot: destination)
+            #expect(try EPUBResourceStore.data(path: resource.path, publication: publication) == data)
+            #expect(try Data(contentsOf: archive) == original)
+            let imageURL = destination.appendingPathComponent(resource.path)
+            var tampered = data; tampered[tampered.count - 1] ^= 1
+            for invalid in [tampered, Data(data.dropLast())] {
+                try invalid.write(to: imageURL)
+                #expect(throws: EPUBError.corruptResource) { _ = try EPUBResourceStore.data(path: resource.path, publication: publication) }
+            }
+        }
+    }
+
+    private func expectInvalidRasterCorrectionsRejected() throws {
+        let root = try EPUBTestSupport.makeWorkspace(); defer { try? FileManager.default.removeItem(at: root) }
+        let jpeg = try EPUBTestSupport.jpegData(width: 2, height: 2)
+        // Independently generated 2x2 two-frame PNG; never silently flatten it.
+        let animatedPNG = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAACAAAAAgAAAAAAAAAAAAEACgAA6FTcAAAAABBJREFUeJxj/M8AAkxgkgEADR0BA4LJcf8AAAAaZmNUTAAAAAEAAAACAAAAAgAAAAAAAAAAAAEACgAAcyc21AAAABZmZEFUAAAAAnicY2Rg+M/AwMDEAAYACx8BAyVgX34AAAAASUVORK5CYII="))
+        let invalid: [(String, Data)] = [
+            ("image/jpeg", animatedPNG),
+            ("image/png", Data([0xFF, 0xD8, 0xFF])),
+            ("image/png", Data(jpeg.prefix(32))),
+            ("image/jpeg", Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])),
+            ("image/png", Data("<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>".utf8)),
+            ("image/webp", jpeg)
+        ]
+        for (index, value) in invalid.enumerated() {
+            let archive = root.appendingPathComponent("invalid-\(index).epub")
+            try writeRasterEPUB(at: archive, data: value.1, declared: value.0)
+            let destination = root.appendingPathComponent("invalid-\(index)", isDirectory: true)
+            #expect(throws: EPUBError.corruptResource) { _ = try EPUBPackageParser.parse(archiveURL: archive, destination: destination) }
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+        }
+        #expect(EPUBCompatibility.rasterMediaTypeCorrection(for: jpeg, declared: "image/svg+xml") == nil)
+        #expect(EPUBCompatibility.rasterMediaTypeCorrection(for: jpeg, declared: "image/webp") == nil)
+        let oversized = try EPUBTestSupport.pngData(width: 16_385, height: 1)
+        #expect(throws: EPUBError.limitExceeded) { try EPUBCompatibility.verifyCorrectedRaster(oversized, mediaType: "image/png") }
+        #expect(throws: EPUBError.limitExceeded) {
+            try EPUBCompatibility.verifyCorrectedRaster(Data(repeating: 0, count: EPUBLimits().imageBytes + 1), mediaType: "image/jpeg")
+        }
     }
 }

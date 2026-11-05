@@ -238,10 +238,10 @@ class EPUBCompatValidationTests(unittest.TestCase):
             self.assertEqual(recorded["host"], 5)
             self.assertEqual(recorded["cases"], summary["files"])
 
-        self.assertEqual(len(compat.ALLOWED), 18)
-        self.assertEqual(len(compat.NEW_ALLOWED), 5)
+        self.assertEqual(len(compat.ALLOWED), 10)
+        self.assertEqual(len(compat.NEW_ALLOWED), 0)
         self.assertTrue(compat.NEW_ALLOWED <= compat.ALLOWED)
-        self.assertEqual(compat.BASE, "4d26ecf62b50014d97cd02d4fd512a617dfcbf1e")
+        self.assertEqual(compat.BASE, "e9615ca90445ff53afd285363233e9678465799c")
         self.assertEqual(compat.SCOPE, "epub-compat-33")
 
         domain_cmd = compat.expected_command("domain", SYNTHETIC_DEST, Path("domain.xcresult"))
@@ -305,8 +305,8 @@ class EPUBCompatValidationTests(unittest.TestCase):
             worktree_blobs=blobs,
         )
         self.assertEqual(receipt["scope"], "epub-compat-33")
-        self.assertEqual(receipt["version"], "0.2.1")
-        self.assertEqual(receipt["build"], "3")
+        self.assertEqual(receipt["version"], "0.2.2")
+        self.assertEqual(receipt["build"], "4")
         self.assertEqual(receipt["selected_total"], 33)
         self.assertEqual(set(receipt["changed_paths"]), compat.ALLOWED)
         self.assertEqual(set(receipt["added_paths"]), compat.NEW_ALLOWED)
@@ -336,7 +336,7 @@ class EPUBCompatValidationTests(unittest.TestCase):
                 )
 
         # Deleting a baseline file or deleting a whitelisted file must be rejected.
-        for deleted_path in ("App/YueJingApp.swift", "App/EPUB/EPUBResourceHandler.swift", "docs/EPUB_COMPATIBILITY.md"):
+        for deleted_path in ("App/YueJingApp.swift", "Sources/ReaderDomain/EPUB/EPUBContentPolicy.swift", "docs/EPUB_COMPATIBILITY.md"):
             bad_cur = copy.deepcopy(current)
             bad_blobs = dict(blobs)
             bad_cur.pop(deleted_path, None)
@@ -363,11 +363,11 @@ class EPUBCompatValidationTests(unittest.TestCase):
         # project.yml version / extra byte mutations must be rejected.
         bad_projects = [
             base_proj,
-            base_proj.replace(b'MARKETING_VERSION: "0.2.0"', b'MARKETING_VERSION: "0.2.2"').replace(
-                b'CURRENT_PROJECT_VERSION: "2"', b'CURRENT_PROJECT_VERSION: "3"'
+            base_proj.replace(b'MARKETING_VERSION: "0.2.1"', b'MARKETING_VERSION: "0.2.3"').replace(
+                b'CURRENT_PROJECT_VERSION: "3"', b'CURRENT_PROJECT_VERSION: "4"'
             ),
-            base_proj.replace(b'MARKETING_VERSION: "0.2.0"', b'MARKETING_VERSION: "0.2.1"').replace(
-                b'CURRENT_PROJECT_VERSION: "2"', b'CURRENT_PROJECT_VERSION: "4"'
+            base_proj.replace(b'MARKETING_VERSION: "0.2.1"', b'MARKETING_VERSION: "0.2.2"').replace(
+                b'CURRENT_PROJECT_VERSION: "3"', b'CURRENT_PROJECT_VERSION: "5"'
             ),
             cur_proj + b"# extra comment\n",
         ]
@@ -752,7 +752,7 @@ def run_self_check():
         "selected_cases": 33,
         "domain_cases": 28,
         "host_cases": 5,
-        "whitelist_paths": 18,
+        "whitelist_paths": 10,
         "native_executions": 0,
     }
 

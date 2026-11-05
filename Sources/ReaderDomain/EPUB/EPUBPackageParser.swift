@@ -114,6 +114,7 @@ public enum EPUBPackageParser {
             var fragmentIDsByPath: [String: Set<String>] = [:]
             var textNodesByPath: [String: [String]] = [:]
             var referencedBodyImages: Set<String> = []
+            var validatedImageMediaTypes: [String: String] = [:]
 
             for spinePath in spinePaths {
                 try Task.checkCancellation()
@@ -136,6 +137,12 @@ public enum EPUBPackageParser {
                 fragmentIDsByPath[spinePath] = sanitized.fragmentIDs
                 textNodesByPath[spinePath] = sanitized.textNodes
                 referencedBodyImages.formUnion(sanitized.referencedImages)
+                for (path, mediaType) in sanitized.imageMediaTypes {
+                    if let previous = validatedImageMediaTypes[path], previous != mediaType {
+                        throw EPUBError.corruptResource
+                    }
+                    validatedImageMediaTypes[path] = mediaType
+                }
             }
 
             for spinePath in spinePaths {
@@ -280,7 +287,7 @@ public enum EPUBPackageParser {
                 servedResources.append(
                     EPUBResource(
                         path: imagePath,
-                        mediaType: item.mediaType,
+                        mediaType: validatedImageMediaTypes[imagePath] ?? item.mediaType,
                         sha256: imgEntry.sha256,
                         byteCount: imgEntry.byteCount
                     )

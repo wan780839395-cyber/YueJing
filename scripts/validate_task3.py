@@ -599,7 +599,7 @@ def verify_ipa(reused=False, epub_compat=False):
     if epub_compat:
         from run_epub_compat_validation import validate_saved
         qualification = validate_saved()
-        require(version == "0.2.1" and build == "3", "EPUB compatibility release identity differs")
+        require(version == "0.2.2" and build == "4", "EPUB compatibility release identity differs")
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=33, coverage="EPUB_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
