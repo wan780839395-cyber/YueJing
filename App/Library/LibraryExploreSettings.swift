@@ -83,6 +83,16 @@ struct LibraryManagementOptions: View {
             Button { onInformation(.license) } label: {
                 Label("开源许可", systemImage: "doc.text").frame(minHeight: 44)
             }.disabled(!canChange)
+            VStack(alignment: .leading, spacing: 6) {
+                Label("当前版本", systemImage: "info.circle")
+                Text(AppVersion.current.displayText)
+                    .font(.subheadline)
+                    .foregroundStyle(appearance.secondary)
+                    .textSelection(.enabled)
+            }
+            .padding(.vertical, 6)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("app.version")
         }.listRowBackground(appearance.surface)
     }
 

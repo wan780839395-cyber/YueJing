@@ -5,14 +5,16 @@ public actor OpenedEPUBReader {
     public nonisolated let publication: EPUBPublication
     public nonisolated let reading: EPUBReadingStart
     public nonisolated let preferences: ReaderPreferences
+    public nonisolated let reusedResources: Bool
     private let store: LibraryStore
     private var closed = false
     private var closing: Task<Void, Error>?
 
     init(book: LibraryBook, publication: EPUBPublication, reading: EPUBReadingStart,
-         preferences: ReaderPreferences, store: LibraryStore) {
+         preferences: ReaderPreferences, store: LibraryStore, reusedResources: Bool = false) {
         self.book = book; self.publication = publication; self.reading = reading
         self.preferences = preferences; self.store = store
+        self.reusedResources = reusedResources
     }
     deinit {
         guard closing == nil else { return }

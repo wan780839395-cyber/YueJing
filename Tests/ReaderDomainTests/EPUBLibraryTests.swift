@@ -85,6 +85,7 @@ struct EPUBLibraryTests {
         #expect(try Data(contentsOf: stored) == bytes)
         #expect(try Data(contentsOf: source) == bytes)
         let reader = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(!reader.reusedResources)
         #expect(reader.publication.package.spine == ["OPS/one.xhtml", "OPS/two.xhtml"])
         for path in reader.publication.package.spine {
             let data = try EPUBResourceStore.data(path: path, publication: reader.publication)
@@ -96,7 +97,43 @@ struct EPUBLibraryTests {
         let fresh = LibraryService(store: try LibraryStore(root: f.managed))
         let reopened = try await fresh.openEPUB(id: receipt.book.id)
         #expect(reopened.publication.package == reader.publication.package)
+        #expect(reopened.reusedResources)
+        #expect(reopened.reading.session.id != reader.reading.session.id)
+        #expect(reopened.publication.resourceRoot != folder)
         try await reopened.close(position: nil, sequence: 1, token: nil, preferences: reopened.preferences)
+        #expect(!FileManager.default.fileExists(atPath: reopened.publication.resourceRoot.path))
+
+        let cache = await f.store.epubCacheURL()
+        let cachedChapter = cache.appendingPathComponent("resources/OPS/one.xhtml")
+        var damaged = try Data(contentsOf: cachedChapter)
+        damaged[damaged.startIndex] ^= 1
+        try damaged.write(to: cachedChapter)
+        let rebuilt = try await fresh.openEPUB(id: receipt.book.id)
+        #expect(!rebuilt.reusedResources)
+        #expect(try EPUBResourceStore.data(path: "OPS/one.xhtml", publication: rebuilt.publication)
+            == Data(contentsOf: cachedChapter))
+        try await rebuilt.close(position: nil, sequence: 1, token: nil, preferences: rebuilt.preferences)
+
+        // A valid resource cache cannot hide a changed original archive.
+        var changed = bytes
+        changed[changed.startIndex] ^= 1
+        try changed.write(to: stored)
+        do {
+            _ = try await fresh.openEPUB(id: receipt.book.id)
+            Issue.record("A warm cache must not admit a changed original")
+        } catch LibraryError.changedFile {
+            // Exact error required; all other errors propagate and fail the test.
+        }
+        try bytes.write(to: stored)
+        let reused = try await fresh.openEPUB(id: receipt.book.id)
+        #expect(reused.reusedResources)
+        try await reused.abandon()
+        #expect(!FileManager.default.fileExists(atPath: reused.publication.resourceRoot.path))
+
+        try FileManager.default.removeItem(at: cache)
+        let missingCache = try await fresh.openEPUB(id: receipt.book.id)
+        #expect(!missingCache.reusedResources)
+        try await missingCache.abandon()
     }
 
     @Test func epubDuplicateKeepsProgressAndRepairsMissingArchive() async throws {

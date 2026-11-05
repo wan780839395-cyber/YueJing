@@ -586,8 +586,12 @@ extension LibraryService {
         defer { if !keep { Self.removeStaging(work) } }
         do {
             let source = try await store.epubFileURL(bookID: id)
-            guard try EPUBResourceStore.sourceDigest(source) == book.id else { throw LibraryError.changedFile }
-            let publication = try await epubImporter.prepare(archiveURL: source, destination: work)
+            let expected = try await store.storedEPUBPackage(bookID: id)
+            let cache = await store.epubCacheURL()
+            let prepared = try await epubImporter.prepareForReading(
+                archiveURL: source, destination: work, expected: expected, cache: cache
+            )
+            let publication = prepared.publication
             let preferences = try await store.preferences()
             let start = try await store.beginEPUB(permit, package: publication.package)
             do {
@@ -599,7 +603,8 @@ extension LibraryService {
             }
             await store.endReaderOpen(permit)
             keep = true
-            return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences, store: store)
+            return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
+                                    store: store, reusedResources: prepared.reused)
         } catch {
             await store.endReaderOpen(permit)
             throw error

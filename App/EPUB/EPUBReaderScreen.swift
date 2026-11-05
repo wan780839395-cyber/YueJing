@@ -39,6 +39,7 @@ struct EPUBReaderScreen: View {
                     onLoadFailure: model.handleLoadFailure,
                     onInternalLink: model.navigateToInternalLink,
                     onChapterBoundary: model.turnChapter,
+                    onPreloadFailure: model.handlePreloadFailure,
                     interactionEnabled: model.ready && !model.loading && !model.exitSaveFailed &&
                         tools.canInteract && tools.panel == nil,
                     toolIntent: { tools.intent },
@@ -169,6 +170,13 @@ struct EPUBReaderScreen: View {
             } else {
                 EPUBSettingsView(
                     preferences: settingsBinding(for: session.id),
+                    readingMode: Binding(
+                        get: { model.readingMode },
+                        set: { mode in
+                            guard panelActive(.settings, session.id) else { return }
+                            model.setReadingMode(mode)
+                        }
+                    ),
                     changed: {
                         if panelActive(.settings, session.id) {
                             model.settingsChanged()

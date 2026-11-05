@@ -268,6 +268,7 @@ struct EPUBReaderHostTests {
                 model.handleLocatorEvent(scrolledPayload)
                 let savedAnchor = try #require(model.currentPosition)
                 #expect(savedAnchor.node == anchorNode && savedAnchor.utf16Offset == 4)
+                let loadsBeforeReflow = controller.documentLoadCount
 
                 // Apply typography + dark theme change, minting a new navigation epoch.
                 model.preferences = ReaderPreferences(fontSize: 28, lineSpacing: 14, theme: .dark)
@@ -303,6 +304,11 @@ struct EPUBReaderHostTests {
                     "window.getComputedStyle(document.body).fontSize"
                 ) as? String
                 #expect(fontStyle == "28px")
+                #expect(controller.documentLoadCount == loadsBeforeReflow)
+                controller.apply(reflowRequest)
+                #expect(controller.documentLoadCount == loadsBeforeReflow)
+                model.settingsChanged()
+                #expect(model.navigationRequest == reflowRequest)
 
                 // Navigate to Chapter 2 mid-section fragment via TOC item and gate old reflowToken callbacks.
                 let ch2MidItem = try #require(model.navigationItems.first(where: { $0.fragment == "sec-mid" }))
@@ -604,6 +610,17 @@ struct EPUBReaderHostTests {
     }
 
     private func verifyPageGeometry() {
+        let spine = (0..<12).map { "chapter-\($0).xhtml" }
+        #expect(EPUBChapterWindow.paths(in: spine, around: spine[0]) == Array(spine[0..<5]))
+        #expect(EPUBChapterWindow.paths(in: spine, around: spine[6]) == Array(spine[4..<9]))
+        #expect(EPUBChapterWindow.paths(in: spine, around: spine[11]) == Array(spine[7..<12]))
+        #expect(EPUBChapterWindow.paths(in: ["only.xhtml"], around: "only.xhtml") == ["only.xhtml"])
+        #expect(EPUBChapterWindow.paths(in: spine, around: "unknown.xhtml").isEmpty)
+        #expect(EPUBChapterWindow.paths(in: [], around: "unknown.xhtml").isEmpty)
+        let shortSpine = (0..<128).map { "short-\($0).xhtml" }
+        #expect(EPUBChapterWindow.paths(in: shortSpine, around: shortSpine[0], count: 10).count == 10)
+        #expect(EPUBChapterWindow.paths(in: shortSpine, around: shortSpine[0], count: 1000).count == 64)
+        #expect(EPUBChapterWindow.maximumXHTMLBytes == 40 * 1024 * 1024)
         let g1 = EPUBPageGeometry(offset: 0, contentHeight: 2000, viewportHeight: 600, topInset: 0, bottomInset: 0)
         #expect(g1.valid)
         #expect(g1.minimum == 0)
@@ -642,8 +659,8 @@ struct EPUBReaderHostTests {
         #expect(shortG.maximum == 0)
         #expect(shortG.destination(.next) == nil)
         #expect(shortG.destination(.previous) == nil)
-        #expect(shortG.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: -70)) == .next)
-        #expect(shortG.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: 70)) == .previous)
+        #expect(shortG.continuation(direction: .next) == .next)
+        #expect(shortG.continuation(direction: .previous) == .previous)
 
         let insetG = EPUBPageGeometry(offset: 0, contentHeight: 2000, viewportHeight: 600, topInset: 56, bottomInset: 56)
         #expect(insetG.valid)
@@ -651,19 +668,23 @@ struct EPUBReaderHostTests {
         #expect(insetG.maximum == 1456)
 
         let topBoundary = EPUBPageGeometry(offset: 0, contentHeight: 2000, viewportHeight: 600)
-        #expect(topBoundary.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: 70)) == .previous)
-        #expect(topBoundary.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: 50)) == nil)
-        #expect(topBoundary.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: -70)) == nil)
-        #expect(topBoundary.boundaryTurn(from: 0, translation: CGPoint(x: 60, y: 70)) == nil)
-        #expect(topBoundary.boundaryTurn(from: 100, translation: CGPoint(x: 0, y: 70)) == nil)
+        #expect(topBoundary.continuation(direction: .previous) == .previous)
+        #expect(topBoundary.continuation(direction: .next) == nil)
         let notAtTop = EPUBPageGeometry(offset: 50, contentHeight: 2000, viewportHeight: 600)
-        #expect(notAtTop.boundaryTurn(from: 0, translation: CGPoint(x: 0, y: 70)) == nil)
-
+        #expect(notAtTop.continuation(direction: .previous) == nil)
         let bottomBoundary = EPUBPageGeometry(offset: 1400, contentHeight: 2000, viewportHeight: 600)
-        #expect(bottomBoundary.boundaryTurn(from: 1400, translation: CGPoint(x: 0, y: -70)) == .next)
-        #expect(bottomBoundary.boundaryTurn(from: 1400, translation: CGPoint(x: 0, y: 70)) == nil)
-        #expect(bottomBoundary.boundaryTurn(from: 1400, translation: CGPoint(x: 0, y: -50)) == nil)
-        #expect(bottomBoundary.boundaryTurn(from: 1000, translation: CGPoint(x: 0, y: -70)) == nil)
+        #expect(bottomBoundary.continuation(direction: .next) == .next)
+        #expect(bottomBoundary.continuation(direction: .previous) == nil)
+        #expect(gNearEnd.continuation(direction: .next) == nil)
+        #expect(EPUBPageGeometry(offset: .nan, contentHeight: 2000, viewportHeight: 600).continuation(direction: .next) == nil)
+        #expect(EPUBPageGeometry.horizontalDestination(.next, offset: 0, contentWidth: 1200, viewportWidth: 400) == 400)
+        #expect(EPUBPageGeometry.horizontalDestination(.previous, offset: 400, contentWidth: 1200, viewportWidth: 400) == 0)
+        #expect(EPUBPageGeometry.horizontalDestination(.next, offset: 800, contentWidth: 1200, viewportWidth: 400) == nil)
+        #expect(EPUBPageGeometry.horizontalDestination(.next, offset: 0, contentWidth: 400, viewportWidth: 400) == nil)
+        #expect(EPUBPageGeometry.horizontalDestination(.next, offset: .nan, contentWidth: 1200, viewportWidth: 400) == nil)
+        #expect(EPUBPageGeometry.horizontalDestination(.next, offset: 0, contentWidth: 1200, viewportWidth: 0) == nil)
+        #expect(AppVersion(info: ["CFBundleShortVersionString": "9.8.7", "CFBundleVersion": "42"]).displayText == "9.8.7（构建 42）")
+        #expect(AppVersion(info: [:]).displayText == "未知（构建 未知）")
 
         let screenSize = CGSize(width: 400, height: 800)
         #expect(EPUBPageGeometry.edgeDirection(at: CGPoint(x: 40, y: 400), size: screenSize) == .previous)
@@ -681,13 +702,14 @@ struct EPUBReaderHostTests {
 
     private func verifyPagingAndChapterBoundaryNavigation() async throws {
         verifyPageGeometry()
+        try await verifyHorizontalPagination()
 
         try await withHostFixture { fixture in
             let archiveURL = fixture.root.appendingPathComponent("Paging.epub")
             try EPUBUITestFixture.writeIllustratedEPUB(to: archiveURL, title: "Host Paging")
             let receipt = try await fixture.install(archiveURL)
 
-            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, readingMode: .scroll)
             let controller = EPUBWebViewController()
             model.webView.attach(controller)
             controller.onLocatorEvent = { [weak model] payload in model?.handleLocatorEvent(payload) }
@@ -707,6 +729,11 @@ struct EPUBReaderHostTests {
                 let initialRequest = try #require(model.navigationRequest)
                 controller.apply(initialRequest)
                 try await waitUntilReady(model: model, expectedToken: initialRequest.token)
+                try await waitForChapterWindow(controller, count: 3)
+                #expect(model.currentToken == initialRequest.token)
+                #expect(model.currentPosition?.path == initialRequest.token.path)
+                #expect(controller.documentLoadCount == 1)
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("window.__continuousDocument = document; window.__continuousNode = document.querySelector('[data-yj-chapter]'); true;")
 
                 let ch1Token = try #require(model.currentToken)
                 #expect(ch1Token.path == "OEBPS/text/ch1.xhtml")
@@ -730,44 +757,58 @@ struct EPUBReaderHostTests {
                 #expect((sampleAfterTurn?.scrollY ?? 0) > 0)
 
                 let scroll = controller.webView.scrollView
-                let maxOffset = max(0, scroll.contentSize.height - scroll.bounds.height)
-                scroll.setContentOffset(CGPoint(x: 0, y: maxOffset), animated: false)
-                let boundaryTurned = controller.turnPage(.next, animated: false)
-                #expect(boundaryTurned == true)
-
-                let repeatTurn = model.turnChapter(.next, from: ch1Token)
-                #expect(repeatTurn == false)
-
+                // Both sides of the boundary are rendered simultaneously, not a replacement screenshot.
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+                var next = document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]');
+                window.scrollTo(0, window.scrollY + next.getBoundingClientRect().top - 100);
+                true;
+                """)
+                let boundarySample = try #require(await controller.sampleVisibleNow())
+                #expect(boundarySample.visibleText.contains("EPUB_CH1_END"))
+                #expect(boundarySample.visibleText.contains("EPUB_CH2_START"))
+                #expect(boundarySample.path == ch1Token.path)
+                // One continuous movement crosses the boundary without calling turnChapter.
+                controller.scrollViewWillBeginDragging(scroll)
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+                window.scrollTo(0, window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top + 20);
+                true;
+                """)
+                let crossed = try #require(await controller.sampleVisibleNow())
+                model.handleLocatorEvent(crossed)
+                controller.scrollViewDidEndDragging(scroll, willDecelerate: false)
                 try await waitForNewToken(model: model, previous: ch1Token)
                 let ch2Request = try #require(model.navigationRequest)
                 #expect(ch2Request.token.path == "OEBPS/text/ch2.xhtml")
-                #expect(ch2Request.startAtEnd == false)
-                controller.apply(ch2Request)
+                #expect(ch2Request.reloadDocument == false && ch2Request.preserveViewport)
                 try await waitUntilReady(model: model, expectedToken: ch2Request.token)
                 let ch2Token = try #require(model.currentToken)
-                #expect(ch2Token.path == "OEBPS/text/ch2.xhtml")
+                #expect(controller.documentLoadCount == 1)
+                #expect(!model.loading)
+                let retained = try await controller.evaluateLocatorJavaScriptForTesting("document === window.__continuousDocument && document.querySelector('[data-yj-chapter]') === window.__continuousNode") as? Bool
+                #expect(retained == true)
+                let afterCrossing = try #require(await controller.sampleVisibleNow())
+                #expect(abs(afterCrossing.scrollY - crossed.scrollY) < 2)
+                let positionBeforeStale = model.currentPosition
+                model.handleLocatorEvent(boundarySample) // old epoch cannot move progress back
+                #expect(model.currentPosition == positionBeforeStale)
                 #expect(model.turnChapter(.next, from: ch1Token) == false)
                 controller.interactionEnabled = false
                 #expect(controller.turnPage(.next, animated: false) == false)
                 controller.interactionEnabled = true
 
-                scroll.setContentOffset(.zero, animated: false)
-                let backTurned = controller.turnPage(.previous, animated: false)
-                #expect(backTurned == true)
-
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+                window.scrollTo(0, window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top - 100);
+                true;
+                """)
+                let backwards = try #require(await controller.sampleVisibleNow())
+                model.handleLocatorEvent(backwards)
                 try await waitForNewToken(model: model, previous: ch2Token)
                 let backRequest = try #require(model.navigationRequest)
                 #expect(backRequest.token.path == "OEBPS/text/ch1.xhtml")
-                #expect(backRequest.startAtEnd == true)
-                controller.apply(backRequest)
-                try await waitUntilReady(model: model, expectedToken: backRequest.token)
-                let backToken = try #require(model.currentToken)
-                #expect(backToken.path == "OEBPS/text/ch1.xhtml")
-
-                let endSample = try #require(await controller.sampleVisibleNow())
-                let ch1MaxY = max(0, endSample.contentHeight - endSample.viewportHeight)
-                #expect(endSample.scrollY >= max(0, ch1MaxY - 40))
-                #expect(endSample.visibleText.contains("EPUB_CH1_END"))
+                #expect(backRequest.preserveViewport && !backRequest.reloadDocument)
+                let backToken = backRequest.token
+                #expect(controller.documentLoadCount == 1)
+                #expect(backwards.visibleText.contains("EPUB_CH1_END"))
 
                 let ch3Item = try #require(model.navigationItems.first(where: { $0.path.contains("ch3") }))
                 model.go(to: ch3Item)
@@ -776,6 +817,7 @@ struct EPUBReaderHostTests {
                 #expect(ch3Request.token.path == "OEBPS/text/ch3.xhtml")
                 controller.apply(ch3Request)
                 try await waitUntilReady(model: model, expectedToken: ch3Request.token)
+                try await waitForChapterWindow(controller, count: 3)
                 let ch3Token = try #require(model.currentToken)
                 #expect(ch3Token.path == "OEBPS/text/ch3.xhtml")
 
@@ -797,6 +839,70 @@ struct EPUBReaderHostTests {
             let reopened = try await fixture.service.openEPUB(id: receipt.book.id)
             #expect(reopened.reading.position?.path == "OEBPS/text/ch3.xhtml")
             try await reopened.close(position: nil, sequence: 1, token: nil, preferences: reopened.preferences)
+        }
+    }
+
+    private func waitForChapterWindow(_ controller: EPUBWebViewController, count: Int) async throws {
+        let deadline = Date().addingTimeInterval(12)
+        while controller.renderedChapterPaths.count != count && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(controller.renderedChapterPaths.count == count)
+        #expect(controller.renderedChapterPaths.count <= EPUBChapterWindow.maximumChapters)
+    }
+
+    private func verifyHorizontalPagination() async throws {
+        let savedMode = UserDefaults.standard.object(forKey: EPUBReadingMode.defaultsKey)
+        defer {
+            if let savedMode { UserDefaults.standard.set(savedMode, forKey: EPUBReadingMode.defaultsKey) }
+            else { UserDefaults.standard.removeObject(forKey: EPUBReadingMode.defaultsKey) }
+        }
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("Horizontal.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Horizontal Pages")
+            let receipt = try await fixture.install(archive)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, readingMode: .paged)
+            let controller = EPUBWebViewController()
+            model.webView.attach(controller)
+            controller.onLocatorEvent = { model.handleLocatorEvent($0) }
+            controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
+            controller.onChapterBoundary = { model.turnChapter($0, from: $1) }
+            try await fixture.withHostedController(controller) {
+                await model.load()
+                let first = try #require(model.navigationRequest)
+                controller.apply(first)
+                try await waitUntilReady(model: model, expectedToken: first.token)
+                try await waitForChapterWindow(controller, count: 3)
+                let scroll = controller.webView.scrollView
+                #expect(controller.documentLoadCount == 1)
+                #expect(scroll.contentSize.width > scroll.bounds.width * 2)
+                #expect(!scroll.panGestureRecognizer.isEnabled)
+                #expect(controller.turnPage(.next, animated: false))
+                #expect(abs(scroll.contentOffset.x - scroll.bounds.width) < 2)
+                #expect(abs(scroll.contentOffset.y) < 1)
+                var payload = await controller.sampleVisibleNow()
+                let deadline = Date().addingTimeInterval(2)
+                while (payload?.scrollX ?? 0) < 1 && Date() < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                    payload = await controller.sampleVisibleNow()
+                }
+                let visible = try #require(payload)
+                #expect(visible.scrollX > 0 && visible.scrollY == 0)
+                model.handleLocatorEvent(visible)
+                let anchor = try #require(model.currentPosition)
+                model.setReadingMode(.scroll)
+                try await waitForNewToken(model: model, previous: first.token)
+                let vertical = try #require(model.navigationRequest)
+                controller.apply(vertical)
+                try await waitUntilReady(model: model, expectedToken: vertical.token)
+                #expect(model.currentPosition == anchor)
+                #expect(controller.documentLoadCount == 1)
+                #expect(scroll.panGestureRecognizer.isEnabled)
+                #expect(scroll.contentSize.height > scroll.bounds.height)
+                #expect(abs(scroll.contentOffset.x) < 1)
+                let closed = await model.close()
+                #expect(closed)
+            }
         }
     }
 }

@@ -23,6 +23,9 @@ struct EPUBLocatorPayload: Sendable, Equatable {
     let contentHeight: Double
     let visibleText: String
     let reason: String?
+    var scrollX: Double = 0
+    var viewportWidth: Double = 0
+    var contentWidth: Double = 0
 }
 
 /// Isolated content-world script for DOM text-node + UTF-16 offset locating and restoration.
@@ -40,7 +43,7 @@ enum EPUBLocationScript {
         )
     }
 
-    static func trustedStyleSheet(for preferences: ReaderPreferences) -> String {
+    static func trustedStyleSheet(for preferences: ReaderPreferences, readingMode: EPUBReadingMode = .scroll) -> String {
         let validated = preferences.validated
         let fontSize = Int(validated.fontSize.rounded())
         let spacing = Int(validated.lineSpacing.rounded())
@@ -55,7 +58,7 @@ enum EPUBLocationScript {
                 return ("rgb(23, 23, 23)", "rgb(224, 224, 224)")
             }
         }()
-        return """
+        let base = """
         html, body {
             margin: 0 !important;
             padding: 16px 20px 40px 20px !important;
@@ -94,9 +97,56 @@ enum EPUBLocationScript {
             display: block !important;
             margin: 12px auto !important;
         }
-        span[id^="yj-t"] {
+        html, body { overflow-anchor: none !important; }
+        body > section[data-yj-chapter] { display: flow-root !important; }
+        span[id^="yj-t"], span[data-yj-original-id^="yj-t"] {
             display: inline !important;
         }
+        """
+        guard readingMode == .paged else { return base }
+        // Content width + column gap equals one viewport; padding is not added per column.
+        return base + """
+
+        html {
+            padding: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+        }
+        body {
+            box-sizing: border-box !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            min-height: 0 !important;
+            max-height: 100vh !important;
+            padding: 16px 20px 24px !important;
+            column-width: calc(100vw - 40px) !important;
+            column-gap: 40px !important;
+            column-count: auto !important;
+            column-fill: auto !important;
+            overflow: visible !important;
+        }
+        html, body {
+            direction: ltr !important;
+            writing-mode: horizontal-tb !important;
+            scroll-behavior: auto !important;
+        }
+        body * {
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            break-before: auto !important;
+            break-after: auto !important;
+            widows: 1 !important;
+            orphans: 1 !important;
+        }
+        body img, body svg {
+            max-height: calc(100vh - 64px) !important;
+            object-fit: contain !important;
+            break-inside: avoid !important;
+        }
+        body > section[data-yj-chapter] { break-before: column !important; }
+        body > section[data-yj-chapter]:first-child { break-before: auto !important; }
         """
     }
 
@@ -156,9 +206,12 @@ enum EPUBLocationScript {
         fragment: String?,
         preferences: ReaderPreferences,
         preserveTargetAnchor: Bool,
-        startAtEnd: Bool = false
+        startAtEnd: Bool = false,
+        readingMode: EPUBReadingMode = .scroll,
+        preserveViewport: Bool = false
     ) throws -> String {
-        guard let nodes = package.textNodes[token.path] else {
+        guard let chapterIndex = package.spine.firstIndex(of: token.path),
+              let nodes = package.textNodes[token.path] else {
             throw EPUBError.invalidPackage
         }
         let lengths = nodes.map { $0.utf16.count }
@@ -166,6 +219,9 @@ enum EPUBLocationScript {
             "sessionID": token.sessionID,
             "epoch": token.epoch.uuidString,
             "path": token.path,
+            "chapterIndex": chapterIndex,
+            "chapterBytes": package.resource(at: token.path)?.byteCount ?? 0,
+            "preserveViewport": preserveViewport,
             "expectedNodeCount": nodes.count,
             "expectedNodeLengths": lengths,
             "targetNode": targetPosition?.path == token.path ? (targetPosition?.node ?? -1) : -1,
@@ -173,7 +229,8 @@ enum EPUBLocationScript {
             "fragment": fragment ?? "",
             "preserveTargetAnchor": preserveTargetAnchor && (targetPosition?.path == token.path),
             "startAtEnd": startAtEnd && targetPosition == nil && fragment == nil,
-            "css": trustedStyleSheet(for: preferences)
+            "readingMode": readingMode.rawValue,
+            "css": trustedStyleSheet(for: preferences, readingMode: readingMode)
         ]
         if targetPosition == nil {
             config["targetNode"] = -1
@@ -216,7 +273,10 @@ enum EPUBLocationScript {
             viewportHeight: viewportHeight,
             contentHeight: contentHeight,
             visibleText: visibleText,
-            reason: reason
+            reason: reason,
+            scrollX: (dict["scrollX"] as? NSNumber)?.doubleValue ?? 0,
+            viewportWidth: (dict["viewportWidth"] as? NSNumber)?.doubleValue ?? 0,
+            contentWidth: (dict["contentWidth"] as? NSNumber)?.doubleValue ?? 0
         )
     }
 
@@ -229,12 +289,20 @@ enum EPUBLocationScript {
             sessionID: "",
             epoch: "",
             path: "",
+            chapters: [],
+            syncGeneration: 0,
+            syncing: false,
+            targetPath: "",
             ready: false,
             suppressingReflow: true,
             preserveTargetAnchor: false,
             targetNode: -1,
             targetOffset: 0,
             restoredScrollY: 0,
+            restoredScrollX: 0,
+            paginated: false,
+            lastAnchor: null,
+            reflowRevision: 0,
             scrollTimer: null
         };
 
@@ -246,27 +314,43 @@ enum EPUBLocationScript {
             } catch (_) {}
         }
 
-        function collectSpans(expectedCount) {
-            var spans = [];
-            if (typeof expectedCount === "number" && expectedCount > 0) {
-                for (var i = 0; i < expectedCount; i++) {
-                    var el = document.getElementById("yj-t" + i);
-                    if (!el) { return { valid: false, spans: [] }; }
-                    spans.push(el);
-                }
-                if (document.getElementById("yj-t" + expectedCount) !== null) {
-                    return { valid: false, spans: [] };
-                }
-                return { valid: true, spans: spans };
+        function chapterFor(path) {
+            return state.chapters.find(function(c) { return c.path === path; });
+        }
+
+        function originalID(el) {
+            return el.getAttribute("data-yj-original-id") || el.id;
+        }
+
+        function scopedElement(id, path) {
+            var chapter = chapterFor(path || state.path);
+            if (!chapter) { return null; }
+            if (originalID(chapter.element) === id) { return chapter.element; }
+            var elements = chapter.element.querySelectorAll("[id], [name]");
+            for (var i = 0; i < elements.length; i++) {
+                if (originalID(elements[i]) === id || elements[i].getAttribute("name") === id) { return elements[i]; }
             }
-            var idx = 0;
-            while (true) {
-                var node = document.getElementById("yj-t" + idx);
-                if (!node) { break; }
-                spans.push(node);
-                idx += 1;
-            }
-            return { valid: spans.length > 0, spans: spans };
+            return null;
+        }
+
+        function collectSpans(expectedCount, path) {
+            var chapter = chapterFor(path || state.path);
+            var spans = chapter ? chapter.spans : [];
+            return {valid: spans.length > 0 && (!expectedCount || expectedCount === spans.length), spans: spans};
+        }
+
+        function installInitial(config) {
+            if (state.chapters.length) { return; }
+            var element = document.createElementNS ? document.createElementNS("http://www.w3.org/1999/xhtml", "section") : document.createElement("section");
+            element.setAttribute("data-yj-chapter", config.path);
+            element.setAttribute("data-yj-index", config.chapterIndex);
+            if (document.body.id) { element.setAttribute("data-yj-original-id", document.body.id); }
+            var spans = [], index = 0, span;
+            while ((span = document.getElementById("yj-t" + index))) { spans.push(span); index++; }
+            while (document.body.firstChild) { element.appendChild(document.body.firstChild); }
+            document.body.appendChild(element);
+            state.chapters.push({path: config.path, index: config.chapterIndex, element: element, spans: spans,
+                bytes: Number.isSafeInteger(config.chapterBytes) ? config.chapterBytes : 0});
         }
 
         function firstTextChild(span) {
@@ -282,132 +366,196 @@ enum EPUBLocationScript {
             if (typeof cssText !== "string") { return; }
             var style = document.getElementById("yj-epub-style");
             if (!style) {
-                style = document.createElement("style");
+                style = document.createElementNS ? document.createElementNS("http://www.w3.org/1999/xhtml", "style") : document.createElement("style");
                 style.id = "yj-epub-style";
                 (document.head || document.documentElement).appendChild(style);
             }
             style.textContent = cssText;
         }
+        function updatePageMetrics() {
+            var style = document.getElementById("yj-epub-page-metrics");
+            if (!style) {
+                style = document.createElementNS ? document.createElementNS("http://www.w3.org/1999/xhtml", "style") : document.createElement("style");
+                style.id = "yj-epub-page-metrics";
+                (document.head || document.documentElement).appendChild(style);
+            }
+            if (!state.paginated) { style.textContent = ""; return; }
+            var width = viewportWidth();
+            // Use the exact same CSS-pixel step as the locator, avoiding vw rounding drift.
+            var columns = "body { width: " + width + "px !important; column-width: " + Math.max(1, width - 40) + "px !important; }";
+            style.textContent = columns + "body::after { content: none !important; }";
+            var pages = Math.max(1, Math.ceil(contentWidth() / width - 0.001));
+            // Absolute, empty extent pads only the scroll range, never adds a blank column.
+            style.textContent = columns + "body::after { content: '' !important; position: absolute !important; top: 0 !important; left: " +
+                (pages * width - 1) + "px !important; width: 1px !important; height: 1px !important; pointer-events: none !important; }";
+        }
 
-        function scrollToTarget(targetNode, targetOffset, fragment) {
-            var topInset = 18;
+
+        function viewportWidth() {
+            return window.innerWidth || document.documentElement.clientWidth || 1;
+        }
+
+        function contentWidth() {
+            return Math.max(document.documentElement.scrollWidth || 0, document.body.scrollWidth || 0);
+        }
+
+        function scrollToRect(rect) {
+            if (state.paginated) {
+                var width = viewportWidth();
+                var page = Math.floor(Math.max(0, (window.scrollX || 0) + rect.left) / width);
+                window.scrollTo(page * width, 0);
+            } else {
+                window.scrollTo(0, Math.max(0, window.scrollY + rect.top - 18));
+            }
+        }
+
+        function firstRect(rects) {
+            for (var i = 0; i < rects.length; i++) {
+                if (rects[i].width > 0 && rects[i].height > 0) { return rects[i]; }
+            }
+            return null;
+        }
+
+        function scrollToTarget(targetNode, targetOffset, fragment, path) {
+            path = path || state.path;
+            // Character ranges avoid the union bounding box of a multi-column span.
             if (typeof targetNode === "number" && targetNode >= 0) {
-                var span = document.getElementById("yj-t" + targetNode);
+                var chapter = chapterFor(path);
+                var span = chapter && chapter.spans[targetNode];
                 if (!span) { return false; }
                 var textNode = firstTextChild(span);
                 var rect = null;
                 if (textNode && textNode.nodeValue && textNode.nodeValue.length > 0) {
                     var len = textNode.nodeValue.length;
-                    var clamped = Math.max(0, Math.min(targetOffset || 0, len));
+                    var clamped = Math.max(0, Math.min(targetOffset || 0, len - 1));
+                    var code = textNode.nodeValue.charCodeAt(clamped);
+                    if (clamped > 0 && code >= 0xDC00 && code <= 0xDFFF) { clamped -= 1; }
+                    var scalarLength = textNode.nodeValue.codePointAt(clamped) > 0xFFFF ? 2 : 1;
                     var range = document.createRange();
-                    if (clamped < len) {
-                        range.setStart(textNode, clamped);
-                        range.setEnd(textNode, Math.min(len, clamped + 1));
-                    } else {
-                        range.setStart(textNode, Math.max(0, len - 1));
-                        range.setEnd(textNode, len);
-                    }
-                    rect = range.getBoundingClientRect();
+                    range.setStart(textNode, clamped);
+                    range.setEnd(textNode, Math.min(len, clamped + scalarLength));
+                    rect = firstRect(range.getClientRects());
                 }
                 if (!rect || (rect.width === 0 && rect.height === 0 && rect.top === 0)) {
-                    rect = span.getBoundingClientRect();
+                    rect = firstRect(span.getClientRects()) || span.getBoundingClientRect();
                 }
-                var desiredY = Math.max(0, window.scrollY + rect.top - topInset);
-                window.scrollTo(0, desiredY);
+                scrollToRect(rect);
                 return true;
             }
             if (typeof fragment === "string" && fragment.length > 0) {
-                var target = document.getElementById(fragment);
-                if (!target) {
-                    var named = document.getElementsByName(fragment);
-                    if (named && named.length > 0) { target = named[0]; }
-                }
+                var target = scopedElement(fragment, path);
                 if (target) {
-                    var fragRect = target.getBoundingClientRect();
-                    window.scrollTo(0, Math.max(0, window.scrollY + fragRect.top - topInset));
+                    var fragRect = firstRect(target.getClientRects()) || target.getBoundingClientRect();
+                    scrollToRect(fragRect);
                     return true;
                 }
             }
-            window.scrollTo(0, 0);
+            var chapter = chapterFor(path);
+            if (!chapter) { return false; }
+            if (chapter === state.chapters[0]) { window.scrollTo(0, 0); }
+            else { scrollToRect(chapter.element.getBoundingClientRect()); }
             return true;
         }
 
         function scrollToChapterEnd() {
-            var height = Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0);
-            window.scrollTo(0, height);
+            var chapter = chapterFor(state.path);
+            if (!chapter) { return false; }
+            var rects = chapter.element.getClientRects();
+            var rect = rects[rects.length - 1] || chapter.element.getBoundingClientRect();
+            if (state.paginated) {
+                var width = viewportWidth();
+                var page = Math.max(0, Math.ceil(((window.scrollX || 0) + rect.right) / width - 0.001) - 1);
+                window.scrollTo(page * width, 0);
+            } else {
+                window.scrollTo(0, Math.max(0, window.scrollY + rect.bottom - window.innerHeight));
+            }
             return true;
         }
 
         function sampleVisible() {
-            var collected = collectSpans(0);
-            var spans = collected.spans;
-            if (!spans || spans.length === 0) {
-                return null;
-            }
-            var targetY = 18;
+            var entries = [];
+            state.chapters.forEach(function(c) {
+                c.spans.forEach(function(span, node) { entries.push({span: span, node: node, path: c.path}); });
+            });
+            var spans = entries.map(function(e) { return e.span; });
+            if (!spans || spans.length === 0) { return null; }
             var viewportH = window.innerHeight || document.documentElement.clientHeight || 700;
-            var chosenIndex = spans.length - 1;
-            for (var i = 0; i < spans.length; i++) {
-                var r = spans[i].getBoundingClientRect();
-                if (r.height > 0 && r.bottom > targetY) {
-                    chosenIndex = i;
-                    break;
+            var viewportW = viewportWidth();
+            var top = state.paginated ? 0 : 18;
+            function intersects(rects) {
+                for (var r = 0; r < rects.length; r++) {
+                    var rect = rects[r];
+                    if (rect.width > 0 && rect.height > 0 && rect.right > 0 &&
+                        rect.left < viewportW && rect.bottom > top && rect.top < viewportH) {
+                        return true;
+                    }
                 }
+                return false;
             }
-            var chosenSpan = spans[chosenIndex];
-            var textNode = firstTextChild(chosenSpan);
-            var text = textNode ? (textNode.nodeValue || "") : (chosenSpan.textContent || "");
+            var chosenIndex = -1;
             var offset = 0;
-            var spanRect = chosenSpan.getBoundingClientRect();
-            if (textNode && text.length > 0 && spanRect.top < targetY - 2) {
-                var low = 0;
-                var high = text.length - 1;
+            var visibleParts = [];
+            var visibleLength = 0;
+            for (var i = 0; i < spans.length && visibleLength < 600; i++) {
+                if (!intersects(spans[i].getClientRects())) { continue; }
+                var textNode = firstTextChild(spans[i]);
+                if (!textNode) { continue; }
+                var text = textNode.nodeValue || "";
                 var range = document.createRange();
-                while (low < high) {
-                    var mid = (low + high) >> 1;
-                    range.setStart(textNode, mid);
-                    range.setEnd(textNode, mid + 1);
-                    var cr = range.getBoundingClientRect();
-                    if (cr.bottom <= targetY) {
-                        low = mid + 1;
-                    } else {
-                        high = mid;
+                var part = "";
+                // Prune invisible subranges by their real fragments, never their union box.
+                // Splits stay on scalar boundaries, so a visible surrogate pair is indivisible.
+                function visit(start, end) {
+                    if (start >= end || visibleLength >= 600) { return; }
+                    range.setStart(textNode, start);
+                    range.setEnd(textNode, end);
+                    if (!intersects(range.getClientRects())) { return; }
+                    var mid = Math.floor((start + end) / 2);
+                    var code = text.charCodeAt(mid);
+                    if (mid > start && code >= 0xDC00 && code <= 0xDFFF) { mid -= 1; }
+                    if (mid <= start) { mid = start + (text.codePointAt(start) > 0xFFFF ? 2 : 1); }
+                    if (mid >= end) {
+                        if (chosenIndex < 0) { chosenIndex = i; offset = start; }
+                        part += text.substring(start, end);
+                        visibleLength += end - start;
+                        return;
                     }
+                    visit(start, mid);
+                    visit(mid, end);
                 }
-                offset = low;
-                if (offset > 0 && offset < text.length) {
-                    var code = text.charCodeAt(offset);
-                    if (code >= 0xDC00 && code <= 0xDFFF) {
-                        offset -= 1;
-                    }
+                visit(0, text.length);
+                if (part.length > 0) { visibleParts.push(part); }
+            }
+            // A visible image can precede the first visible text (including an adjacent chapter).
+            var chosenPath = chosenIndex >= 0 ? entries[chosenIndex].path : null;
+            var chosenNode = chosenIndex >= 0 ? entries[chosenIndex].node : 0;
+            for (var c = 0; c < state.chapters.length; c++) {
+                var chapter = state.chapters[c];
+                if (chapter.path === chosenPath) { break; }
+                var images = chapter.element.querySelectorAll("img");
+                if (Array.prototype.some.call(images, function(img) { return intersects(img.getClientRects()); })) {
+                    chosenPath = chapter.path; chosenNode = 0; offset = 0; break;
                 }
             }
-            var visibleParts = [];
-            for (var j = chosenIndex; j < spans.length; j++) {
-                var sr = spans[j].getBoundingClientRect();
-                if (sr.top > viewportH + 40 && visibleParts.length > 0) {
-                    break;
-                }
-                var t = spans[j].textContent || "";
-                if (j === chosenIndex && offset > 0 && offset < t.length) {
-                    t = t.substring(offset);
-                }
-                if (t.length > 0) {
-                    visibleParts.push(t);
-                }
-                if (visibleParts.join(" ").length >= 600) {
-                    break;
+            if (!chosenPath) {
+                var visibleChapter = state.chapters.find(function(c) { return intersects(c.element.getClientRects()); });
+                chosenPath = visibleChapter ? visibleChapter.path : state.path;
+                if (state.lastAnchor && state.lastAnchor.path === chosenPath) {
+                    chosenNode = state.lastAnchor.node; offset = state.lastAnchor.utf16Offset;
                 }
             }
             return {
                 sessionID: state.sessionID,
                 epoch: state.epoch,
-                path: state.path,
-                node: chosenIndex,
+                path: chosenPath,
+                node: chosenNode,
                 utf16Offset: offset,
                 scrollY: window.scrollY || window.pageYOffset || 0,
                 viewportHeight: viewportH,
-                contentHeight: document.documentElement.scrollHeight || document.body.scrollHeight || 0,
+                contentHeight: Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0),
+                scrollX: window.scrollX || window.pageXOffset || 0,
+                viewportWidth: viewportW,
+                contentWidth: contentWidth(),
                 visibleText: visibleParts.join(" ")
             };
         }
@@ -457,8 +605,283 @@ enum EPUBLocationScript {
             }
         }
 
+        function validLengths(spans, lengths) {
+            return Array.isArray(lengths) && lengths.length > 0 && spans.length === lengths.length &&
+                lengths.every(function(n, i) {
+                    return Number.isSafeInteger(n) && n >= 0 && spans[i] && (spans[i].textContent || "").length === n;
+                });
+        }
+
+        function windowMessage(error) {
+            post({kind: "window", sessionID: state.sessionID, epoch: state.epoch, path: state.path,
+                paths: state.chapters.map(function(c) { return c.path; }), error: error,
+                needsMore: !error && (state.paginated ? contentWidth() < viewportWidth() * 2 :
+                    Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0) < window.innerHeight * 2)});
+        }
+
+        function capabilityURL(value, base) {
+            var url = new URL(value, base);
+            var host = "s-" + state.sessionID.toLowerCase().replace(/[^a-z0-9-]/g, "-") + "--e-" + state.epoch.toLowerCase();
+            if (url.protocol !== "yjepub:" || url.hostname !== host || url.username || url.password || url.port || url.search) {
+                throw new Error("invalid-resource-capability");
+            }
+            return url;
+        }
+
+        function parseChapter(input, generation, validateOnly) {
+            if (typeof input.xhtml !== "string" || input.xhtml.length > 8388608 || /<!DOCTYPE|<!ENTITY/i.test(input.xhtml)) {
+                throw new Error("invalid-xhtml");
+            }
+            var byteLength = new TextEncoder().encode(input.xhtml).length;
+            if (byteLength > 8388608) { throw new Error("xhtml-budget"); }
+            var base = capabilityURL(input.url);
+            if (base.hash || decodeURIComponent(base.pathname) !== "/" + input.path) { throw new Error("invalid-chapter-url"); }
+            var parsed = new DOMParser().parseFromString(input.xhtml, "application/xhtml+xml");
+            if (parsed.querySelector("parsererror") || parsed.doctype) { throw new Error("invalid-xml"); }
+            var bodies = parsed.getElementsByTagNameNS("http://www.w3.org/1999/xhtml", "body");
+            if (bodies.length !== 1) { throw new Error("invalid-body"); }
+            var body = bodies[0];
+            var allowed = ("article section nav aside header footer main div address h1 h2 h3 h4 h5 h6 hgroup " +
+                "p blockquote pre hr br wbr figure figcaption details summary ul ol li dl dt dd span a em strong i b u s small sub sup mark " +
+                "q cite code kbd samp var dfn abbr time bdi bdo ruby rt rp del ins table caption thead tbody tfoot tr th td colgroup col img").split(" ");
+            var ids = new Set();
+            // Validate the entire inert XML before importing anything into the live document.
+            Array.prototype.forEach.call(parsed.querySelectorAll("*"), function(el) {
+                var name = el.localName;
+                var inBody = el === body || body.contains(el);
+                if (el.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
+                    (inBody ? name !== "body" && allowed.indexOf(name) < 0 : ["html", "head", "meta", "title"].indexOf(name) < 0)) {
+                    throw new Error("forbidden-element");
+                }
+                Array.prototype.forEach.call(el.attributes, function(attr) {
+                    var key = attr.name, value = attr.value;
+                    var permitted = key === "xmlns" || key === "id" || key === "dir" ||
+                        (name === "a" && key === "href") || (name === "img" && (key === "src" || key === "alt")) ||
+                        (!inBody && name === "meta" && ["charset", "http-equiv", "content"].indexOf(key) >= 0);
+                    if (!permitted || (key === "xmlns" && value !== "http://www.w3.org/1999/xhtml") ||
+                        (key === "http-equiv" && value.toLowerCase() !== "content-security-policy")) { throw new Error("forbidden-attribute"); }
+                    if (key === "id") {
+                        if (!value || ids.has(value)) { throw new Error("duplicate-id"); }
+                        ids.add(value);
+                    }
+                    if (key === "src" || key === "href") { capabilityURL(value, base.href); }
+                });
+            });
+            var parsedSpans = Array.prototype.filter.call(body.querySelectorAll("[id]"), function(el) { return el.id.indexOf("yj-t") === 0; });
+            if (!validLengths(parsedSpans, input.lengths) || parsedSpans.some(function(el, i) {
+                return el.id !== "yj-t" + i || el.localName !== "span" || el.childNodes.length !== 1 || el.firstChild.nodeType !== 3;
+            })) { throw new Error("invalid-text-nodes"); }
+            if (validateOnly) { return; }
+            var element = document.createElementNS ? document.createElementNS("http://www.w3.org/1999/xhtml", "section") : document.createElement("section");
+            element.setAttribute("data-yj-chapter", input.path);
+            element.setAttribute("data-yj-index", input.index);
+            if (body.hasAttribute("dir")) { element.setAttribute("dir", body.getAttribute("dir")); }
+            // IDs are local to a chapter, including original body fragment IDs.
+            if (body.id) { element.setAttribute("data-yj-original-id", body.id); }
+            Array.prototype.forEach.call(body.querySelectorAll("[src], [href]"), function(el) {
+                ["src", "href"].forEach(function(key) {
+                    if (el.hasAttribute(key)) { el.setAttribute(key, capabilityURL(el.getAttribute(key), base.href).href); }
+                });
+            });
+            Array.prototype.forEach.call(body.childNodes, function(node) { element.appendChild(document.importNode(node, true)); });
+            var spans = [], count = 0;
+            Array.prototype.forEach.call(element.querySelectorAll("[id]"), function(el) {
+                var id = el.id;
+                el.setAttribute("data-yj-original-id", id);
+                el.id = "yj-chapter-" + input.index + "-" + generation + "-" + id;
+                if (document.getElementById(el.id)) { throw new Error("id-collision"); }
+                if (id.indexOf("yj-t") === 0) {
+                    var n = Number(id.slice(4));
+                    if (!Number.isSafeInteger(n) || n < 0 || id !== "yj-t" + n || el.localName !== "span" || spans[n]) {
+                        throw new Error("invalid-text-id");
+                    }
+                    spans[n] = el; count++;
+                }
+            });
+            if (count !== input.lengths.length || !validLengths(spans, input.lengths)) { throw new Error("node-length-mismatch"); }
+            return {path: input.path, index: input.index, element: element, spans: spans, bytes: byteLength};
+        }
+
+        function cancelImagePreloads() {
+            var cancels = state.imageCancels || [];
+            state.imageCancels = [];
+            cancels.forEach(function(cancel) { cancel(); });
+        }
+
+        function preloadChapter(chapter) {
+            return Promise.all(Array.prototype.map.call(chapter.element.querySelectorAll("img"), function(img) {
+                return new Promise(function(resolve, reject) {
+                    var finished = false;
+                    var timer = window.setTimeout(function() { finish(false); }, 8000);
+                    function finish(ok) {
+                        if (finished) { return; }
+                        finished = true;
+                        window.clearTimeout(timer);
+                        img.removeEventListener("load", loaded);
+                        img.removeEventListener("error", failed);
+                        if (ok) { resolve(); } else { reject(new Error("image-not-ready")); }
+                    }
+                    state.imageCancels.push(function() {
+                        if (!finished) { finish(false); img.removeAttribute("src"); }
+                    });
+                    function failed() { finish(false); }
+                    function loaded() {
+                        if (!img.naturalWidth) { finish(false); return; }
+                        if (typeof img.decode === "function") { img.decode().then(function() { finish(true); }, failed); }
+                        else { finish(true); }
+                    }
+                    img.addEventListener("load", loaded);
+                    img.addEventListener("error", failed);
+                    if (img.complete) { loaded(); }
+                });
+            }));
+        }
+
+        function inViewport(rect) {
+            return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < viewportWidth() &&
+                rect.bottom > 0 && rect.top < window.innerHeight;
+        }
+
+        function anchorRect(anchor) {
+            if (anchor.measureRange) { return firstRect(anchor.measureRange.getClientRects()); }
+            if (anchor.measureElement) { return anchor.measureElement.getBoundingClientRect(); }
+            var chapter = chapterFor(anchor.path);
+            if (!chapter) { return null; }
+            var span = chapter.spans[anchor.node], text = span && firstTextChild(span);
+            if (text && text.length) {
+                var start = Math.min(anchor.utf16Offset, text.length - 1);
+                var range = document.createRange();
+                range.setStart(text, start);
+                range.setEnd(text, Math.min(text.length, start + (text.nodeValue.codePointAt(start) > 0xFFFF ? 2 : 1)));
+                var rect = firstRect(range.getClientRects());
+                if (rect && inViewport(rect)) { anchor.measureRange = range; return rect; }
+            }
+            var images = chapter.element.querySelectorAll("img");
+            for (var i = 0; i < images.length; i++) {
+                var rect = images[i].getBoundingClientRect();
+                if (inViewport(rect)) { anchor.measureElement = images[i]; return rect; }
+            }
+            return span ? firstRect(span.getClientRects()) : chapter.element.getBoundingClientRect();
+        }
+
+        function syncWindow(config) {
+            if (!config || !state.ready || config.sessionID !== state.sessionID || config.epoch !== state.epoch) { return false; }
+            var additions = [], paths = new Set(), indexes = new Set();
+            var generation = state.syncGeneration + 1;
+            var limit = config.limit === undefined ? 5 : config.limit;
+            try {
+                if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64 ||
+                    !Array.isArray(config.chapters) || config.chapters.length > limit || !Array.isArray(config.keepPaths) ||
+                    config.keepPaths.length < 1 || config.keepPaths.length > limit || new Set(config.keepPaths).size !== config.keepPaths.length ||
+                    config.keepPaths.some(function(p) { return typeof p !== "string" || !p; })) { throw new Error("invalid-window"); }
+                config.chapters.forEach(function(c) {
+                    if (!c || typeof c.path !== "string" || !c.path || !Number.isSafeInteger(c.index) || c.index < 0 ||
+                        paths.has(c.path) || indexes.has(c.index) || !Array.isArray(c.lengths) || !c.lengths.length ||
+                        c.lengths.some(function(n) { return !Number.isSafeInteger(n) || n < 0; }) ||
+                        config.keepPaths.indexOf(c.path) < 0) { throw new Error("invalid-chapter"); }
+                    paths.add(c.path); indexes.add(c.index);
+                    var old = chapterFor(c.path);
+                    if (state.chapters.some(function(old) { return old.index === c.index && old.path !== c.path; })) { throw new Error("index-collision"); }
+                    if (old) {
+                        if (old.index !== c.index || !validLengths(old.spans, c.lengths)) { throw new Error("changed-chapter"); }
+                        parseChapter(c, generation, true);
+                    } else { additions.push(parseChapter(c, generation)); }
+                });
+                if (config.keepPaths.some(function(p) { return !chapterFor(p) && !paths.has(p); })) { throw new Error("missing-chapter"); }
+            } catch (_) { windowMessage(true); return false; }
+            state.syncGeneration = generation;
+            cancelImagePreloads();
+            state.syncing = false;
+            var session = state.sessionID, epoch = state.epoch;
+            function live() { return generation === state.syncGeneration && session === state.sessionID && epoch === state.epoch; }
+            Promise.all(additions.map(preloadChapter)).then(function() {
+                if (!live()) { return; }
+                state.imageCancels = [];
+                // Capture AFTER image decoding: the reader may have moved while it was pending.
+                var anchor = sampleVisible(), before = anchor && anchorRect(anchor);
+                if (!anchor) { windowMessage(true); return; }
+                state.syncing = true;
+                state.reflowRevision += 1;
+                var kept = state.chapters.filter(function(c) {
+                    var visible = Array.prototype.some.call(c.element.getClientRects(), inViewport);
+                    return config.keepPaths.indexOf(c.path) >= 0 || c.path === state.path || c.path === anchor.path || visible;
+                });
+                state.chapters.forEach(function(c) { if (kept.indexOf(c) < 0) { c.element.remove(); } });
+                additions.sort(function(a, b) { return Math.abs(a.index - (chapterFor(anchor.path) || {index: 0}).index) -
+                    Math.abs(b.index - (chapterFor(anchor.path) || {index: 0}).index); });
+                var residentBytes = kept.reduce(function(sum, c) { return sum + c.bytes; }, 0);
+                additions.forEach(function(c) {
+                    var low = Math.min.apply(null, kept.map(function(k) { return k.index; }));
+                    var high = Math.max.apply(null, kept.map(function(k) { return k.index; }));
+                    if ((c.index === low - 1 || c.index === high + 1) && kept.length < limit && residentBytes + c.bytes <= 41943040) {
+                        kept.push(c); residentBytes += c.bytes;
+                    }
+                });
+                kept.sort(function(a, b) { return a.index - b.index; });
+                // Only insert new sections; never detach/move an already resident node.
+                for (var i = kept.length - 1; i >= 0; i--) {
+                    if (!chapterFor(kept[i].path)) { document.body.insertBefore(kept[i].element, i + 1 < kept.length ? kept[i + 1].element : null); }
+                }
+                state.chapters = kept;
+                updatePageMetrics();
+                var after = anchor && anchorRect(anchor);
+                if (before && after) {
+                    window.scrollTo((window.scrollX || 0) + (state.paginated ? after.left - before.left : 0),
+                        state.paginated ? 0 : (window.scrollY || 0) + after.top - before.top);
+                }
+                state.preserveTargetAnchor = false;
+                state.suppressingReflow = false;
+                state.lastAnchor = anchor && {path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset};
+                // ResizeObserver delivery from this commit must not snap to a page/line start.
+                window.requestAnimationFrame(function() { window.requestAnimationFrame(function() {
+                    if (!live()) { return; }
+                    state.syncing = false;
+                    windowMessage(false);
+                    // A preload is not user navigation and cannot create a progress event.
+                }); });
+            }).catch(function() {
+                if (live()) { state.syncing = false; cancelImagePreloads(); windowMessage(true); }
+            });
+            return true;
+        }
+
+        function refreshChapterLinks() {
+            var host = "s-" + state.sessionID.toLowerCase().replace(/[^a-z0-9-]/g, "-") + "--e-" + state.epoch.toLowerCase();
+            state.chapters.forEach(function(c) {
+                var base = "yjepub://" + host + "/" + c.path.split("/").map(encodeURIComponent).join("/");
+                Array.prototype.forEach.call(c.element.querySelectorAll("a[href]"), function(link) {
+                    var url = new URL(link.getAttribute("href"), base);
+                    if (url.protocol === "yjepub:") { url.host = host; link.setAttribute("href", url.href); }
+                });
+            });
+        }
+
         function configure(config) {
             if (!config || typeof config !== "object") { return; }
+            state.syncGeneration += 1;
+            cancelImagePreloads();
+            state.syncing = false;
+            installInitial(config);
+            if (config.preserveViewport === true) {
+                var selected = chapterFor(config.path);
+                if (!selected || selected.index !== config.chapterIndex || selected.spans.length !== config.expectedNodeCount ||
+                    !validLengths(selected.spans, config.expectedNodeLengths)) { return false; }
+                state.sessionID = String(config.sessionID || "");
+                state.epoch = String(config.epoch || "");
+                state.path = config.path;
+                refreshChapterLinks();
+                state.reflowRevision += 1;
+                state.ready = true;
+                state.suppressingReflow = false;
+                state.preserveTargetAnchor = false;
+                var current = sampleVisible();
+                var ready = Object.assign({}, current, {kind: "ready", path: config.path});
+                if (current.path !== config.path) { ready.node = 0; ready.utf16Offset = 0; ready.visibleText = ""; }
+                ready.restoredNode = ready.node; ready.restoredOffset = ready.utf16Offset;
+                post(ready);
+                reportScrollNow();
+                return true;
+            }
             if (state.scrollTimer !== null) {
                 window.clearTimeout(state.scrollTimer);
                 state.scrollTimer = null;
@@ -466,13 +889,19 @@ enum EPUBLocationScript {
             state.sessionID = String(config.sessionID || "");
             state.epoch = String(config.epoch || "");
             state.path = String(config.path || "");
+            refreshChapterLinks();
             state.ready = false;
             state.suppressingReflow = true;
             state.preserveTargetAnchor = Boolean(config.preserveTargetAnchor);
             state.targetNode = typeof config.targetNode === "number" ? config.targetNode : -1;
             state.targetOffset = typeof config.targetOffset === "number" ? config.targetOffset : 0;
+            state.targetPath = state.path;
+            state.paginated = config.readingMode === "paged";
+            state.lastAnchor = null;
+            state.reflowRevision += 1;
 
             applyStyleSheet(config.css || "");
+            updatePageMetrics();
 
             var expectedCount = typeof config.expectedNodeCount === "number" ? config.expectedNodeCount : 0;
             var expectedLengths = Array.isArray(config.expectedNodeLengths) ? config.expectedNodeLengths : [];
@@ -504,6 +933,7 @@ enum EPUBLocationScript {
             var mySession = state.sessionID;
             var myEpoch = state.epoch;
             waitForImagesAndTwoFrames(mySession, myEpoch, function() {
+                updatePageMetrics();
                 var ok = config.startAtEnd === true && state.targetNode < 0 && !config.fragment
                     ? scrollToChapterEnd()
                     : scrollToTarget(state.targetNode, state.targetOffset, config.fragment || "");
@@ -535,8 +965,10 @@ enum EPUBLocationScript {
                         state.ready = true;
                         state.suppressingReflow = false;
                         state.restoredScrollY = sample.scrollY;
+                        state.restoredScrollX = sample.scrollX;
                         var restoredNode = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetNode : sample.node;
                         var restoredOffset = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetOffset : sample.utf16Offset;
+                        state.lastAnchor = {path: sample.path, node: restoredNode, utf16Offset: restoredOffset};
                         post({
                             kind: "ready",
                             sessionID: sample.sessionID,
@@ -549,6 +981,9 @@ enum EPUBLocationScript {
                             scrollY: sample.scrollY,
                             viewportHeight: sample.viewportHeight,
                             contentHeight: sample.contentHeight,
+                            scrollX: sample.scrollX,
+                            viewportWidth: sample.viewportWidth,
+                            contentWidth: sample.contentWidth,
                             visibleText: sample.visibleText
                         });
                     });
@@ -557,14 +992,16 @@ enum EPUBLocationScript {
         }
 
         function sampleScrollPayload() {
-            if (!state.ready || state.suppressingReflow) { return null; }
+            if (!state.ready || state.suppressingReflow || state.syncing) { return null; }
             var sample = sampleVisible();
             if (!sample) { return null; }
-            if (Math.abs(sample.scrollY - state.restoredScrollY) > 2) {
+            var movement = state.paginated ? sample.scrollX - state.restoredScrollX : sample.scrollY - state.restoredScrollY;
+            if (Math.abs(movement) > 2 || sample.path !== state.targetPath) {
                 state.preserveTargetAnchor = false;
             }
             var activeNode = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetNode : sample.node;
             var activeOffset = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetOffset : sample.utf16Offset;
+            state.lastAnchor = {path: sample.path, node: activeNode, utf16Offset: activeOffset};
             var payload = {
                 kind: "scroll",
                 sessionID: sample.sessionID,
@@ -577,6 +1014,9 @@ enum EPUBLocationScript {
                 scrollY: sample.scrollY,
                 viewportHeight: sample.viewportHeight,
                 contentHeight: sample.contentHeight,
+                scrollX: sample.scrollX,
+                viewportWidth: sample.viewportWidth,
+                contentWidth: sample.contentWidth,
                 visibleText: sample.visibleText
             };
             return payload;
@@ -589,7 +1029,9 @@ enum EPUBLocationScript {
         }
 
         window.addEventListener("scroll", function() {
-            if (!state.ready || state.suppressingReflow) { return; }
+            if (!state.ready || state.suppressingReflow || state.syncing) { return; }
+            // Cache the current real anchor before a subsequent resize can reflow the DOM.
+            sampleScrollPayload();
             if (state.scrollTimer !== null) {
                 window.clearTimeout(state.scrollTimer);
             }
@@ -602,14 +1044,54 @@ enum EPUBLocationScript {
             }, 90);
         }, { passive: true });
 
+        function realignAfterResize() {
+            if (!state.ready || !state.lastAnchor || state.syncing) { return; }
+            var anchor = state.lastAnchor;
+            var mySession = state.sessionID;
+            var myEpoch = state.epoch;
+            var revision = ++state.reflowRevision;
+            state.suppressingReflow = true;
+            window.requestAnimationFrame(function() {
+                if (state.sessionID !== mySession || state.epoch !== myEpoch || revision !== state.reflowRevision) { return; }
+                updatePageMetrics();
+                scrollToTarget(anchor.node, anchor.utf16Offset, "", anchor.path);
+                window.requestAnimationFrame(function() {
+                    if (state.sessionID !== mySession || state.epoch !== myEpoch || revision !== state.reflowRevision) { return; }
+                    state.restoredScrollX = window.scrollX || 0;
+                    state.restoredScrollY = window.scrollY || 0;
+                    // Repeated reflows must retain this character, not drift to each new page start.
+                    state.targetNode = anchor.node;
+                    state.targetOffset = anchor.utf16Offset;
+                    state.targetPath = anchor.path;
+                    state.preserveTargetAnchor = true;
+                    state.suppressingReflow = false;
+                    reportScrollNow();
+                });
+            });
+        }
+        window.addEventListener("resize", realignAfterResize, { passive: true });
+        if (typeof ResizeObserver !== "undefined") {
+            var resizeObserver = new ResizeObserver(function() {
+                if (!state.syncing) { realignAfterResize(); }
+            });
+            resizeObserver.observe(document.documentElement);
+            resizeObserver.observe(document.body);
+        }
+
         window.__yjEpub = {
             configure: configure,
+            syncWindow: syncWindow,
+            windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,
             realignAnchorIfStationary: function() {
+                // Native callers must not pull a reader back after a horizontal user move.
+                sampleScrollPayload();
                 if (!state.ready || state.suppressingReflow || !state.preserveTargetAnchor || state.targetNode < 0) {
                     return false;
                 }
-                scrollToTarget(state.targetNode, state.targetOffset, "");
+                scrollToTarget(state.targetNode, state.targetOffset, "", state.targetPath);
+                state.restoredScrollX = window.scrollX || 0;
+                state.restoredScrollY = window.scrollY || 0;
                 return true;
             }
         };

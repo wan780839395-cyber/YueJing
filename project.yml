@@ -52,8 +52,8 @@ targets:
         OTHER_LDFLAGS: "$(inherited) -Wl,-dead_strip_dylibs"
         PRODUCT_NAME: YueJing
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.app
-        MARKETING_VERSION: "0.2.3"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "0.2.4"
+        CURRENT_PROJECT_VERSION: "6"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"

@@ -10,6 +10,7 @@ struct EPUBSettingsView: View {
     }
 
     @Binding var preferences: ReaderPreferences
+    @Binding var readingMode: EPUBReadingMode
     let changed: @MainActor () -> Void
     var openingSummary: String?
     let isActive: @MainActor () -> Bool
@@ -25,6 +26,7 @@ struct EPUBSettingsView: View {
 
     init(
         preferences: Binding<ReaderPreferences>,
+        readingMode: Binding<EPUBReadingMode>,
         changed: @escaping @MainActor () -> Void,
         openingSummary: String? = nil,
         isActive: @escaping @MainActor () -> Bool,
@@ -32,6 +34,7 @@ struct EPUBSettingsView: View {
         appearance: ReaderToolAppearance
     ) {
         _preferences = preferences
+        _readingMode = readingMode
         self.changed = changed
         self.openingSummary = openingSummary
         self.isActive = isActive
@@ -61,11 +64,25 @@ struct EPUBSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                    ReaderSettingsSection(title: "阅读方式", detail: "切换后保留当前文本位置", appearance: appearance) {
+                        Picker("阅读方式", selection: $readingMode) {
+                            ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .disabled(!isActive())
+                        .accessibilityIdentifier("epub.readingMode")
+                    }
                     typographySection
                     themeSection
                     presetsSection
                     epubScopeSection
                     moreSection
+                    Text("当前版本：\(AppVersion.current.displayText)")
+                        .font(.footnote)
+                        .foregroundStyle(appearance.foreground.opacity(0.7))
+                        .accessibilityIdentifier("app.version")
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)

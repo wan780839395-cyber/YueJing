@@ -7,6 +7,7 @@ struct EPUBResourceCapability: Sendable, Equatable {
     let token: EPUBNavigationToken
     let publication: EPUBPublication
     var preferences: ReaderPreferences
+    var readingMode: EPUBReadingMode = .scroll
 
     var expectedHost: String {
         Self.host(for: token)
@@ -39,7 +40,7 @@ struct EPUBResourceCapability: Sendable, Equatable {
         lhs.token == rhs.token &&
             lhs.publication.package == rhs.publication.package &&
             lhs.publication.resourceRoot == rhs.publication.resourceRoot &&
-            lhs.preferences == rhs.preferences
+            lhs.preferences == rhs.preferences && lhs.readingMode == rhs.readingMode
     }
 }
 
@@ -134,6 +135,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         let publication = capability.publication
         let expectedToken = capability.token
         let preferences = capability.preferences
+        let readingMode = capability.readingMode
         #if DEBUG
         let overrideData = rawXHTMLOverrideForTesting[canonical]
         #else
@@ -159,7 +161,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
                 }
                 let payload: Data
                 if resource.mediaType == "application/xhtml+xml" {
-                    payload = Self.decorateXHTML(rawData, preferences: preferences)
+                    payload = Self.decorateXHTML(rawData, preferences: preferences, readingMode: readingMode)
                 } else {
                     payload = rawData
                 }
@@ -203,9 +205,10 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         activeTasks.removeValue(forKey: taskID)?.cancel()
     }
 
-    static func decorateXHTML(_ data: Data, preferences: ReaderPreferences) -> Data {
+    static func decorateXHTML(_ data: Data, preferences: ReaderPreferences,
+                              readingMode: EPUBReadingMode = .scroll) -> Data {
         guard var xhtml = String(data: data, encoding: .utf8) else { return data }
-        let css = EPUBLocationScript.trustedStyleSheet(for: preferences)
+        let css = EPUBLocationScript.trustedStyleSheet(for: preferences, readingMode: readingMode)
         let cspMeta = xhtml.contains("Content-Security-Policy")
             ? ""
             : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(contentSecurityPolicy)\"/>"

@@ -15,6 +15,8 @@ struct EPUBNavigationRequest: Equatable {
     let preserveTargetAnchor: Bool
     let reloadDocument: Bool
     var startAtEnd: Bool = false
+    var readingMode: EPUBReadingMode = .scroll
+    var preserveViewport: Bool = false
 
     static func == (lhs: EPUBNavigationRequest, rhs: EPUBNavigationRequest) -> Bool {
         lhs.id == rhs.id &&
@@ -25,7 +27,8 @@ struct EPUBNavigationRequest: Equatable {
             lhs.fragment == rhs.fragment &&
             lhs.preferences == rhs.preferences &&
             lhs.preserveTargetAnchor == rhs.preserveTargetAnchor &&
-            lhs.reloadDocument == rhs.reloadDocument && lhs.startAtEnd == rhs.startAtEnd
+            lhs.reloadDocument == rhs.reloadDocument && lhs.startAtEnd == rhs.startAtEnd &&
+            lhs.readingMode == rhs.readingMode && lhs.preserveViewport == rhs.preserveViewport
     }
 }
 
@@ -122,12 +125,24 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var pagePan: UIPanGestureRecognizer?
     private var pagePanToken: EPUBNavigationToken?
     private var interactionGeneration = UUID()
+    private var scrollDirection: EPUBPageDirection?
+    private var transitionSnapshot: UIView?
+    private(set) var documentLoadCount = 0
+    private(set) var renderedChapterPaths: Set<String> = []
+    private var windowTask: Task<Void, Never>?
+    private var windowInFlight = false
+    private var windowChapterCount = EPUBChapterWindow.defaultChapters
+    private var windowRequestedPaths: Set<String> = []
+    private var windowFailedToken: EPUBNavigationToken?
+    var onPreloadFailure: (@MainActor () -> Void)?
     var interactionEnabled = true {
         didSet {
             if oldValue != interactionEnabled {
                 interactionGeneration = UUID()
                 pagePanToken = nil
                 dragOrigin = nil
+                if interactionEnabled, activeRequest?.preserveViewport == true,
+                   let token = readyToken { reportVisiblePosition(for: token) }
             }
         }
     }
@@ -222,32 +237,69 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         setupWebViewIfNeeded()
         applyTheme(request.preferences.theme)
         guard activeRequest != request else { return }
+        let previous = activeRequest
+        let reuseDOM = !request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
+            loadedDocumentToken?.sessionID == request.token.sessionID &&
+            previous?.publication.package == request.publication.package &&
+            previous?.publication.resourceRoot == request.publication.resourceRoot
+        // Invalidated async preload work must not mutate a newly navigated document.
+        windowTask?.cancel()
+        windowTask = nil
+        windowInFlight = false
+        windowFailedToken = nil
+        if !reuseDOM {
+            renderedChapterPaths.removeAll()
+            windowRequestedPaths.removeAll()
+            windowChapterCount = EPUBChapterWindow.defaultChapters
+        }
         loadingNavigation = nil
-        webView.stopLoading()
-
+        if !reuseDOM { webView.stopLoading() }
         activeRequest = request
         readyToken = nil
         pageAnimationToken = nil
         dragOrigin = nil
         pagePanToken = nil
+        scrollDirection = nil
+        pagePan?.isEnabled = request.readingMode == .paged
+        webView.scrollView.panGestureRecognizer.isEnabled = request.readingMode == .scroll
+        webView.scrollView.alwaysBounceVertical = request.readingMode == .scroll
+        webView.scrollView.showsVerticalScrollIndicator = request.readingMode == .scroll
+        webView.scrollView.showsHorizontalScrollIndicator = false
         let capability = EPUBResourceCapability(
             token: request.token,
             publication: request.publication,
-            preferences: request.preferences
+            preferences: request.preferences,
+            readingMode: request.readingMode
         )
         resourceHandler.activate(capability)
 
-
+        loadTask?.cancel()
+        loadTask = nil
+        if reuseDOM, let previous {
+            // The DOM is verified already. Move resource/link URLs to the new capability
+            // without admitting the old epoch's URLs or downloading the XHTML again.
+            rebaseLoadedDOM(from: previous.token, to: request)
+            return
+        }
+        if loadedDocumentPath != nil, transitionSnapshot == nil {
+            transitionSnapshot = webView.snapshotView(afterScreenUpdates: false)
+            if let transitionSnapshot {
+                transitionSnapshot.frame = webView.frame
+                transitionSnapshot.isUserInteractionEnabled = false
+                transitionSnapshot.accessibilityElementsHidden = true
+                view.addSubview(transitionSnapshot)
+            }
+        }
         clearAccessibilityCanvas()
         loadedDocumentPath = nil
         loadedDocumentToken = nil
-        loadTask?.cancel()
         loadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await Self.installContentRulesIfNeeded(on: self.webView.configuration.userContentController)
                 guard !Task.isCancelled, self.activeRequest == request else { return }
                 guard let url = EPUBResourceCapability.url(for: request.token) else { throw EPUBError.invalidPackage }
+                self.documentLoadCount += 1
                 self.loadingNavigation = self.webView.load(URLRequest(url: url))
             } catch {
                 guard !Task.isCancelled, self.activeRequest == request else { return }
@@ -264,9 +316,17 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         pageAnimationToken = nil
         dragOrigin = nil
         pagePanToken = nil
+        windowTask?.cancel()
+        windowTask = nil
+        windowInFlight = false
+        renderedChapterPaths.removeAll()
+        onPreloadFailure = nil
         onChapterBoundary = nil
         loadedDocumentPath = nil
         loadedDocumentToken = nil
+        transitionSnapshot?.removeFromSuperview()
+        transitionSnapshot = nil
+        scrollDirection = nil
         loadingNavigation = nil
         onLocatorEvent = nil
         onLoadFailure = nil
@@ -300,6 +360,43 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         controller.add(list)
     }
 
+    private func rebaseLoadedDOM(from oldToken: EPUBNavigationToken, to request: EPUBNavigationRequest) {
+        let oldHost = EPUBResourceCapability.host(for: oldToken)
+        let prefix = oldHost.components(separatedBy: "--e-")[0] + "--e-"
+        let hosts = [prefix, EPUBResourceCapability.host(for: request.token)]
+        guard let data = try? JSONSerialization.data(withJSONObject: hosts),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let script = """
+        (function(hosts) {
+            document.querySelectorAll('[src], [href]').forEach(function(el) {
+                ['src', 'href'].forEach(function(attr) {
+                    var value = el.getAttribute(attr); if (!value) return;
+                    // Keep decoded pixels attached. Reassigning complete image src can flash at every crossing.
+                    if (attr === 'src' && el.complete && el.naturalWidth > 0) return;
+                    try {
+                        var url = new URL(value, document.baseURI);
+                        if (url.protocol === 'yjepub:' && url.hostname.indexOf(hosts[0]) === 0) {
+                            url.hostname = hosts[1]; el.setAttribute(attr, url.href);
+                        }
+                    } catch (_) {}
+                });
+            });
+        })(\(json));
+        """
+        webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
+            guard let self, self.activeRequest == request else { return }
+            if let error {
+                self.loadedDocumentPath = nil
+                self.loadedDocumentToken = nil
+                self.onLoadFailure?(error, request.token)
+                return
+            }
+            self.loadedDocumentToken = request.token
+            self.loadedDocumentPath = request.token.path
+            self.configureLoadedDOM(for: request)
+        }
+    }
+
     private func configureLoadedDOM(for request: EPUBNavigationRequest) {
         do {
             let invoke = try EPUBLocationScript.configurationInvokeScript(
@@ -309,7 +406,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 fragment: request.fragment,
                 preferences: request.preferences,
                 preserveTargetAnchor: request.preserveTargetAnchor,
-                startAtEnd: request.startAtEnd
+                startAtEnd: request.startAtEnd,
+                readingMode: request.readingMode,
+                preserveViewport: request.preserveViewport
             )
             let combined = EPUBLocationScript.bootstrapSource + "\n" + invoke
             // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
@@ -325,17 +424,112 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
     }
 
+    func refreshChapterWindow() {
+        guard let current = activeRequest, readyToken == current.token,
+              !windowInFlight, windowFailedToken != current.token else { return }
+        let desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
+        guard Set(desired) != renderedChapterPaths else { return }
+        windowInFlight = true
+        windowRequestedPaths.formUnion(Set(desired).union(renderedChapterPaths))
+        let chapterCount = windowChapterCount
+        let installed = renderedChapterPaths
+        let publication = current.publication
+        let token = current.token
+        let urls = Dictionary(uniqueKeysWithValues: desired.compactMap { path -> (String, String)? in
+            guard let url = EPUBResourceCapability.url(for: token, path: path) else { return nil }
+            return (path, url.absoluteString)
+        })
+        windowTask = Task { @MainActor [weak self] in
+            do {
+                let work = Task.detached(priority: .userInitiated) {
+                    try EPUBChapterWindow.invocation(publication: publication, token: token,
+                                                     installedPaths: installed, urls: urls, chapterCount: chapterCount)
+                }
+                let script = try await withTaskCancellationHandler {
+                    try await work.value
+                } onCancel: { work.cancel() }
+                guard !Task.isCancelled, let self, self.activeRequest?.token == token else { return }
+                self.webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] value, error in
+                    guard let self, self.activeRequest?.token == token else { return }
+                    if error != nil || value as? Bool != true { self.failChapterWindow(token) }
+                }
+                // The JS transaction includes bounded image readiness; no unbounded busy state.
+                try await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled, self.activeRequest?.token == token, self.windowInFlight else { return }
+                self.failChapterWindow(token)
+            } catch is CancellationError {
+            } catch {
+                guard let self, self.activeRequest?.token == token else { return }
+                self.failChapterWindow(token)
+            }
+        }
+    }
+
+    private func failChapterWindow(_ token: EPUBNavigationToken) {
+        guard activeRequest?.token == token else { return }
+        windowTask?.cancel()
+        windowTask = nil
+        windowInFlight = false
+        windowFailedToken = token
+        onPreloadFailure?()
+    }
+
+    private func handleWindowResult(_ body: [String: Any]) {
+        guard let current = activeRequest, windowInFlight,
+              body["sessionID"] as? String == current.token.sessionID,
+              let epoch = body["epoch"] as? String, UUID(uuidString: epoch) == current.token.epoch,
+              let paths = body["paths"] as? [String],
+              paths.count <= EPUBChapterWindow.maximumChapters,
+              Set(paths).count == paths.count,
+              paths.contains(current.token.path),
+              Set(paths).isSubset(of: windowRequestedPaths) else { return }
+        renderedChapterPaths = Set(paths)
+        windowInFlight = false
+        windowTask?.cancel()
+        windowTask = nil
+        if body["error"] as? Bool == true {
+            failChapterWindow(current.token)
+        } else if body["needsMore"] as? Bool == true, windowChapterCount < EPUBChapterWindow.maximumChapters {
+            windowChapterCount = min(EPUBChapterWindow.maximumChapters, windowChapterCount + EPUBChapterWindow.defaultChapters)
+            refreshChapterWindow()
+        }
+        // Refresh only accessibility diagnostics; preload completion must not save progress.
+        Task { @MainActor [weak self] in _ = await self?.sampleVisibleNow() }
+    }
+
     func handleScriptMessage(_ message: WKScriptMessage) {
-        guard message.name == EPUBLocationScript.handlerName,
-              let payload = EPUBLocationScript.parseMessage(message.body),
-              let current = activeRequest,
-              payload.sessionID == current.token.sessionID,
-              payload.epoch == current.token.epoch,
-              payload.path == current.token.path else {
+        guard message.name == EPUBLocationScript.handlerName else { return }
+        if let body = message.body as? [String: Any], body["kind"] as? String == "window" {
+            handleWindowResult(body)
             return
         }
-        if payload.kind == .ready { readyToken = current.token }
-        if payload.kind == .error { readyToken = nil }
+        guard let payload = EPUBLocationScript.parseMessage(message.body) else { return }
+        receiveLocatorPayload(payload)
+    }
+
+    private func receiveLocatorPayload(_ payload: EPUBLocatorPayload) {
+        guard let current = activeRequest,
+              payload.sessionID == current.token.sessionID,
+              payload.epoch == current.token.epoch else { return }
+        if payload.path != current.token.path {
+            // This is an observation, never a save authority. The model mints a new epoch.
+            guard payload.kind == .scroll, interactionEnabled,
+                  renderedChapterPaths.contains(payload.path) else { return }
+            onLocatorEvent?(payload)
+            return
+        }
+        if payload.kind == .ready {
+            readyToken = current.token
+            renderedChapterPaths.insert(current.token.path)
+            transitionSnapshot?.removeFromSuperview()
+            transitionSnapshot = nil
+            refreshChapterWindow()
+        }
+        if payload.kind == .error {
+            readyToken = nil
+            transitionSnapshot?.removeFromSuperview()
+            transitionSnapshot = nil
+        }
         if payload.kind == .ready || payload.kind == .scroll {
             updateAccessibilityCanvas(with: payload, preferences: current.preferences)
         }
@@ -355,7 +549,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                       self.activeRequest?.token == current.token,
                       payload.sessionID == current.token.sessionID,
                       payload.epoch == current.token.epoch,
-                      payload.path == current.token.path else {
+                      self.renderedChapterPaths.contains(payload.path) else {
                     continuation.resume(returning: nil)
                     return
                 }
@@ -405,7 +599,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         canvasAccessibilityView.accessibilityValue =
             "path=\(payload.path)|node=\(node)|offset=\(offset)|scrollY=\(Int(payload.scrollY.rounded()))|" +
             "font=\(Int(validated.fontSize.rounded()))|spacing=\(Int(validated.lineSpacing.rounded()))|" +
-            "theme=\(validated.theme.rawValue)"
+            "theme=\(validated.theme.rawValue)|scrollX=\(Int(payload.scrollX.rounded()))|" +
+            "mode=\(activeRequest?.readingMode.rawValue ?? "scroll")|zoom=\(webView.scrollView.zoomScale)|" +
+            "window=\(renderedChapterPaths.count)|loads=\(documentLoadCount)"
     }
 
     private func clearAccessibilityCanvas() {
@@ -490,6 +686,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
               webView.url == EPUBResourceCapability.url(for: current.token) else { return }
         loadedDocumentPath = current.token.path
         loadedDocumentToken = current.token
+        renderedChapterPaths = [current.token.path]
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         configureLoadedDOM(for: current)
     }
@@ -510,7 +707,20 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         guard let current = activeRequest else { return }
+        loadedDocumentPath = nil
+        loadedDocumentToken = nil
+        windowTask?.cancel()
+        windowTask = nil
+        windowInFlight = false
+        renderedChapterPaths.removeAll()
+        readyToken = nil
+        transitionSnapshot?.removeFromSuperview()
+        transitionSnapshot = nil
         onLoadFailure?(error, current.token)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        handleWebKitNavigationFailure(EPUBError.corruptResource)
     }
 
     func webView(
@@ -541,22 +751,33 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         guard interactionEnabled, let token = activeRequest?.token, readyToken == token,
               pageAnimationToken == nil, webView != nil, pageGeometry.valid else { return false }
         let scroll = webView.scrollView
-        if let destination = pageGeometry.destination(direction) {
+        let horizontal = activeRequest?.readingMode == .paged
+        let destination = horizontal
+            ? EPUBPageGeometry.horizontalDestination(direction, offset: scroll.contentOffset.x,
+                contentWidth: scroll.contentSize.width, viewportWidth: scroll.bounds.width)
+            : pageGeometry.destination(direction)
+        if let destination {
+            dragOrigin = nil
+            scrollDirection = nil
             onToolsInteraction?(.scrollingBegan)
             let animate = animated && !UIAccessibility.isReduceMotionEnabled
             pageAnimationToken = animate ? token : nil
-            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: destination), animated: animate)
+            let point = horizontal ? CGPoint(x: destination, y: 0) : CGPoint(x: 0, y: destination)
+            scroll.setContentOffset(point, animated: animate)
             if !animate { reportVisiblePosition(for: token) }
             return true
         }
-        return onChapterBoundary?(direction, token) ?? false
+        // A window edge is not a chapter-navigation gesture. Never replace the document here.
+        windowFailedToken = nil
+        refreshChapterWindow()
+        return false
     }
 
     private func reportVisiblePosition(for token: EPUBNavigationToken) {
         Task { @MainActor [weak self] in
             guard let self, let payload = await self.sampleVisibleNow(),
                   self.activeRequest?.token == token, self.readyToken == token else { return }
-            self.onLocatorEvent?(payload)
+            self.receiveLocatorPayload(payload)
         }
     }
 
@@ -569,7 +790,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === pagePan, let pan = pagePan else { return true }
         let velocity = pan.velocity(in: view)
-        return interactionEnabled && readyToken != nil && readyToken == activeRequest?.token &&
+        return activeRequest?.readingMode == .paged && interactionEnabled && readyToken != nil && readyToken == activeRequest?.token &&
             pageAnimationToken == nil && !UIAccessibility.isVoiceOverRunning &&
             abs(velocity.x) > abs(velocity.y) * 1.5
     }
@@ -610,7 +831,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         pageAnimationToken = nil
-        if interactionEnabled, let token = readyToken, token == activeRequest?.token {
+        scrollDirection = nil
+        if interactionEnabled, activeRequest?.readingMode == .scroll,
+           let token = readyToken, token == activeRequest?.token {
             dragOrigin = (token, scrollView.contentOffset.y)
         } else {
             dragOrigin = nil
@@ -618,30 +841,37 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         onToolsInteraction?(.scrollingBegan)
     }
 
-    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        let origin = dragOrigin
-        dragOrigin = nil
-        if interactionEnabled, let origin, readyToken == origin.token,
-           activeRequest?.token == origin.token,
-           let direction = pageGeometry.boundaryTurn(
-               from: origin.offset, translation: scrollView.panGestureRecognizer.translation(in: view)
-           ), onChapterBoundary?(direction, origin.token) == true {
-            scrollView.setContentOffset(CGPoint(x: 0, y: min(max(scrollView.contentOffset.y, pageGeometry.minimum), pageGeometry.maximum)), animated: false)
-            return
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard let origin = dragOrigin, interactionEnabled,
+              activeRequest?.readingMode == .scroll,
+              origin.token == readyToken, origin.token == activeRequest?.token else { return }
+        let delta = scrollView.contentOffset.y - origin.offset
+        if abs(delta) > 0.5 {
+            scrollDirection = delta > 0 ? .next : .previous
+            dragOrigin = (origin.token, scrollView.contentOffset.y)
         }
+        // Native scrolling stays in one DOM across chapter boundaries.
+    }
+
+    private func continueUserScroll() {
+        // Refresh only when the gesture settles; never hand the drag to a new document.
+        refreshChapterWindow()
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        continueUserScroll()
         if !decelerate {
-            Task { [weak self] in
-                guard let self, let payload = await self.sampleVisibleNow() else { return }
-                self.onLocatorEvent?(payload)
-            }
+            dragOrigin = nil
+            scrollDirection = nil
+            if let token = readyToken { reportVisiblePosition(for: token) }
         }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        Task { [weak self] in
-            guard let self, let payload = await self.sampleVisibleNow() else { return }
-            self.onLocatorEvent?(payload)
-        }
+        continueUserScroll()
+        dragOrigin = nil
+        scrollDirection = nil
+        if let token = readyToken { reportVisiblePosition(for: token) }
     }
 
     func gestureRecognizer(
@@ -660,7 +890,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         guard recognizer.state == .ended, let webView else { return }
         let location = recognizer.location(in: view)
         let scroll = webView.scrollView
-        if let direction = EPUBPageGeometry.edgeDirection(at: location, size: view.bounds.size) {
+        if activeRequest?.readingMode == .paged,
+           let direction = EPUBPageGeometry.edgeDirection(at: location, size: view.bounds.size) {
             let canTurn = !beganTapDuringDeceleration && !scroll.isDragging && !scroll.isDecelerating &&
                 !UIAccessibility.isVoiceOverRunning
             beganTapDuringDeceleration = false
@@ -706,6 +937,7 @@ struct EPUBWebView: UIViewControllerRepresentable {
     let onLoadFailure: @MainActor (Error, EPUBNavigationToken) -> Void
     let onInternalLink: @MainActor (String, String?) -> Void
     let onChapterBoundary: @MainActor (EPUBPageDirection, EPUBNavigationToken) -> Bool
+    let onPreloadFailure: @MainActor () -> Void
     let interactionEnabled: Bool
     let toolIntent: @MainActor () -> UUID
     let onToolsInteraction: @MainActor (ReadingToolsInteraction) -> Void
@@ -721,6 +953,7 @@ struct EPUBWebView: UIViewControllerRepresentable {
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink
         controller.onChapterBoundary = onChapterBoundary
+        controller.onPreloadFailure = onPreloadFailure
         controller.interactionEnabled = interactionEnabled
         controller.toolIntent = toolIntent
         controller.onToolsInteraction = onToolsInteraction
@@ -734,6 +967,7 @@ struct EPUBWebView: UIViewControllerRepresentable {
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink
         controller.onChapterBoundary = onChapterBoundary
+        controller.onPreloadFailure = onPreloadFailure
         controller.interactionEnabled = interactionEnabled
         controller.toolIntent = toolIntent
         controller.onToolsInteraction = onToolsInteraction

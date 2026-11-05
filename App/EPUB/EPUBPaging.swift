@@ -31,13 +31,24 @@ struct EPUBPageGeometry {
         return abs(next - current) > 1 ? next : nil
     }
 
-    /// A deliberate second outward drag at a boundary, never a fling arriving from mid-chapter.
-    func boundaryTurn(from startOffset: CGFloat, translation: CGPoint) -> EPUBPageDirection? {
-        guard valid, startOffset.isFinite, translation.x.isFinite, translation.y.isFinite,
-              abs(translation.y) >= 64, abs(translation.y) > abs(translation.x) * 1.5 else { return nil }
-        if startOffset >= maximum - 2, offset >= maximum - 2, translation.y < 0 { return .next }
-        if startOffset <= minimum + 2, offset <= minimum + 2, translation.y > 0 { return .previous }
+    /// Continue the current drag/fling when it reaches a boundary; no second gesture.
+    /// Callers admit only a live user scroll, never restoration/reflow/programmatic offsets.
+    func continuation(direction: EPUBPageDirection) -> EPUBPageDirection? {
+        guard valid else { return nil }
+        if direction == .next, offset >= maximum - 1 { return .next }
+        if direction == .previous, offset <= minimum + 1 { return .previous }
         return nil
+    }
+
+    /// Horizontal columns are full viewport pages, with no vertical overlap.
+    static func horizontalDestination(_ direction: EPUBPageDirection, offset: CGFloat,
+                                      contentWidth: CGFloat, viewportWidth: CGFloat) -> CGFloat? {
+        guard offset.isFinite, contentWidth.isFinite, viewportWidth.isFinite,
+              contentWidth >= 0, viewportWidth > 0 else { return nil }
+        let lastPage = max(0, ceil((contentWidth - 1) / viewportWidth) - 1)
+        let page = min(lastPage, max(0, (offset / viewportWidth).rounded()))
+        let next = min(lastPage, max(0, page + CGFloat(direction.rawValue)))
+        return next == page ? nil : next * viewportWidth
     }
 
     static func edgeDirection(at point: CGPoint, size: CGSize) -> EPUBPageDirection? {

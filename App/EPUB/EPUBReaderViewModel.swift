@@ -13,6 +13,7 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var currentPosition: EPUBReadingPosition?
     @Published private(set) var navigationRequest: EPUBNavigationRequest?
     @Published var preferences = ReaderPreferences()
+    @Published private(set) var readingMode: EPUBReadingMode
     @Published private(set) var loading = true
     @Published private(set) var ready = false
     @Published private(set) var exitSaveFailed = false
@@ -37,11 +38,22 @@ final class EPUBReaderViewModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
     private var closeTask: Task<Bool, Never>?
+    private var promotionTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
 
-    init(bookID: String, service: LibraryService) {
+    init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil) {
         self.bookID = bookID
         self.service = service
+        self.readingMode = readingMode ?? EPUBReadingMode(
+            rawValue: UserDefaults.standard.string(forKey: EPUBReadingMode.defaultsKey) ?? ""
+        ) ?? .scroll
+    }
+
+    func setReadingMode(_ mode: EPUBReadingMode) {
+        guard mode != readingMode, ready, !closing, !suspended, !exitSaveFailed else { return }
+        readingMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: EPUBReadingMode.defaultsKey)
+        settingsChanged()
     }
 
     func load() async {
@@ -215,6 +227,7 @@ final class EPUBReaderViewModel: ObservableObject {
         guard let reader, !closing, !suspended, !exitSaveFailed else { return }
         let validated = preferences.validated
         preferences = validated
+        guard navigationRequest?.preferences != validated || navigationRequest?.readingMode != readingMode else { return }
         let targetPath = currentPath ?? currentPosition?.path ?? reader.publication.package.spine.first
         guard let path = targetPath else { return }
         let preserved = currentPosition?.path == path ? currentPosition : nil
@@ -260,6 +273,8 @@ final class EPUBReaderViewModel: ObservableObject {
         startAtEnd: Bool = false
     ) async {
         guard let reader, !closing, !suspended, !exitSaveFailed else { return }
+        promotionTask?.cancel()
+        promotionTask = nil
         saveTask?.cancel()
         generation = UUID()
         let gen = generation
@@ -281,7 +296,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 preferences: preferences.validated,
                 preserveTargetAnchor: preserveTargetAnchor,
                 reloadDocument: reloadDocument,
-                startAtEnd: startAtEnd
+                startAtEnd: startAtEnd,
+                readingMode: readingMode
             )
         } catch is CancellationError {
         } catch {
@@ -295,11 +311,13 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func handleLocatorEvent(_ payload: EPUBLocatorPayload) {
         guard !closing, !suspended, !exitSaveFailed,
-              let reader,
-              let token = currentToken,
+              let reader, let token = currentToken,
               payload.sessionID == reader.reading.session.id,
-              payload.epoch == token.epoch,
-              payload.path == token.path else {
+              payload.epoch == token.epoch else { return }
+        if payload.path != token.path {
+            guard payload.kind == .scroll, ready,
+                  webView.controller?.renderedChapterPaths.contains(payload.path) == true else { return }
+            promoteVisibleChapter(payload, from: token)
             return
         }
         webView.recordPayload(payload)
@@ -310,6 +328,13 @@ final class EPUBReaderViewModel: ObservableObject {
             navigationRequest = nil
             message = "章节内容校验或定位未通过，原阅读位置已保留。"
         case .ready:
+            // A seamless promotion was already marked ready before publishing the request.
+            // Do not replace its real observed position with a synthetic ready fallback.
+            if navigationRequest?.preserveViewport == true {
+                ready = true
+                loading = false
+                return
+            }
             let node = payload.restoredNode
             let rawOffset = payload.restoredOffset
             guard let position = try? EPUBLocationScript.makeValidatedPosition(
@@ -359,7 +384,9 @@ final class EPUBReaderViewModel: ObservableObject {
                         self.openingPerformanceSummary = String(
                             format: "打开请求→EPUB 章节已就绪 %.3fs\n进程重启/首绘未单列；仅本地摘要。",
                             seconds
-                        )
+                        ) + (activeReader.reusedResources
+                            ? "\n已复用已验证资源，未重新解压或解析全书。"
+                            : "\n本次重新构建资源缓存。")
                     }
                     if persist {
                         self.hasUserPosition = true
@@ -416,6 +443,78 @@ final class EPUBReaderViewModel: ObservableObject {
         }
     }
 
+    /// Rendering neighbors never calls this. Only a validated visible locator can promote.
+    private func promoteVisibleChapter(_ payload: EPUBLocatorPayload, from oldToken: EPUBNavigationToken) {
+        guard currentToken == oldToken, let reader, let position = try? EPUBLocationScript.makeValidatedPosition(
+            bookID: reader.book.id, package: reader.publication.package, path: payload.path,
+            node: payload.node, rawUTF16Offset: payload.utf16Offset
+        ) else { return }
+        saveTask?.cancel()
+        navigationTask?.cancel()
+        promotionTask?.cancel()
+        generation = UUID()
+        let gen = generation
+        let life = lifecycle
+        // Revoke old UI admission synchronously; the scroll view and its DOM stay alive.
+        currentToken = nil
+        ready = false
+        promotionTask = Task { @MainActor [weak self] in
+            do {
+                let token = try await reader.beginNavigation(path: payload.path)
+                guard let self, !Task.isCancelled, self.lifecycle == life, self.generation == gen,
+                      !self.closing, !self.suspended, self.reader === reader else { return }
+                let marked = try await reader.markReady(token)
+                guard marked, !Task.isCancelled, self.lifecycle == life, self.generation == gen,
+                      !self.closing, !self.suspended, self.reader === reader else { return }
+                self.currentToken = token
+                self.currentPath = payload.path
+                self.currentPosition = position
+                self.currentFragment = nil
+                self.hasUserPosition = true
+                self.shouldPersistOnReady = false
+                self.webView.clearPayload()
+                self.navigationRequest = EPUBNavigationRequest(
+                    id: UUID(), token: token, publication: reader.publication,
+                    targetPosition: nil, fragment: nil, preferences: self.preferences.validated,
+                    preserveTargetAnchor: false, reloadDocument: false,
+                    readingMode: self.readingMode, preserveViewport: true
+                )
+                // Apply immediately: SwiftUI updates may arrive after the user exits the page.
+                if let request = self.navigationRequest { self.webView.controller?.apply(request) }
+                self.sequence += 1
+                _ = try await reader.save(position, sequence: self.sequence, token: token)
+            } catch is CancellationError {
+            } catch {
+                guard let self, self.lifecycle == life, self.generation == gen else { return }
+                self.ready = false
+                self.message = "跨章位置交接未完成，已保存记录保留。请重试打开。"
+            }
+        }
+    }
+
+    /// Capture a crossing that happened immediately before a save/exit, not a speculative preload.
+    private func settleVisibleChapter() async {
+        await promotionTask?.value
+        if navigationRequest?.preserveViewport == true {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !ready, !closing, !suspended, message == nil, ContinuousClock.now < deadline {
+                do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+            }
+        }
+        guard !closing, !suspended, ready, let token = currentToken,
+              let sample = await webView.sampleNow(), currentToken == token,
+              sample.sessionID == token.sessionID, sample.epoch == token.epoch,
+              sample.path != token.path,
+              webView.controller?.renderedChapterPaths.contains(sample.path) == true else { return }
+        promoteVisibleChapter(sample, from: token)
+        await promotionTask?.value
+    }
+
+    func handlePreloadFailure() {
+        guard !closing, !suspended else { return }
+        message = "相邻章节预载未完成，当前正文与已保存位置保留。可通过目录重试该章。"
+    }
+
     func handleLoadFailure(_ error: Error, token: EPUBNavigationToken) {
         guard !closing, !suspended, currentToken == token else { return }
         loading = false
@@ -427,6 +526,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func flush() async {
+        await settleVisibleChapter()
         guard !closing, let reader else { return }
         let life = lifecycle
         saveTask?.cancel()
@@ -471,6 +571,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func suspend() async {
         guard !closing, !suspended else { return }
+        await settleVisibleChapter()
         suspended = true
         lifecycle = UUID()
         generation = UUID()
@@ -527,6 +628,8 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     private func performClose() async -> Bool {
+        guard !closing else { return false }
+        await settleVisibleChapter()
         guard !closing else { return false }
         closing = true
         lifecycle = UUID()
@@ -596,6 +699,8 @@ final class EPUBReaderViewModel: ObservableObject {
         openTask = nil
         navigationTask?.cancel()
         navigationTask = nil
+        promotionTask?.cancel()
+        promotionTask = nil
         saveTask?.cancel()
         settingsTask?.cancel()
         if let reader {
