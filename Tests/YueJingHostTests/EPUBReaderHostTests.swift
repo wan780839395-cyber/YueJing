@@ -333,7 +333,7 @@ struct EPUBReaderHostTests {
                     )
                 )
                 controller.apply(ch2Request)
-                try await waitUntilReady(model: model, expectedToken: ch2Request.token)
+                try await waitUntilReady(model: model, expectedToken: ch2Request.token, minimumNode: 6)
                 #expect(model.currentPosition?.path == "OEBPS/text/ch2.xhtml")
                 #expect((model.currentPosition?.node ?? 0) > 5)
 
@@ -589,13 +589,20 @@ struct EPUBReaderHostTests {
 
     private func waitUntilReady(
         model: EPUBReaderViewModel,
-        expectedToken: EPUBNavigationToken
+        expectedToken: EPUBNavigationToken,
+        minimumNode: Int? = nil
     ) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
-        while !(model.ready && !model.loading && model.currentToken == expectedToken), ContinuousClock.now < deadline {
+        // DOM ready and the asynchronous scroll-position report are separate callbacks.
+        // Await the requested observable position within the same original deadline.
+        func positionReady() -> Bool {
+            minimumNode.map { (model.currentPosition?.node ?? -1) >= $0 } ?? true
+        }
+        while !(model.ready && !model.loading && model.currentToken == expectedToken && positionReady()), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(model.ready && !model.loading && model.currentToken == expectedToken)
+        try #require(positionReady())
     }
 
     private func waitForNewToken(
