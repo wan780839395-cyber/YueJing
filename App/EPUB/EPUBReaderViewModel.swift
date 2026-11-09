@@ -285,7 +285,9 @@ final class EPUBReaderViewModel: ObservableObject {
         let life = lifecycle
         ready = false
         currentToken = nil
-        loading = true
+        // Reflow stays inside the settings panel. Global loading compacts tools and
+        // dismisses that panel; only full loads set it here (explicit jumps set it earlier).
+        if reloadDocument { loading = true }
         loadingStage = "正在排版章节并恢复位置…"
         do {
             let token = try await reader.beginNavigation(path: path)

@@ -296,6 +296,7 @@ struct EPUBReaderHostTests {
                 let reflowRequest = try #require(model.navigationRequest)
                 let reflowToken = reflowRequest.token
                 #expect(reflowToken.epoch != firstToken.epoch)
+                #expect(!model.loading, "In-place typography must not dismiss the active settings panel")
 
                 // Stale callback from the old epoch (attempting to reset to node 0) must be ignored.
                 let stalePayload = EPUBLocatorPayload(
