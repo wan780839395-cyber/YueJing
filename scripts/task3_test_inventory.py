@@ -146,7 +146,7 @@ def parameter_events(text, expected):
         for number, line in enumerate(text.splitlines(), 1):
             if "Passing " not in line:
                 continue
-            match = re.fullmatch(r"(?:◇ )?Passing 1 argument " + spec["argument"] +
+            match = re.fullmatch(r"\u200b?(?:◇ )?Passing 1 argument " + spec["argument"] +
                                  r" → (false|true)(?: \(Bool\))? to " + re.escape(signature) + r"\.?", line)
             if not match:
                 raise ValueError("Unrecognized/foreign argument event")
@@ -157,7 +157,7 @@ def parameter_events(text, expected):
             raise ValueError("Missing/duplicate/out-of-order Bool argument execution")
         records[name] = rows
         adapted = adapted.replace(signature, name + "()")
-    if not records and re.search(r"(?:^|\n)(?:◇ )?Passing ", text):
+    if not records and re.search(r"(?:^|\n)\u200b?(?:◇ )?Passing ", text):
         raise ValueError("Unexpected parameterized execution")
     return adapted, records
 

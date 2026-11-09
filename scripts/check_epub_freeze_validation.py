@@ -73,6 +73,10 @@ for group in r.GROUPS:
 rejects('device destination', lambda: r.command('host-1', 'generic/platform=iOS', Path('synthetic')))
 raw = fixture('domain')
 arg_line = next(line for line in raw.splitlines(keepends=True) if b'Passing ' in line)
+decorated = raw.replace(arg_line, '\u200b'.encode('utf-8') + arg_line)
+assert r.parse_log('domain', decorated, 0, False)['executions'] == 19
+checks.append('Swift Testing line-leading zero-width decoration preserves argument identity')
+rejects('unknown argument decoration', lambda: r.parse_log('domain', raw.replace(arg_line, b'foreign ' + arg_line), 0, False))
 for label, altered in [('missing argument', raw.replace(arg_line, b'')),
                        ('duplicate argument', raw.replace(arg_line, arg_line * 2)),
                        ('foreign argument', raw.replace(b'false to ', b'unknown to ')),
