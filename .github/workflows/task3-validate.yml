@@ -1167,7 +1167,8 @@ jobs:
           test "$(uname -m)" = arm64
           mkdir -p _tooling
           curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
+            -H 'Accept: application/octet-stream' \
+            'https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069' --output _tooling/xcodegen.zip
           printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
           ditto -x -k _tooling/xcodegen.zip _tooling
           _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
