@@ -479,8 +479,8 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
         from epub_diagnostic_package import validate_saved
         validate_saved()
     elif epub_freeze:
-        from run_epub_freeze_validation import validate_saved
-        validate_saved()
+        from run_epub_freeze_validation import release_gate
+        release_gate()
     else:
         # The original full mode still requires this run's exact native union.
         require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
@@ -638,9 +638,9 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,
                dependency_gate="app-dependency-gate.json"))
     elif epub_freeze:
-        from run_epub_freeze_validation import validate_saved, VERSION, BUILD
-        qualification = validate_saved()
-        require(version == VERSION and build == BUILD, "EPUB freeze release identity differs")
+        from run_epub_freeze_validation import release_gate, VERSION, BUILD
+        qualification = release_gate()
+        require(version == VERSION and build == BUILD, "EPUB reopen release identity differs")
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=qualification["native_tests_executed_this_run"],
                coverage=qualification["coverage"], qualification=qualification["qualification"],

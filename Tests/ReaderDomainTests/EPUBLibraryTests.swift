@@ -90,9 +90,12 @@ struct EPUBLibraryTests {
         for path in reader.publication.package.spine {
             let data = try EPUBResourceStore.data(path: path, publication: reader.publication)
             #expect(String(decoding: data, as: UTF8.self).contains("yj-t"))
+            let resource = try #require(reader.publication.package.resource(at: path))
+            #expect(try EPUBResourceStore.data(resource: resource, root: reader.publication.resourceRoot) == data)
         }
         let folder = reader.publication.resourceRoot
-        try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        // Exercise disk-cache/process-reopen behavior without populating the in-process closed slot.
+        try await reader.abandon()
         #expect(!FileManager.default.fileExists(atPath: folder.path))
         let fresh = LibraryService(store: try LibraryStore(root: f.managed))
         let reopened = try await fresh.openEPUB(id: receipt.book.id)
@@ -100,7 +103,7 @@ struct EPUBLibraryTests {
         #expect(reopened.reusedResources)
         #expect(reopened.reading.session.id != reader.reading.session.id)
         #expect(reopened.publication.resourceRoot != folder)
-        try await reopened.close(position: nil, sequence: 1, token: nil, preferences: reopened.preferences)
+        try await reopened.abandon()
         #expect(!FileManager.default.fileExists(atPath: reopened.publication.resourceRoot.path))
 
         let cache = await f.store.epubCacheURL()
@@ -108,6 +111,10 @@ struct EPUBLibraryTests {
         var damaged = try Data(contentsOf: cachedChapter)
         damaged[damaged.startIndex] ^= 1
         try damaged.write(to: cachedChapter)
+        let cachedResource = try #require(reader.publication.package.resource(at: "OPS/one.xhtml"))
+        #expect(throws: EPUBError.corruptResource) {
+            try EPUBResourceStore.data(resource: cachedResource, root: cache.appendingPathComponent("resources"))
+        }
         let rebuilt = try await fresh.openEPUB(id: receipt.book.id)
         #expect(!rebuilt.reusedResources)
         #expect(try EPUBResourceStore.data(path: "OPS/one.xhtml", publication: rebuilt.publication)
@@ -124,6 +131,7 @@ struct EPUBLibraryTests {
         } catch LibraryError.changedFile {
             // Exact error required; all other errors propagate and fail the test.
         }
+        #expect(!FileManager.default.fileExists(atPath: rebuilt.publication.resourceRoot.path))
         try bytes.write(to: stored)
         let reused = try await fresh.openEPUB(id: receipt.book.id)
         #expect(reused.reusedResources)
@@ -134,6 +142,202 @@ struct EPUBLibraryTests {
         let missingCache = try await fresh.openEPUB(id: receipt.book.id)
         #expect(!missingCache.reusedResources)
         try await missingCache.abandon()
+    }
+
+    @Test func epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        var old: OpenedEPUBReader? = try await f.service.openEPUB(id: receipt.book.id)
+        weak var oldReference = old
+        let folder = try #require(old?.publication.resourceRoot)
+        let session = try #require(old?.reading.session.id)
+        let position = try EPUBLibraryFixture.position(try #require(old), path: "OPS/two.xhtml", offset: 1)
+        let token = try #require(try await old?.beginNavigation(path: position.path))
+        #expect(try await old?.markReady(token) == true)
+        let preferences = ReaderPreferences(fontSize: 26, lineSpacing: 11, theme: .dark)
+        try await old?.close(position: position, sequence: 1, token: token, preferences: preferences)
+        #expect(FileManager.default.fileExists(atPath: folder.path))
+        let latest = ReaderPreferences(fontSize: 22, lineSpacing: 8, theme: .dark)
+        try await f.store.savePreferences(latest)
+        let reopened = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(reopened.reusedResources)
+        #expect(reopened.publication.resourceRoot == folder)
+        #expect(reopened.reading.session.id != session)
+        #expect(reopened.reading.position == position)
+        #expect(reopened.preferences == latest)
+        // Terminal calls on the previous owner cannot reclaim or delete the transferred directory.
+        try await old?.close(position: nil, sequence: 2, token: nil, preferences: preferences)
+        try await old?.abandon()
+        try await Task { [old] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await old?.close(position: nil, sequence: 3, token: nil, preferences: preferences)
+        }.value
+        old = nil
+        #expect(oldReference == nil)
+        await Task.yield()
+        #expect(FileManager.default.fileExists(atPath: folder.path))
+        #expect(!(try EPUBResourceStore.data(path: position.path, publication: reopened.publication)).isEmpty)
+        try await reopened.abandon()
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    @Test func epubOverlappingReadersNeverShareAnActiveWorkspace() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let first = try await f.service.openEPUB(id: receipt.book.id)
+        let second = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(first.publication.resourceRoot != second.publication.resourceRoot)
+        #expect(first.reading.session.id != second.reading.session.id)
+        try await first.close(position: nil, sequence: 1, token: nil, preferences: first.preferences)
+        let third = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(third.publication.resourceRoot == first.publication.resourceRoot)
+        #expect(third.publication.resourceRoot != second.publication.resourceRoot)
+        try await first.abandon()
+        #expect(!(try EPUBResourceStore.data(path: "OPS/one.xhtml", publication: third.publication)).isEmpty)
+        try await second.close(position: nil, sequence: 1, token: nil, preferences: second.preferences)
+        try await third.close(position: nil, sequence: 1, token: nil, preferences: third.preferences)
+        // Returning a second closed workspace evicts only the previous slot, not any active owner.
+        #expect(!FileManager.default.fileExists(atPath: second.publication.resourceRoot.path))
+        let final = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(final.publication.resourceRoot == third.publication.resourceRoot)
+        try await final.abandon()
+    }
+
+    @Test func epubConcurrentWorkspaceTakesConsumeTheSlotOnlyOnce() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let source = try f.archive(), importer = EPUBImportService()
+        let original = f.root.appendingPathComponent("closed.epubwork")
+        let initial = try await importer.prepare(archiveURL: source, destination: original)
+        await importer.retainClosed(initial)
+        let cache = f.root.appendingPathComponent("Cache/publication")
+        let a = f.root.appendingPathComponent("a.epubwork"), b = f.root.appendingPathComponent("b.epubwork")
+        // LibraryStore intentionally gates simultaneous same-book sessions; test the ownership boundary directly.
+        async let left = importer.prepareForReading(archiveURL: source, destination: a, expected: initial.package, cache: cache)
+        async let right = importer.prepareForReading(archiveURL: source, destination: b, expected: initial.package, cache: cache)
+        let (one, two) = try await (left, right)
+        #expect(one.publication.resourceRoot != two.publication.resourceRoot)
+        #expect((one.publication.resourceRoot == original) != (two.publication.resourceRoot == original))
+        #expect(one.reused != two.reused)
+        try EPUBPublicationCache.verifyResources(one.publication)
+        try EPUBPublicationCache.verifyResources(two.publication)
+    }
+
+    @Test(arguments: [false, true])
+    func epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime(symlink: Bool) async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let old = try await f.service.openEPUB(id: receipt.book.id)
+        let folder = old.publication.resourceRoot, chapter = folder.appendingPathComponent("OPS/one.xhtml")
+        let expected = try Data(contentsOf: chapter)
+        let attributes = try FileManager.default.attributesOfItem(atPath: chapter.path)
+        try await old.close(position: nil, sequence: 1, token: nil, preferences: old.preferences)
+        if symlink {
+            let target = f.root.appendingPathComponent("same-bytes.xhtml")
+            try expected.write(to: target)
+            try FileManager.default.removeItem(at: chapter)
+            try FileManager.default.createSymbolicLink(at: chapter, withDestinationURL: target)
+        } else {
+            var damaged = expected; damaged[damaged.startIndex] ^= 1
+            try damaged.write(to: chapter)
+            if let date = attributes[.modificationDate] {
+                try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: chapter.path)
+            }
+        }
+        let reopened = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(reopened.reusedResources) // Verified disk-cache fallback, not the damaged warm workspace.
+        #expect(reopened.publication.resourceRoot != folder)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(try EPUBResourceStore.data(path: "OPS/one.xhtml", publication: reopened.publication) == expected)
+        try await old.abandon()
+        try await reopened.abandon()
+    }
+
+    @Test func epubWarmPackageMatchIncludesMetadataNotOnlyVersion() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let source = try f.archive(), importer = EPUBImportService()
+        let folder = f.root.appendingPathComponent("closed.epubwork")
+        let initial = try await importer.prepare(archiveURL: source, destination: folder)
+        let p = initial.package
+        let incompatible = EPUBPackage(sourceSHA256: p.sourceSHA256, parserVersion: p.parserVersion,
+            title: "Different metadata", spine: p.spine, navigation: p.navigation,
+            resources: p.resources, textNodes: p.textNodes, coverPath: p.coverPath)
+        #expect(incompatible.versionID == p.versionID && incompatible != p)
+        await importer.retainClosed(EPUBPublication(package: incompatible, resourceRoot: folder))
+        let opened = try await importer.prepareForReading(archiveURL: source,
+            destination: f.root.appendingPathComponent("new.epubwork"), expected: p,
+            cache: f.root.appendingPathComponent("Cache/publication"))
+        #expect(!opened.reused)
+        #expect(opened.publication.package == p)
+        #expect(opened.publication.resourceRoot != folder)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    @Test func epubFailedOrCancelledCloseNeverReturnsWorkspace() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let reader = try await f.service.openEPUB(id: receipt.book.id)
+        let invalid = try EPUBLibraryFixture.position(reader, offset: Int.max)
+        let token = try await reader.beginNavigation(path: invalid.path)
+        #expect(try await reader.markReady(token))
+        await #expect(throws: EPUBError.invalidPosition) {
+            try await reader.close(position: invalid, sequence: 1, token: token, preferences: reader.preferences)
+        }
+        #expect(!FileManager.default.fileExists(atPath: reader.publication.resourceRoot.path))
+        let next = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(next.publication.resourceRoot != reader.publication.resourceRoot)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await next.close(position: nil, sequence: 1, token: nil, preferences: next.preferences)
+        }
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        #expect(!FileManager.default.fileExists(atPath: next.publication.resourceRoot.path))
+        let final = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(final.publication.resourceRoot != next.publication.resourceRoot)
+        try await final.abandon()
+    }
+
+    @Test func epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let reader = try await f.service.openEPUB(id: receipt.book.id)
+        let folder = reader.publication.resourceRoot
+        try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        let queue = try DatabaseQueue(path: f.managed.appendingPathComponent("library.sqlite").path)
+        try await queue.write { db in
+            try db.execute(sql: "CREATE TRIGGER reject_warm_open BEFORE UPDATE OF activeSession ON books WHEN NEW.activeSession IS NOT NULL BEGIN SELECT RAISE(ABORT,'synthetic warm open'); END")
+        }
+        await #expect(throws: (any Error).self) { try await f.service.openEPUB(id: receipt.book.id) }
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        try await queue.write { db in try db.execute(sql: "DROP TRIGGER reject_warm_open") }
+        let next = try await f.service.openEPUB(id: receipt.book.id)
+        #expect(next.publication.resourceRoot != folder)
+        try await reader.abandon()
+        try EPUBPublicationCache.verifyResources(next.publication)
+        try await next.abandon()
+    }
+
+    @Test func epubCancelledWarmTakeAndImporterDeinitCleanTheirOwnSlot() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let source = try f.archive(), importer = EPUBImportService()
+        let folder = f.root.appendingPathComponent("closed.epubwork")
+        let initial = try await importer.prepare(archiveURL: source, destination: folder)
+        await importer.retainClosed(initial)
+        let destination = f.root.appendingPathComponent("cancelled.epubwork")
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await importer.prepareForReading(archiveURL: source, destination: destination,
+                expected: initial.package, cache: f.root.appendingPathComponent("Cache/publication"))
+        }
+        await #expect(throws: CancellationError.self) { _ = try await cancelled.value }
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        var temporary: EPUBImportService? = EPUBImportService()
+        weak var reference = temporary
+        let retained = try #require(try await temporary?.prepare(archiveURL: source, destination: folder))
+        await temporary?.retainClosed(retained)
+        temporary = nil
+        #expect(reference == nil)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
     @Test func epubDuplicateKeepsProgressAndRepairsMissingArchive() async throws {
@@ -204,7 +408,7 @@ struct EPUBLibraryTests {
         #expect(!data.isEmpty)
         let imports = try FileManager.default.contentsOfDirectory(at: f.managed.appendingPathComponent("Imports"), includingPropertiesForKeys: nil)
         #expect(imports == [reader.publication.resourceRoot])
-        try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        try await reader.abandon()
         // Force failure after the source rename; SQLite and the renamed file must roll back.
         let queue = try DatabaseQueue(path: f.managed.appendingPathComponent("library.sqlite").path)
         try await queue.write { db in

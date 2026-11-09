@@ -303,6 +303,8 @@ enum EPUBLocationScript {
             paginated: false,
             lastAnchor: null,
             reflowRevision: 0,
+            layoutWidth: 0,
+            layoutHeight: 0,
             scrollTimer: null
         };
 
@@ -373,6 +375,8 @@ enum EPUBLocationScript {
             style.textContent = cssText;
         }
         function updatePageMetrics() {
+            state.layoutWidth = viewportWidth();
+            state.layoutHeight = window.innerHeight;
             var style = document.getElementById("yj-epub-page-metrics");
             if (!style) {
                 style = document.createElementNS ? document.createElementNS("http://www.w3.org/1999/xhtml", "style") : document.createElement("style");
@@ -1036,9 +1040,9 @@ enum EPUBLocationScript {
             if (!state.ready || state.suppressingReflow || state.syncing) { return; }
             // Cache the current real anchor before a subsequent resize can reflow the DOM.
             sampleScrollPayload();
-            if (state.scrollTimer !== null) {
-                window.clearTimeout(state.scrollTimer);
-            }
+            // Throttle, not debounce: continuous dragging must advance native
+            // chapter authority/preload before reaching the installed window edge.
+            if (state.scrollTimer !== null) { return; }
             var mySession = state.sessionID;
             var myEpoch = state.epoch;
             state.scrollTimer = window.setTimeout(function() {
@@ -1050,6 +1054,12 @@ enum EPUBLocationScript {
 
         function realignAfterResize() {
             if (!state.ready || !state.lastAnchor || state.syncing) { return; }
+            // Body/document ResizeObserver also fires when neighbors are appended.
+            // Those commits already compensate exact pixel anchors; a text-anchor
+            // restore here would jump backwards on an image-only viewport.
+            var width = viewportWidth(), height = window.innerHeight;
+            if (!state.paginated && width === state.layoutWidth && height === state.layoutHeight) { return; }
+            state.layoutWidth = width; state.layoutHeight = height;
             var anchor = state.lastAnchor;
             var mySession = state.sessionID;
             var myEpoch = state.epoch;

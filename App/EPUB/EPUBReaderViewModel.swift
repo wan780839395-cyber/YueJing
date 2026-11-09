@@ -19,6 +19,7 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var exitSaveFailed = false
     @Published var message: String?
     @Published private(set) var openingPerformanceSummary: String?
+    @Published private(set) var loadingStage = "正在校验并准备书籍…"
 
     let webView = EPUBWebViewHandle()
     private let bookID: String
@@ -40,6 +41,7 @@ final class EPUBReaderViewModel: ObservableObject {
     private var closeTask: Task<Bool, Never>?
     private var promotionTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
+    private var openingResourcesReady: ContinuousClock.Instant?
 
     init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil) {
         self.bookID = bookID
@@ -63,6 +65,8 @@ final class EPUBReaderViewModel: ObservableObject {
         loading = true
         ready = false
         openingStarted = ContinuousClock.now
+        openingResourcesReady = nil
+        loadingStage = "正在校验并准备书籍…"
         openingPerformanceSummary = nil
         do {
             let service = service
@@ -80,6 +84,7 @@ final class EPUBReaderViewModel: ObservableObject {
             }
             openTask = nil
             reader = opened
+            openingResourcesReady = ContinuousClock.now
             title = opened.book.title
             preferences = opened.preferences.validated
             let package = opened.publication.package
@@ -156,23 +161,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func go(to item: EPUBNavigationItem) {
-        guard let reader, !closing, !suspended, !exitSaveFailed,
-              reader.publication.package.spine.contains(item.path) else {
-            return
-        }
-        hasUserPosition = true
-        currentFragment = item.fragment
-        navigationTask?.cancel()
-        navigationTask = Task { @MainActor [weak self] in
-            await self?.beginChapterNavigation(
-                path: item.path,
-                targetPosition: nil,
-                fragment: item.fragment,
-                preserveTargetAnchor: false,
-                persistOnReady: true,
-                reloadDocument: true
-            )
-        }
+        navigateToInternalLink(path: item.path, fragment: item.fragment)
     }
 
     /// Called only by the live viewport at a chapter boundary. Never wrap the spine.
@@ -208,17 +197,32 @@ final class EPUBReaderViewModel: ObservableObject {
               reader.publication.package.spine.contains(path) else {
             return
         }
+        // Revoke old observations before scheduling: a queued scroll promotion must not
+        // cancel this explicit user destination or overwrite its pending fragment.
+        ready = false
+        loading = true
+        loadingStage = "正在定位目标章节…"
+        currentToken = nil
+        generation = UUID()
+        let intent = generation
+        currentPath = path
         hasUserPosition = true
         currentFragment = fragment
+        message = nil
+        webView.clearPayload()
+        promotionTask?.cancel()
+        promotionTask = nil
+        saveTask?.cancel()
         navigationTask?.cancel()
         navigationTask = Task { @MainActor [weak self] in
-            await self?.beginChapterNavigation(
+            guard let self, !Task.isCancelled, self.generation == intent else { return }
+            await self.beginChapterNavigation(
                 path: path,
                 targetPosition: nil,
                 fragment: fragment,
                 preserveTargetAnchor: false,
                 persistOnReady: true,
-                reloadDocument: true
+                reloadDocument: false
             )
         }
     }
@@ -272,7 +276,7 @@ final class EPUBReaderViewModel: ObservableObject {
         reloadDocument: Bool,
         startAtEnd: Bool = false
     ) async {
-        guard let reader, !closing, !suspended, !exitSaveFailed else { return }
+        guard !Task.isCancelled, let reader, !closing, !suspended, !exitSaveFailed else { return }
         promotionTask?.cancel()
         promotionTask = nil
         saveTask?.cancel()
@@ -280,9 +284,12 @@ final class EPUBReaderViewModel: ObservableObject {
         let gen = generation
         let life = lifecycle
         ready = false
+        currentToken = nil
+        loading = true
+        loadingStage = "正在排版章节并恢复位置…"
         do {
             let token = try await reader.beginNavigation(path: path)
-            guard lifecycle == life, generation == gen, !closing, !suspended, self.reader === reader else { return }
+            guard !Task.isCancelled, lifecycle == life, generation == gen, !closing, !suspended, self.reader === reader else { return }
             currentToken = token
             currentPath = path
             shouldPersistOnReady = persistOnReady
@@ -299,6 +306,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 startAtEnd: startAtEnd,
                 readingMode: readingMode
             )
+            // Do not wait for SwiftUI reconciliation to revoke the old viewport epoch.
+            if let request = navigationRequest { webView.controller?.apply(request) }
         } catch is CancellationError {
         } catch {
             guard lifecycle == life, generation == gen, !closing else { return }
@@ -381,9 +390,11 @@ final class EPUBReaderViewModel: ObservableObject {
                         self.openingStarted = nil
                         let elapsed = started.duration(to: ContinuousClock.now).components
                         let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+                        let preparation = started.duration(to: self.openingResourcesReady ?? started).components
+                        let preparationSeconds = Double(preparation.seconds) + Double(preparation.attoseconds) / 1e18
                         self.openingPerformanceSummary = String(
-                            format: "打开请求→EPUB 章节已就绪 %.3fs\n进程重启/首绘未单列；仅本地摘要。",
-                            seconds
+                            format: "打开→章节就绪 %.3fs\n资源准备 %.3fs；章节排版/恢复 %.3fs\n首绘未单列；仅本地摘要。",
+                            seconds, preparationSeconds, max(0, seconds - preparationSeconds)
                         ) + (activeReader.reusedResources
                             ? "\n已复用已验证资源，未重新解压或解析全书。"
                             : "\n本次重新构建资源缓存。")
@@ -521,7 +532,9 @@ final class EPUBReaderViewModel: ObservableObject {
         ready = false
         navigationRequest = nil
         if !(error is CancellationError) {
-            message = Self.safeFailureMessage(error)
+            message = (error as? URLError)?.code == .timedOut
+                ? "章节加载未能及时完成，可重试打开；原书与已保存位置保留。"
+                : Self.safeFailureMessage(error)
         }
     }
 

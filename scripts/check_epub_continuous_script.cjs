@@ -98,6 +98,33 @@ async function fixture(source, css, pagedCSS) {
     ok(section(2) && !section(7) && api.windowPaths().length === 5, 'visible old section blocks additions beyond cap');
     results.push('visible old sections retained instead of exceeding cap');
 
+    atChapter(3, 30); await settle();
+    const movingStart = messages.length;
+    // Keep sending scroll events more frequently than the reporting interval.
+    // A trailing debounce would never notify native while the finger is moving.
+    for (let n = 0; n < 30; n++) {
+        scrollBy(0, 2); window.dispatchEvent(new Event('scroll')); await tick();
+    }
+    ok(messages.slice(movingStart).filter(m=>m.kind === 'scroll').length >= 2,
+        'continuous scroll must report before the gesture settles');
+    await settle();
+    results.push('continuous scroll reports are bounded but cannot starve during a gesture');
+
+    for (const target of [4, 2, 5, 3]) {
+        epoch = `jump-${target}`;
+        await configure(target, {fragment:'frag'});
+        const visible = api.sampleNow();
+        ok(visible.path === chapter(target).path && visible.visibleText.includes(`chapter${target}`), 'resident jump must show destination text');
+        ok(document === originalDocument && span(3) === retained, 'resident jump must keep document and existing nodes');
+    }
+    const rapidStart = messages.length;
+    epoch = 'rapid-obsolete'; api.configure(config(4));
+    epoch = 'rapid-latest'; api.configure(config(3, {fragment:'frag'}));
+    await settle();
+    ok(api.sampleNow().path === chapter(3).path, 'latest rapid jump wins');
+    ok(!messages.slice(rapidStart).some(m => m.kind === 'ready' && m.epoch === 'rapid-obsolete'), 'superseded configure cannot report ready');
+    results.push('resident forward/backward fragment jumps show target; rapid jump cancels obsolete readiness without reload');
+
     atChapter(3, 120); await settle(); anchor = api.sampleNow();
     await configure(3, {readingMode:'paged', css:css + pagedCSS, targetNode:anchor.node, targetOffset:anchor.utf16Offset, preserveTargetAnchor:true});
     ok(api.sampleNow().path === chapter(3).path && api.sampleNow().node === anchor.node && api.sampleNow().utf16Offset === anchor.utf16Offset, 'mode anchor scoped to current chapter');
@@ -174,6 +201,16 @@ async function fixture(source, css, pagedCSS) {
     atChapter(7, 50); await settle();
     ok(api.sampleNow().path === image.path && api.sampleNow().node === 0, 'image-only synthetic anchor has image chapter path');
     results.push('off-flow real image decode; relative image URL; commit-time moved anchor; image-only locator');
+    // Changing content below the viewport is not a viewport resize. An image
+    // locator uses a chapter text anchor for persistence, not its pixel position.
+    atChapter(7, 100); await settle();
+    const imageY = scrollY;
+    const extension = document.createElement('div'); extension.style.height = '300px';
+    section(7).appendChild(extension); await settle();
+    ok(Math.abs(scrollY - imageY) <= 1, 'content-only resize must not snap image viewport to chapter text anchor');
+    extension.remove(); await settle();
+    results.push('content-size notifications preserve image pixel viewport');
+
     const installed = api.windowPaths().join(), failureStart = messages.length;
     const broken = chapter(8, true);
     ok(api.syncWindow({sessionID:'session',epoch,chapters:[broken],keepPaths:[chapter(3).path,chapter(4).path,chapter(5).path,image.path,broken.path]}), 'broken image accepted pending load');
@@ -246,6 +283,54 @@ async function fixture(source, css, pagedCSS) {
     results.push('clamped text/image chapters acknowledge request; actual locator and subsequent scroll remain independent');
     frame.remove(); URL.revokeObjectURL(xmlURL);
     results.push('one-line chapters can continue beyond the first window');
+    // Browser integration fixture: native capability promotion/window scheduling is
+    // substituted, but all layout, scrolling and production JS events remain real.
+    const rollingFrame = document.createElement('iframe');
+    rollingFrame.style.cssText = 'width:390px;height:700px;border:0';
+    rollingFrame.srcdoc = chapter(0).xhtml;
+    const rollingLoaded = new Promise(r=>{ rollingFrame.onload = r; });
+    document.body.appendChild(rollingFrame); await rollingLoaded;
+    const rw = rollingFrame.contentWindow, rd = rollingFrame.contentDocument;
+    let current = 0, serial = 0, rollingEpoch = 'rolling-0', promotionPending = false;
+    const observed = new Set(), rollingErrors = [];
+    const make = i => ({...chapter(i), url:`yjepub://s-session--e-${rollingEpoch}/OEBPS/c${i}.xhtml`});
+    function refreshRolling() {
+        const start = Math.max(0, Math.min(current - 2, 7));
+        const all = Array.from({length:5},(_,n)=>make(start+n));
+        const installed = new Set(rw.__yjEpub.windowPaths());
+        ok(rw.__yjEpub.syncWindow({sessionID:'session',epoch:rollingEpoch,
+            chapters:all.filter(c=>!installed.has(c.path)),keepPaths:all.map(c=>c.path)}), 'rolling window accepted');
+    }
+    rw.webkit = {messageHandlers:{yjepubLocator:{postMessage(p) {
+        if (p.kind === 'error' || (p.kind === 'window' && p.error)) rollingErrors.push(p.kind);
+        if (p.kind !== 'scroll' || p.epoch !== rollingEpoch || promotionPending) return;
+        const index = Number(p.path.match(/c(\d+)\.xhtml/)[1]); observed.add(index);
+        if (index === current) return;
+        promotionPending = true;
+        rw.setTimeout(()=>{
+            current = index; rollingEpoch = `rolling-${++serial}`;
+            const c = make(index);
+            rw.__yjEpub.configure({sessionID:'session',epoch:rollingEpoch,path:c.path,chapterIndex:index,
+                expectedNodeCount:8,expectedNodeLengths:c.lengths,preserveViewport:true});
+            refreshRolling(); promotionPending = false;
+        },0);
+    }}}};
+    rw.eval(source);
+    const first = make(0);
+    rw.__yjEpub.configure({sessionID:'session',epoch:rollingEpoch,path:first.path,chapterIndex:0,
+        expectedNodeCount:8,expectedNodeLengths:first.lengths,targetNode:-1,readingMode:'scroll',css});
+    await settle(); refreshRolling(); await settle();
+    const sameDocument = rd;
+    for (let n=0;n<240 && current<9;n++) { rw.scrollBy(0,180); await tick(); }
+    await settle();
+    ok(current >= 9 && observed.has(6), 'continuous scrolling must advance beyond initial five-chapter window');
+    for (let n=0;n<240 && current>0;n++) { rw.scrollBy(0,-180); await tick(); }
+    await settle();
+    ok(current === 0 && rw.__yjEpub.windowPaths().length <= 5 && rw.document === sameDocument,
+        'continuous reverse scrolling returns to first chapter without reload or unbounded residency');
+    ok(rollingErrors.length === 0, 'rolling window has no readiness/preload errors');
+    rollingFrame.remove();
+    results.push('12-chapter rolling fixture crosses chapter 9 and returns to 0 in one bounded DOM');
     return results;
 }
 

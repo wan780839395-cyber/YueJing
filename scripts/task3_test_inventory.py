@@ -41,7 +41,7 @@ FILES = {
     "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion""",
     "YueJingCanvasTests/ReadingCanvasRenderingTests.swift": """dirtyRegionCoversTheSentinelInEveryThemeAndPreservesOutsidePixels reuseRemovesOldInkAndAccessibilityActionsWithoutResettingTheTheme fractionalResizeRerasterizesToTheSameImageAsAFreshCanvas""",
     "TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift": """automaticDecodeAndChaptersBaseline""",
-    "ReaderDomainTests/EPUBLibraryTests.swift": """epubOriginalArchiveAndValidatedResourcesSurviveReopen epubDuplicateKeepsProgressAndRepairsMissingArchive epubCancellationBeforeCommitLeavesNoBook epubCancellationAfterCommitReturnsReceipt epubFailedImportCleansOnlyItsWorkspace epubV6MigrationPreservesTXTProgressBookmarksAndPreferences epubCoverThumbnailBoundsAndDamagedFallback epubBooksAndTXTStayIsolated""",
+    "ReaderDomainTests/EPUBLibraryTests.swift": """epubOriginalArchiveAndValidatedResourcesSurviveReopen epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences epubOverlappingReadersNeverShareAnActiveWorkspace epubConcurrentWorkspaceTakesConsumeTheSlotOnlyOnce epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime epubWarmPackageMatchIncludesMetadataNotOnlyVersion epubFailedOrCancelledCloseNeverReturnsWorkspace epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination epubCancelledWarmTakeAndImporterDeinitCleanTheirOwnSlot epubDuplicateKeepsProgressAndRepairsMissingArchive epubCancellationBeforeCommitLeavesNoBook epubCancellationAfterCommitReturnsReceipt epubFailedImportCleansOnlyItsWorkspace epubV6MigrationPreservesTXTProgressBookmarksAndPreferences epubCoverThumbnailBoundsAndDamagedFallback epubBooksAndTXTStayIsolated""",
     "ReaderDomainTests/EPUBProgressTests.swift": """epubPositionsRejectForeignVersionsUnitsAndInvalidUTF16Boundaries epubProgressRequiresReadinessAndIncreasingSequence epubOldNavigationSupersededSessionAndClosedCallbacksCannotWrite epubTypographyEpochRestoresSameTextPositionAndSettings""",
     "ReaderDomainTests/LongBookAcceptanceTests.swift": """a06FixedTenMiB128ChaptersImportNavigateAndReopen""",
     "ReaderDomainTests/EPUBArchiveTests.swift": """epubArchiveExtractsStoredAndDeflatedEntriesWithVerifiedDigests epubArchiveRejectsUnsafePathsAndEncodedTraversals epubArchiveRejectsDuplicateAndUnicodeCollidingCanonicalPaths epubArchiveRejectsSymbolicLinksAndDestinationLinkEscapes epubArchiveRejectsCRCMismatchesAfterStreamingExtraction epubArchiveRejectsTruncatedAndInconsistentHeaders epubArchiveEnforcesCompressedAndStreamedExpansionBudgets epubArchiveEnforcesMaximumEntryCountBudget epubArchiveRejectsEncryptedAndUnsupportedCompressionEntries epubArchiveRespectsTaskCancellationAndCleansDestination""",
@@ -50,11 +50,15 @@ FILES = {
     "YueJingEPUBUITests/EPUBFlowUITests.swift": """testEPUBShelfCoverAndDirectoryCrossChapterNavigation testEPUBProgressSurvivesExitAndProcessRelaunch testEPUBTypographyNoCoverFallbackAndTXTIsolation""" ,
     "ReaderDomainTests/EPUBCompatibilityTests.swift": """epubCompatibilityStandardDoctypesPreserveAcceptedTextBytesAndNodes epubCompatibilityRejectsEntitiesUnknownDuplicateAndMisplacedDoctypes epubCompatibilityStaticSVGBecomesLocalJPEGAndPreservesIDs epubCompatibilityRejectsComplexActiveAndEscapingSVG epubCompatibilityImageOnlyPagesHaveStableAnchorButBlankPagesFail epubCompatibilityWebPRequiresRealBoundedSingleFrameDecode epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen epubCompatibilityWebPResourcesStillEnforceSizeAndDigestIntegrity""",
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 146, "TXTBlockDecoderTests": 6,
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 154, "TXTBlockDecoderTests": 6,
           "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 18,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 214  # Full inventory only; epub-compat-33 executes its explicit 33-case subset.
+TOTAL = 222  # Declaration identities; the Bool parameter adds one execution (223).
+PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
+    "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
+EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 155}
+EXECUTION_TOTAL = 223
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 
@@ -96,8 +100,14 @@ def validate_source(root=ROOT):
     names = [n for g in COUNTS for n in expected_names(g)]
     if len(names) != len(set(names)) or len(names) != TOTAL:
         raise ValueError("Task3 selected union is not unique/complete")
+    parameter_source = (root / "Tests/ReaderDomainTests/EPUBLibraryTests.swift").read_text(encoding="utf-8")
+    name = next(iter(PARAMETERIZED))
+    if not re.search(r"@Test\(arguments: \[false, true\]\)\s+func " + name + r"\(symlink: Bool\)", parameter_source):
+        raise ValueError("Reviewed Bool argument matrix changed")
     return {"kind": "SOURCE_INVENTORY_NOT_NATIVE", "groups": COUNTS, "selected": TOTAL,
-            "excluded": EXCLUDED, "all_declared": TOTAL + 1, "native_executions": 0,
+            "execution_groups": EXECUTION_COUNTS, "selected_executions": EXECUTION_TOTAL,
+            "parameterized": PARAMETERIZED, "excluded": EXCLUDED,
+            "all_declared": TOTAL + 1, "native_executions": 0,
             "cases": {g: expected_names(g) for g in (*COUNTS, *EXCLUDED)}}
 
 
@@ -116,8 +126,45 @@ def selection(group):
     return result
 
 
+def parameter_events(text, expected):
+    """Adapt only reviewed signatures in memory; retain every original argument row.
+
+    Swift Testing reports a parent finish, not a separate console finish per argument.
+    A passing parent plus exactly both argument starts is necessary; the release gate
+    additionally requires both successful argument leaves in the real xcresult.
+    """
+    adapted, records = text, {}
+    for name, spec in PARAMETERIZED.items():
+        if name not in expected:
+            continue
+        signature = name + spec["signature"]
+        starts = list(re.finditer(r"\bTest " + re.escape(signature) + r" started\.", text))
+        ends = list(re.finditer(r"\bTest " + re.escape(signature) + r" passed after ([0-9.]+) seconds?", text))
+        if len(starts) != 1 or len(ends) != 1 or not starts[0].start() < ends[0].start() or float(ends[0][1]) > 180:
+            raise ValueError("Invalid parameterized parent events")
+        rows = []
+        for number, line in enumerate(text.splitlines(), 1):
+            if "Passing " not in line:
+                continue
+            match = re.fullmatch(r"(?:◇ )?Passing 1 argument " + spec["argument"] +
+                                 r" → (false|true)(?: \(Bool\))? to " + re.escape(signature) + r"\.?", line)
+            if not match:
+                raise ValueError("Unrecognized/foreign argument event")
+            rows.append(dict(line=number, text=line, value=match[1]))
+        start_line = text[:starts[0].start()].count("\n") + 1
+        end_line = text[:ends[0].start()].count("\n") + 1
+        if sorted(row["value"] for row in rows) != sorted(spec["values"]) or not all(start_line < row["line"] < end_line for row in rows):
+            raise ValueError("Missing/duplicate/out-of-order Bool argument execution")
+        records[name] = rows
+        adapted = adapted.replace(signature, name + "()")
+    if not records and re.search(r"(?:^|\n)(?:◇ )?Passing ", text):
+        raise ValueError("Unexpected parameterized execution")
+    return adapted, records
+
+
 def parse_swift_log(group, log, native_exit):
     expected = expected_names(group)
+    log, arguments = parameter_events(log, expected)
     passed = re.findall(r"\bTest (\w+)\(\) passed after\b", log)
     summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", log)
     bad = re.search(r"^.*\b(?:Test|Suite)[^\r\n]*\b(?:skipped|failed)\b", log, re.MULTILINE)
@@ -125,14 +172,26 @@ def parse_swift_log(group, log, native_exit):
         raise ValueError("Native failure/skip/exit or missing success: " + group)
     if summaries != [(str(COUNTS[group]), "passed")] or sorted(passed) != sorted(expected):
         raise ValueError("Missing/duplicate/unexpected case execution: " + group)
+    if arguments:
+        import audit_native_case_events as audit
+        parsed = audit.parse_events(log.encode(), expected)
+        if not parsed["parser_complete"] or parsed["totals"]["passed"] != len(expected):
+            raise ValueError("Incomplete parameterized native event stream")
     return {"declared": expected, "passed": passed, "native_summaries": summaries,
-            "skipped": [], "native_exit": native_exit}
+            "parameter_events": arguments, "skipped": [], "native_exit": native_exit}
 
 
 def self_check():
     checked = []
     for group in SWIFT_GROUPS:
-        lines = ["Test " + n + "() passed after 0.1 seconds." for n in expected_names(group)]
+        lines = []
+        for name in expected_names(group):
+            spec = PARAMETERIZED.get(name)
+            signature = name + (spec["signature"] if spec else "()")
+            row = f"◇ Test {signature} started.\n"
+            if spec:
+                row += "".join(f"◇ Passing 1 argument symlink → {value} to {signature}\n" for value in spec["values"])
+            lines.append(row + f"✔ Test {signature} passed after 0.1 seconds.")
         tail = f"Test run with {COUNTS[group]} tests passed after 1 seconds.\n** TEST SUCCEEDED **"
         good = "\n".join(lines + [tail])
         parse_swift_log(group, good, 0)

@@ -45,6 +45,7 @@ struct EPUBReaderScreen: View {
                     toolIntent: { tools.intent },
                     onToolsInteraction: handleToolsInteraction
                 )
+                .ignoresSafeArea(.container, edges: .bottom)
                 .allowsHitTesting(!model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
                 .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
                 .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
@@ -54,7 +55,7 @@ struct EPUBReaderScreen: View {
 
                 if model.loading && tools.exitRequest == nil && tools.valid {
                     VStack(alignment: .leading, spacing: 12) {
-                        ProgressView("正在打开章节…")
+                        ProgressView(model.loadingStage)
                         Text("正在校验 EPUB 资源并恢复阅读位置。可返回书架停止本次打开，已保存记录保留。")
                             .font(.footnote)
                             .fixedSize(horizontal: false, vertical: true)

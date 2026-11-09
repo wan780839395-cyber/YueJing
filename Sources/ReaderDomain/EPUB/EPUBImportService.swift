@@ -1,7 +1,26 @@
 import Foundation
 
-/// Parsing stays off MainActor and is serialized; only the caller-owned workspace is removed on failure.
+/// Off-MainActor serialized parsing and one exclusively owned, closed-reader workspace.
 actor EPUBImportService {
+    // Exclusive ownership: only successfully closed readers may return a workspace.
+    // A take empties the slot synchronously, before validation or any caller await.
+    private var closedPublication: EPUBPublication?
+
+    deinit {
+        if let closedPublication { try? FileManager.default.removeItem(at: closedPublication.resourceRoot) }
+    }
+
+    /// Consumes ownership even when cancelled. The caller must never remove this folder afterwards.
+    func retainClosed(_ publication: EPUBPublication) {
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: publication.resourceRoot)
+            return
+        }
+        let previous = closedPublication
+        closedPublication = publication
+        if let previous { try? FileManager.default.removeItem(at: previous.resourceRoot) }
+    }
+
     func prepare(archiveURL: URL, destination: URL) throws -> EPUBPublication {
         try Task.checkCancellation()
         let package = try EPUBPackageParser.parse(archiveURL: archiveURL, destination: destination)
@@ -10,9 +29,30 @@ actor EPUBImportService {
     }
     func prepareForReading(archiveURL: URL, destination: URL, expected: EPUBPackage,
                            cache: URL) throws -> (publication: EPUBPublication, reused: Bool) {
+        var candidate = closedPublication
+        closedPublication = nil
+        defer {
+            // Includes mismatch, source failure and cancellation; never touches a transferred folder.
+            if let candidate { try? FileManager.default.removeItem(at: candidate.resourceRoot) }
+        }
         try Task.checkCancellation()
         // Verify original bytes on every open; no mtime/size-only cache trust.
         guard try EPUBResourceStore.sourceDigest(archiveURL) == expected.sourceSHA256 else { throw LibraryError.changedFile }
+        if let retained = candidate {
+            do {
+                guard retained.package == expected else { throw EPUBError.corruptResource }
+                try EPUBPublicationCache.verifyResources(retained)
+                try Task.checkCancellation()
+                candidate = nil // Transfer the exact directory, with no resource writes or copies.
+                return (retained, true)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A damaged or incompatible closed workspace falls back to the existing disk cache/parser.
+                try? FileManager.default.removeItem(at: retained.resourceRoot)
+                candidate = nil
+            }
+        }
         if let restored = try EPUBPublicationCache.restore(package: expected, cache: cache, destination: destination) {
             try Task.checkCancellation()
             return (restored, true)

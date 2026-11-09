@@ -1,7 +1,7 @@
 import Foundation
 
 /// Rebuildable, single-publication disk cache. Never stores sessions, preferences or progress.
-/// Each reader receives a separate verified workspace so close/cancel cannot delete another reader's data.
+/// Active readers own separate verified workspaces; only a closed workspace may transfer to a new reader.
 enum EPUBPublicationCache {
     static func restore(package: EPUBPackage, cache: URL, destination: URL) throws -> EPUBPublication? {
         let files = FileManager.default
@@ -46,6 +46,25 @@ enum EPUBPublicationCache {
         try? excluded.setResourceValues(values)
     }
 
+    /// Warm ownership transfer still reads and hashes every resource, but writes no bytes.
+    static func verifyResources(_ publication: EPUBPublication) throws {
+        guard publication.package.parserVersion == EPUBFormat.parserVersion,
+              !publication.package.spine.isEmpty,
+              publication.package.resources.count <= EPUBLimits().entries else { throw EPUBError.corruptResource }
+        try requireDirectory(publication.resourceRoot.deletingLastPathComponent())
+        try requireDirectory(publication.resourceRoot)
+        var total = 0
+        var paths = Set<String>()
+        for resource in publication.package.resources {
+            try Task.checkCancellation()
+            guard paths.insert(resource.path).inserted, resource.byteCount >= 0,
+                  resource.byteCount <= EPUBLimits().expandedBytes - total else { throw EPUBError.limitExceeded }
+            total += resource.byteCount
+            // Enforces canonical paths, non-symlink components, regular files, exact size and actual SHA.
+            _ = try EPUBResourceStore.data(resource: resource, root: publication.resourceRoot)
+        }
+    }
+
     private static func copyVerified(_ publication: EPUBPublication, to destination: URL) throws {
         let files = FileManager.default
         guard publication.package.parserVersion == EPUBFormat.parserVersion,
@@ -55,14 +74,18 @@ enum EPUBPublicationCache {
         try files.createDirectory(at: destination, withIntermediateDirectories: true)
         var total = 0
         var paths = Set<String>()
+        var createdDirectories = Set<URL>()
         for resource in publication.package.resources {
             try Task.checkCancellation()
             guard paths.insert(resource.path).inserted, resource.byteCount >= 0,
                   resource.byteCount <= EPUBLimits().expandedBytes - total else { throw EPUBError.limitExceeded }
             total += resource.byteCount
-            let data = try EPUBResourceStore.data(path: resource.path, publication: publication)
+            let data = try EPUBResourceStore.data(resource: resource, root: publication.resourceRoot)
             let url = destination.appendingPathComponent(resource.path)
-            try files.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let parent = url.deletingLastPathComponent()
+            if createdDirectories.insert(parent).inserted {
+                try files.createDirectory(at: parent, withIntermediateDirectories: true)
+            }
             try data.write(to: url, options: .atomic)
         }
     }

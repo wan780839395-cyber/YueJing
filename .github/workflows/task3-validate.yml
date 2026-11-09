@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: Full regression, exact historical scopes, or EPUB compatibility targeted33
+        description: EPUB reopen/jump targeted22 (23 executions); historical modes remain source-bound
         required: true
         type: choice
-        default: full
+        default: epub-reopen-22
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,15 +17,14 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-freeze-3
-          - epub-freeze-diagnostic
+          - epub-reopen-22
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-freeze-3' && inputs.validation_scope != 'epub-freeze-diagnostic' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-22' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1131,7 +1130,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-freeze-3' || inputs.validation_scope == 'epub-freeze-diagnostic' }}
+    if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1143,7 +1142,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out the approved short-chapter and directory candidate
+      - name: Check out the approved EPUB reopen and jump candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1183,7 +1182,7 @@ jobs:
           python3 -B scripts/validate_task3.py resolved
 
       - name: Select installed arm64 simulator and verify test settings
-        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > artifacts/task3/devices.json
@@ -1192,7 +1191,7 @@ jobs:
           python3 -B scripts/validate_task3.py settings
 
       - name: Boot selected simulator once with original readiness budget
-        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'
@@ -1217,29 +1216,36 @@ jobs:
           assert code == 0 and not timed_out, 'Selected simulator did not become ready'
           PY
 
-      - name: Run only 2 affected EPUB Host cases
-        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+      - name: Run 18 affected Domain declarations including both Bool arguments
         run: |
           set -euo pipefail
-          python3 -u -B scripts/run_epub_freeze_validation.py run host \
+          python3 -u -B scripts/run_epub_freeze_validation.py run domain \
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
 
+      - name: Run 3 affected Host cases independently with unchanged budgets
+        run: |
+          set -euo pipefail
+          for group in host-1 host-2 host-3; do
+            python3 -u -B scripts/run_epub_freeze_validation.py run "$group" \
+              --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+          done
+
       - name: Run only 1 directory and cross-chapter UI case
-        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
         run: |
           set -euo pipefail
           python3 -u -B scripts/run_epub_freeze_validation.py run ui \
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
 
       - name: Verify actual simulator WebKit linkage
-        if: ${{ inputs.validation_scope == 'epub-freeze-3' }}
+        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
         run: |
           set -euo pipefail
           python3 -B scripts/check_webkit_linkage.py \
             --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
             --output artifacts/task3/webkit-simulator-linkage
 
-      - name: Validate exact native evidence or disclose explicit diagnostic-only mode
+      - name: Require all selected native executions before formal device release
         run: |
           set -euo pipefail
           python3 -B scripts/run_epub_freeze_validation.py gate

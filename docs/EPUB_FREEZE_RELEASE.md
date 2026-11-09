@@ -1,48 +1,51 @@
-# EPUB 短章/目录修复发布（0.2.5 / build 7）
+# EPUB reopen/jump 定向发布（0.2.6 / build 8）
 
-基线 `d0e195e829c84376f6061f6d98df8d1fcfb8aaff`。用户批准发布、定向验证、编译 IPA 供真机测验；范围内失败可诊断后修复、普通推送并重新编译。保留原始失败，不默认全量回归，不反复修补未知根因。
+基线 `7888b00fe13220775d7bd53045858cda298b08b6`，入口为既有 Task3 的 `validation_scope=epub-reopen-22` / `epub_freeze` 作业。本轮用户批准发布、验证及 IPA；范围内失败允许修复后普通推送及重新编译。每次使用新的 dispatch（attempt1），保留失败证据，禁止增大时限、弱化断言或自动降为 diagnostic。
 
-## 产品范围
+## 精确范围与计数
 
-- `EPUBLocationScript`：普通导航的 ready 只采样请求章；实际滚动仍报告真实可见章。解决窗口末尾短章因上一章仍可见而发错 ready 路径的问题，不放宽会话/epoch/路径校验。
-- `EPUBContentsView`：当前目录索引每次 body 计算一次，行与摘要复用；移除枚举数组分配。匹配规则、选择与关闭权限不变。
-- 两份直接回归：连续 DOM 浏览器脚本及既有 Host 测试；原生测试身份、原断言保留。
-- `project.yml` 只改 0.2.4/6 → 0.2.5/7。原书、解析/资源哈希、CSP、缓存、进度/数据库、TXT、依赖和最低 iOS16.6 不改。
+BASE 到候选 HEAD 必须恰好改动 `run_epub_freeze_validation.py:ALLOWED` 的20路径：原13业务/测试/脚本路径加本轮7基础设施路径，无新增、删除或符链；版本只允许 0.2.5/7 → 0.2.6/8。重试仍检查整个 BASE→HEAD 差异，而非只检查最后一次提交。
 
-## 发布入口与证据
+全模块 inventory 从214增为222个函数身份（Domain146→154）；新增8函数之一有 `symlink: Bool` 的 `[false, true]` 参数，因此全模块展开为223次执行，Domain155次。这里只运行22个函数身份、23次执行，不运行/不声称其余200项通过。
 
-现有 Task3 工作流增加互斥 `epub_freeze` 作业，其他作业跳过。固定 macOS15 / Xcode16.4 / Swift6.1.2 / XcodeGen2.46.0，沿用既有 GRDB7.0.0、ZIPFoundation0.9.19 和真实设备依赖、未签名 arm64、资源许可、IPA 逐文件字节校验。
+### Domain：18函数 / 19次执行
 
-### `validation_scope=epub-freeze-3`
+- `EPUBLibraryTests` 13函数：原资源/磁盘缓存复开、8个新增 warm workspace/并发归属/损坏及符链/完整metadata/失败取消close/transfer清理/deinit回归，加 duplicate保进度、commit前取消、commit后取消、失败workspace清理。
+- `EPUBProgressTests` 全4函数：位置单位/版本/UTF16、readiness和递增序列、旧navigation/新session/closed回调、typography epoch和设置。
+- `EPUBCompatibilityTests.epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen` 1函数。
+- 精确函数名固定在 runner 的 `SELECTED_FILES`；不选迁移、cover、安全解析等无关用例。
 
-只执行既有测试：
+### Host：3函数，各独立调用
 
-1. Host `epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position`（含1633条目录匹配回归）。
-2. Host `epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor`（含两章、两张本地PNG、末尾短章的原生ready/滚动回归）。
-3. UI `testEPUBShelfCoverAndDirectoryCrossChapterNavigation`。
+1. `epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position`
+2. `epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor`
+3. `epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks`
 
-Host/UI各480秒组预算，单用例原180秒，模拟器准备原120秒；不提高原时限。必须逐项一次开始、一次通过，无失败/跳过/未完成，退出0且有成功汇总；超过180秒的迟到通过也不能取得资格。其余211项不执行、不声称通过。
+每个独立 Host 调用仍480秒，单case180秒，迟到通过无资格；不选择cover/security。Domain480秒、UI480秒、单case180秒、模拟器准备120秒均不扩大。
 
-`EPUB_FREEZE_3_TARGETED_NATIVE / EPUB_TARGETED_NOT_FULL` 仅表示本次选定3项通过。现有UI样本不是1633条目录UI耗时测量；不能据此声称真机原书卡点已全部消失或给出未测量的性能数字。
+### UI：1函数
 
-### `validation_scope=epub-freeze-diagnostic`
+`testEPUBShelfCoverAndDirectoryCrossChapterNavigation` 覆盖目录、跨章、同进程退出复开，并比较保存前后的path/node/offset。初查发现旧case只退出；协调端已在同一批准测试路径补足warm reopen，基础设施未编辑测试断言。`scope` 仍拒绝缺少exit→open或以terminate/launch替代同进程复开的候选。
 
-仅在依既定停止原则转交真机诊断时选择；不自动从失败测试转绿。新运行不准备模拟器、不执行测试。相同批准范围和真实设备打包门仍强制执行；输出 `DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED`、本轮原生执行0、通过0、完整回归false。此前失败与已通过证据另行说明，不伪装成本轮通过。
+## 真实证据与正式发布门
 
-两个模式均核对main/repository/commit/run/attempt1、基线祖先与精确10文件变化边界，重新解析保存的资格证据。后续修复使用新提交及新run，不覆盖旧结果。
+- Domain复用 `run_epub_reading_validation` 的未宿主scheme/effective settings机制；Host/UI仍用真实App及原scheme核验。共享同job中间产物，不复用跨run通过记录。
+- Swift Testing汇总计数为函数声明数。参数化函数必须有正确 `(symlink:)` 身份、唯一父start/pass、false和true各一次原始argument事件，且位于父事件之间；无失败/跳过/未知事件。
+- 参数化日志签名仅在内存中适配既有审计器；保存原始日志SHA、原行号/行文及参数事件，不重写日志、不伪造子case的console finish。
+- 实际xcresult必须存在，`xcresulttool get test-results tests` 中两个Bool参数叶节点均Passed；父级green不能替代参数完成证据。保存原始JSON，正式门重新从同bundle提取并比较，未知格式拒绝放行。新增格式解析目前只有离线合成测试，尚待Xcode16.4实际输出验证；必要修复须保留失败证据且不弱化条件。
+- selection/execution/counts/source/run/attempt/destination/command/timeouts均重算；所有组选定原生执行均通过才生成 `EPUB_REOPEN_22_TARGETED_NATIVE / EPUB_TARGETED_NOT_FULL`。
+- 当前 `epub-freeze-diagnostic` 明确禁用并移出选项；其他历史diagnostic仍绑定旧源，不授权本候选。无自动fallback。
+- `validate_task3.py` 的 package/IPA入口再次调用严格release gate；原arm64/iOS16.6/未签名、设备依赖图、GRDB/ZIPFoundation许可与资源、WebKit linkage、IPA provenance及逐文件payload字节门保持。
+- 新scope默认选中且与原全量作业互斥。只在所有门成功后上传正式IPA；失败上传证据，不交付正式IPA。
 
-## 离线检查
+## 离线检查及后续执行
 
 ```powershell
 python -B scripts/check_epub_freeze_validation.py
-node scripts/check_epub_horizontal_script.cjs
-node scripts/check_epub_continuous_script.cjs
 ```
 
-入口自检是合成门禁测试；Node/Chromium结果不是Swift/WKWebView/真机验收。产品脚本未变时可核对哈希复用同候选的本地通过记录，不机械重复运行。
+自检覆盖选择/参数事件/xcresult负例、scope路由与边界、artifact/provenance/release/IPA字节拒绝；临时夹具放会话scratch。`offline_checks_passed` 是合成门禁测试，不是Swift测试；`release_source_ready` 单独报告UI源码形状合同，不能将其当成原生通过或发布资格。
 
-## 交付
+协调端重跑离线检查、核对精确20路径，普通提交/push后只调既有 `task3-validate.yml`，显式传 `validation_scope=epub-reopen-22`。云端顺序：scope→固定工具链/依赖→Domain→三个独立Host→UI→原生gate→真实设备Release→依赖门→打包→IPA字节核验。失败可在本批白名单修复并新dispatch，不覆盖/隐藏旧失败。
 
-下载后核对GitHub artifact摘要/大小、ZIP CRC及安全路径、源码/run身份、IPA摘要/元数据、真实Release二进制与依赖证明。交付 `YueJing-0.2.5.ipa` 并说明实际验证模式、编译结果及修复轮次。
-
-iPhone使用覆盖安装，保留原书与进度，不卸载、清库或强制重导入。重点复验原卡点向下滚动、打开/关闭目录及选章是否持续可交互。交付后停止追加构建，等待真机反馈。
+交付 `YueJing-0.2.6.ipa` 时核对artifact摘要/大小/安全ZIP、同SHA与run及IPA摘要，说明实际编译结果、修复次数和22身份/23执行的区别。不声称完整回归、进程重启、RSS、秒开或真机已通过；真机覆盖安装保留原书及进度，重点测同进程退出复开、目录快速跨章及位置恢复。

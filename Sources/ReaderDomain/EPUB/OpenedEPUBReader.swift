@@ -7,16 +7,21 @@ public actor OpenedEPUBReader {
     public nonisolated let preferences: ReaderPreferences
     public nonisolated let reusedResources: Bool
     private let store: LibraryStore
+    private let importer: EPUBImportService
     private var closed = false
     private var closing: Task<Void, Error>?
 
     init(book: LibraryBook, publication: EPUBPublication, reading: EPUBReadingStart,
-         preferences: ReaderPreferences, store: LibraryStore, reusedResources: Bool = false) {
+         preferences: ReaderPreferences, store: LibraryStore, importer: EPUBImportService,
+         reusedResources: Bool = false) {
         self.book = book; self.publication = publication; self.reading = reading
         self.preferences = preferences; self.store = store
+        self.importer = importer
         self.reusedResources = reusedResources
     }
     deinit {
+        // A terminal task owns cleanup/transfer from the instant it is installed.
+        // In particular, deinit must not remove a folder already handed to a new reader.
         guard closing == nil else { return }
         let owner = store, session = reading.session, folder = publication.resourceRoot
         Task {
@@ -58,13 +63,24 @@ public actor OpenedEPUBReader {
                       preferences: ReaderPreferences) async throws {
         if let closing { try await closing.value; return }
         closed = true
-        let owner = store, session = reading.session, folder = publication.resourceRoot
+        let owner = store, session = reading.session, publication = publication, importer = importer
+        let cancelledAtStart = Task.isCancelled
         let operation = Task {
-            defer { try? FileManager.default.removeItem(at: folder) }
+            var transferred = false
+            defer { if !transferred { try? FileManager.default.removeItem(at: publication.resourceRoot) } }
             try await owner.finishEPUB(session: session, position: position, sequence: sequence,
                                       token: token, preferences: preferences)
+            if cancelledAtStart { throw CancellationError() }
+            try Task.checkCancellation()
+            // Nonthrowing consume: after this await neither close nor deinit owns the directory.
+            await importer.retainClosed(publication)
+            transferred = true
         }
         closing = operation
-        try await operation.value
+        try await withTaskCancellationHandler {
+            try await operation.value
+        } onCancel: {
+            operation.cancel()
+        }
     }
 }

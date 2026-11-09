@@ -117,6 +117,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var loadedDocumentPath: String?
     private var loadTask: Task<Void, Never>?
     private var loadingNavigation: WKNavigation?
+    private var readinessTask: Task<Void, Never>?
     private var beganTapDuringDeceleration = false
     private(set) var deniedNavigations: [String] = []
     private var readyToken: EPUBNavigationToken?
@@ -258,6 +259,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         guard activeRequest != request else { return }
         let previous = activeRequest
         let reuseDOM = !request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
+            readyToken != nil && readyToken == previous?.token &&
             loadedDocumentToken?.sessionID == request.token.sessionID &&
             previous?.publication.package == request.publication.package &&
             previous?.publication.resourceRoot == request.publication.resourceRoot
@@ -280,6 +282,13 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         pagePanToken = nil
         scrollDirection = nil
         applyReadingGesturePolicy()
+        readinessTask?.cancel()
+        let expectedToken = request.token
+        readinessTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.expireReadiness(for: expectedToken)
+        }
         let capability = EPUBResourceCapability(
             token: request.token,
             publication: request.publication,
@@ -318,12 +327,39 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 self.loadingNavigation = self.webView.load(URLRequest(url: url))
             } catch {
                 guard !Task.isCancelled, self.activeRequest == request else { return }
+                self.readinessTask?.cancel()
+                self.readinessTask = nil
                 self.onLoadFailure?(error, request.token)
             }
         }
     }
 
+    /// A missing didFinish/JS-ready callback must not leave the reader loading forever.
+    /// The deadline starts before content rules/navigation; stale deadlines cannot cancel a retry.
+    func expireReadiness(for token: EPUBNavigationToken) {
+        guard activeRequest?.token == token, readyToken != token else { return }
+        readinessTask?.cancel()
+        readinessTask = nil
+        loadTask?.cancel()
+        loadTask = nil
+        windowTask?.cancel()
+        windowTask = nil
+        windowInFlight = false
+        activeRequest = nil
+        loadingNavigation = nil
+        loadedDocumentToken = nil
+        loadedDocumentPath = nil
+        renderedChapterPaths.removeAll()
+        resourceHandler.invalidate()
+        webView.stopLoading()
+        transitionSnapshot?.removeFromSuperview()
+        transitionSnapshot = nil
+        onLoadFailure?(URLError(.timedOut), token)
+    }
+
     func detachCallbacks() {
+        readinessTask?.cancel()
+        readinessTask = nil
         loadTask?.cancel()
         loadTask = nil
         activeRequest = nil
@@ -403,6 +439,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             if let error {
                 self.loadedDocumentPath = nil
                 self.loadedDocumentToken = nil
+                self.readinessTask?.cancel()
+                self.readinessTask = nil
                 self.onLoadFailure?(error, request.token)
                 return
             }
@@ -431,10 +469,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 guard let error else { return }
                 Task { @MainActor [weak self] in
                     guard let self, self.activeRequest?.token == request.token else { return }
+                    self.readinessTask?.cancel()
+                    self.readinessTask = nil
                     self.onLoadFailure?(error, request.token)
                 }
             }
         } catch {
+            readinessTask?.cancel()
+            readinessTask = nil
             onLoadFailure?(error, request.token)
         }
     }
@@ -535,6 +577,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         if payload.kind == .ready {
+            readinessTask?.cancel()
+            readinessTask = nil
             readyToken = current.token
             applyReadingGesturePolicy()
             renderedChapterPaths.insert(current.token.path)
@@ -543,6 +587,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             refreshChapterWindow()
         }
         if payload.kind == .error {
+            readinessTask?.cancel()
+            readinessTask = nil
             readyToken = nil
             transitionSnapshot?.removeFromSuperview()
             transitionSnapshot = nil
@@ -744,6 +790,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         guard let current = activeRequest else { return }
+        readinessTask?.cancel()
+        readinessTask = nil
         loadedDocumentPath = nil
         loadedDocumentToken = nil
         windowTask?.cancel()
@@ -867,6 +915,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        interactionGeneration = UUID() // Revoke an asynchronous tap hit-test before dragging.
         pageAnimationToken = nil
         scrollDirection = nil
         if interactionEnabled, activeRequest?.readingMode == .scroll,
@@ -925,34 +974,53 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     @objc private func handleViewportTap(_ recognizer: UITapGestureRecognizer) {
         guard recognizer.state == .ended, let webView else { return }
-        let location = recognizer.location(in: view)
+        let began = beganTapDuringDeceleration
+        beganTapDuringDeceleration = false
+        handleViewportTap(at: recognizer.location(in: webView), beganDuringDeceleration: began)
+    }
+
+    /// Viewport coordinates, not text bounds: short chapters and bottom whitespace
+    /// have the same tool gesture as body text. UI controls sit above this view.
+    func handleViewportTap(at location: CGPoint, beganDuringDeceleration: Bool = false) {
+        guard let webView, interactionEnabled, let token = readyToken,
+              token == activeRequest?.token, webView.bounds.contains(location) else { return }
         let scroll = webView.scrollView
         if activeRequest?.readingMode == .paged,
            let direction = EPUBPageGeometry.edgeDirection(at: location, size: view.bounds.size) {
-            let canTurn = !beganTapDuringDeceleration && !scroll.isDragging && !scroll.isDecelerating &&
+            let canTurn = !beganDuringDeceleration && !scroll.isDragging && !scroll.isDecelerating &&
                 !UIAccessibility.isVoiceOverRunning
-            beganTapDuringDeceleration = false
-            if canTurn { turnPageAtEdge(direction, point: recognizer.location(in: webView)) }
-            return
-        }
-        guard ReadingToolsGesturePolicy.central(
-            x: location.x,
-            y: location.y,
-            width: view.bounds.width,
-            height: view.bounds.height
-        ) else {
+            if canTurn { turnPageAtEdge(direction, point: location) }
             return
         }
         let scrollView = webView.scrollView
         let decision = ReadingToolsGesturePolicy.tap(
-            beganDuringDeceleration: beganTapDuringDeceleration,
+            beganDuringDeceleration: beganDuringDeceleration,
             dragging: scrollView.isDragging,
             decelerating: scrollView.isDecelerating,
             voiceOver: UIAccessibility.isVoiceOverRunning
         )
-        beganTapDuringDeceleration = false
-        guard let expected = toolIntent?() else { return }
-        onToolsInteraction?(.tap(expected, decision))
+        if decision == .stopMomentum {
+            scrollView.setContentOffset(scrollView.contentOffset, animated: false)
+            return
+        }
+        guard decision == .toggle, let expected = toolIntent?() else { return }
+        let interaction = interactionGeneration
+        let script = """
+        (function() {
+            var selection = window.getSelection();
+            var element = document.elementFromPoint(\(location.x), \(location.y));
+            return (!element || !element.closest('a, button, input, textarea, select, summary')) &&
+                (!selection || selection.isCollapsed);
+        })();
+        """
+        webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] value, error in
+            guard let self, error == nil, value as? Bool == true,
+                  self.interactionEnabled, self.interactionGeneration == interaction,
+                  self.activeRequest?.token == token, self.readyToken == token,
+                  !self.webView.scrollView.isDragging, !self.webView.scrollView.isDecelerating,
+                  self.toolIntent?() == expected else { return }
+            self.onToolsInteraction?(.tap(expected, .toggle))
+        }
     }
 }
 

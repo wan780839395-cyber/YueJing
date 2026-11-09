@@ -19,6 +19,7 @@ struct EPUBReaderHostTests {
             let reader = try await fixture.service.openEPUB(id: receipt.book.id)
             let path = try #require(reader.publication.package.spine.first)
             let token = try await reader.beginNavigation(path: path)
+            verifyReadinessDeadline(publication: reader.publication, token: token, preferences: reader.preferences)
 
             let sampleText = "A😀e\u{301}尾"
             #expect(EPUBLocationScript.snapUTF16OffsetToCharacterBoundary(-1, in: sampleText) == nil)
@@ -82,6 +83,9 @@ struct EPUBReaderHostTests {
                 #expect((domSummary?["strong"] as? Int ?? 0) >= 1)
                 #expect((domSummary?["li"] as? Int ?? 0) >= 2)
                 #expect(domSummary?["imgLoaded"] as? Bool == true)
+                controller.expireReadiness(for: token)
+                #expect(controller.activeRequest?.token == token) // Ready content never expires.
+                try await verifyViewportWhitespaceTap(controller)
 
                 #expect(try await reader.markReady(token))
                 let nodes = try #require(reader.publication.package.textNodes[path])
@@ -636,6 +640,76 @@ struct EPUBReaderHostTests {
         try #require(model.navigationRequest?.token != nil && model.navigationRequest?.token != previous)
     }
 
+    private func verifyReadinessDeadline(publication: EPUBPublication, token: EPUBNavigationToken,
+                                         preferences: ReaderPreferences) {
+        let controller = EPUBWebViewController()
+        var failed: [EPUBNavigationToken] = []
+        controller.onLoadFailure = { error, token in
+            #expect((error as? URLError)?.code == .timedOut)
+            failed.append(token)
+        }
+        func request(_ token: EPUBNavigationToken) -> EPUBNavigationRequest {
+            EPUBNavigationRequest(id: UUID(), token: token, publication: publication, targetPosition: nil,
+                                  fragment: nil, preferences: preferences, preserveTargetAnchor: false, reloadDocument: true)
+        }
+        // No sleeps: expire before the scheduled navigation task can run.
+        controller.apply(request(token))
+        let next = EPUBNavigationToken(sessionID: token.sessionID, path: token.path)
+        controller.expireReadiness(for: next)
+        #expect(controller.activeRequest?.token == token && failed.isEmpty)
+        controller.expireReadiness(for: token)
+        #expect(controller.activeRequest == nil && failed == [token])
+        controller.apply(request(next))
+        controller.expireReadiness(for: token)
+        #expect(controller.activeRequest?.token == next && failed == [token])
+        controller.detachCallbacks()
+        controller.expireReadiness(for: next)
+        #expect(failed == [token])
+    }
+
+    private func verifyViewportWhitespaceTap(_ controller: EPUBWebViewController) async throws {
+        let intent = UUID()
+        var toggles = 0
+        controller.toolIntent = { intent }
+        controller.onToolsInteraction = { event in
+            if case .tap(let expected, .toggle) = event {
+                #expect(expected == intent); toggles += 1
+            }
+        }
+        defer { controller.toolIntent = nil; controller.onToolsInteraction = nil }
+        // Place a genuinely empty surface below the old central 20%-80% gate.
+        _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+        (function() {
+            var blank = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+            blank.id = 'test-tap-blank';
+            blank.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:80px;z-index:9999;background:white';
+            document.body.appendChild(blank); return true;
+        })();
+        """)
+        let point = CGPoint(x: controller.webView.bounds.midX, y: controller.webView.bounds.height - 20)
+        controller.handleViewportTap(at: point)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while toggles == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(toggles == 1)
+        controller.handleViewportTap(at: point)
+        controller.scrollViewWillBeginDragging(controller.webView.scrollView)
+        _ = try await controller.evaluateLocatorJavaScriptForTesting("true;")
+        #expect(toggles == 1) // A subsequent drag revokes the pending hit-test.
+        controller.scrollViewDidEndDragging(controller.webView.scrollView, willDecelerate: false)
+        _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+        document.getElementById('test-tap-blank').innerHTML = '<a href="#" style="display:block;width:100%;height:100%">link</a>'; true;
+        """)
+        controller.handleViewportTap(at: point)
+        // An ordered IPC barrier ensures the prior hit-test callback has returned.
+        _ = try await controller.evaluateLocatorJavaScriptForTesting("true;")
+        #expect(toggles == 1) // Links remain publication interactions, not tool toggles.
+        controller.interactionEnabled = false
+        controller.handleViewportTap(at: point)
+        #expect(toggles == 1)
+        controller.interactionEnabled = true
+        _ = try await controller.evaluateLocatorJavaScriptForTesting("document.getElementById('test-tap-blank').remove(); true;")
+    }
+
     private func verifyClampedShortChapterReadiness() async throws {
         try await withHostFixture { fixture in
             let archive = fixture.root.appendingPathComponent("ClampedShortChapter.epub")
@@ -934,7 +1008,23 @@ struct EPUBReaderHostTests {
                 #expect(backwards.visibleText.contains("EPUB_CH1_END"))
 
                 let ch3Item = try #require(model.navigationItems.first(where: { $0.path.contains("ch3") }))
+                try await waitUntilReady(model: model, expectedToken: backToken)
+                let positionBeforeJump = model.currentPosition
+                let obsoleteScroll = EPUBLocatorPayload(
+                    kind: .scroll, sessionID: backToken.sessionID, epoch: backToken.epoch,
+                    path: "OEBPS/text/ch2.xhtml", node: 0, utf16Offset: 0,
+                    restoredNode: 0, restoredOffset: 0, scrollY: 400,
+                    viewportHeight: 700, contentHeight: 2400, visibleText: "obsolete", reason: nil
+                )
+                let firstItem = try #require(model.navigationItems.first(where: { $0.path == backToken.path }))
+                model.go(to: firstItem) // superseded before either queued task can run
+                let loadsBeforeJump = controller.documentLoadCount
                 model.go(to: ch3Item)
+                #expect(model.currentToken == nil && !model.ready && model.loading)
+                model.handleLocatorEvent(obsoleteScroll) // no await: the previously unguarded race window
+                model.handleLoadFailure(EPUBError.corruptResource, token: backToken)
+                #expect(model.currentPosition == positionBeforeJump)
+                #expect(model.currentToken == nil && model.message == nil)
                 try await waitForNewToken(model: model, previous: backToken)
                 let ch3Request = try #require(model.navigationRequest)
                 #expect(ch3Request.token.path == "OEBPS/text/ch3.xhtml")
@@ -943,6 +1033,12 @@ struct EPUBReaderHostTests {
                 try await waitForChapterWindow(controller, count: 3)
                 let ch3Token = try #require(model.currentToken)
                 #expect(ch3Token.path == "OEBPS/text/ch3.xhtml")
+                #expect(controller.documentLoadCount == loadsBeforeJump)
+                let targetSample = try #require(await controller.sampleVisibleNow())
+                #expect(targetSample.path == ch3Item.path)
+                #expect(!targetSample.visibleText.isEmpty)
+                let sameDocument = try await controller.evaluateLocatorJavaScriptForTesting("document === window.__continuousDocument") as? Bool
+                #expect(sameDocument == true)
 
                 let ch3Scroll = controller.webView.scrollView
                 let ch3Max = max(0, ch3Scroll.contentSize.height - ch3Scroll.bounds.height)

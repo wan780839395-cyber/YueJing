@@ -35,6 +35,18 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(waitForPredicates([coverLoaded], timeout: 10), .completed)
 
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open", app)
+            // One stationary tap in the old excluded bottom band must reveal tools.
+            // First explicitly hide the initial tools; never retry center taps to mask failure.
+            let bottom = viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.94))
+            if app.buttons["reader.exit"].isHittable {
+                viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    !app.buttons["reader.exit"].isHittable
+                }, object: nil)
+                XCTAssertEqual(waitForPredicates([hidden], timeout: 5), .completed)
+            }
+            bottom.tap()
+            waitHittable(app.buttons["reader.exit"], timeout: 5)
             openDirectory(app)
             XCTAssertTrue(app.staticTexts["reader.directory.total"].label.contains("4"))
             XCTAssertFalse(app.buttons["reader.contents.bookmarks"].exists)
@@ -63,6 +75,17 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(midAnchorChapter.value as? String, "当前章节")
             closePanel(app)
             verifyPagingAndCrossChapterNavigation(app)
+            let beforeWarmReopen = Self.parseCanvasValue(canvas.value as? String ?? "")
+            XCTAssertEqual(beforeWarmReopen["path"], "OEBPS/text/ch3.xhtml")
+            XCTAssertNotNil(beforeWarmReopen["node"])
+            XCTAssertNotNil(beforeWarmReopen["offset"])
+            exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
+            // Reuse the closed workspace in the same process; preserve actual saved coordinates.
+            openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH3_START", stage: "warm-reopen", app)
+            let warmRestored = Self.parseCanvasValue(canvas.value as? String ?? "")
+            XCTAssertEqual(warmRestored["path"], "OEBPS/text/ch3.xhtml")
+            XCTAssertEqual(warmRestored["node"], beforeWarmReopen["node"])
+            XCTAssertEqual(warmRestored["offset"], beforeWarmReopen["offset"])
             exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
         }
     }

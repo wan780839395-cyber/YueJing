@@ -582,8 +582,9 @@ extension LibraryService {
         guard let book = try await store.book(id: id), book.format == .epub else { throw LibraryError.missingBook }
         let permit = try await store.reserveReaderOpen(bookID: id)
         let work = await store.epubWorkURL(id: UUID())
+        var ownedWork = work
         var keep = false
-        defer { if !keep { Self.removeStaging(work) } }
+        defer { if !keep { Self.removeStaging(ownedWork) } }
         do {
             let source = try await store.epubFileURL(bookID: id)
             let expected = try await store.storedEPUBPackage(bookID: id)
@@ -592,19 +593,23 @@ extension LibraryService {
                 archiveURL: source, destination: work, expected: expected, cache: cache
             )
             let publication = prepared.publication
+            // prepareForReading transfers exclusive ownership; warm opens need not use `work`.
+            ownedWork = publication.resourceRoot
+            try Task.checkCancellation()
             let preferences = try await store.preferences()
             let start = try await store.beginEPUB(permit, package: publication.package)
             do {
                 try await store.confirmReaderOpen(permit, session: start.session)
                 try Task.checkCancellation()
+                await store.endReaderOpen(permit)
+                try Task.checkCancellation()
             } catch {
                 try? await store.abandonEPUB(session: start.session)
                 throw error
             }
-            await store.endReaderOpen(permit)
             keep = true
             return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
-                                    store: store, reusedResources: prepared.reused)
+                                    store: store, importer: epubImporter, reusedResources: prepared.reused)
         } catch {
             await store.endReaderOpen(permit)
             throw error
