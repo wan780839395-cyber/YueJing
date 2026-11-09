@@ -44,18 +44,19 @@ def fixture(group):
 
 
 selected = r.selection()
-assert [len(n) for n in selected.values()] == [18, 1, 1, 1, 1]
+assert len(selected) == 24 and all(len(n) == 1 for n in selected.values())
+PARAM_GROUP = next(g for g, s in r.GROUPS.items() if any(n in r.inventory.PARAMETERIZED for n in s['cases']))
 assert len(r.ALLOWED) == 20 and not r.NEW
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
 checks.append('candidate inventory survives JSON roundtrip')
-checks.append('exact Domain18 Host3 UI1 / inventory222 declarations, 223 expansions')
+checks.append('exact Domain18 Host3 UI3 independently selected / inventory222 declarations, 223 expansions')
 destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
 for group in r.GROUPS:
     raw = fixture(group)
     parsed = r.parse_log(group, raw, 0, False)
     assert parsed['passed'] == r.GROUPS[group]['cases']
-    assert parsed['executions'] == (19 if group == 'domain' else 1)
+    assert parsed['executions'] == (2 if group == PARAM_GROUP else 1)
     checks.append(group + ' valid synthetic events, not native execution')
     rejects(group + ' nonzero exit', lambda: r.parse_log(group, raw, 65, False))
     rejects(group + ' bool exit', lambda: r.parse_log(group, raw, False, False))
@@ -69,20 +70,20 @@ for group in r.GROUPS:
     command = r.command(group, destination, Path('synthetic.xcresult'))
     assert len([a for a in command if a.startswith('-only-testing:')]) == len(r.GROUPS[group]['cases'])
     assert command.count('180') == 2 and r.GROUPS[group]['timeout'] == 480
-    assert command[command.index('-scheme') + 1] == ('ReaderDomain' if group == 'domain' else 'YueJingUI')
+    assert command[command.index('-scheme') + 1] == ('ReaderDomain' if r.GROUPS[group]['kind'] == 'domain' else 'YueJingUI')
 rejects('device destination', lambda: r.command('host-1', 'generic/platform=iOS', Path('synthetic')))
-raw = fixture('domain')
+raw = fixture(PARAM_GROUP)
 arg_line = next(line for line in raw.splitlines(keepends=True) if b'Passing ' in line)
 decorated = raw.replace(arg_line, '\u200b'.encode('utf-8') + arg_line)
-assert r.parse_log('domain', decorated, 0, False)['executions'] == 19
+assert r.parse_log(PARAM_GROUP, decorated, 0, False)['executions'] == 2
 checks.append('Swift Testing line-leading zero-width decoration preserves argument identity')
-rejects('unknown argument decoration', lambda: r.parse_log('domain', raw.replace(arg_line, b'foreign ' + arg_line), 0, False))
+rejects('unknown argument decoration', lambda: r.parse_log(PARAM_GROUP, raw.replace(arg_line, b'foreign ' + arg_line), 0, False))
 for label, altered in [('missing argument', raw.replace(arg_line, b'')),
                        ('duplicate argument', raw.replace(arg_line, arg_line * 2)),
                        ('foreign argument', raw.replace(b'false to ', b'unknown to ')),
                        ('argument after finish', raw.replace(arg_line, b'') + arg_line),
-                       ('expanded count pretending declarations', raw.replace(b'18 tests passed', b'19 tests passed'))]:
-    rejects(label, lambda: r.parse_log('domain', altered, 0, False))
+                       ('expanded count pretending declarations', raw.replace(b'1 tests passed', b'2 tests passed'))]:
+    rejects(label, lambda: r.parse_log(PARAM_GROUP, altered, 0, False))
 with patch.dict(r.SELECTED_FILES, {'ReaderDomainTests/EPUBCompatibilityTests.swift': ['foreignCase']}):
     rejects('selection identity drift', r.selection)
 
@@ -111,10 +112,12 @@ assert 'default: ' + r.SCOPE in workflow
 assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
 assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
 assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow
-assert 'run domain' in job and 'for group in host-1 host-2 host-3' in job and 'run ui' in job
-assert job.index('run_epub_freeze_validation.py gate') < job.index('Compile actual unsigned') < job.index('package-gate-epub-freeze') < job.index('verify-ipa-epub-freeze')
-assert 'continue-on-error' not in job and 'Publish verified unsigned IPA' in job and 'if: success()' in job
-checks.append('exclusive new scope routing / no fallback / release follows native gate')
+assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
+assert 'Show every selected result and the complete UI inventory\n        if: always()' in job
+assert 'run_epub_freeze_validation.py report' in job
+assert job.index('Compile actual unsigned') < job.index('run-all') < job.index('run_epub_freeze_validation.py gate') < job.index('package-gate-epub-freeze') < job.index('verify-ipa-epub-freeze')
+assert 'continue-on-error' not in job and 'Publish verified unsigned IPA' in job and 'if: success()' not in job
+checks.append('exclusive scope routing / independent device build / strict native and delivery gates separated')
 
 base_project = r.git('show', r.BASE + ':project.yml')
 old = {p: ['100644', 'blob', '1'*40] for p in r.ALLOWED}
@@ -122,7 +125,8 @@ old['Sources/ReaderDomain/untouched.swift'] = ['100644', 'blob', '3'*40]
 current = {**old, **{p: ['100644', 'blob', '2'*40] for p in r.ALLOWED}}
 head = 'a'*40
 env = dict(VALIDATION_SCOPE=r.SCOPE, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main',
-           GITHUB_RUN_ATTEMPT='1', GITHUB_REPOSITORY='wan780839395-cyber/YueJing', GITHUB_SHA=head, GITHUB_RUN_ID='12345')
+           GITHUB_RUN_ATTEMPT='1', GITHUB_REPOSITORY='wan780839395-cyber/YueJing', GITHUB_SHA=head, GITHUB_RUN_ID='12345',
+           GITHUB_EVENT_PATH=__file__, ALLOW_UNQUALIFIED_IPA='false')
 def fakegit(*args):
     if args == ('rev-parse', 'HEAD'): return head.encode()
     if args[0] in ('merge-base', 'status'): return b''
@@ -131,9 +135,9 @@ def fakegit(*args):
 # Scope fixtures isolate the boundary validator; actual missing UI coverage is disclosed below.
 with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current), \
-     patch.object(r, 'ui_reopen_contract'):
+     patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
-    assert receipt['native_tests_planned'] == 23 and 'verified_passed' not in receipt
+    assert receipt['native_tests_planned'] == 25 and 'verified_passed' not in receipt
     checks.append('scope binds exact20 paths and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
@@ -180,13 +184,25 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             r.write(folder/'counts.json', parsed)
         qualified = r.qualification()
         r.write(out/'gate.json', qualified)
-        assert r.release_gate()['verified_passed'] == 23
+        assert r.release_gate()['verified_passed'] == 25
         checks.append('synthetic complete artifact / release acceptance (native helpers mocked)')
+        for failure_path in (native/'ui-1/failure.json', out/'case-scheduling-error.json'):
+            r.write(failure_path, dict(error='synthetic failure after passing receipt'))
+            rejects('failure record overrides complete green receipts: ' + failure_path.name, r.release_gate)
+            failure_path.unlink()
+        broken = native/'ui-1/counts.json'
+        previous = broken.read_bytes()
+        broken.write_bytes(b'{invalid')
+        summary = r.summarize()
+        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 23
+        assert len(summary['ui_inventory']) == 15
+        broken.write_bytes(previous)
+        checks.append('one corrupt result is visible and does not hide remaining UI cases')
         for filename, field, value in [('selection.json', 'source_commit', 'b'*40),
                                        ('execution.json', 'timed_out', True),
                                        ('execution.json', 'run_id', '999'),
                                        ('counts.json', 'executions', 18)]:
-            path = native/'domain'/filename
+            path = native/'domain-1'/filename
             original = path.read_bytes(); data = json.loads(original); data[field] = value
             path.write_text(json.dumps(data), encoding='utf-8')
             rejects('artifact drift ' + filename + ':' + field, r.release_gate)
@@ -223,7 +239,7 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
         (artifacts/'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
     package()
     with patch.object(v, 'ROOT', out), patch.object(v, 'APP', app), patch.object(v, 'report'), \
-         patch.dict(os.environ, env), patch.object(r, 'release_gate', return_value=qualified):
+         patch.dict(os.environ, env), patch.object(r, 'complete_delivery', return_value=qualified):
         v.verify_ipa(epub_freeze=True)
         checks.append('synthetic IPA provenance and payload-byte positive control')
         package(tamper=True)
@@ -231,13 +247,222 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
         package()
         with patch.dict(os.environ, {'GITHUB_SHA': 'b'*40}):
             rejects('IPA foreign SHA', lambda: v.verify_ipa(epub_freeze=True))
-    with patch.object(v.sys, 'platform', 'darwin'), patch.object(r, 'release_gate', side_effect=ValueError('not qualified')):
-        rejects('device package cannot bypass native release gate', lambda: v.package_gate(epub_freeze=True))
+    with patch.object(v.sys, 'platform', 'darwin'), patch.object(r, 'delivery_gate', side_effect=ValueError('not qualified')):
+        rejects('device package cannot bypass explicit delivery gate', lambda: v.package_gate(epub_freeze=True))
     with patch.object(v, 'ROOT', out), patch.object(v, 'APP', app), patch.dict(os.environ, env), \
-         patch.object(r, 'release_gate', side_effect=ValueError('not qualified')):
-        rejects('IPA cannot bypass native release gate', lambda: v.verify_ipa(epub_freeze=True))
+         patch.object(r, 'complete_delivery', side_effect=ValueError('not qualified')):
+        rejects('IPA cannot bypass explicit delivery gate', lambda: v.verify_ipa(epub_freeze=True))
 with patch.object(v.sys, 'platform', 'darwin'):
     rejects('mixed device package qualification', lambda: v.package_gate(epub_freeze=True, diagnostic=True))
     rejects('mixed IPA qualification', lambda: v.verify_ipa(epub_freeze=True, epub_reading=True))
+# Exercise the production scheduler with isolated synthetic native boundaries.
+import contextlib
+import io
+import sys
+import subprocess
+with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    root = Path(temp)
+    scope = dict(scope=r.SCOPE, source_commit='a'*40, run_id='synthetic')
+    for scenario in ('mixed', 'all_pass', 'preflight', 'cancelled'):
+        out = root/scenario
+        visited = []
+        def prepare(kind, folder, source_commit, **kwargs):
+            visited.append(folder.name)
+            if scenario == 'mixed' and folder.name == 'domain-2':
+                raise ValueError('synthetic individual settings failure')
+        def stream(args, log, timeout):
+            group = log.parent.name
+            assert len([s for s in args if s.startswith('-only-testing:')]) == 1
+            assert timeout == 480
+            if scenario == 'cancelled' and group == 'host-1':
+                raise KeyboardInterrupt()
+            raw = fixture(group)
+            if scenario == 'mixed' and group in ('domain-1', 'ui-1'):
+                log.write_bytes(raw.replace(b'passed', b'failed').replace(b'TEST SUCCEEDED', b'TEST FAILED'))
+                return 65, False
+            if scenario == 'mixed' and group == 'host-1':
+                log.write_bytes(b'synthetic timeout')
+                return -9, True
+            log.write_bytes(raw)
+            return 0, False
+        def preflight(*args, **kwargs):
+            if scenario == 'preflight':
+                raise ValueError('synthetic common toolchain unavailable')
+        with patch.object(r, 'OUT', out), patch.object(r, 'NATIVE_OUT', out/'epub-freeze'), \
+             patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(out/'synthetic-step-summary.md')}), \
+             patch.object(r, 'live_scope', return_value=scope), \
+             patch.object(r.compat, 'validate_toolchain_and_dependencies', side_effect=preflight), \
+             patch.object(r.compat, 'validate_destination'), \
+             patch.object(r.reading, 'prepare_group_settings', side_effect=prepare), \
+             patch.object(r, 'stream_case', side_effect=stream), \
+             patch.object(r.paging, 'require_xcresult'), \
+             patch.object(r.subprocess, 'check_output', return_value=json.dumps(result_tree).encode()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            if scenario == 'preflight':
+                rejects('common prerequisite fails once without running tests', lambda: r.run_all(destination))
+                assert not visited
+            elif scenario == 'cancelled':
+                try:
+                    r.run_all(destination)
+                except KeyboardInterrupt:
+                    pass
+                else:
+                    raise AssertionError('Cancellation swallowed')
+                assert visited[-1] == 'host-1' and 'ui-1' not in visited
+                checks.append('cancellation stops scheduling without falsely skipping/passing remaining cases')
+            else:
+                assert r.run_all(destination) == (scenario == 'all_pass')
+                assert visited == list(r.GROUPS)
+                checks.append(scenario + ': production scheduler attempted every selected identity once')
+            report = r.summarize(publish=True)
+            assert len(report['cases']) == 24 and len(report['ui_inventory']) == 15
+            assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 12
+            assert {x['case'] for x in report['ui_inventory']} == set(r.inventory.expected_names('YueJingUITests') + r.inventory.expected_names('YueJingEPUBUITests'))
+            if scenario == 'mixed':
+                assert report['counts'] == dict(passed=20, failed=2, timed_out=1, error=0, blocked=1, not_run=0)
+                assert all(x['status'] == 'passed' for x in report['cases'] if x['group'] in ('ui-2', 'ui-3'))
+                rejects('failed cases cannot qualify even after later cases pass', r.qualification)
+                checks.append('first/middle/UI failures and timeout continue; failure statuses retained')
+            elif scenario == 'all_pass':
+                assert report['counts']['passed'] == 24
+                assert sum(x['planned_executions'] for x in report['cases']) == 25
+            elif scenario == 'preflight':
+                assert report['counts']['blocked'] == 24 and report['counts']['passed'] == 0
+            else:
+                assert report['counts']['not_run'] == 6
+            markdown = (out/'case-results.md').read_text('utf-8')
+            assert all(x['case'] in markdown for x in report['ui_inventory'])
+            checks.append(scenario + ': complete UI display and truthful selected/unselected states')
+            rejects('existing case evidence cannot be overwritten/retried', lambda: r.run_all(destination)) if scenario != 'preflight' else None
+
+    # Real local process exits/timeouts; these are Python processes, NOT Swift tests.
+    assert r.stream_case([sys.executable, '-c', 'print("ok")'], root/'success.log', 10) == (0, False)
+    assert r.stream_case([sys.executable, '-c', 'raise SystemExit(7)'], root/'failure.log', 10) == (7, False)
+    code, expired = r.stream_case([sys.executable, '-c', 'import time; time.sleep(20)'], root/'timeout.log', 0.2)
+    assert expired and code != 0
+    assert r.stream_case([sys.executable, '-c', 'print("after timeout")'], root/'after.log', 10) == (0, False)
+    checks.append('real local child success/nonzero/timeout followed by next process; no pipe hang')
+# Dependency expressions are evaluated against synthetic step outcomes, not global success.
+import re
+blocks = {re.search(r'\n        id: (\w+)', block)[1]: block for block in job.split('      - name: ')
+          if re.search(r'\n        id: (\w+)', block)}
+def admitted(step, outcomes, cancelled=False):
+    expression = re.search(r'\n        if: \$\{\{ (.+) \}\}', blocks[step])[1]
+    expression = expression.replace('!cancelled()', str(not cancelled)).replace('&&', ' and ')
+    expression = re.sub(r"steps\.(\w+)\.outcome", lambda m: repr(outcomes.get(m[1], 'skipped')), expression)
+    return eval(expression, {'__builtins__': {}}, {})
+good = dict(scope='success', toolchain='success', dependencies='success', device='success',
+            simulator='success', boot='success', tests='failure', native_gate='failure')
+assert admitted('device', good) and admitted('package', good) and admitted('simulator_linkage', good)
+checks.append('UI/test failure does not block device, package or simulator linkage integrity validation')
+assert admitted('simulator', {**good, 'device': 'failure'}) and admitted('tests', {**good, 'device': 'failure'})
+checks.append('device failure does not block independent simulator/tests')
+for prerequisite in ('scope', 'toolchain', 'dependencies'):
+    assert not admitted('package', {**good, prerequisite: 'failure'})
+    assert not admitted('device', {**good, prerequisite: 'failure'})
+    checks.append('shared prerequisite failure blocks delivery: ' + prerequisite)
+assert not admitted('package', good, cancelled=True)
+assert "!cancelled() && steps.package.outcome == 'success'" in job
+assert 'allow_unqualified_ipa:' in workflow and 'type: boolean\n        default: false' in workflow
+checks.append('cancelled package/upload excluded; diagnostic permission defaults false')
+
+with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    out = Path(temp)
+    event = out/'event.json'
+    with patch.dict(os.environ, {'GITHUB_EVENT_PATH': str(event), 'ALLOW_UNQUALIFIED_IPA': 'false'}):
+        event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE))))
+        assert r.dispatch_permission() is False
+        checks.append('missing explicit dispatch permission defaults false')
+        with patch.dict(os.environ, {'ALLOW_UNQUALIFIED_IPA': 'true'}):
+            rejects('environment true cannot forge omitted dispatch permission', r.dispatch_permission)
+            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, allow_unqualified_ipa=True))))
+            assert r.dispatch_permission() is True
+            checks.append('explicit true dispatch and environment agree')
+        rejects('dispatch true cannot be changed to environment false', r.dispatch_permission)
+        event.write_text(json.dumps(dict(inputs=dict(validation_scope='full', allow_unqualified_ipa=False))))
+        rejects('diagnostic permission cannot cross scope', r.dispatch_permission)
+    frozen = out/'frozen.json'
+    frozen.write_text(json.dumps(receipt))
+    with patch.object(r, 'SCOPE_JSON', frozen), patch.object(r, 'scope_receipt', return_value={**receipt, 'allow_unqualified_ipa': True}):
+        rejects('frozen false permission cannot be changed to true after scope gate', r.live_scope)
+    native = out/'epub-freeze'; native.mkdir()
+    scope = {**receipt, 'allow_unqualified_ipa': True}
+    for name in ('toolchain.log', 'xcodegen.log', 'dependency-resolution.json', 'app-build.log', 'epub-freeze-scope.json'):
+        (out/name).write_text('synthetic')
+    (out/'app-build-exit-code.txt').write_text('0')
+    group = 'domain-1'; spec = r.GROUPS[group]
+    folder = native/group; folder.mkdir()
+    want = r.provenance(group, destination, folder/(spec['target']+'.xcresult'), scope)
+    r.write(folder/'selection.json', want)
+    r.write(folder/'execution.json', dict(**want, native_exit=0, timed_out=False))
+    (folder/(spec['target']+'.log')).write_bytes(fixture(group))
+    with patch.object(r, 'OUT', out), patch.object(r, 'NATIVE_OUT', native), \
+         patch.object(r, 'PACKAGE_JSON', out/'package.json'), patch.object(r, 'live_scope', return_value=scope), \
+         patch.object(r.compat, 'validate_toolchain_and_dependencies'), patch.object(r, 'validate_linkage', return_value='c'*64), \
+         patch.object(r, 'release_gate', side_effect=ValueError('UI failed')):
+        result = r.delivery_gate()
+        assert result['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY' and result['coverage'] == 'UI_NOT_QUALIFIED'
+        assert result['verified_passed'] is None and result['native_tests_executed_this_run'] is None
+        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 23
+        assert len(result['cases']) == 24 and result['evidence_sha256']
+        assert not (out/'package.json').exists()
+        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/25 or premature IPA receipt')
+        with patch.object(r, 'live_scope', return_value={**scope, 'allow_unqualified_ipa': False}):
+            rejects('UI failure without explicit diagnostic permission refuses delivery', r.delivery_gate)
+        with patch.object(r, 'live_scope', side_effect=ValueError('source mismatch')):
+            rejects('explicit permission cannot bypass source integrity', r.delivery_gate)
+        with patch.object(r, 'live_scope', side_effect=[scope, {**scope, 'source_commit': 'b'*40}]):
+            rejects('source mutation during native qualification cannot be downgraded', r.delivery_gate)
+        with patch.object(r, 'validate_linkage', side_effect=ValueError('device linkage failed')):
+            rejects('explicit permission cannot bypass device WebKit integrity', r.delivery_gate)
+        with patch.object(r.compat, 'validate_toolchain_and_dependencies', side_effect=ValueError('dependency mismatch')):
+            rejects('explicit permission cannot bypass common toolchain/dependency integrity', r.delivery_gate)
+        (out/'app-build-exit-code.txt').write_text('65')
+        rejects('explicit permission cannot bypass failed device build', r.delivery_gate)
+        (out/'app-build-exit-code.txt').write_text('0')
+        rejects('explicit permission cannot bypass missing device integrity receipt', lambda: r.complete_delivery({'ipa_sha256': 'a'*64}, 2))
+        assert not (out/'package.json').exists()
+        with patch.object(r, 'release_gate', return_value=qualified):
+            formal = r.delivery_gate()
+            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 25
+            checks.append('formal delivery still obtains strict release_gate qualification')
+        artifacts = out/'artifacts'; artifacts.mkdir()
+        app = out/'YueJing.app'; app.mkdir()
+        (app/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString=r.VERSION, CFBundleVersion=r.BUILD)))
+        (app/'Assets.car').write_bytes(b'synthetic icon')
+        (app/'YueJing').write_bytes(b'synthetic device image')
+        ipa = artifacts/f'YueJing-{r.VERSION}.ipa'
+        # Reuse the real synthetic ZIP writer; no native build is claimed.
+        package()
+        r.write(out/'app-dependency-gate.json', dict(source_commit=head, run_id=scope['run_id'], run_attempt='1',
+                signing='unsigned', actual_images=[dict(binary='YueJing', sha256=r.sha(app/'YueJing'))]))
+        with patch.object(v, 'ROOT', out), patch.object(v, 'APP', app), patch.object(v, 'report'), patch.dict(os.environ, env):
+            v.verify_ipa(epub_freeze=True)
+            saved = r.load(out/'package.json')
+            assert saved['ipa_integrity'] == 'passed' and saved['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY'
+            assert saved['source_commit'] == head and saved['run_id'] == scope['run_id']
+            assert saved['ipa_sha256'] == r.sha(ipa) and saved['verified_passed'] is None
+            checks.append('explicit diagnostic package receipt emitted only after actual synthetic IPA byte verification')
+            (out/'package.json').unlink()
+            package(tamper=True)
+            rejects('explicit true still rejects corrupt IPA payload', lambda: v.verify_ipa(epub_freeze=True))
+            assert not (out/'package.json').exists()
+            package()
+            (app/'YueJing').write_bytes(b'changed image')
+            package()
+            rejects('matching ZIP cannot conceal changed device dependency image', lambda: v.verify_ipa(epub_freeze=True))
+            assert not (out/'package.json').exists()
+    linkage = out/'webkit-device-linkage'; linkage.mkdir()
+    (linkage/'image').write_bytes((app/'YueJing').read_bytes())
+    link_record = dict(source_commit=head, run_id=scope['run_id'], run_attempt='1', passed=True, errors=[],
+                       binaries=[dict(path='YueJing', evidence='image', passed=True, nm_exit=0, sha256=r.sha(app/'YueJing'))])
+    r.write(linkage/'verification.json', link_record)
+    with patch.object(r, 'OUT', out), patch.object(v, 'APP', app):
+        assert r.validate_linkage('device', scope) == r.sha(linkage/'verification.json')
+        checks.append('device linkage receipt binds source/run and actual/evidence image hashes')
+        rejects('linkage receipt cannot be reused across runs', lambda: r.validate_linkage('device', {**scope, 'run_id': '999'}))
+        (linkage/'image').write_bytes(b'changed linkage evidence')
+        rejects('linkage evidence hash drift rejected', lambda: r.validate_linkage('device', scope))
+
 print(json.dumps(dict(offline_checks_passed=len(checks), checks=checks, native_tests_executed=0,
                      release_source_ready=not blockers, source_blockers=blockers), indent=2))

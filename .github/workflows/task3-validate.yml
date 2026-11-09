@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB reopen/jump targeted22 (23 executions); historical modes remain source-bound
+        description: EPUB targeted24 (25 executions); continue independent cases and report every UI test
         required: true
         type: choice
-        default: epub-reopen-22
+        default: epub-reopen-24
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,14 +17,19 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-reopen-22
+          - epub-reopen-24
+      allow_unqualified_ipa:
+        description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-22' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1130,7 +1135,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
+    if: ${{ inputs.validation_scope == 'epub-reopen-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1138,6 +1143,7 @@ jobs:
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
       VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -1149,6 +1155,7 @@ jobs:
           fetch-depth: 0
 
       - name: Freeze exact release boundary and check selection contracts
+        id: scope
         run: |
           set -euo pipefail
           mkdir -p artifacts/task3
@@ -1156,6 +1163,7 @@ jobs:
           python3 -B scripts/run_epub_freeze_validation.py scope
 
       - name: Verify pinned toolchain and generate project
+        id: toolchain
         timeout-minutes: 5
         run: |
           set -euo pipefail
@@ -1176,14 +1184,35 @@ jobs:
           _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
 
       - name: Resolve and verify fixed dependencies
+        id: dependencies
         run: |
           set -euo pipefail
           xcodebuild -resolvePackageDependencies -project YueJing.xcodeproj -scheme YueJing \
             -clonedSourcePackagesDirPath build/SourcePackages 2>&1 | tee artifacts/task3/dependency-resolution.log
           python3 -B scripts/validate_task3.py resolved
 
+      - name: Compile actual unsigned iPhoneOS arm64 Release
+        id: device
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
       - name: Select installed arm64 simulator and verify test settings
-        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
+        id: simulator
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > artifacts/task3/devices.json
@@ -1192,7 +1221,8 @@ jobs:
           python3 -B scripts/validate_task3.py settings
 
       - name: Boot selected simulator once with original readiness budget
-        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
+        id: boot
+        if: ${{ !cancelled() && steps.simulator.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 -B - <<'PY'
@@ -1217,58 +1247,39 @@ jobs:
           assert code == 0 and not timed_out, 'Selected simulator did not become ready'
           PY
 
-      - name: Run 18 affected Domain declarations including both Bool arguments
+      - name: Run all 24 selected cases independently and continue after individual failures
+        id: tests
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
         run: |
           set -euo pipefail
-          python3 -u -B scripts/run_epub_freeze_validation.py run domain \
+          python3 -u -B scripts/run_epub_freeze_validation.py run-all \
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
 
-      - name: Run 3 affected Host cases independently with unchanged budgets
+      - name: Show every selected result and the complete UI inventory
+        if: always()
         run: |
           set -euo pipefail
-          for group in host-1 host-2 host-3; do
-            python3 -u -B scripts/run_epub_freeze_validation.py run "$group" \
-              --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
-          done
-
-      - name: Run only 1 directory and cross-chapter UI case
-        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
-        run: |
-          set -euo pipefail
-          python3 -u -B scripts/run_epub_freeze_validation.py run ui \
-            --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+          python3 -B scripts/run_epub_freeze_validation.py report
 
       - name: Verify actual simulator WebKit linkage
-        if: ${{ inputs.validation_scope == 'epub-reopen-22' }}
+        id: simulator_linkage
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 -B scripts/check_webkit_linkage.py \
             --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
             --output artifacts/task3/webkit-simulator-linkage
 
-      - name: Require all selected native executions before formal device release
+      - name: Require all selected native executions for strict qualification
+        id: native_gate
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 -B scripts/run_epub_freeze_validation.py gate
 
-      - name: Compile actual unsigned iPhoneOS arm64 Release
-        run: |
-          set -uo pipefail
-          set +e
-          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' \
-            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
-            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            -resultBundlePath artifacts/task3/AppBuild.xcresult \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-            build 2>&1 | tee artifacts/task3/app-build.log
-          pipeline=("${PIPESTATUS[@]}")
-          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
-          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
-          exit "${pipeline[1]}"
-
       - name: Verify device dependency graph and every IPA payload byte
+        id: package
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.device.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 -B scripts/check_webkit_linkage.py \
@@ -1277,6 +1288,28 @@ jobs:
           python3 -B scripts/validate_task3.py package-gate-epub-freeze 2>&1 | tee artifacts/task3/dependency-gate.log
           python3 -B scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
           python3 -B scripts/validate_task3.py verify-ipa-epub-freeze 2>&1 | tee artifacts/task3/ipa-verification.log
+
+      - name: Summarize independent tests device build and package qualification
+        id: final_summary
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          out = Path('artifacts/task3')
+          out.mkdir(parents=True, exist_ok=True)
+          outcomes = {key: value['outcome'] for key, value in json.loads(os.environ['STEP_RESULTS']).items()}
+          receipt = out / 'epub-freeze-package.json'
+          package = json.loads(receipt.read_text()) if outcomes.get('package') == 'success' and receipt.is_file() else None
+          result = dict(source_commit=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                        run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], steps=outcomes,
+                        package_qualification=package['qualification'] if package else 'NOT_DELIVERABLE')
+          (out / 'delivery-summary.json').write_text(json.dumps(result, indent=2))
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as stream:
+              stream.write('\n## Independent build / test / package outcomes\n\n```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
 
       - name: Preserve targeted validation and build evidence including failures
         if: always()
@@ -1288,7 +1321,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish verified unsigned IPA with explicit qualification receipt
-        if: success()
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
@@ -1298,7 +1331,9 @@ jobs:
             artifacts/SHA256SUMS
             artifacts/task3/app-dependency-gate.json
             artifacts/task3/ipa-verification.json
-            artifacts/task3/epub-freeze-gate.json
+            artifacts/task3/epub-freeze-package.json
+            artifacts/task3/case-results.json
+            artifacts/task3/delivery-summary.json
             artifacts/task3/epub-freeze-scope.json
           retention-days: 3
           if-no-files-found: error

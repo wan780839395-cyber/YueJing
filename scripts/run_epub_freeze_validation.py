@@ -1,6 +1,6 @@
-"""EPUB reopen/jump release: Domain18 + Host3 + UI1 declarations, 23 executions.
+"""EPUB reopen/jump release: Domain18 + Host3 + UI3 declarations, 25 executions.
 
-No diagnostic fallback. Existing device dependency/IPA byte gates remain mandatory.
+Diagnostic delivery requires an explicit dispatch opt-in; strict release stays separate.
 Retries use a new committed candidate/new dispatch, never overwrite failed evidence.
 """
 import argparse
@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import signal
 
 import audit_native_case_events as audit
 import run_epub_compat_validation as compat
@@ -20,14 +21,15 @@ import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
 BASE = "7888b00fe13220775d7bd53045858cda298b08b6"
-SCOPE = "epub-reopen-22"
+SCOPE = "epub-reopen-24"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
 VERSION, BUILD = "0.2.6", "8"
-TOTAL, EXECUTIONS = 22, 23
-QUALIFICATION = "EPUB_REOPEN_22_TARGETED_NATIVE"
+TOTAL, EXECUTIONS = 24, 25
+QUALIFICATION = "EPUB_REOPEN_24_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
+PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
 NEW = frozenset()
 ALLOWED = frozenset({
@@ -71,14 +73,17 @@ SELECTED_FILES = {
         "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor",
         "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks"],
     "YueJingEPUBUITests/EPUBFlowUITests.swift": [
-        "testEPUBShelfCoverAndDirectoryCrossChapterNavigation"],
+        "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
+        "testEPUBProgressSurvivesExitAndProcessRelaunch",
+        "testEPUBTypographyNoCoverFallbackAndTXTIsolation"],
 }
 GROUPS = {}
 for _kind, _target in (("domain", "ReaderDomainTests"), ("host", "YueJingHostTests"), ("ui", "YueJingEPUBUITests")):
     _pairs = [(rel, n) for rel, names in SELECTED_FILES.items() if rel.startswith(_target + "/") for n in names]
-    # Separate Host invocations isolate launch failures without increasing 480s/180s budgets.
-    for _index, _chunk in enumerate([_pairs] if _kind != "host" else [[p] for p in _pairs], 1):
-        _key = _kind if _kind != "host" else "host-" + str(_index)
+    # Every declaration gets independent evidence/process admission. A failed case
+    # must not consume the remaining cases' opportunity to execute.
+    for _index, _chunk in enumerate([[p] for p in _pairs], 1):
+        _key = _kind + "-" + str(_index)
         GROUPS[_key] = dict(kind=_kind, target=_target, timeout=480, pairs=_chunk, cases=[n for _, n in _chunk])
 del _kind, _target, _pairs, _index, _chunk, _key
 require, load, write, sha = v.require, compat.load_json, compat.write_new, compat.digest_path
@@ -92,7 +97,10 @@ def selection():
         actual = inventory.source_names(rel, (ROOT / "Tests" / rel).read_text(encoding="utf-8"))
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
-    require(len(names) == len(set(names)) == TOTAL and len(GROUPS["domain"]["cases"]) == 18, "Expected Domain18/Host3/UI1")
+    require(len(names) == len(set(names)) == TOTAL and
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == 18 and
+            SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] ==
+            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain18/Host3/all EPUB UI3")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -107,11 +115,24 @@ def ui_reopen_contract(text):
             "Selected UI case lacks same-process exit/reopen coverage; do not substitute process relaunch")
 
 
+def dispatch_permission():
+    """Bind the job environment to the original workflow_dispatch payload."""
+    event = load(Path(os.environ["GITHUB_EVENT_PATH"]))
+    inputs = event.get("inputs", {})
+    value = inputs.get("allow_unqualified_ipa", False)
+    require(type(value) is bool or value in ("true", "false"), "Invalid diagnostic permission")
+    allowed = value is True or value == "true"
+    require(inputs.get("validation_scope") == SCOPE and
+            os.environ.get("ALLOW_UNQUALIFIED_IPA") == ("true" if allowed else "false"),
+            "Dispatch permission/scope differs from environment")
+    return allowed
+
+
 def scope_receipt():
     env = os.environ
     require(env.get("VALIDATION_SCOPE") == SCOPE and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
             and env.get("GITHUB_REF") == "refs/heads/main" and env.get("GITHUB_RUN_ATTEMPT") == "1"
-            and env.get("GITHUB_REPOSITORY") == "wan780839395-cyber/YueJing", "Unapproved dispatch identity; diagnostic disabled")
+            and env.get("GITHUB_REPOSITORY") == "wan780839395-cyber/YueJing", "Unapproved dispatch identity")
     head = git("rev-parse", "HEAD").decode().strip()
     require(re.fullmatch(r"[0-9a-f]{40}", head) and head == env.get("GITHUB_SHA") and head != BASE, "Candidate/source mismatch")
     require(re.fullmatch(r"[1-9][0-9]*", env.get("GITHUB_RUN_ID", "")), "Invalid run identity")
@@ -129,6 +150,7 @@ def scope_receipt():
     ui_reopen_contract((ROOT / "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift").read_text(encoding="utf-8"))
     return dict(scope=SCOPE, source_commit=head, baseline_commit=BASE,
                 run_id=env["GITHUB_RUN_ID"], run_attempt="1", version=VERSION, build=BUILD,
+                allow_unqualified_ipa=dispatch_permission(), dispatch_event_sha256=sha(Path(env["GITHUB_EVENT_PATH"])),
                 changed_paths=sorted(changed), selected=selection(), selected_declarations=TOTAL,
                 native_tests_planned=EXECUTIONS, full_inventory_declared=222, full_inventory_executions=223,
                 files=v.candidate_files(), approved_files={p: sha(ROOT / p) for p in sorted(ALLOWED)},
@@ -228,7 +250,7 @@ def parameter_result(document):
 
 
 def parameter_evidence(group, folder, bundle, *, export=False):
-    if group != "domain":
+    if not any(name in inventory.PARAMETERIZED for name in GROUPS[group]["cases"]):
         return None
     path = folder / "xcresult-tests.json"
     if export:
@@ -249,12 +271,41 @@ def provenance(group, destination, bundle, scope):
                 group=group, target=GROUPS[group]["target"], destination=destination,
                 expected_cases=GROUPS[group]["cases"], command=command(group, destination, bundle),
                 timeout_seconds=GROUPS[group]["timeout"], case_timeout_seconds=180)
+def stream_case(args, path, timeout_seconds):
+    """Write raw output directly: a child keeping a PIPE open cannot hang the scheduler."""
+    timed_out = False
+    with path.open("x", encoding="utf-8") as stream:
+        process = subprocess.Popen(args, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT,
+                                   start_new_session=os.name == "posix")
+        def stop():
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                elif process.poll() is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            try:
+                code = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stop()
+                code = process.wait(timeout=10)
+        finally:
+            # Also clean descendants left behind by a failed/cancelled command.
+            stop()
+            process.wait(timeout=10)
+    return code, timed_out
 
 
-def run_group(group, destination):
-    scope = live_scope()
-    compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
-    compat.validate_destination(destination, OUT)
+
+
+def run_group(group, destination, *, checked_scope=None):
+    scope = checked_scope if checked_scope is not None else live_scope()
+    if checked_scope is None:
+        compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
+        compat.validate_destination(destination, OUT)
     folder = NATIVE_OUT / group
     require(not folder.exists(), "Existing group evidence; use a fresh dispatch")
     folder.mkdir(parents=True)
@@ -264,7 +315,7 @@ def run_group(group, destination):
     write(folder / "selection.json", want)
     reading.prepare_group_settings(kind, folder, scope["source_commit"], root=ROOT, out=OUT)
     log = folder / (target + ".log")
-    code, timed_out = ui.stream_native(want["command"], log, GROUPS[group]["timeout"])
+    code, timed_out = stream_case(want["command"], log, GROUPS[group]["timeout"])
     write(folder / "execution.json", dict(**want, native_exit=code, timed_out=timed_out))
     parsed = parse_log(group, log.read_bytes(), code, timed_out)
     paging.require_xcresult(bundle)
@@ -274,9 +325,131 @@ def run_group(group, destination):
     print(json.dumps(parsed, indent=2))
 
 
+def run_all(destination):
+    """Continue independent cases, never convert failed evidence into release success."""
+    require(not NATIVE_OUT.exists(), "Existing native evidence; do not retry/overwrite cases")
+    OUT.mkdir(parents=True, exist_ok=True)
+    try:
+        scope = live_scope()
+        # Common prerequisites are checked once. A broken environment is not 24
+        # independent test failures, and must not trigger 24 repeated tool probes.
+        compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
+        compat.validate_destination(destination, OUT)
+        NATIVE_OUT.mkdir()
+        summarize()
+        for group in GROUPS:
+            require(live_scope() == scope, "Source/run changed during case scheduling")
+            try:
+                print("Running " + group + ": " + GROUPS[group]["cases"][0], flush=True)
+                run_group(group, destination, checked_scope=scope)
+            except Exception as error:
+                # Includes preparation, compilation, assertion, timeout and evidence
+                # failures. Cancellation/SystemExit are NOT swallowed.
+                folder = NATIVE_OUT / group
+                folder.mkdir(exist_ok=True)
+                write(folder / "failure.json", dict(group=group, error_type=type(error).__name__,
+                      error=str(error), source_commit=scope["source_commit"], run_id=scope["run_id"]))
+            finally:
+                summarize()
+        result = summarize()
+        return all(row["status"] == "passed" for row in result["cases"])
+    except Exception as error:
+        write(OUT / "case-scheduling-error.json", dict(error_type=type(error).__name__, error=str(error)))
+        raise
+    finally:
+        summarize()
+
+
+def summarize(*, publish=False):
+    """Diagnostic display only; qualification() independently revalidates every case."""
+    def optional(path):
+        if not path.exists():
+            return None
+        require(path.is_file() and not path.is_symlink(), "Invalid report evidence path")
+        return load(path)
+
+    rows = []
+    for group, spec in GROUPS.items():
+        folder = NATIVE_OUT / group
+        case = spec["cases"][0]
+        row = dict(group=group, target=spec["target"], case=case, kind=spec["kind"],
+                   planned_executions=len(inventory.PARAMETERIZED.get(case, {}).get("values", [None])),
+                   status="not_run", reason="尚未开始；检查前置准备、调度或取消状态")
+        try:
+            execution = optional(folder / "execution.json")
+            failure = optional(folder / "failure.json")
+            counts = optional(folder / "counts.json")
+            if failure is not None:
+                row.update(status="error", reason=failure["error"])
+            if execution is not None:
+                row.update(native_exit=execution["native_exit"], timed_out=execution["timed_out"])
+                if execution["timed_out"]:
+                    row.update(status="timed_out", reason="执行超时，未放宽预算；继续下一项")
+                elif execution["native_exit"] != 0:
+                    row.update(status="failed", reason="原生命令失败；查看该项日志（含编译/断言失败）")
+                elif counts is not None and failure is None:
+                    parsed = parse_log(group, (folder / (spec["target"] + ".log")).read_bytes(), 0, False)
+                    parsed["parameter_xcresult"] = None
+                    if case in inventory.PARAMETERIZED:
+                        raw = (folder / "xcresult-tests.json").read_bytes()
+                        parsed["parameter_xcresult"] = dict(**parameter_result(json.loads(raw)),
+                                                            raw_sha256=compat.digest_bytes(raw))
+                    require(counts == parsed, "Summary counts differ from raw events")
+                    row.update(status="passed", reason="原始事件与通过回执一致；正式资格另行核验")
+                elif failure is None:
+                    row.update(status="error", reason="执行已结束但缺少合格结果回执")
+            elif failure is not None:
+                row.update(status="blocked", reason=failure["error"])
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            row.update(status="error", reason="结果证据无效：" + str(error))
+        rows.append(row)
+
+    scheduling = optional(OUT / "case-scheduling-error.json")
+    if scheduling:
+        for row in rows:
+            if row["status"] == "not_run":
+                row.update(status="blocked", reason=scheduling["error"])
+    selected_ui = {row["case"]: row for row in rows if row["kind"] == "ui"}
+    ui_rows = []
+    for target in ("YueJingEPUBUITests", "YueJingUITests"):
+        for case in inventory.expected_names(target):
+            ui_rows.append(selected_ui.get(case, dict(target=target, case=case, status="not_selected",
+                reason="本轮未选择：独立 TXT/通用阅读 UI 范围，未执行、不计通过")))
+    counts = {status: sum(row["status"] == status for row in rows)
+              for status in ("passed", "failed", "timed_out", "error", "blocked", "not_run")}
+    report = dict(scope=SCOPE, source_commit=os.environ.get("GITHUB_SHA"), run_id=os.environ.get("GITHUB_RUN_ID"),
+                  selected_declarations=TOTAL, planned_executions=EXECUTIONS, counts=counts,
+                  cases=rows, ui_inventory=ui_rows, scheduling_error=scheduling,
+                  qualification="DISPLAY_ONLY_NOT_RELEASE_QUALIFICATION")
+    def cell(value):
+        return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("\n", " ").replace("\r", " ")
+    labels = dict(passed="通过", failed="失败", timed_out="超时", error="证据/执行错误", blocked="阻塞", not_run="未执行", not_selected="未选择")
+    lines = ["## EPUB 定向测试逐项结果", "", f"计划：{TOTAL} 个测试身份 / {EXECUTIONS} 次执行；失败不终止后续用例。",
+             "汇总仅用于展示，存在失败/超时/阻塞/未执行时不得获得正式 IPA 资格。", "",
+             "| 项目 | 状态 | 说明 |", "|---|---|---|"]
+    for row in rows:
+        lines.append(f"| {cell(row['group'] + ': ' + row['case'])} | {labels[row['status']]} | {cell(row['reason'])} |")
+    lines += ["", "### 完整 UI 清单（含未选择项目）", "", "| Target / 用例 | 状态 | 说明 |", "|---|---|---|"]
+    for row in ui_rows:
+        lines.append(f"| {cell(row['target'] + '/' + row['case'])} | {labels[row['status']]} | {cell(row['reason'])} |")
+    if scheduling:
+        lines += ["", "公共调度阻塞：" + cell(scheduling["error"])]
+    markdown = "\n".join(lines) + "\n"
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "case-results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (OUT / "case-results.md").write_text(markdown, encoding="utf-8")
+    if publish and os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as file:
+            file.write(markdown)
+    return report
+
+
 def qualification():
     scope = live_scope()
     require(scope["scope"] == SCOPE, "Diagnostic fallback disabled")
+    require(not (OUT / "case-scheduling-error.json").exists() and
+            not any((NATIVE_OUT / group / "failure.json").exists() for group in GROUPS),
+            "Failed/blocked cases cannot qualify even if a counts receipt exists")
     require(not (OUT / "native-test-gate.json").exists() and not (OUT / "epub-reading-gate.json").exists(), "Mixed qualification")
     compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
     sim = load(OUT / "simulator-selection.json")
@@ -323,6 +496,109 @@ def release_gate():
     return result
 
 
+def validate_linkage(kind, scope):
+    folder = OUT / ("webkit-" + kind + "-linkage")
+    record = load(folder / "verification.json")
+    require(all(record.get(key) == scope[key] for key in ("source_commit", "run_id", "run_attempt")) and
+            record.get("passed") is True and not record.get("errors") and record.get("binaries"),
+            "Missing same-run successful " + kind + " WebKit linkage")
+    app = v.APP if kind == "device" else ROOT / "build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app"
+    for binary in record["binaries"]:
+        path = app / binary["path"]
+        evidence = folder / binary["evidence"]
+        require(path.resolve().is_relative_to(app.resolve()) and evidence.resolve().is_relative_to(folder.resolve())
+                and binary.get("passed") is True and binary.get("nm_exit") == 0
+                and sha(path) == sha(evidence) == binary["sha256"], "WebKit binary evidence drift")
+    return sha(folder / "verification.json")
+
+
+def delivery_gate():
+    """Admission only, not IPA success. Source/common prerequisites never fall back."""
+    scope = live_scope()
+    compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
+    require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
+    device_linkage = validate_linkage("device", scope)
+    try:
+        native = release_gate()
+        validate_linkage("simulator", scope)
+        reason = None
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        require(scope.get("allow_unqualified_ipa") is True, "Native qualification failed; explicit diagnostic permission required")
+        native, reason = None, str(error)
+    # Recheck outside the fallback: a source/run mutation can never be downgraded.
+    require(live_scope() == scope, "Source/run changed during qualification")
+    report = summarize()
+    evidence = {}
+    rows = []
+    for row in report["cases"]:
+        row = dict(row)
+        folder = NATIVE_OUT / row["group"]
+        if folder.exists():
+            require(not folder.is_symlink(), "Symlink native evidence")
+            for path in sorted(folder.rglob("*")):
+                require(not path.is_symlink(), "Symlink native evidence")
+                if path.is_file():
+                    evidence[path.relative_to(OUT).as_posix()] = sha(path)
+        # Only strict raw success chains supply exact expansion counts. Failed or
+        # interrupted commands may have executed some tests: unknown is NOT zero.
+        executed = None
+        try:
+            spec = GROUPS[row["group"]]
+            bundle = folder / (spec["target"] + ".xcresult")
+            execution = load(folder / "execution.json")
+            want = provenance(row["group"], execution["destination"], bundle, scope)
+            require(execution == dict(**want, native_exit=0, timed_out=False) and
+                    load(folder / "selection.json") == want, "Unbound case evidence")
+            parsed = parse_log(row["group"], (folder / (spec["target"] + ".log")).read_bytes(),
+                               execution["native_exit"], execution["timed_out"])
+            executed = parsed["executions"]
+        except (ValueError, OSError, KeyError, TypeError):
+            pass
+        row["executed_count"] = executed
+        row["execution_count_status"] = "known" if executed is not None else "unknown"
+        rows.append(row)
+    known = sum(row["executed_count"] or 0 for row in rows)
+    unknown = [row["group"] for row in rows if row["executed_count"] is None]
+    for name in ("toolchain.log", "xcodegen.log", "dependency-resolution.json", "app-build.log",
+                 "app-build-exit-code.txt", "epub-freeze-scope.json"):
+        path = OUT / name
+        require(path.is_file() and not path.is_symlink(), "Missing common evidence: " + name)
+        evidence[name] = sha(path)
+    for name in ("simulator-selection.json", "simulator-boot.json", "case-scheduling-error.json",
+                 "epub-freeze-gate.json", "case-results.json"):
+        path = OUT / name
+        if path.exists():
+            require(path.is_file() and not path.is_symlink(), "Invalid supporting evidence: " + name)
+            evidence[name] = sha(path)
+    require(live_scope() == scope, "Source/run changed while collecting package evidence")
+    return dict(**scope, qualification=QUALIFICATION if native else "DEVICE_DIAGNOSTIC_ONLY",
+                coverage="EPUB_TARGETED_NOT_FULL" if native else "UI_NOT_QUALIFIED",
+                strict_native_qualification="passed" if native else "failed",
+                diagnostic_reason=reason, verified_passed=EXECUTIONS if native else None,
+                native_tests_executed_this_run=EXECUTIONS if native else (None if unknown else known),
+                known_executions=known, unknown_execution_groups=unknown, cases=rows,
+                case_results_qualification=report["qualification"], evidence_sha256=evidence,
+                device_linkage_sha256=device_linkage)
+
+
+def complete_delivery(manifest, packaged_files):
+    """Called ONLY after device gates and every IPA byte have passed."""
+    result = delivery_gate()
+    dependency = load(OUT / "app-dependency-gate.json")
+    require(all(dependency.get(key) == result[key] for key in ("source_commit", "run_id", "run_attempt")) and dependency["signing"] == "unsigned",
+            "Device dependency receipt identity differs")
+    require(dependency["actual_images"], "Missing device image evidence")
+    for image in dependency["actual_images"]:
+        path = v.APP / image["binary"]
+        require(path.resolve().is_relative_to(v.APP.resolve()) and sha(path) == image["sha256"], "Device image drift")
+    result.update(ipa_integrity="passed", ipa_sha256=manifest["ipa_sha256"],
+                  verified_packaged_files=packaged_files, device_dependency_sha256=sha(OUT / "app-dependency-gate.json"))
+    require(manifest["source_commit"] == result["source_commit"] and manifest["version"] == VERSION and
+            manifest["build"] == BUILD, "IPA/source/version differs from delivery scope")
+    write(PACKAGE_JSON, result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -330,6 +606,9 @@ def main():
     run = sub.add_parser("run")
     run.add_argument("group", choices=GROUPS)
     run.add_argument("--destination", required=True)
+    all_cases = sub.add_parser("run-all")
+    all_cases.add_argument("--destination", required=True)
+    sub.add_parser("report")
     sub.add_parser("gate")
     args = parser.parse_args()
     if args.action == "scope":
@@ -337,6 +616,10 @@ def main():
         write(SCOPE_JSON, scope_receipt())
     elif args.action == "run":
         run_group(args.group, args.destination)
+    elif args.action == "run-all":
+        require(run_all(args.destination), "Selected tests failed; remaining cases attempted, see case-results.json")
+    elif args.action == "report":
+        summarize(publish=True)
     else:
         result = qualification()
         write(GATE_JSON, result)

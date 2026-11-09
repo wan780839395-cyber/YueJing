@@ -479,8 +479,8 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
         from epub_diagnostic_package import validate_saved
         validate_saved()
     elif epub_freeze:
-        from run_epub_freeze_validation import release_gate
-        release_gate()
+        from run_epub_freeze_validation import delivery_gate
+        delivery_gate()
     else:
         # The original full mode still requires this run's exact native union.
         require(json.loads((OUT / "native-test-gate.json").read_text()) == all_test_evidence(),
@@ -570,7 +570,8 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
            grdb_linkage="dynamic" if any(path.name == "GRDB" for path in binaries) else "SPM automatic/static",
            packages=packages, zipfoundation_license_sha256=digest(zip_license),
            grdb_privacy_resources=[str(path.relative_to(APP)) for path in resources],
-           grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned"))
+           grdb_privacy_sha256=digest(privacy), grdb_license_sha256=digest(license_path), signing="unsigned",
+           **(dict(run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"]) if epub_freeze else {})))
 
 
 def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False, epub_freeze=False):
@@ -638,9 +639,9 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,
                dependency_gate="app-dependency-gate.json"))
     elif epub_freeze:
-        from run_epub_freeze_validation import release_gate, VERSION, BUILD
-        qualification = release_gate()
+        from run_epub_freeze_validation import complete_delivery, VERSION, BUILD
         require(version == VERSION and build == BUILD, "EPUB reopen release identity differs")
+        qualification = complete_delivery(manifest, len(expected))
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=qualification["native_tests_executed_this_run"],
                coverage=qualification["coverage"], qualification=qualification["qualification"],
