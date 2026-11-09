@@ -79,6 +79,9 @@ struct EPUBLibraryTests {
     @Test func epubOriginalArchiveAndValidatedResourcesSurviveReopen() async throws {
         let f = try EPUBLibraryFixture(); defer { f.remove() }
         let source = try f.archive(), bytes = try Data(contentsOf: source)
+        #expect(EPUBResourceStore.digest(Data()) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        #expect(EPUBResourceStore.digest(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        #expect(try EPUBResourceStore.sourceDigest(source) == EPUBResourceStore.digest(bytes))
         let receipt = try await f.install(source)
         #expect(receipt.book.format == .epub && receipt.book.encoding == nil && receipt.book.utf16Count == 0)
         let stored = try await f.store.epubFileURL(bookID: receipt.book.id)

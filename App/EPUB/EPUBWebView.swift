@@ -242,7 +242,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
         pagePan?.isEnabled = !vertical
         webView.scrollView.alwaysBounceVertical = vertical
-        webView.scrollView.showsVerticalScrollIndicator = vertical
+        // This is a moving chapter window, not the whole book: its scrollbar jumps
+        // as neighbors enter/leave. Keep reading immersive without a misleading thumb.
+        webView.scrollView.showsVerticalScrollIndicator = false
         webView.scrollView.showsHorizontalScrollIndicator = false
     }
 
@@ -450,7 +452,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
     }
 
-    private func configureLoadedDOM(for request: EPUBNavigationRequest) {
+    private func configureLoadedDOM(for request: EPUBNavigationRequest, installBootstrap: Bool = false) {
         do {
             let invoke = try EPUBLocationScript.configurationInvokeScript(
                 token: request.token,
@@ -463,7 +465,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 readingMode: request.readingMode,
                 preserveViewport: request.preserveViewport
             )
-            let combined = EPUBLocationScript.bootstrapSource + "\n" + invoke
+            let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + invoke
             // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
             webView.__evaluateJavaScript(combined, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
                 guard let error else { return }
@@ -540,6 +542,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
               Set(paths).count == paths.count,
               paths.contains(current.token.path),
               Set(paths).isSubset(of: windowRequestedPaths) else { return }
+        let previousPaths = renderedChapterPaths
         renderedChapterPaths = Set(paths)
         windowInFlight = false
         windowTask?.cancel()
@@ -547,8 +550,13 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         applyReadingGesturePolicy()
         if body["error"] as? Bool == true {
             failChapterWindow(current.token)
-        } else if body["needsMore"] as? Bool == true, windowChapterCount < EPUBChapterWindow.maximumChapters {
+        } else if body["needsMore"] as? Bool == true, windowChapterCount < EPUBChapterWindow.maximumChapters,
+                  Set(EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path,
+                                              count: windowChapterCount)).isSubset(of: renderedChapterPaths) {
             windowChapterCount = min(EPUBChapterWindow.maximumChapters, windowChapterCount + EPUBChapterWindow.defaultChapters)
+            refreshChapterWindow()
+        } else if previousPaths != renderedChapterPaths {
+            // One neighbor is now readable; prepare the next without blocking it.
             refreshChapterWindow()
         }
         // Refresh only accessibility diagnostics; preload completion must not save progress.
@@ -771,7 +779,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         renderedChapterPaths = [current.token.path]
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         applyReadingGesturePolicy()
-        configureLoadedDOM(for: current)
+        configureLoadedDOM(for: current, installBootstrap: true)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

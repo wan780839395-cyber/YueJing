@@ -305,6 +305,8 @@ enum EPUBLocationScript {
             reflowRevision: 0,
             layoutWidth: 0,
             layoutHeight: 0,
+            observedScrollX: 0,
+            observedScrollY: 0,
             scrollTimer: null
         };
 
@@ -834,6 +836,8 @@ enum EPUBLocationScript {
                     window.scrollTo((window.scrollX || 0) + (state.paginated ? after.left - before.left : 0),
                         state.paginated ? 0 : (window.scrollY || 0) + after.top - before.top);
                 }
+                state.observedScrollX = window.scrollX || 0;
+                state.observedScrollY = window.scrollY || 0;
                 state.preserveTargetAnchor = false;
                 state.suppressingReflow = false;
                 state.lastAnchor = anchor && {path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset};
@@ -879,6 +883,8 @@ enum EPUBLocationScript {
                 state.ready = true;
                 state.suppressingReflow = false;
                 state.preserveTargetAnchor = false;
+                state.observedScrollX = window.scrollX || 0;
+                state.observedScrollY = window.scrollY || 0;
                 var current = sampleVisible();
                 var ready = Object.assign({}, current, {kind: "ready", path: config.path});
                 if (current.path !== config.path) { ready.node = 0; ready.utf16Offset = 0; ready.visibleText = ""; }
@@ -974,6 +980,8 @@ enum EPUBLocationScript {
                         state.suppressingReflow = false;
                         state.restoredScrollY = sample.scrollY;
                         state.restoredScrollX = sample.scrollX;
+                        state.observedScrollX = sample.scrollX;
+                        state.observedScrollY = sample.scrollY;
                         var restoredNode = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetNode : sample.node;
                         var restoredOffset = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetOffset : sample.utf16Offset;
                         state.lastAnchor = {path: sample.path, node: restoredNode, utf16Offset: restoredOffset};
@@ -1038,6 +1046,11 @@ enum EPUBLocationScript {
 
         window.addEventListener("scroll", function() {
             if (!state.ready || state.suppressingReflow || state.syncing) { return; }
+            var x = window.scrollX || 0, y = window.scrollY || 0;
+            // WebKit can deliver a programmatic compensation/restore event late.
+            // Unchanged pixels are not a new user navigation (especially short chapters).
+            if (x === state.observedScrollX && y === state.observedScrollY) { return; }
+            state.observedScrollX = x; state.observedScrollY = y;
             // Cache the current real anchor before a subsequent resize can reflow the DOM.
             sampleScrollPayload();
             // Throttle, not debounce: continuous dragging must advance native

@@ -35,7 +35,18 @@ public enum EPUBResourceStore {
     }
 
     public static func digest(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        hexadecimal(SHA256.hash(data: data))
+    }
+
+    private static func hexadecimal(_ digest: SHA256.Digest) -> String {
+        let alphabet = Array("0123456789abcdef".utf8)
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(64)
+        for byte in digest {
+            bytes.append(alphabet[Int(byte >> 4)])
+            bytes.append(alphabet[Int(byte & 15)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     public static func sourceDigest(_ url: URL) throws -> String {
@@ -52,6 +63,6 @@ public enum EPUBResourceStore {
             hash.update(data: chunk)
         }
         guard count == size else { throw EPUBError.corruptResource }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        return hexadecimal(hash.finalize())
     }
 }

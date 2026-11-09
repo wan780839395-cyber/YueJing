@@ -8,7 +8,7 @@ on:
         description: EPUB targeted24 (25 executions); continue independent cases and report every UI test
         required: true
         type: choice
-        default: epub-reopen-24
+        default: epub-scene-24
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,7 +17,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-reopen-24
+          - epub-scene-24
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-24' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-scene-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1135,7 +1135,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-reopen-24' }}
+    if: ${{ inputs.validation_scope == 'epub-scene-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:

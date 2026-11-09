@@ -793,6 +793,17 @@ struct EPUBReaderHostTests {
         #expect(EPUBChapterWindow.paths(in: shortSpine, around: shortSpine[0], count: 10).count == 10)
         #expect(EPUBChapterWindow.paths(in: shortSpine, around: shortSpine[0], count: 1000).count == 64)
         #expect(EPUBChapterWindow.maximumXHTMLBytes == 40 * 1024 * 1024)
+        let desired = Array(spine[0..<5])
+        var installed: Set<String> = [spine[2]]
+        for next in [3, 4, 1, 0] {
+            let plan = EPUBChapterWindow.nextPaths(desired: desired, installed: installed, current: spine[2])
+            #expect(Set(plan).subtracting(installed) == Set([spine[next]]))
+            #expect(plan == desired.filter { installed.contains($0) || $0 == spine[next] })
+            installed = Set(plan)
+        }
+        #expect(EPUBChapterWindow.nextPaths(desired: desired, installed: installed, current: spine[2]) == desired)
+        #expect(EPUBChapterWindow.nextPaths(desired: [], installed: installed, current: spine[2]).isEmpty)
+        #expect(EPUBChapterWindow.nextPaths(desired: desired, installed: [spine[0]], current: spine[0]) == [spine[0], spine[1]])
         let g1 = EPUBPageGeometry(offset: 0, contentHeight: 2000, viewportHeight: 600, topInset: 0, bottomInset: 0)
         #expect(g1.valid)
         #expect(g1.minimum == 0)
@@ -896,6 +907,7 @@ struct EPUBReaderHostTests {
                 #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
                 #expect(controller.webView.scrollView.zoomScale == 1)
                 #expect(controller.webView.scrollView.alwaysBounceVertical == true)
+                #expect(controller.webView.scrollView.showsVerticalScrollIndicator == false)
 
                 await model.load()
                 let initialRequest = try #require(model.navigationRequest)

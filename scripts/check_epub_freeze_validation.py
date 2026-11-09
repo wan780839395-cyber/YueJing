@@ -46,7 +46,7 @@ def fixture(group):
 selected = r.selection()
 assert len(selected) == 24 and all(len(n) == 1 for n in selected.values())
 PARAM_GROUP = next(g for g, s in r.GROUPS.items() if any(n in r.inventory.PARAMETERIZED for n in s['cases']))
-assert len(r.ALLOWED) == 20 and not r.NEW
+assert len(r.ALLOWED) == 12 and not r.NEW
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
 checks.append('candidate inventory survives JSON roundtrip')
@@ -138,7 +138,7 @@ with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
     assert receipt['native_tests_planned'] == 25 and 'verified_passed' not in receipt
-    checks.append('scope binds exact20 paths and makes no native-pass claim')
+    checks.append('scope binds exact12 paths and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
                        ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other')]:

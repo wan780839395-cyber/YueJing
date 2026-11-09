@@ -24,10 +24,25 @@ enum EPUBChapterWindow {
         }.map { $0 }
     }
 
+    /// Install only the immediately adjacent missing chapter per transaction.
+    /// A distant image must not hold the next readable chapter behind Promise.all.
+    static func nextPaths(desired: [String], installed: Set<String>, current: String) -> [String] {
+        guard let center = desired.firstIndex(of: current) else { return [] }
+        var available = installed.intersection(Set(desired))
+        available.insert(current)
+        if let next = desired.indices.dropFirst(center + 1).first(where: { !available.contains(desired[$0]) }) {
+            available.insert(desired[next])
+        } else if let previous = desired.indices.prefix(center).reversed().first(where: { !available.contains(desired[$0]) }) {
+            available.insert(desired[previous])
+        }
+        return desired.filter { available.contains($0) }
+    }
+
     /// Run away from the main actor. Only validated, sanitized package resources are read.
     static func invocation(publication: EPUBPublication, token: EPUBNavigationToken,
                            installedPaths: Set<String>, urls: [String: String], chapterCount: Int = defaultChapters) throws -> String {
-        let paths = paths(in: publication.package, around: token.path, count: chapterCount)
+        let desired = paths(in: publication.package, around: token.path, count: chapterCount)
+        let paths = nextPaths(desired: desired, installed: installedPaths, current: token.path)
         guard !paths.isEmpty, paths.count <= maximumChapters else { throw EPUBError.invalidPackage }
         var byteCount = 0
         var chapters: [[String: Any]] = []

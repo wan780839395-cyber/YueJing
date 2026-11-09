@@ -20,12 +20,12 @@ import task3_test_inventory as inventory
 import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
-BASE = "7888b00fe13220775d7bd53045858cda298b08b6"
-SCOPE = "epub-reopen-24"
+BASE = "6960385c20f35c35f45a3bf61b307e8bf2e584af"
+SCOPE = "epub-scene-24"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
-VERSION, BUILD = "0.2.6", "8"
+VERSION, BUILD = "0.2.7", "9"
 TOTAL, EXECUTIONS = 24, 25
-QUALIFICATION = "EPUB_REOPEN_24_TARGETED_NATIVE"
+QUALIFICATION = "EPUB_SCENE_24_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
@@ -33,18 +33,12 @@ PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
 NEW = frozenset()
 ALLOWED = frozenset({
-    "App/EPUB/EPUBLocationScript.swift", "App/EPUB/EPUBReaderScreen.swift",
-    "App/EPUB/EPUBReaderViewModel.swift", "App/EPUB/EPUBWebView.swift",
-    "Sources/ReaderDomain/EPUB/EPUBImportService.swift",
-    "Sources/ReaderDomain/EPUB/EPUBPublicationCache.swift",
-    "Sources/ReaderDomain/EPUB/EPUBResourceStore.swift",
-    "Sources/ReaderDomain/EPUB/OpenedEPUBReader.swift", "Sources/ReaderDomain/LibraryService.swift",
-    "Tests/ReaderDomainTests/EPUBLibraryTests.swift",
-    "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift", "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
-    "scripts/check_epub_continuous_script.cjs",
-    ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
-    "scripts/check_epub_freeze_validation.py", "scripts/task3_test_inventory.py",
-    "scripts/validate_task3.py", "project.yml", "docs/EPUB_FREEZE_RELEASE.md",
+    "App/EPUB/EPUBChapterWindow.swift", "App/EPUB/EPUBLocationScript.swift",
+    "App/EPUB/EPUBWebView.swift", "Sources/ReaderDomain/EPUB/EPUBResourceStore.swift",
+    "Tests/ReaderDomainTests/EPUBLibraryTests.swift", "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
+    "scripts/check_epub_continuous_script.cjs", ".github/workflows/task3-validate.yml",
+    "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
+    "project.yml", "docs/EPUB_FREEZE_RELEASE.md",
 })
 SELECTED_FILES = {
     "ReaderDomainTests/EPUBLibraryTests.swift": """
@@ -140,10 +134,10 @@ def scope_receipt():
     require(not git("status", "--porcelain", "--untracked-files=no").strip(), "Tracked source drift")
     before, after = tree(BASE), tree("HEAD")
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
-    require(changed == ALLOWED and set(after) == set(before), "Release changes outside exact 20-path boundary")
+    require(changed == ALLOWED and set(after) == set(before), "Release changes outside exact 12-path boundary")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
-    old_version = b'        MARKETING_VERSION: "0.2.5"\n        CURRENT_PROJECT_VERSION: "7"\n'
-    new_version = b'        MARKETING_VERSION: "0.2.6"\n        CURRENT_PROJECT_VERSION: "8"\n'
+    old_version = b'        MARKETING_VERSION: "0.2.6"\n        CURRENT_PROJECT_VERSION: "8"\n'
+    new_version = b'        MARKETING_VERSION: "0.2.7"\n        CURRENT_PROJECT_VERSION: "9"\n'
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")

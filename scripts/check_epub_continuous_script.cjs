@@ -70,6 +70,11 @@ async function fixture(source, css, pagedCSS) {
     sameRect(before, rectFor(anchor), 'prepend exact character compensation');
     ok(originalSpan === document.getElementById('yj-t0') && document === originalDocument, 'initial DOM identity');
     results.push('prepend preserves exact character rect and initial IDs/DOM identity');
+    const stationaryStart = messages.length;
+    window.dispatchEvent(new Event('scroll')); await settle();
+    ok(!messages.slice(stationaryStart).some(m => m.kind === 'scroll'),
+        'delayed stationary compensation scroll must not mint a new navigation');
+    results.push('stationary post-commit scroll is not user navigation');
 
     scrollTo(0, scrollY + section(3).getBoundingClientRect().top - 130); await settle();
     let sample = api.sampleNow();
@@ -227,6 +232,61 @@ async function fixture(source, css, pagedCSS) {
     const w = frame.contentWindow, d = frame.contentDocument, tinyMessages = [];
     w.webkit = {messageHandlers:{yjepubLocator:{postMessage(p) { tinyMessages.push(p); }}}};
     ok(d.contentType === 'application/xhtml+xml', 'native-like XHTML MIME fixture');
+    // Native now submits one neighbor at a time. Exercise the same ordered XML
+    // shape as intro -> sanitized static SVG image -> short note -> slow multi-image.
+    const sceneFrame = document.createElement('iframe');
+    sceneFrame.style.cssText = 'width:390px;height:844px;border:0';
+    sceneFrame.srcdoc = '<html><head></head><body><p><span id="yj-t0">简介夹具</span></p></body></html>';
+    const sceneLoaded = new Promise(r => { sceneFrame.onload = r; }); document.body.appendChild(sceneFrame); await sceneLoaded;
+    const sw = sceneFrame.contentWindow, sd = sceneFrame.contentDocument, sceneMessages = [];
+    sw.webkit = {messageHandlers:{yjepubLocator:{postMessage(p) { sceneMessages.push(p); }}}};
+    sw.eval(source);
+    const sceneAPI = sw.__yjEpub, sceneDocument = sd;
+    const scenePath = i => `scene/c${i}.xhtml`;
+    const sceneConfig = i => ({sessionID:'session',epoch:'scene',path:scenePath(i),chapterIndex:i,
+        expectedNodeCount:1,expectedNodeLengths:[i === 2 ? 4 : i === 4 ? 4 : 3],targetNode:-1,readingMode:'scroll',css});
+    sceneAPI.configure(sceneConfig(2)); await settle();
+    const sceneCanvas = sd.createElement('canvas'); sceneCanvas.width=300; sceneCanvas.height=1100;
+    const sceneImageURL = sceneCanvas.toDataURL('image/png');
+    const sceneImport = sd.importNode.bind(sd), sceneDecode = sw.HTMLImageElement.prototype.decode;
+    let releaseSlow;
+    const slowGate = new Promise(r => { releaseSlow=r; });
+    sd.importNode = function(node, deep) {
+        const copy = sceneImport(node, deep);
+        const images = copy.nodeType === 1 ? (copy.localName === 'img' ? [copy] : [...copy.querySelectorAll('img')]) : [];
+        for (const img of images) { img.__slow = img.getAttribute('src').includes('slow'); img.src=sceneImageURL; }
+        return copy;
+    };
+    sw.HTMLImageElement.prototype.decode = function() { return sceneDecode.call(this).then(() => this.__slow ? slowGate : undefined); };
+    const sceneChapter = i => ({path:scenePath(i),index:i,lengths:[i === 4 ? 4 : 3],
+        url:`yjepub://s-session--e-scene/${scenePath(i)}`,
+        xhtml:`<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body><span id="yj-t0">${i===4?'场景说明':'图片页'}</span><div>${i===4?'':`<img src="${i===5?'slow':'ready'}.png" alt=""/>`}</div></body></html>`});
+    async function installScene(i) {
+        const before = sceneMessages.length;
+        ok(sceneAPI.syncWindow({sessionID:'session',epoch:'scene',chapters:[sceneChapter(i)],keepPaths:[...sceneAPI.windowPaths(),scenePath(i)]}), 'one-neighbor scene accepted');
+        for (let n=0;n<120 && !sceneMessages.slice(before).some(m=>m.kind==='window');n++) await tick();
+        ok(sceneMessages.slice(before).some(m=>m.kind==='window' && !m.error), 'scene neighbor committed');
+    }
+    const batchStart = sceneMessages.length;
+    ok(sceneAPI.syncWindow({sessionID:'session',epoch:'scene',chapters:[3,4,5].map(sceneChapter),keepPaths:[2,3,4,5].map(scenePath)}), 'old batch control accepted');
+    await settle();
+    ok(!sd.querySelector('img') && !sceneMessages.slice(batchStart).some(m=>m.kind==='window'), 'old all-neighbor batch blocks first scene on distant slow image');
+    sceneAPI.configure(sceneConfig(2)); await settle(); // cancel control transaction, retain initial content
+    await installScene(3); await installScene(4); await settle();
+    const firstSceneImage = sd.querySelector('img');
+    ok(firstSceneImage.complete && firstSceneImage.naturalHeight === 1100, 'first scene image is decoded');
+    const beforeSlow = sceneMessages.length;
+    ok(sceneAPI.syncWindow({sessionID:'session',epoch:'scene',chapters:[sceneChapter(5)],keepPaths:[...sceneAPI.windowPaths(),scenePath(5)]}), 'far slow scene accepted');
+    await settle();
+    sw.scrollTo(0,sw.scrollY + firstSceneImage.getBoundingClientRect().top + 50); await settle();
+    ok(sceneAPI.sampleNow().path === scenePath(3), 'intro can continuously enter first scene while far image is pending');
+    ok(!sceneMessages.slice(beforeSlow).some(m=>m.kind==='window'), 'far image remains pending without hiding ready scene');
+    sceneAPI.configure(sceneConfig(3)); await settle(); // explicit jump cancels obsolete preload
+    ok(sceneMessages.filter(m=>m.kind==='ready').at(-1).path === scenePath(3), 'directory target scene ready');
+    sceneAPI.configure(sceneConfig(2)); await settle();
+    ok(sceneAPI.sampleNow().path === scenePath(2) && sd === sceneDocument && sd.querySelector('img') === firstSceneImage, 'reverse directory jump keeps original document and pixels');
+    releaseSlow(); sceneFrame.remove();
+    results.push('short intro/static-image/short-note neighbors stay readable while later image is slow; directory jumps reuse DOM');
     w.eval(source);
     const tiny = i => ({path:`tiny/c${i}.xhtml`, index:i, lengths:[2],
         url:`yjepub://s-session--e-tiny/tiny/c${i}.xhtml`,
