@@ -187,6 +187,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         created.scrollView.delegate = self
         created.scrollView.contentInsetAdjustmentBehavior = .never
         created.scrollView.alwaysBounceVertical = true
+        created.scrollView.showsVerticalScrollIndicator = false
+        created.scrollView.showsHorizontalScrollIndicator = false
         created.scrollView.panGestureRecognizer.maximumNumberOfTouches = 1
         created.scrollView.pinchGestureRecognizer?.isEnabled = false
         created.isOpaque = false
