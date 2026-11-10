@@ -585,8 +585,9 @@ extension LibraryService {
         var lease: EPUBContentLease?
         do {
             let source = try await store.epubFileURL(bookID: id)
-            let snapshot = try await store.storedEPUBSnapshot(bookID: id)
             let cache = await store.epubContentPoolURL()
+            let decoded = await EPUBContentPool.shared.reusableMetadata(bookID: id, root: cache)
+            let snapshot = try await store.storedEPUBSnapshot(bookID: id, reusing: decoded)
             let catalogFinished = ContinuousClock.now
             let prepared = try await EPUBContentPool.shared.acquire(
                 bookID: id, archive: source, snapshot: snapshot, root: cache
@@ -594,6 +595,7 @@ extension LibraryService {
             lease = prepared.lease
             let publication = prepared.lease.publication
             var timings = prepared.timings
+            timings.metadataDecodeReused = snapshot.decodeReused
             timings.record(.catalog, since: catalogStarted, until: catalogFinished)
             // The pool, not this service/reader, owns the stable version directory.
             try Task.checkCancellation()

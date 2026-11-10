@@ -34,7 +34,7 @@ def fixture(group):
             signature = name + (param['signature'] if param else '()')
             text += f'◇ Test {signature} started.\n'
             if param:
-                text += ''.join(f'◇ Passing 1 argument symlink → {value} to {signature}\n' for value in param['values'])
+                text += ''.join(f"◇ Passing 1 argument {param['argument']} → {value} to {signature}\n" for value in param['values'])
             text += f'✔ Test {signature} passed after 0.1 seconds.\n'
     if spec['kind'] == 'ui':
         text += 'Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds\n'
@@ -42,9 +42,42 @@ def fixture(group):
         text += f"✔ Test run with {len(spec['cases'])} tests passed after 0.2 seconds.\n"
     return (text + '** TEST SUCCEEDED **\n').encode('utf-8')
 
+def expected_executions(group):
+    return sum(len(r.inventory.PARAMETERIZED.get(name, {}).get('values', [None]))
+               for name in r.GROUPS[group]['cases'])
 
+
+assert r.BASE == 'b15c2f86434896124746db0cb0bf634a05c5d14e'
+assert r.SCOPE == 'epub-reopen-fast-10'
+assert r.VERSION == '0.2.12' and r.BUILD == '14'
+assert r.QUALIFICATION == 'EPUB_REOPEN_FAST_10_TARGETED_NATIVE'
 selected = r.selection()
-assert len(selected) == r.TOTAL == r.EXECUTIONS == 3 and all(len(n) == 1 for n in selected.values())
+expected_selected_files = [
+    ('ReaderDomainTests/EPUBLibraryTests.swift', [
+        'epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences',
+        'epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime',
+    ]),
+    ('ReaderDomainTests/EPUBContentPoolTests.swift',
+     r.inventory.FILES['ReaderDomainTests/EPUBContentPoolTests.swift'].split()),
+    ('YueJingHostTests/EPUBReaderHostTests.swift', [
+        'epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position',
+        'epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU',
+    ]),
+]
+assert list(r.SELECTED_FILES.items()) == expected_selected_files
+expected_selected = {
+    'domain-1': ['epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences'],
+    'domain-2': ['epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime'],
+    **{f'domain-{i}': [name] for i, name in enumerate(
+        r.inventory.FILES['ReaderDomainTests/EPUBContentPoolTests.swift'].split(), 3)},
+    'host-1': ['epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position'],
+    'host-2': ['epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU'],
+}
+assert selected == expected_selected and list(selected) == list(expected_selected)
+assert len(selected) == r.TOTAL == 10 and r.EXECUTIONS == 11 and all(len(n) == 1 for n in selected.values())
+assert expected_executions('domain-2') == 2
+assert all(expected_executions(group) == 1 for group in selected if group != 'domain-2')
+assert sum(expected_executions(group) for group in selected) == r.EXECUTIONS == 11
 release_groups = copy.deepcopy(r.GROUPS)
 parameter = next(iter(r.inventory.PARAMETERIZED))
 PARAM_GROUP = 'offline-parameter'
@@ -53,17 +86,35 @@ r.GROUPS[PARAM_GROUP] = dict(kind='domain', target='ReaderDomainTests', timeout=
 r.GROUPS['offline-ui'] = dict(kind='ui', target='YueJingEPUBUITests', timeout=480,
     pairs=[('YueJingEPUBUITests/EPUBFlowUITests.swift', 'testEPUBShelfCoverAndDirectoryCrossChapterNavigation')],
     cases=['testEPUBShelfCoverAndDirectoryCrossChapterNavigation'])
-assert len(r.ALLOWED) == 11 and r.NEW == {'Sources/ReaderDomain/EPUB/EPUBSessionBreakdown.swift', 'scripts/check_epub_session_profile.py'}
+expected_allowed = {
+    '.github/workflows/task3-validate.yml',
+    'Sources/ReaderDomain/EPUB/EPUBContentPool.swift',
+    'Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift',
+    'Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift',
+    'Sources/ReaderDomain/EPUB/EPUBResourceStore.swift',
+    'Sources/ReaderDomain/LibraryService.swift',
+    'Sources/ReaderDomain/LibraryStore.swift',
+    'Tests/ReaderDomainTests/EPUBContentPoolTests.swift',
+    'docs/EPUB_FREEZE_RELEASE.md',
+    'project.yml',
+    'scripts/check_epub_freeze_validation.py',
+    'scripts/check_epub_metadata_reopen.py',
+    'scripts/check_epub_reopen_fast.py',
+    'scripts/run_epub_freeze_validation.py',
+}
+assert len(r.ALLOWED) == 14 and r.ALLOWED == expected_allowed and r.NEW == {'scripts/check_epub_reopen_fast.py'}
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
+assert reviewed['selected'] == 229 and reviewed['selected_executions'] == 230
+assert reviewed['selected'] - r.TOTAL == 219 and reviewed['selected_executions'] - r.EXECUTIONS == 219
 checks.append('candidate inventory survives JSON roundtrip')
-checks.append('exact Domain2 Host1 selected; parameter/UI fixtures are offline only / inventory229 declarations, 230 expansions')
+checks.append('exact Domain8 (domain-2 Bool 2x) Host2 selected, no UI; offline-parameter/UI fixtures isolated / inventory229 declarations, 230 expansions, 219 unselected')
 destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
 for group in r.GROUPS:
     raw = fixture(group)
     parsed = r.parse_log(group, raw, 0, False)
     assert parsed['passed'] == r.GROUPS[group]['cases']
-    assert parsed['executions'] == (2 if group == PARAM_GROUP else 1)
+    assert parsed['executions'] == expected_executions(group)
     checks.append(group + ' valid synthetic events, not native execution')
     rejects(group + ' nonzero exit', lambda: r.parse_log(group, raw, 65, False))
     rejects(group + ' bool exit', lambda: r.parse_log(group, raw, False, False))
@@ -76,21 +127,26 @@ for group in r.GROUPS:
     rejects(group + ' skipped despite green', lambda: r.parse_log(group, raw + b'Test extra skipped\n', 0, False))
     command = r.command(group, destination, Path('synthetic.xcresult'))
     assert len([a for a in command if a.startswith('-only-testing:')]) == len(r.GROUPS[group]['cases'])
+    expected_suffix = '/' + r.GROUPS[group]['cases'][0] + (
+        '' if r.GROUPS[group]['kind'] == 'ui' else
+        r.inventory.PARAMETERIZED.get(r.GROUPS[group]['cases'][0], {}).get('signature', '()'))
+    assert any(a.endswith(expected_suffix) for a in command if a.startswith('-only-testing:'))
     assert command.count('180') == 2 and r.GROUPS[group]['timeout'] == 480
     assert command[command.index('-scheme') + 1] == ('ReaderDomain' if r.GROUPS[group]['kind'] == 'domain' else 'YueJingUI')
 rejects('device destination', lambda: r.command('host-1', 'generic/platform=iOS', Path('synthetic')))
-raw = fixture(PARAM_GROUP)
-arg_line = next(line for line in raw.splitlines(keepends=True) if b'Passing ' in line)
-decorated = raw.replace(arg_line, '\u200b'.encode('utf-8') + arg_line)
-assert r.parse_log(PARAM_GROUP, decorated, 0, False)['executions'] == 2
+for param_group in ('domain-2', PARAM_GROUP):
+    raw = fixture(param_group)
+    arg_line = next(line for line in raw.splitlines(keepends=True) if b'Passing ' in line)
+    decorated = raw.replace(arg_line, '\u200b'.encode('utf-8') + arg_line)
+    assert r.parse_log(param_group, decorated, 0, False)['executions'] == 2
+    for label, altered in [('unknown argument decoration', raw.replace(arg_line, b'foreign ' + arg_line)),
+                           ('missing argument', raw.replace(arg_line, b'')),
+                           ('duplicate argument', raw.replace(arg_line, arg_line * 2)),
+                           ('foreign argument', raw.replace(b'false to ', b'unknown to ')),
+                           ('argument after finish', raw.replace(arg_line, b'') + arg_line),
+                           ('expanded count pretending declarations', raw.replace(b'1 tests passed', b'2 tests passed'))]:
+        rejects(param_group + ': ' + label, lambda g=param_group, a=altered: r.parse_log(g, a, 0, False))
 checks.append('Swift Testing line-leading zero-width decoration preserves argument identity')
-rejects('unknown argument decoration', lambda: r.parse_log(PARAM_GROUP, raw.replace(arg_line, b'foreign ' + arg_line), 0, False))
-for label, altered in [('missing argument', raw.replace(arg_line, b'')),
-                       ('duplicate argument', raw.replace(arg_line, arg_line * 2)),
-                       ('foreign argument', raw.replace(b'false to ', b'unknown to ')),
-                       ('argument after finish', raw.replace(arg_line, b'') + arg_line),
-                       ('expanded count pretending declarations', raw.replace(b'1 tests passed', b'2 tests passed'))]:
-    rejects(label, lambda: r.parse_log(PARAM_GROUP, altered, 0, False))
 del r.GROUPS[PARAM_GROUP], r.GROUPS['offline-ui']
 assert r.GROUPS == release_groups and r.selection() == selected
 with patch.dict(r.SELECTED_FILES, {'ReaderDomainTests/EPUBCompatibilityTests.swift': ['foreignCase']}):
@@ -148,8 +204,10 @@ with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current), \
      patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
-    assert receipt['native_tests_planned'] == 3 and 'verified_passed' not in receipt
-    checks.append('scope binds exact11 paths including two additions and makes no native-pass claim')
+    assert receipt['native_tests_planned'] == 11 and receipt['selected_declarations'] == 10
+    assert receipt['full_inventory_declared'] == 229 and receipt['full_inventory_executions'] == 230
+    assert 'verified_passed' not in receipt
+    checks.append('scope binds exact14 paths including one addition and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
                        ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other')]:
@@ -205,7 +263,11 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             r.write(folder/'counts.json', parsed)
         qualified = r.qualification()
         r.write(out/'gate.json', qualified)
-        assert r.release_gate()['verified_passed'] == 3
+        qualified_gate = r.release_gate()
+        assert qualified_gate['verified_passed'] == 11 and qualified_gate['verified_declarations'] == 10
+        assert qualified_gate['not_executed_this_run'] == 219 and qualified_gate['qualification'] == r.QUALIFICATION
+        domain2_counts = r.load(native/'domain-2/counts.json')
+        assert domain2_counts['executions'] == 2 and domain2_counts['parameter_xcresult']['passed_arguments'] == ['false', 'true']
         checks.append('synthetic complete artifact / release acceptance (native helpers mocked)')
         for failure_path in (native/'host-1/failure.json', out/'case-scheduling-error.json'):
             r.write(failure_path, dict(error='synthetic failure after passing receipt'))
@@ -215,7 +277,7 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
         previous = broken.read_bytes()
         broken.write_bytes(b'{invalid')
         summary = r.summarize()
-        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 2
+        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 9
         assert len(summary['ui_inventory']) == 15 and all(x['status'] == 'not_selected' for x in summary['ui_inventory'])
         broken.write_bytes(previous)
         checks.append('one corrupt result is visible and does not hide remaining UI cases')
@@ -230,7 +292,16 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             path.write_bytes(original)
         with patch.object(r.paging, 'require_xcresult', side_effect=ValueError('missing bundle')):
             rejects('missing xcresult bundle', r.release_gate)
-        # Parameter bundle checks remain isolated: none is scheduled by this release.
+        # Verify real scheduled domain-2 and isolated parameter-fixture xcresult export drift checks.
+        with patch.object(r.subprocess, 'check_output', return_value=b'{"testNodes": []}'):
+            rejects('domain-2 xcresult differs from export', r.release_gate)
+        xc_export = native/'domain-2/xcresult-tests.json'
+        xc_original = xc_export.read_bytes()
+        xc_tampered = json.loads(xc_original)
+        xc_tampered['testNodes'][0]['children'].pop()
+        xc_export.write_text(json.dumps(xc_tampered), encoding='utf-8')
+        rejects('domain-2 tampered xcresult export', r.release_gate)
+        xc_export.write_bytes(xc_original)
         with patch.dict(r.GROUPS, {PARAM_GROUP: dict(kind='domain', cases=[parameter])}):
             parameter_folder = out/'parameter-fixture'; parameter_folder.mkdir()
             r.parameter_evidence(PARAM_GROUP, parameter_folder, out/'parameter.xcresult', export=True)
@@ -335,31 +406,32 @@ with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI
                     pass
                 else:
                     raise AssertionError('Cancellation swallowed')
-                assert visited[-1] == 'domain-2' and 'host-1' not in visited
+                assert visited == ['domain-1', 'domain-2'] and 'domain-3' not in visited and 'host-1' not in visited
                 checks.append('cancellation stops scheduling without falsely skipping/passing remaining cases')
             else:
                 assert r.run_all(destination) == (scenario == 'all_pass')
                 assert visited == list(r.GROUPS)
                 checks.append(scenario + ': production scheduler attempted every selected identity once')
             report = r.summarize(publish=True)
-            assert len(report['cases']) == 3 and len(report['ui_inventory']) == 15
+            assert len(report['cases']) == 10 and len(report['ui_inventory']) == 15
             assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 15
             assert {x['case'] for x in report['ui_inventory']} == set(r.inventory.expected_names('YueJingUITests') + r.inventory.expected_names('YueJingEPUBUITests'))
             if scenario == 'mixed':
-                assert report['counts'] == dict(passed=0, failed=1, timed_out=1, error=0, blocked=1, not_run=0)
+                assert report['counts'] == dict(passed=7, failed=1, timed_out=1, error=0, blocked=1, not_run=0)
                 rejects('failed/blocked/timed-out cases cannot qualify', r.qualification)
                 checks.append('failure, settings error and timeout all attempted and retained')
             elif scenario == 'early_failure':
-                assert report['counts'] == dict(passed=2, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
+                assert report['counts'] == dict(passed=9, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
                 assert all(x['status'] == 'passed' for x in report['cases'] if x['group'] != 'domain-1')
                 rejects('early failure cannot qualify despite later successful cases', r.qualification)
             elif scenario == 'all_pass':
-                assert report['counts']['passed'] == 3
-                assert sum(x['planned_executions'] for x in report['cases']) == 3
+                assert report['counts']['passed'] == 10
+                assert sum(x['planned_executions'] for x in report['cases']) == 11
+                assert [x['planned_executions'] for x in report['cases']] == [expected_executions(g) for g in r.GROUPS]
             elif scenario == 'preflight':
-                assert report['counts']['blocked'] == 3 and report['counts']['passed'] == 0
+                assert report['counts']['blocked'] == 10 and report['counts']['passed'] == 0
             else:
-                assert report['counts']['not_run'] == 2
+                assert report['counts']['passed'] == 1 and report['counts']['not_run'] == 9
             markdown = (out/'case-results.md').read_text('utf-8')
             assert all(x['case'] in markdown for x in report['ui_inventory'])
             checks.append(scenario + ': complete UI display and truthful selected/unselected states')
@@ -442,10 +514,10 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         result = r.delivery_gate()
         assert result['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY' and result['coverage'] == 'UI_NOT_QUALIFIED'
         assert result['verified_passed'] is None and result['native_tests_executed_this_run'] is None
-        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 2
-        assert len(result['cases']) == 3 and result['evidence_sha256']
+        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 9
+        assert len(result['cases']) == 10 and result['evidence_sha256']
         assert not (out/'package.json').exists()
-        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/3 or premature IPA receipt')
+        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/11 or premature IPA receipt')
         with patch.object(r, 'live_scope', return_value={**scope, 'build_ipa': False}):
             rejects('validation-only source receipt cannot package even with diagnostic opt-in', r.delivery_gate)
         with patch.object(r, 'live_scope', return_value={**scope, 'allow_unqualified_ipa': False}):
@@ -465,7 +537,7 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         assert not (out/'package.json').exists()
         with patch.object(r, 'release_gate', return_value=qualified):
             formal = r.delivery_gate()
-            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 3
+            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 11
             checks.append('formal delivery still obtains strict release_gate qualification')
         artifacts = out/'artifacts'; artifacts.mkdir()
         app = out/'YueJing.app'; app.mkdir()

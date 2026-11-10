@@ -525,13 +525,13 @@ extension LibraryStore {
     }
 
 
-    func storedEPUBSnapshot(bookID: String) throws -> EPUBMetadataSnapshot {
+    func storedEPUBSnapshot(bookID: String, reusing: EPUBMetadataSnapshot.Decoded? = nil) throws -> EPUBMetadataSnapshot {
         guard let book = try book(id: bookID), book.format == .epub else { throw LibraryError.missingBook }
         return try queue.read { db in
             guard let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [bookID]) else {
                 throw EPUBError.corruptResource
             }
-            let snapshot = try EPUBMetadataSnapshot(metadata: metadata)
+            let snapshot = try EPUBMetadataSnapshot(metadata: metadata, reusing: reusing)
             let package = snapshot.package
             guard package.sourceSHA256 == bookID, package.versionID == book.versionID,
                   package.parserVersion == EPUBFormat.parserVersion else { throw EPUBError.corruptResource }

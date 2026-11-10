@@ -9,6 +9,7 @@ struct EPUBContentPoolTests {
         let a = try await f.install(f.archive(title: "Recent A"))
         let b = try await f.install(f.archive(title: "Recent B"))
         let first = try await f.service.openEPUB(id: a.book.id)
+        #expect(!first.openingTimings.metadataDecodeReused)
         try verifySessionBreakdown(first.openingTimings)
         #expect(!first.openingTimings.summary.contains(a.book.id))
         let aRoot = first.publication.resourceRoot
@@ -25,6 +26,8 @@ struct EPUBContentPoolTests {
         #expect(reopened.openingTimings.samples.contains { $0.phase == .sourceVerification && $0.succeeded })
         #expect(reopened.openingTimings.samples.contains { $0.phase == .warmResourceVerification && $0.succeeded })
         #expect(reopened.openingTimings.packageFingerprintReused)
+        #expect(reopened.openingTimings.metadataDecodeReused)
+        #expect(reopened.openingTimings.summary.contains("leased-metadata-v1"))
         #expect(reopened.openingTimings.samples.contains { $0.phase == .packageFingerprint && $0.succeeded })
         try verifySessionBreakdown(reopened.openingTimings)
         await pin.release()
@@ -35,6 +38,8 @@ struct EPUBContentPoolTests {
         #expect(!FileManager.default.fileExists(atPath: aRoot.path))
         try await verifyMetadataSnapshotReuse()
         try await verifyMetadataMutationRejectsSession()
+        try await verifyLeaseHeldMetadataReuse()
+        try verifyResourceAttributes()
     }
 
     @Test func contentLeaseEvictionWaitsForEveryHolderAndRejectsReleasedTokens() async throws {
@@ -169,6 +174,9 @@ private extension EPUBContentPoolTests {
         #expect(try largeCache.resolve(largeSnapshot).reused == false)
         #expect(try largeCache.resolve(largeSnapshot).reused)
         #expect(largeCache.count == 1)
+        let largeReused = try EPUBMetadataSnapshot(metadata: encoder.encode(large), reusing: largeSnapshot.decoded)
+        #expect(largeReused.decodeReused && largeReused.decoded === largeSnapshot.decoded)
+        #expect(largeReused.package == large)
 
         let root = f.root.appendingPathComponent("Pool"), pool = EPUBContentPool()
         let snapshot = firstByteSnapshot
@@ -211,6 +219,8 @@ private extension EPUBContentPoolTests {
         try await queue.write { db in
             try db.execute(sql: "UPDATE epubPackages SET metadata=? WHERE bookID=?", arguments: [changed, id])
         }
+        let fresh = try await f.store.storedEPUBSnapshot(bookID: id, reusing: snapshot.decoded)
+        #expect(!fresh.decodeReused && fresh.package.title == "Snapshot B")
         await #expect(throws: EPUBError.corruptResource) { try await f.store.beginEPUB(permit, snapshot: snapshot) }
         let active = try await queue.read { db in
             try String.fetchOne(db, sql: "SELECT activeSession FROM books WHERE id=?", arguments: [id])
@@ -266,5 +276,82 @@ private extension EPUBContentPoolTests {
         var successful = EPUBSessionBreakdown()
         #expect(successful.measure(.rowUpdate) { 42 } == 42)
         #expect(successful.samples.count == 1 && successful.samples.first?.succeeded == true)
+    }
+}
+
+private extension EPUBContentPoolTests {
+    func verifyLeaseHeldMetadataReuse() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let archive = try f.archive(title: "Decoded A")
+        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: f.root.appendingPathComponent("parsed"))
+        let bytes = try JSONEncoder().encode(package)
+        let original = try EPUBMetadataSnapshot(metadata: bytes)
+        let pool = EPUBContentPool(), root = f.root.appendingPathComponent("Pool")
+        let before = await pool.reusableMetadata(bookID: package.sourceSHA256, root: root)
+        #expect(before == nil)
+        let first = try await pool.acquire(bookID: package.sourceSHA256, archive: archive, snapshot: original, root: root)
+        let pin = try await first.lease.duplicate()
+        await first.lease.finish(retain: true)
+        let borrowed = try #require(await pool.reusableMetadata(bookID: package.sourceSHA256, root: root))
+        let same = try EPUBMetadataSnapshot(metadata: bytes, reusing: borrowed)
+        #expect(same.decodeReused && same.decoded === original.decoded)
+        #expect(same.matches(bytes) && same.package == package)
+        let foreignRoot = await pool.reusableMetadata(bookID: package.sourceSHA256, root: f.root)
+        let foreignBook = await pool.reusableMetadata(bookID: "foreign", root: root)
+        #expect(foreignRoot == nil && foreignBook == nil)
+        let changed = Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "Decoded A", with: "Decoded B").utf8)
+        let changedSnapshot = try EPUBMetadataSnapshot(metadata: changed, reusing: borrowed)
+        #expect(changed.count == bytes.count && changedSnapshot.decodeReused == false)
+        #expect(changedSnapshot.package.versionID == package.versionID && changedSnapshot.package.title == "Decoded B")
+        #expect(changedSnapshot.decoded !== original.decoded && !same.matches(changed))
+        #expect(throws: (any Error).self) { try EPUBMetadataSnapshot(metadata: Data("invalid".utf8), reusing: borrowed) }
+        let reopened = try await pool.acquire(bookID: package.sourceSHA256, archive: archive, snapshot: same, root: root)
+        #expect(reopened.reused)
+        await reopened.lease.release()
+        let pinned = await pool.reusableMetadata(bookID: package.sourceSHA256, root: root)
+        #expect(pinned === original.decoded)
+        await pin.release()
+        let afterRelease = await pool.reusableMetadata(bookID: package.sourceSHA256, root: root)
+        #expect(afterRelease == nil) // Retained disk receipt does not retain a decoded tree.
+        let coldAgain = try EPUBMetadataSnapshot(metadata: bytes, reusing: afterRelease)
+        #expect(!coldAgain.decodeReused)
+        await pool.discardUnused(root: root)
+    }
+
+    func verifyResourceAttributes() throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let files = FileManager.default, root = f.root.appendingPathComponent("attribute-fixture")
+        let parent = root.appendingPathComponent("OPS"), leaf = parent.appendingPathComponent("one.xhtml")
+        try files.createDirectory(at: parent, withIntermediateDirectories: true)
+        let bytes = Data("synthetic resource".utf8)
+        let resource = EPUBResource(path: "OPS/one.xhtml", mediaType: "application/xhtml+xml",
+                                    sha256: EPUBResourceStore.digest(bytes), byteCount: bytes.count)
+        try bytes.write(to: leaf)
+        #expect(try EPUBResourceStore.data(resource: resource, root: root) == bytes)
+        let flat = root.appendingPathComponent("flat.xhtml")
+        try bytes.write(to: flat)
+        let flatResource = EPUBResource(path: "flat.xhtml", mediaType: resource.mediaType,
+                                        sha256: resource.sha256, byteCount: resource.byteCount)
+        #expect(try EPUBResourceStore.data(resource: flatResource, root: root) == bytes)
+        var damaged = bytes; damaged[damaged.startIndex] ^= 1
+        try damaged.write(to: leaf)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: resource, root: root) }
+        try (bytes + Data([0])).write(to: leaf)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: resource, root: root) }
+        try files.removeItem(at: leaf)
+        try files.createSymbolicLink(at: leaf, withDestinationURL: flat)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: resource, root: root) }
+        try files.removeItem(at: leaf)
+        try files.createDirectory(at: leaf, withIntermediateDirectories: false)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: resource, root: root) }
+        try files.removeItem(at: leaf)
+        try bytes.write(to: leaf)
+        let moved = root.appendingPathComponent("real-OPS")
+        try files.moveItem(at: parent, to: moved)
+        try files.createSymbolicLink(at: parent, withDestinationURL: moved)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: resource, root: root) }
+        let rootLink = f.root.appendingPathComponent("root-link")
+        try files.createSymbolicLink(at: rootLink, withDestinationURL: root)
+        #expect(throws: EPUBError.corruptResource) { try EPUBResourceStore.data(resource: flatResource, root: rootLink) }
     }
 }

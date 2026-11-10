@@ -46,12 +46,24 @@ actor EPUBContentPool {
     private struct Holder {
         let folder: URL
         let publication: EPUBPublication
+        let decoded: EPUBMetadataSnapshot.Decoded?
     }
     private var entries: [URL: Entry] = [:]
     private var holders: [UUID: Holder] = [:]
     private var packageFingerprints = EPUBMetadataFingerprintCache()
     private let limits: Limits
     init(limits: Limits = Limits()) { self.limits = limits }
+
+    /// Only borrow a package already held by an active/parked lease. Idle disk entries
+    /// never retain full metadata; a fresh database SHA must match before reuse.
+    func reusableMetadata(bookID: String, root: URL) -> EPUBMetadataSnapshot.Decoded? {
+        for holder in holders.values {
+            guard let entry = entries[holder.folder], entry.root == root, !entry.retired,
+                  let decoded = holder.decoded, decoded.package.sourceSHA256 == bookID else { continue }
+            return decoded
+        }
+        return nil
+    }
 
     private static func requireDirectory(_ url: URL) throws {
         let v = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -135,7 +147,7 @@ actor EPUBContentPool {
             }
             try Self.requireDirectory(fallback)
             return try build(bookID: bookID, archive: archive, expected: expected, root: fallback,
-                             digest: digest, timings: timings, cacheable: false)
+                             digest: digest, timings: timings, cacheable: false, decoded: snapshot?.decoded)
         }
         let key = EPUBResourceStore.digest(Data((bookID + "\n" + expected.versionID).utf8))
         let bytes = try Self.size(expected)
@@ -147,7 +159,7 @@ actor EPUBContentPool {
                 let publication = EPUBPublication(package: expected, resourceRoot: entry.folder.appendingPathComponent("resources"))
                 try timings.measure(.warmResourceVerification) { try EPUBPublicationCache.verifyResources(publication) }
                 try Task.checkCancellation()
-                let lease = grant(publication, folder: entry.folder)
+                let lease = grant(publication, folder: entry.folder, decoded: snapshot?.decoded)
                 timings.contentCacheOutcome = .verifiedVersion
                 timings.resourceCount = expected.resources.count
                 timings.resourceBytes = bytes
@@ -162,7 +174,7 @@ actor EPUBContentPool {
         }
         do {
             return try build(bookID: bookID, archive: archive, expected: expected, root: root,
-                             digest: digest, timings: timings, cacheable: true)
+                             digest: digest, timings: timings, cacheable: true, decoded: snapshot?.decoded)
         } catch let error as CocoaError where error.code == .fileWriteNoPermission || error.code == .fileWriteVolumeReadOnly {
             let fallback = root.deletingLastPathComponent().appendingPathComponent("Imports", isDirectory: true)
             try Self.requireDirectory(fallback.deletingLastPathComponent())
@@ -171,12 +183,13 @@ actor EPUBContentPool {
             }
             try Self.requireDirectory(fallback)
             return try build(bookID: bookID, archive: archive, expected: expected, root: fallback,
-                             digest: digest, timings: timings, cacheable: false)
+                             digest: digest, timings: timings, cacheable: false, decoded: snapshot?.decoded)
         }
     }
 
     private func build(bookID: String, archive: URL, expected: EPUBPackage, root: URL,
-                       digest: String, timings initialTimings: EPUBOpeningTimings, cacheable: Bool)
+                       digest: String, timings initialTimings: EPUBOpeningTimings, cacheable: Bool,
+                       decoded: EPUBMetadataSnapshot.Decoded?)
         throws -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
         var timings = initialTimings
         let key = EPUBResourceStore.digest(Data((bookID + "\n" + expected.versionID).utf8))
@@ -191,7 +204,8 @@ actor EPUBContentPool {
         try Task.checkCancellation()
         entries[folder] = Entry(root: root, folder: folder,
             record: Record(key: key, packageDigest: digest, bytes: bytes, touched: Date()), retired: !cacheable)
-        let lease = grant(EPUBPublication(package: package, resourceRoot: resources), folder: folder)
+        // Equality above validates the rebuild; retain the existing tree, not a second decoded copy.
+        let lease = grant(EPUBPublication(package: expected, resourceRoot: resources), folder: folder, decoded: decoded)
         timings.contentCacheOutcome = cacheable
             ? (initialTimings.contentCacheOutcome == .rebuiltAfterInvalidation ? .rebuiltAfterInvalidation : .rebuilt)
             : .temporary
@@ -202,11 +216,12 @@ actor EPUBContentPool {
         return (lease, false, timings)
     }
 
-    private func grant(_ publication: EPUBPublication, folder: URL) -> EPUBContentLease {
+    private func grant(_ publication: EPUBPublication, folder: URL,
+                       decoded: EPUBMetadataSnapshot.Decoded?) -> EPUBContentLease {
         let token = UUID()
         entries[folder]?.tokens.insert(token)
         entries[folder]?.record.touched = Date()
-        holders[token] = Holder(folder: folder, publication: publication)
+        holders[token] = Holder(folder: folder, publication: publication, decoded: decoded)
         return EPUBContentLease(publication: publication, owner: self, token: token)
     }
     func duplicate(_ token: UUID) throws -> EPUBContentLease {
@@ -214,7 +229,7 @@ actor EPUBContentPool {
         guard let holder = holders[token], let entry = entries[holder.folder], !entry.retired else {
             throw EPUBError.staleSession
         }
-        return grant(holder.publication, folder: holder.folder)
+        return grant(holder.publication, folder: holder.folder, decoded: holder.decoded)
     }
     func release(_ token: UUID, retain: Bool) {
         guard let holder = holders.removeValue(forKey: token), var entry = entries[holder.folder] else { return }

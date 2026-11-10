@@ -20,13 +20,16 @@ public enum EPUBResourceStore {
         var url = root
         let rootValues = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else { throw EPUBError.corruptResource }
-        for component in path.split(separator: "/") {
+        for component in path.split(separator: "/").dropLast() {
             url.appendPathComponent(String(component))
             let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
             guard values.isSymbolicLink != true else { throw EPUBError.corruptResource }
         }
-        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true, values.fileSize == resource.byteCount else { throw EPUBError.corruptResource }
+        url.appendPathComponent(String(path.split(separator: "/").last!)) // Canonical path is nonempty.
+        // Fetch the leaf's link/type/size together, not via two separate Foundation queries.
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isSymbolicLink != true, values.isRegularFile == true,
+              values.fileSize == resource.byteCount else { throw EPUBError.corruptResource }
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         let data = try input.read(upToCount: resource.byteCount + 1) ?? Data()

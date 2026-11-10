@@ -10,7 +10,7 @@ def main():
     service = read('Sources/ReaderDomain/LibraryService.swift')
     store = read('Sources/ReaderDomain/LibraryStore.swift')
     pool = read('Sources/ReaderDomain/EPUB/EPUBContentPool.swift')
-    assert 'storedEPUBSnapshot(bookID: id)' in service, 'reopen must carry one decoded metadata snapshot into session confirmation'
+    assert 'storedEPUBSnapshot(bookID: id, reusing: decoded)' in service, 'reopen must carry one decoded metadata snapshot into session confirmation'
     snapshot = read('Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift')
     assert 'private let metadata: Data' in snapshot and 'metadata == current' in snapshot
     assert 'metadataSHA256 = EPUBResourceStore.digest(metadata)' in snapshot

@@ -1,16 +1,33 @@
 import Foundation
 
-/// One open's exact database bytes and their decoded value. Not a session or file-read permit.
-/// No caller can pair a different package with these bytes. Discarded after opening completes.
+/// One open's fresh database bytes; decoded trees may be shared with a still-live content lease.
+/// Never a session/file-read permit. Raw bytes are discarded after session confirmation.
 struct EPUBMetadataSnapshot: Sendable {
+    /// Constructible only from decoded real metadata in this file, never a caller-supplied pair.
+    final class Decoded: Sendable {
+        let package: EPUBPackage
+        let metadataSHA256: String
+        fileprivate init(package: EPUBPackage, metadataSHA256: String) {
+            self.package = package; self.metadataSHA256 = metadataSHA256
+        }
+    }
     private let metadata: Data
-    let package: EPUBPackage
+    let decoded: Decoded
+    var package: EPUBPackage { decoded.package }
     let metadataSHA256: String
+    let decodeReused: Bool
 
-    init(metadata: Data) throws {
-        package = try JSONDecoder().decode(EPUBPackage.self, from: metadata)
+    init(metadata: Data, reusing: Decoded? = nil) throws {
         self.metadata = metadata
         metadataSHA256 = EPUBResourceStore.digest(metadata)
+        if let reusing, reusing.metadataSHA256 == metadataSHA256 {
+            decoded = reusing
+            decodeReused = true
+        } else {
+            decoded = Decoded(package: try JSONDecoder().decode(EPUBPackage.self, from: metadata),
+                              metadataSHA256: metadataSHA256)
+            decodeReused = false
+        }
     }
 
     /// Re-read within the session transaction, then compare actual bytes, never size/mtime.
