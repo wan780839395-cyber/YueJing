@@ -9,9 +9,7 @@ import tempfile
 from unittest.mock import patch
 import zipfile
 
-# Exercise the original parameterized parser/gates regardless of the dispatch scope.
-with patch.dict(os.environ, {'VALIDATION_SCOPE': 'epub-recent-20'}):
-    import run_epub_freeze_validation as r
+import run_epub_freeze_validation as r
 import validate_task3 as v
 
 checks = []
@@ -48,7 +46,7 @@ def fixture(group):
 selected = r.selection()
 assert len(selected) == r.TOTAL == 20 and r.EXECUTIONS == 21 and all(len(n) == 1 for n in selected.values())
 PARAM_GROUP = next(g for g, s in r.GROUPS.items() if any(n in r.inventory.PARAMETERIZED for n in s['cases']))
-assert len(r.ALLOWED) == 21 and r.NEW == {'App/EPUB/EPUBWarmRendererCache.swift', 'App/EPUB/EPUBParkReply.swift', 'Sources/ReaderDomain/EPUB/EPUBContentPool.swift', 'Tests/ReaderDomainTests/EPUBContentPoolTests.swift'}
+assert len(r.ALLOWED) == 12 and r.NEW == {'Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift', 'scripts/check_epub_metadata_reopen.py'}
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
 checks.append('candidate inventory survives JSON roundtrip')
@@ -112,9 +110,8 @@ workflow = (r.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding=
 job = workflow.split('\n  epub_freeze:\n')[1]
 assert 'default: ' + r.SCOPE in workflow
 assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' || inputs.validation_scope == '" + r.RETEST_SCOPE + "' || inputs.validation_scope == '" + r.FINAL_SCOPE + "' }}" in job
-assert "inputs.validation_scope != '" + r.FINAL_SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-assert "inputs.validation_scope != '" + r.RETEST_SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
+assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
+assert 'epub-recent-' not in workflow
 assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow
 assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
 assert 'Show every selected result and the complete UI inventory\n        if: always()' in job
@@ -143,7 +140,7 @@ with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
     assert receipt['native_tests_planned'] == 21 and 'verified_passed' not in receipt
-    checks.append('scope binds exact21 paths including four additions and makes no native-pass claim')
+    checks.append('scope binds exact12 paths including two additions and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
                        ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other')]:
@@ -490,110 +487,11 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         (linkage/'image').write_bytes(b'changed linkage evidence')
         rejects('linkage evidence hash drift rejected', lambda: r.validate_linkage('device', scope))
 
-# Load the six-case entry independently; never count previous Domain tests as this run.
-import importlib.util
-with patch.dict(os.environ, {'VALIDATION_SCOPE': r.RETEST_SCOPE}):
-    module_spec = importlib.util.spec_from_file_location('recent_six_selfcheck', r.__file__)
-    six = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(six)
-assert six.SCOPE == r.RETEST_SCOPE and six.TOTAL == six.EXECUTIONS == 6
-assert six.QUALIFICATION == 'EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE'
-assert set(six.selection()) == {'host-1', 'host-2', 'host-3', 'ui-1', 'ui-2', 'ui-3'}
-assert all(s['kind'] != 'domain' for s in six.GROUPS.values())
-rejects('six-case scope refuses Domain invocation', lambda: six.command('domain-1', destination, Path('x')))
-for group in six.GROUPS:
-    assert six.parse_log(group, fixture(group), 0, False)['executions'] == 1
-checks.append('six-case entry selects exactly Host3/UI3; no reused passes added')
-initial_tree = r.tree(r.RETEST_BASE)
-repair_tree = copy.deepcopy(initial_tree)
-for p in six.RETEST_ALLOWED:
-    repair_tree[p] = ['100644', 'blob', 'f'*40]
-original_tree = r.tree(r.BASE)
-with patch.dict(os.environ, {**env, 'VALIDATION_SCOPE': six.SCOPE}), \
-     patch.object(six, 'git', side_effect=fakegit), \
-     patch.object(six, 'tree', side_effect=lambda rev: original_tree if rev == six.BASE else initial_tree if rev == six.RETEST_BASE else repair_tree), \
-     patch.object(six, 'dispatch_permission', return_value=False):
-    six_receipt = six.scope_receipt()
-    assert six_receipt['native_tests_planned'] == 6 and six_receipt['selected_declarations'] == 6
-    for p in ('Sources/ReaderDomain/EPUB/EPUBContentPool.swift', 'project.yml', 'Tests/ReaderDomainTests/EPUBContentPoolTests.swift'):
-        saved = repair_tree[p]; repair_tree[p] = ['100644', 'blob', 'e'*40]
-        rejects('six-case isolation rejects ' + p, six.scope_receipt)
-        repair_tree[p] = saved
-checks.append('six-case source boundary rejects product/Domain/build-setting drift')
-with tempfile.TemporaryDirectory(prefix='epub-six-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
-    out = Path(temp); native = out/'epub-freeze'; native.mkdir()
-    (out/'simulator-selection.json').write_text(json.dumps(dict(udid=destination.split('id=')[1])))
-    with patch.object(six, 'OUT', out), patch.object(six, 'NATIVE_OUT', native), \
-         patch.object(six, 'live_scope', return_value=six_receipt), \
-         patch.object(six.compat, 'validate_toolchain_and_dependencies'), patch.object(six.compat, 'validate_destination'), \
-         patch.object(six.reading, 'validate_group_settings'), patch.object(six.paging, 'require_xcresult'):
-        for group, spec in six.GROUPS.items():
-            folder = native/group; folder.mkdir(); bundle = folder/(spec['target']+'.xcresult')
-            want = six.provenance(group, destination, bundle, six_receipt)
-            six.write(folder/'selection.json', want)
-            six.write(folder/'execution.json', dict(**want, native_exit=0, timed_out=False))
-            (folder/(spec['target']+'.log')).write_bytes(fixture(group))
-            six.write(folder/'counts.json', dict(**six.parse_log(group, fixture(group), 0, False), parameter_xcresult=None))
-        result = six.qualification()
-        assert result['verified_passed'] == result['native_tests_executed_this_run'] == 6
-        assert result['not_executed_this_run'] == 224
-        six.write(native/'host-1/failure.json', dict(error='synthetic'))
-        rejects('six-case failure cannot qualify', six.qualification)
-checks.append('six-case qualification counts only six and rejects retained failures')
-
-with patch.dict(os.environ, {'VALIDATION_SCOPE': r.FINAL_SCOPE}):
-    final_spec = importlib.util.spec_from_file_location('recent_final_selfcheck', r.__file__)
-    final = importlib.util.module_from_spec(final_spec)
-    final_spec.loader.exec_module(final)
-assert final.SCOPE == r.FINAL_SCOPE and final.BASE == r.FINAL_BASE
-assert final.TOTAL == final.EXECUTIONS == 2 and set(final.selection()) == {'host-3', 'ui-1'}
-assert len(final.ALLOWED) == 5 and not final.NEW
-for group in final.GROUPS:
-    assert final.parse_log(group, fixture(group), 0, False)['executions'] == 1
-rejects('two-case scope refuses already passed Host1', lambda: final.command('host-1', destination, Path('x')))
-previous_tree = r.tree(final.BASE); final_tree = copy.deepcopy(previous_tree)
-for p in final.ALLOWED:
-    final_tree[p] = ['100644', 'blob', 'f'*40]
-final_project = r.git('show', final.BASE + ':project.yml')
-def finalgit(*args):
-    if args == ('show', final.BASE + ':project.yml'): return final_project
-    return fakegit(*args)
-with patch.dict(os.environ, {**env, 'VALIDATION_SCOPE': final.SCOPE}), \
-     patch.object(final, 'git', side_effect=finalgit), \
-     patch.object(final, 'tree', side_effect=lambda rev: previous_tree if rev == final.BASE else final_tree), \
-     patch.object(final, 'dispatch_permission', return_value=True):
-    final_receipt = final.scope_receipt()
-    assert final_receipt['native_tests_planned'] == 2
-    for p in ('App/EPUB/EPUBWebView.swift', 'Tests/YueJingHostTests/EPUBReaderHostTests.swift', 'project.yml'):
-        saved = final_tree[p]; final_tree[p] = ['100644', 'blob', 'e'*40]
-        rejects('two-case isolation rejects ' + p, final.scope_receipt)
-        final_tree[p] = saved
-with tempfile.TemporaryDirectory(prefix='epub-final-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
-    out = Path(temp); native = out/'epub-freeze'; native.mkdir()
-    (out/'simulator-selection.json').write_text(json.dumps(dict(udid=destination.split('id=')[1])))
-    with patch.object(final, 'OUT', out), patch.object(final, 'NATIVE_OUT', native), \
-         patch.object(final, 'live_scope', return_value=final_receipt), \
-         patch.object(final.compat, 'validate_toolchain_and_dependencies'), patch.object(final.compat, 'validate_destination'), \
-         patch.object(final.reading, 'validate_group_settings'), patch.object(final.paging, 'require_xcresult'):
-        for group, spec in final.GROUPS.items():
-            folder = native/group; folder.mkdir(); bundle = folder/(spec['target']+'.xcresult')
-            want = final.provenance(group, destination, bundle, final_receipt)
-            final.write(folder/'selection.json', want)
-            final.write(folder/'execution.json', dict(**want, native_exit=0, timed_out=False))
-            (folder/(spec['target']+'.log')).write_bytes(fixture(group))
-            final.write(folder/'counts.json', dict(**final.parse_log(group, fixture(group), 0, False), parameter_xcresult=None))
-        result = final.qualification()
-        assert result['verified_passed'] == result['native_tests_executed_this_run'] == 2
-        assert result['not_executed_this_run'] == 228
-        summary = final.summarize()
-        assert sum(x['status'] == 'not_selected' for x in summary['ui_inventory']) == 14
-        final.write(native/'host-3/failure.json', dict(error='synthetic'))
-        rejects('two-case failure cannot qualify', final.qualification)
 ui_source = (r.ROOT/'Tests/YueJingEPUBUITests/EPUBFlowUITests.swift').read_text('utf-8')
 assert 'waitFor { abs(Double(coordinate("scrollX") - initialX) - Double(initialFrame.width)) <= 2 }' in ui_source
 assert 'XCTAssertEqual(Double(nextX - initialX), Double(view.frame.width), accuracy: 2)' in ui_source
 assert 348 > 0 and not abs(348 - 375) <= 2 and abs(375 - 375) <= 2
-checks.append('two-case identity/counts/isolation and exact paging completion wait; no budget/assertion relaxation')
+checks.append('existing exact paging completion wait and final assertion preserved')
 
 print(json.dumps(dict(offline_checks_passed=len(checks), checks=checks, native_tests_executed=0,
                      release_source_ready=not blockers, source_blockers=blockers), indent=2))

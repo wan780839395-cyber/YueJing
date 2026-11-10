@@ -20,38 +20,24 @@ import task3_test_inventory as inventory
 import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
-BASE = "eee357c1bce90cd576657b1610116e55b75c1b92"
-SCOPE = "epub-recent-20"
-RETEST_SCOPE = "epub-recent-host-ui-6"
-RETEST_BASE = "0cf3849908f9e142733a378848ae70a6bc9366b7"
-RETEST_ALLOWED = frozenset({"Tests/YueJingHostTests/EPUBReaderHostTests.swift",
-    ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
-    "scripts/check_epub_freeze_validation.py", "docs/EPUB_FREEZE_RELEASE.md"})
-FINAL_SCOPE = "epub-recent-final-2"
-FINAL_BASE = "efd22c7e7df33d90a80d95c1be023f1cc3b116e0"
-FINAL_ALLOWED = (RETEST_ALLOWED - {"Tests/YueJingHostTests/EPUBReaderHostTests.swift"}) | {
-    "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift"}
+BASE = "9182f1f990fe1956bdfaedab456dc7a7df9e0422"
+SCOPE = "epub-metadata-20"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
-VERSION, BUILD = "0.2.9", "11"
+VERSION, BUILD = "0.2.10", "12"
 TOTAL, EXECUTIONS = 20, 21
-QUALIFICATION = "EPUB_RECENT_20_TARGETED_NATIVE"
+QUALIFICATION = "EPUB_METADATA_20_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
 PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
-NEW = frozenset({"App/EPUB/EPUBWarmRendererCache.swift", "App/EPUB/EPUBParkReply.swift",
-                 "Sources/ReaderDomain/EPUB/EPUBContentPool.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift"})
+NEW = frozenset({"Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift", "scripts/check_epub_metadata_reopen.py"})
 ALLOWED = frozenset({
-    "App/EPUB/EPUBLocationScript.swift", "App/EPUB/EPUBReaderViewModel.swift",
-    "App/EPUB/EPUBWebView.swift", "App/EPUB/EPUBWarmRendererCache.swift", "App/EPUB/EPUBParkReply.swift",
-    "App/Library/BookReadingRouteOwner.swift", "Sources/ReaderDomain/EPUB/EPUBContentPool.swift",
-    "Sources/ReaderDomain/EPUB/OpenedEPUBReader.swift", "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift",
-    "Sources/ReaderDomain/LibraryService.swift", "Sources/ReaderDomain/LibraryStore.swift",
-    "Tests/ReaderDomainTests/EPUBLibraryTests.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift",
-    "Tests/YueJingHostTests/EPUBReaderHostTests.swift", "scripts/check_epub_continuous_script.cjs",
-    ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
-    "scripts/check_epub_freeze_validation.py", "scripts/task3_test_inventory.py",
+    "Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift", "Sources/ReaderDomain/EPUB/EPUBContentPool.swift",
+    "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift", "Sources/ReaderDomain/LibraryStore.swift",
+    "Sources/ReaderDomain/LibraryService.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift",
+    "scripts/check_epub_metadata_reopen.py", ".github/workflows/task3-validate.yml",
+    "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
     "project.yml", "docs/EPUB_FREEZE_RELEASE.md",
 })
 SELECTED_FILES = {
@@ -90,19 +76,6 @@ for _kind, _target in (("domain", "ReaderDomainTests"), ("host", "YueJingHostTes
         GROUPS[_key] = dict(kind=_kind, target=_target, timeout=480, pairs=_chunk, cases=[n for _, n in _chunk])
 del _kind, _target, _pairs, _index, _chunk, _key
 
-# A test-helper-only repair cannot invalidate the independent Domain target.
-# This scope reports only its own six executions; prior Domain evidence is separate.
-if os.environ.get("VALIDATION_SCOPE") == RETEST_SCOPE:
-    SCOPE, TOTAL, EXECUTIONS = RETEST_SCOPE, 6, 6
-    QUALIFICATION = "EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE"
-    SELECTED_FILES = {p: n for p, n in SELECTED_FILES.items() if not p.startswith("ReaderDomainTests/")}
-    GROUPS = {g: s for g, s in GROUPS.items() if s["kind"] != "domain"}
-elif os.environ.get("VALIDATION_SCOPE") == FINAL_SCOPE:
-    SCOPE, BASE, TOTAL, EXECUTIONS = FINAL_SCOPE, FINAL_BASE, 2, 2
-    QUALIFICATION = "EPUB_RECENT_FINAL_2_TARGETED_NATIVE"
-    ALLOWED, NEW = frozenset(FINAL_ALLOWED), frozenset()
-    GROUPS = {g: s for g, s in GROUPS.items() if g in {"host-3", "ui-1"}}
-    SELECTED_FILES = {p: [n] for s in GROUPS.values() for p, n in s["pairs"]}
 require, load, write, sha = v.require, compat.load_json, compat.write_new, compat.digest_path
 
 
@@ -115,12 +88,9 @@ def selection():
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == (14 if SCOPE == "epub-recent-20" else 0),
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == 14,
             "Unexpected selected test count")
     expected_ui = inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split()
-    if SCOPE == FINAL_SCOPE:
-        require(set(GROUPS) == {"host-3", "ui-1"}, "Expected only two residual cases")
-        expected_ui = expected_ui[:1]
     require(SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] == expected_ui, "Unexpected UI selection")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
@@ -168,16 +138,8 @@ def scope_receipt():
     require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
             "Release changes outside exact scope-specific boundary / approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
-    if SCOPE == RETEST_SCOPE:
-        git("merge-base", "--is-ancestor", RETEST_BASE, head)
-        initial = tree(RETEST_BASE)
-        repair_changed = {p for p in set(initial) | set(after) if initial.get(p) != after.get(p)}
-        require(repair_changed == RETEST_ALLOWED and set(initial) == set(after),
-                "Host/UI-only retest requires unchanged product, Domain sources, dependencies and build settings")
-    old_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
-    new_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
-    if SCOPE == FINAL_SCOPE:
-        old_version = new_version # Test-only repair; project and release identity must be byte-identical.
+    old_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
+    new_version = b'        MARKETING_VERSION: "0.2.10"\n        CURRENT_PROJECT_VERSION: "12"\n'
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")

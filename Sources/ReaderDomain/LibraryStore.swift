@@ -525,16 +525,17 @@ extension LibraryStore {
     }
 
 
-    func storedEPUBPackage(bookID: String) throws -> EPUBPackage {
+    func storedEPUBSnapshot(bookID: String) throws -> EPUBMetadataSnapshot {
         guard let book = try book(id: bookID), book.format == .epub else { throw LibraryError.missingBook }
         return try queue.read { db in
             guard let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [bookID]) else {
                 throw EPUBError.corruptResource
             }
-            let package = try JSONDecoder().decode(EPUBPackage.self, from: metadata)
+            let snapshot = try EPUBMetadataSnapshot(metadata: metadata)
+            let package = snapshot.package
             guard package.sourceSHA256 == bookID, package.versionID == book.versionID,
                   package.parserVersion == EPUBFormat.parserVersion else { throw EPUBError.corruptResource }
-            return package
+            return snapshot
         }
     }
 
@@ -586,7 +587,8 @@ extension LibraryStore {
         }
     }
 
-    func beginEPUB(_ permit: ReaderOpenPermit, package: EPUBPackage) throws -> EPUBReadingStart {
+    func beginEPUB(_ permit: ReaderOpenPermit, snapshot: EPUBMetadataSnapshot) throws -> EPUBReadingStart {
+        let package = snapshot.package
         try Task.checkCancellation()
         guard readerOpens[permit.bookID] == permit.id, permit.bookID == package.sourceSHA256 else { throw CancellationError() }
         let session = ReadingSession(id: UUID().uuidString, bookID: permit.bookID, versionID: package.versionID)
@@ -595,7 +597,7 @@ extension LibraryStore {
                   try String.fetchOne(db, sql: "SELECT format FROM bookFormats WHERE bookID=?", arguments: [permit.bookID]) == "epub",
                   book.versionID == package.versionID,
                   let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [book.id]),
-                  try JSONDecoder().decode(EPUBPackage.self, from: metadata) == package else { throw EPUBError.corruptResource }
+                  snapshot.matches(metadata) else { throw EPUBError.corruptResource }
             let data = try Data.fetchOne(db, sql: "SELECT anchor FROM epubProgress WHERE bookID=?", arguments: [book.id])
             let decoded = data.flatMap { try? JSONDecoder().decode(EPUBReadingPosition.self, from: $0) }
             let valid = decoded.flatMap { (try? $0.validate(in: package)) != nil ? $0 : nil }

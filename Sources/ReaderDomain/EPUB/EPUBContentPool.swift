@@ -49,16 +49,13 @@ actor EPUBContentPool {
     }
     private var entries: [URL: Entry] = [:]
     private var holders: [UUID: Holder] = [:]
+    private var packageFingerprints = EPUBMetadataFingerprintCache()
     private let limits: Limits
     init(limits: Limits = Limits()) { self.limits = limits }
 
     private static func requireDirectory(_ url: URL) throws {
         let v = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard v.isDirectory == true, v.isSymbolicLink != true else { throw EPUBError.corruptResource }
-    }
-    private static func fingerprint(_ package: EPUBPackage) throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return EPUBResourceStore.digest(try encoder.encode(package))
     }
     private static func size(_ package: EPUBPackage) throws -> Int {
         var total = 0
@@ -105,13 +102,30 @@ actor EPUBContentPool {
 
     /// Serialized preparation has no await: overlapping requests cannot publish duplicate work.
     /// Every acquisition, including hits, re-reads the original and all actual resource hashes.
+    func acquire(bookID: String, archive: URL, snapshot: EPUBMetadataSnapshot, root: URL)
+        throws -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
+        try acquire(bookID: bookID, archive: archive, expected: snapshot.package, root: root, snapshot: snapshot)
+    }
+
     func acquire(bookID: String, archive: URL, expected: EPUBPackage, root: URL)
+        throws -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
+        try acquire(bookID: bookID, archive: archive, expected: expected, root: root, snapshot: nil)
+    }
+
+    private func acquire(bookID: String, archive: URL, expected: EPUBPackage, root: URL,
+                         snapshot: EPUBMetadataSnapshot?)
         throws -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
         try Task.checkCancellation()
         var timings = EPUBOpeningTimings()
         guard try timings.measure(.sourceVerification, { try EPUBResourceStore.sourceDigest(archive) }) == expected.sourceSHA256 else {
             throw LibraryError.changedFile
         }
+        let fingerprint = try timings.measure(.packageFingerprint) {
+            if let snapshot { return try packageFingerprints.resolve(snapshot) }
+            return (digest: try EPUBMetadataFingerprintCache.canonical(expected), reused: false)
+        }
+        let digest = fingerprint.digest
+        timings.packageFingerprintReused = fingerprint.reused
         // Optional cache failure must not prevent a valid first open using temporary storage.
         do { try discover(root) } catch {
             let fallback = root.deletingLastPathComponent().appendingPathComponent("Imports", isDirectory: true)
@@ -121,9 +135,8 @@ actor EPUBContentPool {
             }
             try Self.requireDirectory(fallback)
             return try build(bookID: bookID, archive: archive, expected: expected, root: fallback,
-                             timings: timings, cacheable: false)
+                             digest: digest, timings: timings, cacheable: false)
         }
-        let digest = try Self.fingerprint(expected)
         let key = EPUBResourceStore.digest(Data((bookID + "\n" + expected.versionID).utf8))
         let bytes = try Self.size(expected)
         let candidates = entries.values.filter { $0.root == root && $0.record.key == key && !$0.retired }
@@ -149,7 +162,7 @@ actor EPUBContentPool {
         }
         do {
             return try build(bookID: bookID, archive: archive, expected: expected, root: root,
-                             timings: timings, cacheable: true)
+                             digest: digest, timings: timings, cacheable: true)
         } catch let error as CocoaError where error.code == .fileWriteNoPermission || error.code == .fileWriteVolumeReadOnly {
             let fallback = root.deletingLastPathComponent().appendingPathComponent("Imports", isDirectory: true)
             try Self.requireDirectory(fallback.deletingLastPathComponent())
@@ -158,15 +171,14 @@ actor EPUBContentPool {
             }
             try Self.requireDirectory(fallback)
             return try build(bookID: bookID, archive: archive, expected: expected, root: fallback,
-                             timings: timings, cacheable: false)
+                             digest: digest, timings: timings, cacheable: false)
         }
     }
 
     private func build(bookID: String, archive: URL, expected: EPUBPackage, root: URL,
-                       timings initialTimings: EPUBOpeningTimings, cacheable: Bool)
+                       digest: String, timings initialTimings: EPUBOpeningTimings, cacheable: Bool)
         throws -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
         var timings = initialTimings
-        let digest = try Self.fingerprint(expected)
         let key = EPUBResourceStore.digest(Data((bookID + "\n" + expected.versionID).utf8))
         let bytes = try Self.size(expected)
         let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)

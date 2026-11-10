@@ -8,12 +8,14 @@ public struct EPUBOpeningTimings: Sendable {
     public internal(set) var contentCacheOutcome: ContentCacheOutcome = .notRequested
     public internal(set) var resourceCount = 0
     public internal(set) var resourceBytes = 0
+    public internal(set) var packageFingerprintReused = false
     public enum Phase: String, CaseIterable, Sendable {
-        case catalog, sourceVerification, warmResourceVerification, diskRestore, rebuild, cacheWrite, session
+        case catalog, sourceVerification, packageFingerprint, warmResourceVerification, diskRestore, rebuild, cacheWrite, session
         var label: String {
             switch self {
             case .catalog: "书库/打开许可"
             case .sourceVerification: "原书读取+完整SHA"
+            case .packageFingerprint: "规范指纹计算/复用"
             case .warmResourceVerification: "复用目录逐资源校验"
             case .diskRestore: "磁盘缓存校验/恢复"
             case .rebuild: "资源重新构建"
@@ -51,7 +53,8 @@ public struct EPUBOpeningTimings: Sendable {
     }
 
     public var summary: String {
-        let cache = "内容缓存：\(contentCacheOutcome.rawValue)；资源清单 \(resourceCount) 项 / \(resourceBytes) 字节\n"
+        let cache = "准备链：metadata-snapshot-v1；规范指纹命中：\(packageFingerprintReused)\n" +
+            "内容缓存：\(contentCacheOutcome.rawValue)；资源清单 \(resourceCount) 项 / \(resourceBytes) 字节\n"
         return cache + Phase.allCases.flatMap { phase in
             samples.filter { $0.phase == phase }.map {
                 phase.label + String(format: " %.3fs", $0.seconds) + ($0.succeeded ? "" : "（未成功，已回退）")

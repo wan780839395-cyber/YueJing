@@ -585,11 +585,11 @@ extension LibraryService {
         var lease: EPUBContentLease?
         do {
             let source = try await store.epubFileURL(bookID: id)
-            let expected = try await store.storedEPUBPackage(bookID: id)
+            let snapshot = try await store.storedEPUBSnapshot(bookID: id)
             let cache = await store.epubContentPoolURL()
             let catalogFinished = ContinuousClock.now
             let prepared = try await EPUBContentPool.shared.acquire(
-                bookID: id, archive: source, expected: expected, root: cache
+                bookID: id, archive: source, snapshot: snapshot, root: cache
             )
             lease = prepared.lease
             let publication = prepared.lease.publication
@@ -599,7 +599,7 @@ extension LibraryService {
             try Task.checkCancellation()
             let sessionStarted = ContinuousClock.now
             let preferences = try await store.preferences()
-            let start = try await store.beginEPUB(permit, package: publication.package)
+            let start = try await store.beginEPUB(permit, snapshot: snapshot)
             do {
                 try await store.confirmReaderOpen(permit, session: start.session)
                 try Task.checkCancellation()
