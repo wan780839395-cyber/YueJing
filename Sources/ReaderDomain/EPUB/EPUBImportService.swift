@@ -28,7 +28,8 @@ actor EPUBImportService {
         return EPUBPublication(package: package, resourceRoot: destination)
     }
     func prepareForReading(archiveURL: URL, destination: URL, expected: EPUBPackage,
-                           cache: URL) throws -> (publication: EPUBPublication, reused: Bool) {
+                           cache: URL) throws -> (publication: EPUBPublication, reused: Bool, timings: EPUBOpeningTimings) {
+        var timings = EPUBOpeningTimings()
         var candidate = closedPublication
         closedPublication = nil
         defer {
@@ -37,14 +38,14 @@ actor EPUBImportService {
         }
         try Task.checkCancellation()
         // Verify original bytes on every open; no mtime/size-only cache trust.
-        guard try EPUBResourceStore.sourceDigest(archiveURL) == expected.sourceSHA256 else { throw LibraryError.changedFile }
+        guard try timings.measure(.sourceVerification, { try EPUBResourceStore.sourceDigest(archiveURL) }) == expected.sourceSHA256 else { throw LibraryError.changedFile }
         if let retained = candidate {
             do {
                 guard retained.package == expected else { throw EPUBError.corruptResource }
-                try EPUBPublicationCache.verifyResources(retained)
+                try timings.measure(.warmResourceVerification) { try EPUBPublicationCache.verifyResources(retained) }
                 try Task.checkCancellation()
                 candidate = nil // Transfer the exact directory, with no resource writes or copies.
-                return (retained, true)
+                return (retained, true, timings)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -53,21 +54,21 @@ actor EPUBImportService {
                 candidate = nil
             }
         }
-        if let restored = try EPUBPublicationCache.restore(package: expected, cache: cache, destination: destination) {
+        if let restored = try timings.measure(.diskRestore, { try EPUBPublicationCache.restore(package: expected, cache: cache, destination: destination) }) {
             try Task.checkCancellation()
-            return (restored, true)
+            return (restored, true, timings)
         }
-        let fresh = try prepare(archiveURL: archiveURL, destination: destination)
+        let fresh = try timings.measure(.rebuild) { try prepare(archiveURL: archiveURL, destination: destination) }
         guard fresh.package == expected else { throw EPUBError.corruptResource }
         do {
-            try EPUBPublicationCache.store(fresh, cache: cache)
+            try timings.measure(.cacheWrite) { try EPUBPublicationCache.store(fresh, cache: cache) }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             // A full verified open remains usable when optional caching runs out of disk space.
         }
         try Task.checkCancellation()
-        return (fresh, false)
+        return (fresh, false, timings)
     }
 
     static func copyBounded(_ source: URL, to destination: URL, maximumBytes: Int) throws {

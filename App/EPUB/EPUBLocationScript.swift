@@ -292,6 +292,7 @@ enum EPUBLocationScript {
             chapters: [],
             syncGeneration: 0,
             syncing: false,
+            scrollActive: false,
             targetPath: "",
             ready: false,
             suppressingReflow: true,
@@ -309,6 +310,27 @@ enum EPUBLocationScript {
             observedScrollY: 0,
             scrollTimer: null
         };
+
+        function diagnosticNow() { return window.performance && window.performance.now ? window.performance.now() : 0; }
+        var diagnosticOrigin = diagnosticNow();
+        var diagnosticTrace = {events: [], counts: {}, sampleCount: 0, sampleMS: 0, sampleMaxMS: 0, remaining: 0};
+        function recordDiagnostic(name, value, extra) {
+            diagnosticTrace.counts[name] = (diagnosticTrace.counts[name] || 0) + 1;
+            if (diagnosticTrace.events.length === 128) { diagnosticTrace.events.shift(); }
+            diagnosticTrace.events.push({event: name, ms: diagnosticNow() - diagnosticOrigin,
+                value: Number.isFinite(value) ? value : 0, extra: Number.isFinite(extra) ? extra : 0,
+                active: state.scrollActive});
+        }
+        function finishSample(start) {
+            var duration = Math.max(0, diagnosticNow() - start);
+            diagnosticTrace.sampleCount += 1;
+            diagnosticTrace.sampleMS += duration;
+            diagnosticTrace.sampleMaxMS = Math.max(diagnosticTrace.sampleMaxMS, duration);
+        }
+        function observedScrollTo(x, y) {
+            recordDiagnostic("programmatic-scroll", x, y);
+            window.scrollTo(x, y);
+        }
 
         function post(payload) {
             try {
@@ -409,9 +431,9 @@ enum EPUBLocationScript {
             if (state.paginated) {
                 var width = viewportWidth();
                 var page = Math.floor(Math.max(0, (window.scrollX || 0) + rect.left) / width);
-                window.scrollTo(page * width, 0);
+                observedScrollTo(page * width, 0);
             } else {
-                window.scrollTo(0, Math.max(0, window.scrollY + rect.top - 18));
+                observedScrollTo(0, Math.max(0, window.scrollY + rect.top - 18));
             }
         }
 
@@ -458,7 +480,7 @@ enum EPUBLocationScript {
             }
             var chapter = chapterFor(path);
             if (!chapter) { return false; }
-            if (chapter === state.chapters[0]) { window.scrollTo(0, 0); }
+            if (chapter === state.chapters[0]) { observedScrollTo(0, 0); }
             else { scrollToRect(chapter.element.getBoundingClientRect()); }
             return true;
         }
@@ -471,14 +493,15 @@ enum EPUBLocationScript {
             if (state.paginated) {
                 var width = viewportWidth();
                 var page = Math.max(0, Math.ceil(((window.scrollX || 0) + rect.right) / width - 0.001) - 1);
-                window.scrollTo(page * width, 0);
+                observedScrollTo(page * width, 0);
             } else {
-                window.scrollTo(0, Math.max(0, window.scrollY + rect.bottom - window.innerHeight));
+                observedScrollTo(0, Math.max(0, window.scrollY + rect.bottom - window.innerHeight));
             }
             return true;
         }
 
         function sampleVisible(path) {
+            var sampleStarted = diagnosticNow();
             var chapters = path ? state.chapters.filter(function(c) { return c.path === path; }) : state.chapters;
             var entries = [];
             chapters.forEach(function(c) {
@@ -551,7 +574,7 @@ enum EPUBLocationScript {
                     chosenNode = state.lastAnchor.node; offset = state.lastAnchor.utf16Offset;
                 }
             }
-            return {
+            var result = {
                 sessionID: state.sessionID,
                 epoch: state.epoch,
                 path: chosenPath,
@@ -565,9 +588,14 @@ enum EPUBLocationScript {
                 contentWidth: contentWidth(),
                 visibleText: visibleParts.join(" ")
             };
+            finishSample(sampleStarted);
+            diagnosticTrace.remaining = Math.max(0, result.contentHeight - result.scrollY - viewportH);
+            return result;
         }
 
         function waitForImagesAndTwoFrames(expectedSession, expectedEpoch, done) {
+            var imagesStarted = diagnosticNow();
+            recordDiagnostic("initial-images-start");
             var images = Array.prototype.slice.call(document.images || []);
             var pending = [];
             for (var i = 0; i < images.length; i++) {
@@ -580,6 +608,7 @@ enum EPUBLocationScript {
                 if (finished) { return; }
                 finished = true;
                 if (state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
+                recordDiagnostic("initial-images-settled", diagnosticNow() - imagesStarted);
                 window.requestAnimationFrame(function() {
                     if (state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
                     window.requestAnimationFrame(function() {
@@ -619,9 +648,10 @@ enum EPUBLocationScript {
                 });
         }
 
-        function windowMessage(error) {
+        function windowMessage(error, deferred) {
+            recordDiagnostic(error ? "window-error" : deferred ? "window-deferred" : "window-committed", state.chapters.length);
             post({kind: "window", sessionID: state.sessionID, epoch: state.epoch, path: state.path,
-                paths: state.chapters.map(function(c) { return c.path; }), error: error,
+                paths: state.chapters.map(function(c) { return c.path; }), error: error, deferred: deferred === true,
                 needsMore: !error && (state.paginated ? contentWidth() < viewportWidth() * 2 :
                     Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0) < window.innerHeight * 2)});
         }
@@ -718,18 +748,21 @@ enum EPUBLocationScript {
         function preloadChapter(chapter) {
             return Promise.all(Array.prototype.map.call(chapter.element.querySelectorAll("img"), function(img) {
                 return new Promise(function(resolve, reject) {
+                    var imageStarted = diagnosticNow();
+                    recordDiagnostic("image-start");
                     var finished = false;
                     var timer = window.setTimeout(function() { finish(false); }, 8000);
-                    function finish(ok) {
+                    function finish(ok, cancelled) {
                         if (finished) { return; }
                         finished = true;
+                        recordDiagnostic(cancelled ? "image-cancelled" : ok ? "image-ready" : "image-failed", diagnosticNow() - imageStarted);
                         window.clearTimeout(timer);
                         img.removeEventListener("load", loaded);
                         img.removeEventListener("error", failed);
                         if (ok) { resolve(); } else { reject(new Error("image-not-ready")); }
                     }
                     state.imageCancels.push(function() {
-                        if (!finished) { finish(false); img.removeAttribute("src"); }
+                        if (!finished) { finish(false, true); img.removeAttribute("src"); }
                     });
                     function failed() { finish(false); }
                     function loaded() {
@@ -773,6 +806,8 @@ enum EPUBLocationScript {
 
         function syncWindow(config) {
             if (!config || !state.ready || config.sessionID !== state.sessionID || config.epoch !== state.epoch) { return false; }
+            var windowStarted = diagnosticNow();
+            recordDiagnostic("window-start", diagnosticTrace.remaining, state.observedScrollY);
             var additions = [], paths = new Set(), indexes = new Set();
             var generation = state.syncGeneration + 1;
             var limit = config.limit === undefined ? 5 : config.limit;
@@ -801,8 +836,20 @@ enum EPUBLocationScript {
             state.syncing = false;
             var session = state.sessionID, epoch = state.epoch;
             function live() { return generation === state.syncGeneration && session === state.sessionID && epoch === state.epoch; }
+            // Prepending/evicting changes the scroll origin. Do not fight a native
+            // drag or its deceleration with coordinate compensation. A deferred
+            // acknowledgement releases the native timeout; idle retries the window.
+            function deferForScroll() {
+                return !state.paginated && state.scrollActive &&
+                    (state.chapters.some(function(c) { return config.keepPaths.indexOf(c.path) < 0; }) ||
+                     additions.some(function(c) { return c.index < state.chapters[0].index; }));
+            }
+            if (deferForScroll()) { windowMessage(false, true); return true; }
             Promise.all(additions.map(preloadChapter)).then(function() {
                 if (!live()) { return; }
+                recordDiagnostic("window-prepared", diagnosticNow() - windowStarted, additions.length);
+                // A gesture may have begun while images were being decoded.
+                if (deferForScroll()) { state.imageCancels = []; windowMessage(false, true); return; }
                 state.imageCancels = [];
                 // Capture AFTER image decoding: the reader may have moved while it was pending.
                 var anchor = sampleVisible(), before = anchor && anchorRect(anchor);
@@ -832,9 +879,12 @@ enum EPUBLocationScript {
                 state.chapters = kept;
                 updatePageMetrics();
                 var after = anchor && anchorRect(anchor);
-                if (before && after) {
-                    window.scrollTo((window.scrollX || 0) + (state.paginated ? after.left - before.left : 0),
-                        state.paginated ? 0 : (window.scrollY || 0) + after.top - before.top);
+                var deltaX = before && after && state.paginated ? after.left - before.left : 0;
+                var deltaY = before && after && !state.paginated ? after.top - before.top : 0;
+                // Even scrollTo(currentX, currentY) can cancel WebKit's native momentum.
+                // Append-only commits must not issue any programmatic scroll command.
+                if (deltaX !== 0 || deltaY !== 0) {
+                    observedScrollTo((window.scrollX || 0) + deltaX, state.paginated ? 0 : (window.scrollY || 0) + deltaY);
                 }
                 state.observedScrollX = window.scrollX || 0;
                 state.observedScrollY = window.scrollY || 0;
@@ -867,6 +917,7 @@ enum EPUBLocationScript {
 
         function configure(config) {
             if (!config || typeof config !== "object") { return; }
+            recordDiagnostic(config.preserveViewport === true ? "promotion" : "navigation");
             state.syncGeneration += 1;
             cancelImagePreloads();
             state.syncing = false;
@@ -1108,11 +1159,20 @@ enum EPUBLocationScript {
         window.__yjEpub = {
             configure: configure,
             syncWindow: syncWindow,
+            setScrollActive: function(active) {
+                if (state.scrollActive !== (active === true)) { recordDiagnostic(active === true ? "motion-start" : "motion-end"); }
+                state.scrollActive = active === true;
+            },
+            diagnostics: function() {
+                return {events: diagnosticTrace.events.map(function(e) { return Object.assign({}, e); }),
+                    counts: Object.assign({}, diagnosticTrace.counts), sampleCount: diagnosticTrace.sampleCount,
+                    sampleMS: diagnosticTrace.sampleMS, sampleMaxMS: diagnosticTrace.sampleMaxMS};
+            },
             windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,
             sampleStatus: function() {
                 return {ready: state.ready, reflow: state.suppressingReflow, syncing: state.syncing,
-                    chapters: state.chapters.length, revision: state.reflowRevision,
+                    chapters: state.chapters.length, revision: state.reflowRevision, scrollActive: state.scrollActive,
                     configuredPathVisible: (sampleVisible() || {}).path === state.path};
             },
             realignAnchorIfStationary: function() {

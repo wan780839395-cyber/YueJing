@@ -148,10 +148,25 @@ struct EPUBLibraryTests {
     }
 
     @Test func epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences() async throws {
+        var measured = EPUBOpeningTimings()
+        let clockStart = ContinuousClock.now
+        measured.record(.catalog, since: clockStart, until: clockStart.advanced(by: .milliseconds(25)))
+        #expect(abs((measured.samples.first?.seconds ?? 0) - 0.025) < 0.000001)
+        #expect(throws: EPUBError.self) {
+            try measured.measure(.rebuild) { () throws -> Void in throw EPUBError.corruptResource }
+        }
+        #expect(measured.samples.last?.succeeded == false)
+        for _ in 0..<40 { measured.record(.session, since: clockStart) }
+        #expect(measured.samples.count == 16)
+        #expect(measured.samples.allSatisfy { $0.seconds.isFinite && $0.seconds >= 0 })
         let f = try EPUBLibraryFixture(); defer { f.remove() }
         let receipt = try await f.install(f.archive())
         var old: OpenedEPUBReader? = try await f.service.openEPUB(id: receipt.book.id)
         weak var oldReference = old
+        let initialTimings = try #require(old?.openingTimings)
+        #expect(initialTimings.samples.contains { $0.phase == .sourceVerification && $0.succeeded })
+        #expect(initialTimings.samples.contains { $0.phase == .catalog && $0.succeeded })
+        #expect(initialTimings.samples.contains { $0.phase == .session && $0.succeeded })
         let folder = try #require(old?.publication.resourceRoot)
         let session = try #require(old?.reading.session.id)
         let position = try EPUBLibraryFixture.position(try #require(old), path: "OPS/two.xhtml", offset: 1)
@@ -164,6 +179,9 @@ struct EPUBLibraryTests {
         try await f.store.savePreferences(latest)
         let reopened = try await f.service.openEPUB(id: receipt.book.id)
         #expect(reopened.reusedResources)
+        #expect(reopened.openingTimings.samples.contains { $0.phase == .warmResourceVerification && $0.succeeded })
+        #expect(!reopened.openingTimings.samples.contains { $0.phase == .rebuild })
+        #expect(!reopened.openingTimings.summary.contains(receipt.book.id))
         #expect(reopened.publication.resourceRoot == folder)
         #expect(reopened.reading.session.id != session)
         #expect(reopened.reading.position == position)

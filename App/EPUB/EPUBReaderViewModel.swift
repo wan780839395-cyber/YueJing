@@ -400,6 +400,8 @@ final class EPUBReaderViewModel: ObservableObject {
                         ) + (activeReader.reusedResources
                             ? "\n已复用已验证资源，未重新解压或解析全书。"
                             : "\n本次重新构建资源缓存。")
+                            + "\n" + activeReader.openingTimings.summary
+                            + "\n细分项未覆盖全部等待/调度，不与上方总耗时重复相加。"
                     }
                     if persist {
                         self.hasUserPosition = true

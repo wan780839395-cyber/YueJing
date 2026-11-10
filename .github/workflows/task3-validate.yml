@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB targeted24 (25 executions); continue independent cases and report every UI test
+        description: EPUB P0 targeted9 (10 executions); independent tests and diagnostic device delivery
         required: true
         type: choice
-        default: epub-scene-24
+        default: epub-p0-9
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,7 +17,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-scene-24
+          - epub-p0-9
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-scene-24' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-p0-9' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1135,7 +1135,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-scene-24' }}
+    if: ${{ inputs.validation_scope == 'epub-p0-9' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1148,7 +1148,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out the approved EPUB reopen and jump candidate
+      - name: Check out the approved EPUB P0 observation and scroll candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1249,7 +1249,7 @@ jobs:
           assert code == 0 and not timed_out, 'Selected simulator did not become ready'
           PY
 
-      - name: Run all 24 selected cases independently and continue after individual failures
+      - name: Run all 9 selected cases independently and continue after individual failures
         id: tests
         if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
         run: |

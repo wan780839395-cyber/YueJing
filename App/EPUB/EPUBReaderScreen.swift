@@ -184,6 +184,9 @@ struct EPUBReaderScreen: View {
                         }
                     },
                     openingSummary: model.openingPerformanceSummary,
+                    runtimeDiagnostics: {
+                        await model.webView.controller?.performanceSummary() ?? "阅读器已释放。"
+                    },
                     isActive: { panelActive(.settings, session.id) },
                     close: { closePanel(session.id) },
                     appearance: appearance

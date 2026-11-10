@@ -13,11 +13,13 @@ struct EPUBSettingsView: View {
     @Binding var readingMode: EPUBReadingMode
     let changed: @MainActor () -> Void
     var openingSummary: String?
+    let runtimeDiagnostics: (@MainActor () async -> String)?
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
     let appearance: ReaderToolAppearance
     @State private var draft: ReaderPreferences
     @State private var info: AuxiliaryPage?
+    @State private var runtimeSummary: String?
     @State private var showRestore = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -29,6 +31,7 @@ struct EPUBSettingsView: View {
         readingMode: Binding<EPUBReadingMode>,
         changed: @escaping @MainActor () -> Void,
         openingSummary: String? = nil,
+        runtimeDiagnostics: (@MainActor () async -> String)? = nil,
         isActive: @escaping @MainActor () -> Bool,
         close: @escaping @MainActor () -> Void,
         appearance: ReaderToolAppearance
@@ -37,6 +40,7 @@ struct EPUBSettingsView: View {
         _readingMode = readingMode
         self.changed = changed
         self.openingSummary = openingSummary
+        self.runtimeDiagnostics = runtimeDiagnostics
         self.isActive = isActive
         self.close = close
         self.appearance = appearance
@@ -111,7 +115,14 @@ struct EPUBSettingsView: View {
             NavigationStack {
                 Group {
                     if page == .diagnostics {
-                        ReaderDiagnosticsView(openingSummary: openingSummary)
+                        ReaderDiagnosticsView(openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"))
+                            .task {
+                                runtimeSummary = nil
+                                guard isActive(), let runtimeDiagnostics else { return }
+                                let value = await runtimeDiagnostics()
+                                guard !Task.isCancelled, isActive() else { return }
+                                runtimeSummary = value
+                            }
                     } else {
                         ScrollView {
                             Text(LibraryLicenseView.bundledLicenseText())

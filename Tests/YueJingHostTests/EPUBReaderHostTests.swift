@@ -12,6 +12,10 @@ import XCTest
 struct EPUBReaderHostTests {
     @Test func epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position() async throws {
         verifyLargeDirectorySelection()
+        var trace = EPUBRuntimeTrace()
+        for _ in 0..<200 { trace.record(.windowRequested) }
+        #expect(trace.entries.count == 128 && trace.counts[.windowRequested] == 200)
+        #expect(trace.entries.allSatisfy { $0.milliseconds.isFinite && $0.milliseconds >= 0 })
         try await withHostFixture { fixture in
             let archiveURL = fixture.root.appendingPathComponent("Illustrated.epub")
             try EPUBUITestFixture.writeIllustratedEPUB(to: archiveURL, title: "Host Illustrated")
@@ -64,6 +68,10 @@ struct EPUBReaderHostTests {
                 #expect(controller.resourceHandler.servedPaths.contains("OEBPS/images/cover.png"))
                 #expect(controller.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
                 #expect(controller.webView.scrollView.zoomScale == 1)
+                let performance = await controller.performanceSummary()
+                #expect(performance.contains("documentLoad") && performance.contains("locatorReady"))
+                #expect(performance.contains("sampleCount") && !performance.contains("OEBPS/"))
+                #expect(!performance.contains("EPUB_CH1_START"))
                 let domSummary = try await controller.evaluateLocatorJavaScriptForTesting(
                     """
                     (function() {
@@ -697,6 +705,13 @@ struct EPUBReaderHostTests {
         _ = try await controller.evaluateLocatorJavaScriptForTesting("true;")
         #expect(toggles == 1) // A subsequent drag revokes the pending hit-test.
         controller.scrollViewDidEndDragging(controller.webView.scrollView, willDecelerate: false)
+        let dragStopped = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+        #expect(dragStopped == false)
+        controller.scrollViewWillBeginDragging(controller.webView.scrollView)
+        controller.scrollViewDidEndDragging(controller.webView.scrollView, willDecelerate: true)
+        controller.handleViewportTap(at: point, beganDuringDeceleration: true)
+        let momentumStopped = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+        #expect(momentumStopped == false && toggles == 1)
         _ = try await controller.evaluateLocatorJavaScriptForTesting("""
         document.getElementById('test-tap-blank').innerHTML = '<a href="#" style="display:block;width:100%;height:100%">link</a>'; true;
         """)
@@ -953,18 +968,27 @@ struct EPUBReaderHostTests {
                 #expect(boundarySample.path == ch1Token.path)
                 // One continuous movement crosses the boundary without calling turnChapter.
                 controller.scrollViewWillBeginDragging(scroll)
+                let draggingProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+                #expect(draggingProtected == true)
                 _ = try await controller.evaluateLocatorJavaScriptForTesting("""
                 window.scrollTo(0, window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top + 20);
                 true;
                 """)
                 let crossed = try #require(await controller.sampleVisibleNow())
                 model.handleLocatorEvent(crossed)
-                controller.scrollViewDidEndDragging(scroll, willDecelerate: false)
+                controller.scrollViewDidEndDragging(scroll, willDecelerate: true)
+                let decelerationProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+                #expect(decelerationProtected == true)
                 try await waitForNewToken(model: model, previous: ch1Token)
                 let ch2Request = try #require(model.navigationRequest)
                 #expect(ch2Request.token.path == "OEBPS/text/ch2.xhtml")
                 #expect(ch2Request.reloadDocument == false && ch2Request.preserveViewport)
                 try await waitUntilReady(model: model, expectedToken: ch2Request.token)
+                let promotionProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+                #expect(promotionProtected == true)
+                controller.scrollViewDidEndDecelerating(scroll)
+                let idleProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
+                #expect(idleProtected == false)
                 let ch2Token = try #require(model.currentToken)
                 #expect(controller.documentLoadCount == 1)
                 #expect(!model.loading)

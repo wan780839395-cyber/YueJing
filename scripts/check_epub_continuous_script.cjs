@@ -63,6 +63,29 @@ async function fixture(source, css, pagedCSS) {
     function sameRect(a,b,label) { ok(Math.abs(a.top-b.top) <= 1 && Math.abs(a.left-b.left) <= 1, `${label}: ${a.top},${a.left} != ${b.top},${b.left}`); }
     function atChapter(i, offset = 0) { scrollTo(0, scrollY + section(i).getBoundingClientRect().top + offset); }
     await configure(2);
+    api.setScrollActive(true);
+    // Appending below the viewport must not reset UIScrollView momentum through JS.
+    const originalScrollTo = window.scrollTo;
+    const scrollCommands = [];
+    window.scrollTo = function(...args) { scrollCommands.push(args); return originalScrollTo.apply(window, args); };
+    await sync([2,3]);
+    window.scrollTo = originalScrollTo;
+    ok(scrollCommands.length === 0, 'append-only preload must not issue scrollTo, even at unchanged coordinates');
+    results.push('append-only preload issues no programmatic scroll command');
+    const pendingPaths = api.windowPaths().join('|'), pendingY = scrollY;
+    const deferredPrepend = await sync([1,2,3]);
+    ok(deferredPrepend.deferred && !deferredPrepend.error && api.windowPaths().join('|') === pendingPaths && scrollY === pendingY,
+        'backward preload must defer without moving the reader during native scrolling');
+    // A natural chapter promotion changes authority, not the current gesture state.
+    epoch = 'moving-promotion';
+    api.configure(config(2, {preserveViewport:true}));
+    ok((await sync([1,2,3])).deferred, 'promotion must not clear native scrolling protection');
+    for (const delta of [80, -35]) {
+        const prior = scrollY; scrollBy(0, delta); await settle();
+        ok(Math.abs(scrollY - prior - delta) <= 1 && api.sampleNow(), 'deferred preload must preserve forward and backward scrolling');
+    }
+    api.setScrollActive(false);
+    results.push('native motion defers backward prepend, survives promotion, and allows both scroll directions');
     let anchor = api.sampleNow(), before = rectFor(anchor);
     const preloadMessageStart = messages.length;
     await sync([1,2,3]);
@@ -93,6 +116,13 @@ async function fixture(source, css, pagedCSS) {
     ok(messages.at(-2).kind === 'ready' && messages.at(-2).path === chapter(3).path && messages.at(-1).kind === 'scroll', 'promotion ready then actual scroll');
     anchor = api.sampleNow(); before = rectFor(anchor);
     const retained = span(3);
+    api.setScrollActive(true);
+    const beforeEvictionPaths = api.windowPaths().join('|'), beforeEvictionY = scrollY;
+    const deferredEviction = await sync([2,3,4,5,6]);
+    ok(deferredEviction.deferred && api.windowPaths().join('|') === beforeEvictionPaths && scrollY === beforeEvictionY,
+        'window pruning must not change the scroll origin during dragging or deceleration');
+    api.setScrollActive(false);
+    results.push('window pruning waits for native idle rather than interrupting momentum');
     await sync([2,3,4,5,6]);
     sameRect(before, rectFor(anchor), 'eviction exact character compensation');
     ok(span(3) === retained && api.windowPaths().length === 5 && !section(0) && !section(1), 'eviction identity and cap');
@@ -197,9 +227,22 @@ async function fixture(source, css, pagedCSS) {
     ok(api.syncWindow({sessionID:'session',epoch,chapters:[image],keepPaths:[chapter(3).path,chapter(4).path,chapter(5).path,chapter(6).path,image.path]}), 'image sync accepted');
     await tick(); ok(!section(7), 'image stays off-flow until decoded');
     atChapter(4, 110); await settle(); anchor = api.sampleNow(); before = rectFor(anchor);
+    const decodingPaths = api.windowPaths().join('|'), decodingY = scrollY;
+    api.setScrollActive(true);
     release();
     for(let n=0;n<120 && !messages.slice(start).some(m=>m.kind==='window');n++) await tick();
     await settle();
+    const decodingResult = messages.slice(start).find(m => m.kind === 'window');
+    ok(decodingResult && decodingResult.deferred && !decodingResult.error && !section(7) &&
+        api.windowPaths().join('|') === decodingPaths && scrollY === decodingY,
+        'gesture begun during image decode must defer origin-changing commit');
+    api.setScrollActive(false);
+    const idleImageStart = messages.length;
+    ok(api.syncWindow({sessionID:'session',epoch,chapters:[image],keepPaths:[chapter(3).path,chapter(4).path,chapter(5).path,chapter(6).path,image.path]}), 'idle image retry accepted');
+    for(let n=0;n<120 && !messages.slice(idleImageStart).some(m=>m.kind==='window');n++) await tick();
+    await settle();
+    ok(messages.slice(idleImageStart).some(m => m.kind === 'window' && !m.error && !m.deferred), 'idle image retry completes normally');
+    results.push('late gesture during image decode defers commit; idle retries without error or viewport drift');
     document.importNode = nativeImport; HTMLImageElement.prototype.decode = nativeDecode;
     ok(section(7) && importedURL === `yjepub://s-session--e-${epoch}/Images/test.png`, 'relative image rebased to epoch capability');
     sameRect(before, rectFor(anchor), 'capture anchor at image commit, not start');
@@ -391,6 +434,23 @@ async function fixture(source, css, pagedCSS) {
     ok(rollingErrors.length === 0, 'rolling window has no readiness/preload errors');
     rollingFrame.remove();
     results.push('12-chapter rolling fixture crosses chapter 9 and returns to 0 in one bounded DOM');
+    const diagnosticMessages = messages.length, diagnosticY = scrollY;
+    const originalDiagnostics = JSON.stringify(api.diagnostics());
+    const diagnosticCopy = api.diagnostics();
+    ok(diagnosticCopy.counts['window-deferred'] > 0 && diagnosticCopy.counts['window-committed'] > 0,
+        'diagnostics distinguish deferred and committed transactions');
+    ok(diagnosticCopy.sampleCount > 0 && diagnosticCopy.sampleMS >= 0 && diagnosticCopy.sampleMaxMS >= 0,
+        'diagnostics record real sample durations, not frame-rate claims');
+    diagnosticCopy.events[0].event = 'tampered'; diagnosticCopy.counts['navigation'] = -1;
+    ok(JSON.stringify(api.diagnostics()) === originalDiagnostics, 'diagnostic snapshots cannot mutate recorder');
+    ok(messages.length === diagnosticMessages && scrollY === diagnosticY, 'reading diagnostics cannot post progress or scroll');
+    for (let n = 0; n < 200; n++) { api.setScrollActive(true); api.setScrollActive(false); }
+    const bounded = api.diagnostics();
+    ok(bounded.events.length === 128 && bounded.counts['motion-start'] >= 200, 'bounded events retain cumulative counters');
+    ok(bounded.events.every(e => Number.isFinite(e.ms) && Number.isFinite(e.value) && Number.isFinite(e.extra)), 'diagnostic numbers are finite');
+    ok(!originalDiagnostics.includes('OEBPS/') && !originalDiagnostics.includes('chapter3 paragraph') && !originalDiagnostics.includes('sessionID'),
+        'diagnostic output excludes publication paths, body text and session identity');
+    results.push('bounded numeric diagnostics distinguish outcomes, measure sampling, and stay read-only/private');
     return results;
 }
 

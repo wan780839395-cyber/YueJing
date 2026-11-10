@@ -1,7 +1,7 @@
-"""EPUB reopen/jump release: Domain18 + Host3 + UI3 declarations, 25 executions.
+"""EPUB P0 release: Domain3 + Host3 + UI3 declarations, 10 executions.
 
 Diagnostic delivery requires an explicit dispatch opt-in; strict release stays separate.
-Retries use a new committed candidate/new dispatch, never overwrite failed evidence.
+This batch permits one push and one dispatch; failed evidence is never overwritten.
 """
 import argparse
 import json
@@ -20,21 +20,24 @@ import task3_test_inventory as inventory
 import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
-BASE = "6960385c20f35c35f45a3bf61b307e8bf2e584af"
-SCOPE = "epub-scene-24"
+BASE = "51f5e113295e98a32289335f9dcab0cbc2323f53"
+SCOPE = "epub-p0-9"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
-VERSION, BUILD = "0.2.7", "9"
-TOTAL, EXECUTIONS = 24, 25
-QUALIFICATION = "EPUB_SCENE_24_TARGETED_NATIVE"
+VERSION, BUILD = "0.2.8", "10"
+TOTAL, EXECUTIONS = 9, 10
+QUALIFICATION = "EPUB_P0_9_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
 PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
-NEW = frozenset()
+NEW = frozenset({"App/EPUB/EPUBRuntimeTrace.swift", "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift"})
 ALLOWED = frozenset({
-    "App/EPUB/EPUBChapterWindow.swift", "App/EPUB/EPUBLocationScript.swift",
-    "App/EPUB/EPUBWebView.swift", "Sources/ReaderDomain/EPUB/EPUBResourceStore.swift",
+    "App/EPUB/EPUBLocationScript.swift", "App/EPUB/EPUBReaderScreen.swift",
+    "App/EPUB/EPUBReaderViewModel.swift", "App/EPUB/EPUBSettingsView.swift",
+    "App/EPUB/EPUBWebView.swift", "App/EPUB/EPUBRuntimeTrace.swift",
+    "Sources/ReaderDomain/EPUB/EPUBImportService.swift", "Sources/ReaderDomain/EPUB/OpenedEPUBReader.swift",
+    "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift", "Sources/ReaderDomain/LibraryService.swift",
     "Tests/ReaderDomainTests/EPUBLibraryTests.swift", "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
     "scripts/check_epub_continuous_script.cjs", ".github/workflows/task3-validate.yml",
     "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
@@ -44,24 +47,7 @@ SELECTED_FILES = {
     "ReaderDomainTests/EPUBLibraryTests.swift": """
         epubOriginalArchiveAndValidatedResourcesSurviveReopen
         epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences
-        epubOverlappingReadersNeverShareAnActiveWorkspace
-        epubConcurrentWorkspaceTakesConsumeTheSlotOnlyOnce
-        epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime
-        epubWarmPackageMatchIncludesMetadataNotOnlyVersion
-        epubFailedOrCancelledCloseNeverReturnsWorkspace
-        epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination
-        epubCancelledWarmTakeAndImporterDeinitCleanTheirOwnSlot
-        epubDuplicateKeepsProgressAndRepairsMissingArchive
-        epubCancellationBeforeCommitLeavesNoBook
-        epubCancellationAfterCommitReturnsReceipt
-        epubFailedImportCleansOnlyItsWorkspace""".split(),
-    "ReaderDomainTests/EPUBProgressTests.swift": """
-        epubPositionsRejectForeignVersionsUnitsAndInvalidUTF16Boundaries
-        epubProgressRequiresReadinessAndIncreasingSequence
-        epubOldNavigationSupersededSessionAndClosedCallbacksCannotWrite
-        epubTypographyEpochRestoresSameTextPositionAndSettings""".split(),
-    "ReaderDomainTests/EPUBCompatibilityTests.swift": [
-        "epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen"],
+        epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime""".split(),
     "YueJingHostTests/EPUBReaderHostTests.swift": [
         "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
         "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor",
@@ -92,9 +78,9 @@ def selection():
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == 18 and
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == 3 and
             SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] ==
-            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain18/Host3/all EPUB UI3")
+            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain3/Host3/all EPUB UI3")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -134,10 +120,11 @@ def scope_receipt():
     require(not git("status", "--porcelain", "--untracked-files=no").strip(), "Tracked source drift")
     before, after = tree(BASE), tree("HEAD")
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
-    require(changed == ALLOWED and set(after) == set(before), "Release changes outside exact 12-path boundary")
+    require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
+            "Release changes outside exact 18-path boundary / two approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
-    old_version = b'        MARKETING_VERSION: "0.2.6"\n        CURRENT_PROJECT_VERSION: "8"\n'
-    new_version = b'        MARKETING_VERSION: "0.2.7"\n        CURRENT_PROJECT_VERSION: "9"\n'
+    old_version = b'        MARKETING_VERSION: "0.2.7"\n        CURRENT_PROJECT_VERSION: "9"\n'
+    new_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")
@@ -325,8 +312,8 @@ def run_all(destination):
     OUT.mkdir(parents=True, exist_ok=True)
     try:
         scope = live_scope()
-        # Common prerequisites are checked once. A broken environment is not 24
-        # independent test failures, and must not trigger 24 repeated tool probes.
+        # Common prerequisites are checked once. A broken environment is not nine
+        # independent test failures, and must not trigger nine repeated tool probes.
         compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
         compat.validate_destination(destination, OUT)
         NATIVE_OUT.mkdir()

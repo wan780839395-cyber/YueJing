@@ -579,6 +579,7 @@ extension LibraryService {
     }
 
     public func openEPUB(id: String) async throws -> OpenedEPUBReader {
+        let catalogStarted = ContinuousClock.now
         guard let book = try await store.book(id: id), book.format == .epub else { throw LibraryError.missingBook }
         let permit = try await store.reserveReaderOpen(bookID: id)
         let work = await store.epubWorkURL(id: UUID())
@@ -589,13 +590,17 @@ extension LibraryService {
             let source = try await store.epubFileURL(bookID: id)
             let expected = try await store.storedEPUBPackage(bookID: id)
             let cache = await store.epubCacheURL()
+            let catalogFinished = ContinuousClock.now
             let prepared = try await epubImporter.prepareForReading(
                 archiveURL: source, destination: work, expected: expected, cache: cache
             )
             let publication = prepared.publication
+            var timings = prepared.timings
+            timings.record(.catalog, since: catalogStarted, until: catalogFinished)
             // prepareForReading transfers exclusive ownership; warm opens need not use `work`.
             ownedWork = publication.resourceRoot
             try Task.checkCancellation()
+            let sessionStarted = ContinuousClock.now
             let preferences = try await store.preferences()
             let start = try await store.beginEPUB(permit, package: publication.package)
             do {
@@ -607,9 +612,11 @@ extension LibraryService {
                 try? await store.abandonEPUB(session: start.session)
                 throw error
             }
+            timings.record(.session, since: sessionStarted)
             keep = true
             return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
-                                    store: store, importer: epubImporter, reusedResources: prepared.reused)
+                                    store: store, importer: epubImporter, reusedResources: prepared.reused,
+                                    openingTimings: timings)
         } catch {
             await store.endReaderOpen(permit)
             throw error

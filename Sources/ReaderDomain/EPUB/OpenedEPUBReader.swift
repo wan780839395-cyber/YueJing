@@ -6,6 +6,7 @@ public actor OpenedEPUBReader {
     public nonisolated let reading: EPUBReadingStart
     public nonisolated let preferences: ReaderPreferences
     public nonisolated let reusedResources: Bool
+    public nonisolated let openingTimings: EPUBOpeningTimings
     private let store: LibraryStore
     private let importer: EPUBImportService
     private var closed = false
@@ -13,11 +14,12 @@ public actor OpenedEPUBReader {
 
     init(book: LibraryBook, publication: EPUBPublication, reading: EPUBReadingStart,
          preferences: ReaderPreferences, store: LibraryStore, importer: EPUBImportService,
-         reusedResources: Bool = false) {
+         reusedResources: Bool = false, openingTimings: EPUBOpeningTimings = .init()) {
         self.book = book; self.publication = publication; self.reading = reading
         self.preferences = preferences; self.store = store
         self.importer = importer
         self.reusedResources = reusedResources
+        self.openingTimings = openingTimings
     }
     deinit {
         // A terminal task owns cleanup/transfer from the instant it is installed.

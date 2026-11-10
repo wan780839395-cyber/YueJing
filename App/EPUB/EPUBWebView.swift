@@ -135,6 +135,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var windowChapterCount = EPUBChapterWindow.defaultChapters
     private var windowRequestedPaths: Set<String> = []
     private var windowFailedToken: EPUBNavigationToken?
+    private var windowDeferredToken: EPUBNavigationToken?
+    private var nativeScrollActive = false
+    private var runtimeTrace = EPUBRuntimeTrace()
     var onPreloadFailure: (@MainActor () -> Void)?
     var interactionEnabled = true {
         didSet {
@@ -180,7 +183,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
         // Accessing view here can synchronously reenter via viewDidLoad before
         // webView is assigned. Publish the instance before loading the root view.
+        runtimeTrace.record(.webViewCreationStarted)
         let created = WKWebView(frame: .zero, configuration: config)
+        runtimeTrace.record(.webViewCreated)
         created.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         created.navigationDelegate = self
         created.uiDelegate = self
@@ -261,6 +266,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         setupWebViewIfNeeded()
         applyTheme(request.preferences.theme)
         guard activeRequest != request else { return }
+        runtimeTrace.record(request.preserveViewport ? .promotion : .navigation)
         let previous = activeRequest
         let reuseDOM = !request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
             readyToken != nil && readyToken == previous?.token &&
@@ -268,11 +274,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             previous?.publication.package == request.publication.package &&
             previous?.publication.resourceRoot == request.publication.resourceRoot
         // Invalidated async preload work must not mutate a newly navigated document.
+        if windowInFlight { runtimeTrace.record(.windowCancelled) }
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
         windowFailedToken = nil
+        windowDeferredToken = nil
         if !reuseDOM {
+            nativeScrollActive = false
             renderedChapterPaths.removeAll()
             windowRequestedPaths.removeAll()
             windowChapterCount = EPUBChapterWindow.defaultChapters
@@ -328,6 +337,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 guard !Task.isCancelled, self.activeRequest == request else { return }
                 guard let url = EPUBResourceCapability.url(for: request.token) else { throw EPUBError.invalidPackage }
                 self.documentLoadCount += 1
+                self.runtimeTrace.record(.documentLoad)
                 self.loadingNavigation = self.webView.load(URLRequest(url: url))
             } catch {
                 guard !Task.isCancelled, self.activeRequest == request else { return }
@@ -346,6 +356,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         readinessTask = nil
         loadTask?.cancel()
         loadTask = nil
+        if windowInFlight { runtimeTrace.record(.windowCancelled) }
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
@@ -371,6 +382,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         pageAnimationToken = nil
         dragOrigin = nil
         pagePanToken = nil
+        if windowInFlight { runtimeTrace.record(.windowCancelled) }
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
@@ -467,7 +479,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 readingMode: request.readingMode,
                 preserveViewport: request.preserveViewport
             )
-            let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + invoke
+            let motion = "window.__yjEpub && window.__yjEpub.setScrollActive(\(nativeScrollActive));"
+            let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + motion + invoke
             // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
             webView.__evaluateJavaScript(combined, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
                 guard let error else { return }
@@ -487,10 +500,12 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     func refreshChapterWindow() {
         guard let current = activeRequest, readyToken == current.token,
-              !windowInFlight, windowFailedToken != current.token else { return }
+              !windowInFlight, windowFailedToken != current.token,
+              windowDeferredToken != current.token || !nativeScrollActive else { return }
         let desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
         guard Set(desired) != renderedChapterPaths else { return }
         windowInFlight = true
+        runtimeTrace.record(.windowRequested)
         windowRequestedPaths.formUnion(Set(desired).union(renderedChapterPaths))
         let chapterCount = windowChapterCount
         let installed = renderedChapterPaths
@@ -528,6 +543,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     private func failChapterWindow(_ token: EPUBNavigationToken) {
         guard activeRequest?.token == token else { return }
+        runtimeTrace.record(.windowFailed)
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
@@ -549,6 +565,19 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowInFlight = false
         windowTask?.cancel()
         windowTask = nil
+        if body["deferred"] as? Bool == true, body["error"] as? Bool != true {
+            runtimeTrace.record(.windowDeferred)
+            windowDeferredToken = current.token
+            // Idle can arrive before this IPC acknowledgement. Retry in that case,
+            // otherwise wait for the real end of dragging AND deceleration.
+            if !nativeScrollActive {
+                windowDeferredToken = nil
+                refreshChapterWindow()
+            }
+            return
+        }
+        windowDeferredToken = nil
+        if body["error"] as? Bool != true { runtimeTrace.record(.windowCommitted) }
         applyReadingGesturePolicy()
         if body["error"] as? Bool == true {
             failChapterWindow(current.token)
@@ -587,6 +616,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         if payload.kind == .ready {
+            runtimeTrace.record(.locatorReady)
             readinessTask?.cancel()
             readinessTask = nil
             readyToken = current.token
@@ -607,6 +637,27 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             updateAccessibilityCanvas(with: payload, preferences: current.preferences)
         }
         onLocatorEvent?(payload)
+    }
+
+    /// Read once on demand. Never samples/changes the locator or drives navigation.
+    func performanceSummary() async -> String {
+        let native = runtimeTrace.summary
+        guard let expected = activeRequest?.token, let webView else { return native }
+        let script = "window.__yjEpub && JSON.stringify(window.__yjEpub.diagnostics());"
+        let browser: String = await withCheckedContinuation { continuation in
+            webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] value, error in
+                guard let self, self.activeRequest?.token == expected else {
+                    continuation.resume(returning: "会话已变化，未采用旧快照。")
+                    return
+                }
+                guard error == nil, let value = value as? String, value.utf8.count <= 32768 else {
+                    continuation.resume(returning: "JS诊断快照未取得。")
+                    return
+                }
+                continuation.resume(returning: value)
+            }
+        }
+        return native + "\nJS事件：脚本安装起计时；与原生时钟起点不同，非帧率/首绘\n" + browser
     }
 
     func sampleVisibleNow() async -> EPUBLocatorPayload? {
@@ -776,6 +827,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let navigation, let loadingNavigation, let current = activeRequest, navigation === loadingNavigation,
               webView.url == EPUBResourceCapability.url(for: current.token) else { return }
+        runtimeTrace.record(.documentFinished)
         loadedDocumentPath = current.token.path
         loadedDocumentToken = current.token
         renderedChapterPaths = [current.token.path]
@@ -804,6 +856,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         readinessTask = nil
         loadedDocumentPath = nil
         loadedDocumentToken = nil
+        if windowInFlight { runtimeTrace.record(.windowCancelled) }
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
@@ -925,6 +978,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        setNativeScrollActive(true)
         interactionGeneration = UUID() // Revoke an asynchronous tap hit-test before dragging.
         pageAnimationToken = nil
         scrollDirection = nil
@@ -949,14 +1003,25 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         // Native scrolling stays in one DOM across chapter boundaries.
     }
 
+    private func setNativeScrollActive(_ active: Bool) {
+        if nativeScrollActive != active { runtimeTrace.record(active ? .dragging : .settled) }
+        nativeScrollActive = active
+        if !active { windowDeferredToken = nil }
+        guard let webView else { return }
+        let script = "window.__yjEpub && window.__yjEpub.setScrollActive(\(active));"
+        webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world, completionHandler: nil)
+    }
+
     private func continueUserScroll() {
         // Refresh only when the gesture settles; never hand the drag to a new document.
+        setNativeScrollActive(false)
         refreshChapterWindow()
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        continueUserScroll()
+        // Finger-up is not idle while UIScrollView is still decelerating.
         if !decelerate {
+            continueUserScroll()
             dragOrigin = nil
             scrollDirection = nil
             if let token = readyToken { reportVisiblePosition(for: token) }
@@ -1010,7 +1075,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             voiceOver: UIAccessibility.isVoiceOverRunning
         )
         if decision == .stopMomentum {
+            runtimeTrace.record(.momentumStopped)
             scrollView.setContentOffset(scrollView.contentOffset, animated: false)
+            continueUserScroll() // Programmatic momentum stop may not deliver didEndDecelerating.
             return
         }
         guard decision == .toggle, let expected = toolIntent?() else { return }
