@@ -1,4 +1,4 @@
-"""Recent EPUB lifecycle validation: Domain14 + Host3 + UI3, 21 executions.
+"""P0 EPUB session observation validation: Domain2 + Host1, 3 executions.
 
 Run the full selected batch before any product repair. Device packaging is explicitly staged.
 Strict qualification remains separate from explicitly labelled diagnostic delivery.
@@ -20,51 +20,33 @@ import task3_test_inventory as inventory
 import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
-BASE = "9182f1f990fe1956bdfaedab456dc7a7df9e0422"
-SCOPE = "epub-metadata-20"
+BASE = "a8f044bcb9b0892bdc4843736ec074dd3fa170f6"
+SCOPE = "epub-session-profile-3"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
-VERSION, BUILD = "0.2.10", "12"
-TOTAL, EXECUTIONS = 20, 21
-QUALIFICATION = "EPUB_METADATA_20_TARGETED_NATIVE"
+VERSION, BUILD = "0.2.11", "13"
+TOTAL, EXECUTIONS = 3, 3
+QUALIFICATION = "EPUB_SESSION_PROFILE_3_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
 PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
-NEW = frozenset({"Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift", "scripts/check_epub_metadata_reopen.py"})
+NEW = frozenset({"Sources/ReaderDomain/EPUB/EPUBSessionBreakdown.swift", "scripts/check_epub_session_profile.py"})
 ALLOWED = frozenset({
-    "Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift", "Sources/ReaderDomain/EPUB/EPUBContentPool.swift",
+    "Sources/ReaderDomain/EPUB/EPUBSessionBreakdown.swift",
     "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift", "Sources/ReaderDomain/LibraryStore.swift",
     "Sources/ReaderDomain/LibraryService.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift",
-    "scripts/check_epub_metadata_reopen.py", ".github/workflows/task3-validate.yml",
+    "scripts/check_epub_session_profile.py", ".github/workflows/task3-validate.yml",
     "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
     "project.yml", "docs/EPUB_FREEZE_RELEASE.md",
 })
 SELECTED_FILES = {
-    "ReaderDomainTests/EPUBLibraryTests.swift": """
-        epubOriginalArchiveAndValidatedResourcesSurviveReopen
-        epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences
-        epubOverlappingReadersUseIndependentLeasesAndSessions
-        epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime
-        epubFailedOrCancelledCloseNeverReturnsWorkspace
-        epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination
-        epubFailedImportCleansOnlyItsWorkspace
-        epubBooksAndTXTStayIsolated""".split(),
-    "ReaderDomainTests/EPUBContentPoolTests.swift": """
-        recentBooksReuseIndependentVersionsWithoutCopying
-        contentLeaseEvictionWaitsForEveryHolderAndRejectsReleasedTokens
-        diskContentSurvivesPoolRecreationAndCancellationPublishesNothing
-        corruptedLeasedVersionIsNotDeletedUntilOldRendererReleasesIt
-        invalidPeerReceiptDoesNotBlockOtherBooks
-        unavailableOptionalCacheFallsBackToTemporaryLeasedContent""".split(),
+    "ReaderDomainTests/EPUBLibraryTests.swift": [
+        "epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences"],
+    "ReaderDomainTests/EPUBContentPoolTests.swift": [
+        "recentBooksReuseIndependentVersionsWithoutCopying"],
     "YueJingHostTests/EPUBReaderHostTests.swift": [
-        "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
-        "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
-        "epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU"],
-    "YueJingEPUBUITests/EPUBFlowUITests.swift": [
-        "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
-        "testEPUBProgressSurvivesExitAndProcessRelaunch",
-        "testEPUBTypographyNoCoverFallbackAndTXTIsolation"],
+        "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position"],
 }
 GROUPS = {}
 for _kind, _target in (("domain", "ReaderDomainTests"), ("host", "YueJingHostTests"), ("ui", "YueJingEPUBUITests")):
@@ -88,10 +70,10 @@ def selection():
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == 14,
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == 2 and
+            sum(g["kind"] == "host" for g in GROUPS.values()) == 1 and
+            not any(g["kind"] == "ui" for g in GROUPS.values()),
             "Unexpected selected test count")
-    expected_ui = inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split()
-    require(SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] == expected_ui, "Unexpected UI selection")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -138,8 +120,8 @@ def scope_receipt():
     require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
             "Release changes outside exact scope-specific boundary / approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
-    old_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
-    new_version = b'        MARKETING_VERSION: "0.2.10"\n        CURRENT_PROJECT_VERSION: "12"\n'
+    old_version = b'        MARKETING_VERSION: "0.2.10"\n        CURRENT_PROJECT_VERSION: "12"\n'
+    new_version = b'        MARKETING_VERSION: "0.2.11"\n        CURRENT_PROJECT_VERSION: "13"\n'
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")

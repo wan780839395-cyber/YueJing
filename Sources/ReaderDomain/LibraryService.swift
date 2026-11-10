@@ -598,18 +598,32 @@ extension LibraryService {
             // The pool, not this service/reader, owns the stable version directory.
             try Task.checkCancellation()
             let sessionStarted = ContinuousClock.now
+            var sessionBreakdown = EPUBSessionBreakdown()
+            let preferencesStarted = ContinuousClock.now
             let preferences = try await store.preferences()
-            let start = try await store.beginEPUB(permit, snapshot: snapshot)
+            sessionBreakdown.record(.preferencesCall, since: preferencesStarted)
+            let beginStarted = ContinuousClock.now
+            let measured = try await store.beginEPUBMeasured(permit, snapshot: snapshot, requestedAt: beginStarted)
+            let beginReturned = ContinuousClock.now
+            sessionBreakdown.merge(measured.details)
+            sessionBreakdown.record(.beginCall, since: beginStarted, until: beginReturned)
+            sessionBreakdown.record(.returnResume, since: measured.finishedAt, until: beginReturned)
+            let start = measured.start
             do {
+                let confirmationStarted = ContinuousClock.now
                 try await store.confirmReaderOpen(permit, session: start.session)
+                sessionBreakdown.record(.confirmCall, since: confirmationStarted)
                 try Task.checkCancellation()
+                let releaseStarted = ContinuousClock.now
                 await store.endReaderOpen(permit)
+                sessionBreakdown.record(.releaseCall, since: releaseStarted)
                 try Task.checkCancellation()
             } catch {
                 try? await store.abandonEPUB(session: start.session)
                 throw error
             }
             timings.record(.session, since: sessionStarted)
+            timings.sessionBreakdown = sessionBreakdown
             return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
                                     store: store, contentLease: prepared.lease, reusedResources: prepared.reused,
                                     openingTimings: timings)

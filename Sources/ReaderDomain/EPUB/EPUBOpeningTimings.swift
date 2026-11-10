@@ -9,6 +9,7 @@ public struct EPUBOpeningTimings: Sendable {
     public internal(set) var resourceCount = 0
     public internal(set) var resourceBytes = 0
     public internal(set) var packageFingerprintReused = false
+    public internal(set) var sessionBreakdown = EPUBSessionBreakdown()
     public enum Phase: String, CaseIterable, Sendable {
         case catalog, sourceVerification, packageFingerprint, warmResourceVerification, diskRestore, rebuild, cacheWrite, session
         var label: String {
@@ -59,6 +60,6 @@ public struct EPUBOpeningTimings: Sendable {
             samples.filter { $0.phase == phase }.map {
                 phase.label + String(format: " %.3fs", $0.seconds) + ($0.succeeded ? "" : "（未成功，已回退）")
             }
-        }.joined(separator: "\n")
+        }.joined(separator: "\n") + (sessionBreakdown.samples.isEmpty ? "" : "\n\n" + sessionBreakdown.summary)
     }
 }

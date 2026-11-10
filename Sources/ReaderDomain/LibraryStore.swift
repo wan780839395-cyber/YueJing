@@ -588,25 +588,58 @@ extension LibraryStore {
     }
 
     func beginEPUB(_ permit: ReaderOpenPermit, snapshot: EPUBMetadataSnapshot) throws -> EPUBReadingStart {
+        try beginEPUBMeasured(permit, snapshot: snapshot, requestedAt: ContinuousClock.now).start
+    }
+
+    func beginEPUBMeasured(_ permit: ReaderOpenPermit, snapshot: EPUBMetadataSnapshot,
+                           requestedAt: ContinuousClock.Instant) throws -> EPUBMeasuredReadingStart {
+        let enteredAt = ContinuousClock.now
         let package = snapshot.package
         try Task.checkCancellation()
         guard readerOpens[permit.bookID] == permit.id, permit.bookID == package.sourceSHA256 else { throw CancellationError() }
         let session = ReadingSession(id: UUID().uuidString, bookID: permit.bookID, versionID: package.versionID)
-        let start = try queue.write { db -> EPUBReadingStart in
-            guard let book = try LibraryBook.fetchOne(db, key: permit.bookID), book.format == .epub,
-                  try String.fetchOne(db, sql: "SELECT format FROM bookFormats WHERE bookID=?", arguments: [permit.bookID]) == "epub",
-                  book.versionID == package.versionID,
-                  let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [book.id]),
-                  snapshot.matches(metadata) else { throw EPUBError.corruptResource }
-            let data = try Data.fetchOne(db, sql: "SELECT anchor FROM epubProgress WHERE bookID=?", arguments: [book.id])
-            let decoded = data.flatMap { try? JSONDecoder().decode(EPUBReadingPosition.self, from: $0) }
-            let valid = decoded.flatMap { (try? $0.validate(in: package)) != nil ? $0 : nil }
-            try db.execute(sql: "UPDATE books SET activeSession=?,lastReadAt=? WHERE id=?",
-                           arguments: [session.id, Date().timeIntervalSince1970, book.id])
-            return EPUBReadingStart(session: session, position: valid, ignoredIncompatibleProgress: data != nil && valid == nil)
+        let queueStarted = ContinuousClock.now
+        let transaction = try queue.write { db -> EPUBMeasuredReadingStart in
+            var details = EPUBSessionBreakdown()
+            details.record(.actorAdmission, since: requestedAt, until: enteredAt)
+            details.record(.storeSetup, since: enteredAt, until: queueStarted)
+            details.record(.databaseEntry, since: queueStarted)
+            let storedBook = try details.measure(.bookRead) {
+                try LibraryBook.fetchOne(db, key: permit.bookID)
+            }
+            guard let book = storedBook, book.format == .epub else { throw EPUBError.corruptResource }
+            let format = try details.measure(.formatRead) {
+                try String.fetchOne(db, sql: "SELECT format FROM bookFormats WHERE bookID=?", arguments: [permit.bookID])
+            }
+            guard format == "epub", book.versionID == package.versionID else { throw EPUBError.corruptResource }
+            let storedMetadata = try details.measure(.metadataRead) {
+                try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [book.id])
+            }
+            guard let metadata = storedMetadata else { throw EPUBError.corruptResource }
+            details.metadataBytes = metadata.count
+            guard details.measure(.metadataCompare, { snapshot.matches(metadata) }) else { throw EPUBError.corruptResource }
+            let data = try details.measure(.progressRead) {
+                try Data.fetchOne(db, sql: "SELECT anchor FROM epubProgress WHERE bookID=?", arguments: [book.id])
+            }
+            let decoded = details.measure(.progressDecode) {
+                data.flatMap { try? JSONDecoder().decode(EPUBReadingPosition.self, from: $0) }
+            }
+            let valid = details.measure(.positionValidation) {
+                decoded.flatMap { (try? $0.validate(in: package)) != nil ? $0 : nil }
+            }
+            try details.measure(.rowUpdate) {
+                try db.execute(sql: "UPDATE books SET activeSession=?,lastReadAt=? WHERE id=?",
+                               arguments: [session.id, Date().timeIntervalSince1970, book.id])
+            }
+            let start = EPUBReadingStart(session: session, position: valid, ignoredIncompatibleProgress: data != nil && valid == nil)
+            return EPUBMeasuredReadingStart(start: start, details: details, finishedAt: ContinuousClock.now)
         }
+        let transactionReturned = ContinuousClock.now
+        var details = transaction.details
+        details.record(.transactionReturn, since: transaction.finishedAt, until: transactionReturned)
         epubSessions[session.id] = (package, nil, false)
-        return start
+        details.record(.storePublish, since: transactionReturned)
+        return EPUBMeasuredReadingStart(start: transaction.start, details: details, finishedAt: ContinuousClock.now)
     }
 
     func beginEPUBNavigation(session: ReadingSession, path: String) throws -> EPUBNavigationToken {

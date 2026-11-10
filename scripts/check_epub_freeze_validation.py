@@ -44,13 +44,20 @@ def fixture(group):
 
 
 selected = r.selection()
-assert len(selected) == r.TOTAL == 20 and r.EXECUTIONS == 21 and all(len(n) == 1 for n in selected.values())
-PARAM_GROUP = next(g for g, s in r.GROUPS.items() if any(n in r.inventory.PARAMETERIZED for n in s['cases']))
-assert len(r.ALLOWED) == 12 and r.NEW == {'Sources/ReaderDomain/EPUB/EPUBMetadataSnapshot.swift', 'scripts/check_epub_metadata_reopen.py'}
+assert len(selected) == r.TOTAL == r.EXECUTIONS == 3 and all(len(n) == 1 for n in selected.values())
+release_groups = copy.deepcopy(r.GROUPS)
+parameter = next(iter(r.inventory.PARAMETERIZED))
+PARAM_GROUP = 'offline-parameter'
+r.GROUPS[PARAM_GROUP] = dict(kind='domain', target='ReaderDomainTests', timeout=480,
+    pairs=[('ReaderDomainTests/EPUBLibraryTests.swift', parameter)], cases=[parameter])
+r.GROUPS['offline-ui'] = dict(kind='ui', target='YueJingEPUBUITests', timeout=480,
+    pairs=[('YueJingEPUBUITests/EPUBFlowUITests.swift', 'testEPUBShelfCoverAndDirectoryCrossChapterNavigation')],
+    cases=['testEPUBShelfCoverAndDirectoryCrossChapterNavigation'])
+assert len(r.ALLOWED) == 11 and r.NEW == {'Sources/ReaderDomain/EPUB/EPUBSessionBreakdown.swift', 'scripts/check_epub_session_profile.py'}
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
 checks.append('candidate inventory survives JSON roundtrip')
-checks.append('exact Domain14 Host3 UI3 independently selected / inventory229 declarations, 230 expansions')
+checks.append('exact Domain2 Host1 selected; parameter/UI fixtures are offline only / inventory229 declarations, 230 expansions')
 destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
 for group in r.GROUPS:
     raw = fixture(group)
@@ -84,6 +91,8 @@ for label, altered in [('missing argument', raw.replace(arg_line, b'')),
                        ('argument after finish', raw.replace(arg_line, b'') + arg_line),
                        ('expanded count pretending declarations', raw.replace(b'1 tests passed', b'2 tests passed'))]:
     rejects(label, lambda: r.parse_log(PARAM_GROUP, altered, 0, False))
+del r.GROUPS[PARAM_GROUP], r.GROUPS['offline-ui']
+assert r.GROUPS == release_groups and r.selection() == selected
 with patch.dict(r.SELECTED_FILES, {'ReaderDomainTests/EPUBCompatibilityTests.swift': ['foreignCase']}):
     rejects('selection identity drift', r.selection)
 
@@ -139,8 +148,8 @@ with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current), \
      patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
-    assert receipt['native_tests_planned'] == 21 and 'verified_passed' not in receipt
-    checks.append('scope binds exact12 paths including two additions and makes no native-pass claim')
+    assert receipt['native_tests_planned'] == 3 and 'verified_passed' not in receipt
+    checks.append('scope binds exact11 paths including two additions and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
                        ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other')]:
@@ -196,18 +205,18 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             r.write(folder/'counts.json', parsed)
         qualified = r.qualification()
         r.write(out/'gate.json', qualified)
-        assert r.release_gate()['verified_passed'] == 21
+        assert r.release_gate()['verified_passed'] == 3
         checks.append('synthetic complete artifact / release acceptance (native helpers mocked)')
-        for failure_path in (native/'ui-1/failure.json', out/'case-scheduling-error.json'):
+        for failure_path in (native/'host-1/failure.json', out/'case-scheduling-error.json'):
             r.write(failure_path, dict(error='synthetic failure after passing receipt'))
             rejects('failure record overrides complete green receipts: ' + failure_path.name, r.release_gate)
             failure_path.unlink()
-        broken = native/'ui-1/counts.json'
+        broken = native/'host-1/counts.json'
         previous = broken.read_bytes()
         broken.write_bytes(b'{invalid')
         summary = r.summarize()
-        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 19
-        assert len(summary['ui_inventory']) == 15
+        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 2
+        assert len(summary['ui_inventory']) == 15 and all(x['status'] == 'not_selected' for x in summary['ui_inventory'])
         broken.write_bytes(previous)
         checks.append('one corrupt result is visible and does not hide remaining UI cases')
         for filename, field, value in [('selection.json', 'source_commit', 'b'*40),
@@ -221,8 +230,14 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             path.write_bytes(original)
         with patch.object(r.paging, 'require_xcresult', side_effect=ValueError('missing bundle')):
             rejects('missing xcresult bundle', r.release_gate)
-        with patch.object(r.subprocess, 'check_output', return_value=b'{"testNodes": []}'):
-            rejects('export differs from actual bundle', r.release_gate)
+        # Parameter bundle checks remain isolated: none is scheduled by this release.
+        with patch.dict(r.GROUPS, {PARAM_GROUP: dict(kind='domain', cases=[parameter])}):
+            parameter_folder = out/'parameter-fixture'; parameter_folder.mkdir()
+            r.parameter_evidence(PARAM_GROUP, parameter_folder, out/'parameter.xcresult', export=True)
+            with patch.object(r.subprocess, 'check_output', return_value=b'{"testNodes": []}'):
+                rejects('export differs from actual bundle', lambda: r.parameter_evidence(
+                    PARAM_GROUP, parameter_folder, out/'parameter.xcresult'))
+        assert r.GROUPS == release_groups
         (native/'extra').mkdir()
         rejects('extra native group', r.release_gate)
         (native/'extra').rmdir()
@@ -275,7 +290,7 @@ import subprocess
 with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
     root = Path(temp)
     scope = dict(scope=r.SCOPE, source_commit='a'*40, run_id='synthetic')
-    for scenario in ('mixed', 'all_pass', 'preflight', 'cancelled'):
+    for scenario in ('mixed', 'early_failure', 'all_pass', 'preflight', 'cancelled'):
         out = root/scenario
         visited = []
         def prepare(kind, folder, source_commit, **kwargs):
@@ -286,10 +301,10 @@ with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI
             group = log.parent.name
             assert len([s for s in args if s.startswith('-only-testing:')]) == 1
             assert timeout == 480
-            if scenario == 'cancelled' and group == 'host-1':
+            if scenario == 'cancelled' and group == 'domain-2':
                 raise KeyboardInterrupt()
             raw = fixture(group)
-            if scenario == 'mixed' and group in ('domain-1', 'ui-1'):
+            if scenario in ('mixed', 'early_failure') and group == 'domain-1':
                 log.write_bytes(raw.replace(b'passed', b'failed').replace(b'TEST SUCCEEDED', b'TEST FAILED'))
                 return 65, False
             if scenario == 'mixed' and group == 'host-1':
@@ -320,28 +335,31 @@ with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI
                     pass
                 else:
                     raise AssertionError('Cancellation swallowed')
-                assert visited[-1] == 'host-1' and 'ui-1' not in visited
+                assert visited[-1] == 'domain-2' and 'host-1' not in visited
                 checks.append('cancellation stops scheduling without falsely skipping/passing remaining cases')
             else:
                 assert r.run_all(destination) == (scenario == 'all_pass')
                 assert visited == list(r.GROUPS)
                 checks.append(scenario + ': production scheduler attempted every selected identity once')
             report = r.summarize(publish=True)
-            assert len(report['cases']) == 20 and len(report['ui_inventory']) == 15
-            assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 12
+            assert len(report['cases']) == 3 and len(report['ui_inventory']) == 15
+            assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 15
             assert {x['case'] for x in report['ui_inventory']} == set(r.inventory.expected_names('YueJingUITests') + r.inventory.expected_names('YueJingEPUBUITests'))
             if scenario == 'mixed':
-                assert report['counts'] == dict(passed=16, failed=2, timed_out=1, error=0, blocked=1, not_run=0)
-                assert all(x['status'] == 'passed' for x in report['cases'] if x['group'] in ('ui-2', 'ui-3'))
-                rejects('failed cases cannot qualify even after later cases pass', r.qualification)
-                checks.append('first/middle/UI failures and timeout continue; failure statuses retained')
+                assert report['counts'] == dict(passed=0, failed=1, timed_out=1, error=0, blocked=1, not_run=0)
+                rejects('failed/blocked/timed-out cases cannot qualify', r.qualification)
+                checks.append('failure, settings error and timeout all attempted and retained')
+            elif scenario == 'early_failure':
+                assert report['counts'] == dict(passed=2, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
+                assert all(x['status'] == 'passed' for x in report['cases'] if x['group'] != 'domain-1')
+                rejects('early failure cannot qualify despite later successful cases', r.qualification)
             elif scenario == 'all_pass':
-                assert report['counts']['passed'] == 20
-                assert sum(x['planned_executions'] for x in report['cases']) == 21
+                assert report['counts']['passed'] == 3
+                assert sum(x['planned_executions'] for x in report['cases']) == 3
             elif scenario == 'preflight':
-                assert report['counts']['blocked'] == 20 and report['counts']['passed'] == 0
+                assert report['counts']['blocked'] == 3 and report['counts']['passed'] == 0
             else:
-                assert report['counts']['not_run'] == 6
+                assert report['counts']['not_run'] == 2
             markdown = (out/'case-results.md').read_text('utf-8')
             assert all(x['case'] in markdown for x in report['ui_inventory'])
             checks.append(scenario + ': complete UI display and truthful selected/unselected states')
@@ -424,10 +442,10 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         result = r.delivery_gate()
         assert result['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY' and result['coverage'] == 'UI_NOT_QUALIFIED'
         assert result['verified_passed'] is None and result['native_tests_executed_this_run'] is None
-        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 19
-        assert len(result['cases']) == 20 and result['evidence_sha256']
+        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 2
+        assert len(result['cases']) == 3 and result['evidence_sha256']
         assert not (out/'package.json').exists()
-        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/21 or premature IPA receipt')
+        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/3 or premature IPA receipt')
         with patch.object(r, 'live_scope', return_value={**scope, 'build_ipa': False}):
             rejects('validation-only source receipt cannot package even with diagnostic opt-in', r.delivery_gate)
         with patch.object(r, 'live_scope', return_value={**scope, 'allow_unqualified_ipa': False}):
@@ -447,7 +465,7 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         assert not (out/'package.json').exists()
         with patch.object(r, 'release_gate', return_value=qualified):
             formal = r.delivery_gate()
-            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 21
+            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 3
             checks.append('formal delivery still obtains strict release_gate qualification')
         artifacts = out/'artifacts'; artifacts.mkdir()
         app = out/'YueJing.app'; app.mkdir()

@@ -9,6 +9,8 @@ struct EPUBContentPoolTests {
         let a = try await f.install(f.archive(title: "Recent A"))
         let b = try await f.install(f.archive(title: "Recent B"))
         let first = try await f.service.openEPUB(id: a.book.id)
+        try verifySessionBreakdown(first.openingTimings)
+        #expect(!first.openingTimings.summary.contains(a.book.id))
         let aRoot = first.publication.resourceRoot
         let aSession = first.reading.session.id
         let pin = try await first.leaseForRenderer()
@@ -24,6 +26,7 @@ struct EPUBContentPoolTests {
         #expect(reopened.openingTimings.samples.contains { $0.phase == .warmResourceVerification && $0.succeeded })
         #expect(reopened.openingTimings.packageFingerprintReused)
         #expect(reopened.openingTimings.samples.contains { $0.phase == .packageFingerprint && $0.succeeded })
+        try verifySessionBreakdown(reopened.openingTimings)
         await pin.release()
         try EPUBPublicationCache.verifyResources(reopened.publication)
         try await reopened.abandon()
@@ -220,5 +223,48 @@ private extension EPUBContentPoolTests {
         await f.store.endReaderOpen(permit)
         try await f.store.abandonEPUB(session: start.session)
         await #expect(throws: CancellationError.self) { try await f.store.beginEPUB(permit, snapshot: snapshot) }
+    }
+}
+
+private extension EPUBContentPoolTests {
+    func verifySessionBreakdown(_ opening: EPUBOpeningTimings) throws {
+        let samples = opening.sessionBreakdown.samples
+        #expect(samples.count == EPUBSessionBreakdown.Phase.allCases.count)
+        #expect(Set(samples.map { $0.phase.rawValue }) == Set(EPUBSessionBreakdown.Phase.allCases.map { $0.rawValue }))
+        #expect(samples.allSatisfy { $0.succeeded && $0.seconds.isFinite && $0.seconds >= 0 })
+        #expect(opening.sessionBreakdown.metadataBytes > 0)
+        let session = try #require(opening.samples.first { $0.phase == .session })
+        let begin = try #require(samples.first { $0.phase == .beginCall })
+        let outerTotal = samples.filter { $0.phase.isOuter }.reduce(0) { $0 + $1.seconds }
+        let innerTotal = samples.filter { !$0.phase.isOuter }.reduce(0) { $0 + $1.seconds }
+        #expect(outerTotal <= session.seconds + 0.000001)
+        #expect(innerTotal <= begin.seconds + 0.000001)
+        #expect(opening.summary.contains("session-breakdown-v1"))
+        #expect(opening.summary.contains("不与外层重复相加"))
+        #expect(opening.summary.contains("非纯fsync"))
+
+        let origin = ContinuousClock.now
+        var bounded = EPUBSessionBreakdown()
+        bounded.record(.beginCall, since: origin, until: origin.advanced(by: .milliseconds(12)))
+        #expect(abs(try #require(bounded.samples.first).seconds - 0.012) < 0.000001)
+        var nested = EPUBSessionBreakdown()
+        nested.metadataBytes = 321
+        nested.record(.metadataRead, since: origin, until: origin.advanced(by: .milliseconds(3)))
+        bounded.merge(nested)
+        #expect(bounded.metadataBytes == 321 && bounded.samples.count == 2)
+        for _ in 0..<64 { bounded.record(.bookRead, since: origin, until: origin) }
+        bounded.merge(nested)
+        #expect(bounded.samples.count == 24)
+        #expect(EPUBSessionBreakdown().summary.isEmpty)
+
+        enum ProbeFailure: Error { case expected }
+        var failed = EPUBSessionBreakdown()
+        #expect(throws: ProbeFailure.expected) {
+            try failed.measure(.metadataRead) { throw ProbeFailure.expected }
+        }
+        #expect(failed.samples.count == 1 && failed.samples.first?.succeeded == false)
+        var successful = EPUBSessionBreakdown()
+        #expect(successful.measure(.rowUpdate) { 42 } == 42)
+        #expect(successful.samples.count == 1 && successful.samples.first?.succeeded == true)
     }
 }
