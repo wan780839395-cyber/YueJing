@@ -580,7 +580,8 @@ final class EPUBFlowUITests: XCTestCase {
         let initialLoads = coordinate("loads")
         let initialX = coordinate("scrollX")
         view.swipeLeft(velocity: .default)
-        waitFor { coordinate("scrollX") > initialX }
+        // A positive sample can be an intermediate animated offset, not a settled page.
+        waitFor { abs(Double(coordinate("scrollX") - initialX) - Double(initialFrame.width)) <= 2 }
         let nextX = coordinate("scrollX")
         XCTAssertEqual(coordinate("scrollY"), 0)
         XCTAssertEqual(Double(nextX - initialX), Double(view.frame.width), accuracy: 2)

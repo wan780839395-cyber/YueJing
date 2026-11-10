@@ -27,6 +27,10 @@ RETEST_BASE = "0cf3849908f9e142733a378848ae70a6bc9366b7"
 RETEST_ALLOWED = frozenset({"Tests/YueJingHostTests/EPUBReaderHostTests.swift",
     ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
     "scripts/check_epub_freeze_validation.py", "docs/EPUB_FREEZE_RELEASE.md"})
+FINAL_SCOPE = "epub-recent-final-2"
+FINAL_BASE = "efd22c7e7df33d90a80d95c1be023f1cc3b116e0"
+FINAL_ALLOWED = (RETEST_ALLOWED - {"Tests/YueJingHostTests/EPUBReaderHostTests.swift"}) | {
+    "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift"}
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
 VERSION, BUILD = "0.2.9", "11"
 TOTAL, EXECUTIONS = 20, 21
@@ -93,6 +97,12 @@ if os.environ.get("VALIDATION_SCOPE") == RETEST_SCOPE:
     QUALIFICATION = "EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE"
     SELECTED_FILES = {p: n for p, n in SELECTED_FILES.items() if not p.startswith("ReaderDomainTests/")}
     GROUPS = {g: s for g, s in GROUPS.items() if s["kind"] != "domain"}
+elif os.environ.get("VALIDATION_SCOPE") == FINAL_SCOPE:
+    SCOPE, BASE, TOTAL, EXECUTIONS = FINAL_SCOPE, FINAL_BASE, 2, 2
+    QUALIFICATION = "EPUB_RECENT_FINAL_2_TARGETED_NATIVE"
+    ALLOWED, NEW = frozenset(FINAL_ALLOWED), frozenset()
+    GROUPS = {g: s for g, s in GROUPS.items() if g in {"host-3", "ui-1"}}
+    SELECTED_FILES = {p: [n] for s in GROUPS.values() for p, n in s["pairs"]}
 require, load, write, sha = v.require, compat.load_json, compat.write_new, compat.digest_path
 
 
@@ -105,9 +115,13 @@ def selection():
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == (0 if SCOPE == RETEST_SCOPE else 14) and
-            SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] ==
-            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected selected Domain/Host3/all EPUB UI3")
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == (14 if SCOPE == "epub-recent-20" else 0),
+            "Unexpected selected test count")
+    expected_ui = inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split()
+    if SCOPE == FINAL_SCOPE:
+        require(set(GROUPS) == {"host-3", "ui-1"}, "Expected only two residual cases")
+        expected_ui = expected_ui[:1]
+    require(SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] == expected_ui, "Unexpected UI selection")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -152,7 +166,7 @@ def scope_receipt():
     before, after = tree(BASE), tree("HEAD")
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
     require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
-            "Release changes outside exact 21-path boundary / four approved additions")
+            "Release changes outside exact scope-specific boundary / approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
     if SCOPE == RETEST_SCOPE:
         git("merge-base", "--is-ancestor", RETEST_BASE, head)
@@ -162,6 +176,8 @@ def scope_receipt():
                 "Host/UI-only retest requires unchanged product, Domain sources, dependencies and build settings")
     old_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
     new_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
+    if SCOPE == FINAL_SCOPE:
+        old_version = new_version # Test-only repair; project and release identity must be byte-identical.
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")
@@ -433,7 +449,7 @@ def summarize(*, publish=False):
     for target in ("YueJingEPUBUITests", "YueJingUITests"):
         for case in inventory.expected_names(target):
             ui_rows.append(selected_ui.get(case, dict(target=target, case=case, status="not_selected",
-                reason="本轮未选择：独立 TXT/通用阅读 UI 范围，未执行、不计通过")))
+                reason="本轮未选择，未执行、不计本轮通过；历史证据另列来源")))
     counts = {status: sum(row["status"] == status for row in rows)
               for status in ("passed", "failed", "timed_out", "error", "blocked", "not_run")}
     report = dict(scope=SCOPE, source_commit=os.environ.get("GITHUB_SHA"), run_id=os.environ.get("GITHUB_RUN_ID"),

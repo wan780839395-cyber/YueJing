@@ -43,3 +43,7 @@
 统一修复仅为 `makeModel`、`bind`、`openAndClose` 添加 `@MainActor`：这些函数构造或操作主actor拥有的UI模型/控制器，原断言、时间预算和生产实现不变。
 
 复测 `epub-recent-host-ui-6` 仅选原Host3＋UI3，当前运行计划6次、资格名 `EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE`；Domain15次通过仍归属初轮，不写进本轮通过数。相对初轮仅允许Host测试、workflow、runner、自检及本文5路径变化，严格保持产品、Domain测试、工具链、依赖和project不变。此前25组Chromium/16项脚本检查因受测生产JS未变不重复执行。设备阶段使用 `build_ipa=true`；诊断许可与正式资格仍独立，任何编译/完整性失败均不交付。
+
+第二轮 `efd22c7e7df33d90a80d95c1be023f1cc3b116e0` / `42766626139/1`：编译阻塞已消除，Host1/2、UI2/3通过；Host3首次首开15秒未就绪（GPU启动记录15.50秒），UI1分页采样348而期望375±2。设备Release和云端包完整性通过，但仅诊断资格。
+
+最后受影响入口 `epub-recent-final-2` 仅Host3和UI1。本次仅修正分页UI把“位移>0”误当作动画完成的等待条件，改为原12秒内等待原有整页目标±2，最终断言不变；Host3原样在新执行器恢复一次，不增加15秒就绪预算。相对第二轮精确5路径：UI测试、workflow、runner、自检、本文，无新增文件、无产品/Host/Domain/project变化。Domain15次通过引用初轮，Host1/2与UI2/3四次通过引用第二轮，本轮只报告2次计划执行，不把跨轮证据写成同轮21次通过。仍失败则保留未知原因并停止猜测性循环，按明确诊断资格交付经完整性核验的设备包。

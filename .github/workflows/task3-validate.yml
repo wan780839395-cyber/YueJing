@@ -19,6 +19,7 @@ on:
           - epub-diagnostic-e8112fb
           - epub-recent-20
           - epub-recent-host-ui-6
+          - epub-recent-final-2
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -35,7 +36,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-recent-20' && inputs.validation_scope != 'epub-recent-host-ui-6' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-recent-20' && inputs.validation_scope != 'epub-recent-host-ui-6' && inputs.validation_scope != 'epub-recent-final-2' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1141,7 +1142,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-recent-20' || inputs.validation_scope == 'epub-recent-host-ui-6' }}
+    if: ${{ inputs.validation_scope == 'epub-recent-20' || inputs.validation_scope == 'epub-recent-host-ui-6' || inputs.validation_scope == 'epub-recent-final-2' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:

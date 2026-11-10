@@ -112,7 +112,8 @@ workflow = (r.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding=
 job = workflow.split('\n  epub_freeze:\n')[1]
 assert 'default: ' + r.SCOPE in workflow
 assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' || inputs.validation_scope == '" + r.RETEST_SCOPE + "' }}" in job
+assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' || inputs.validation_scope == '" + r.RETEST_SCOPE + "' || inputs.validation_scope == '" + r.FINAL_SCOPE + "' }}" in job
+assert "inputs.validation_scope != '" + r.FINAL_SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
 assert "inputs.validation_scope != '" + r.RETEST_SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
 assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow
 assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
@@ -539,6 +540,60 @@ with tempfile.TemporaryDirectory(prefix='epub-six-', dir=os.environ.get('PI_SCRA
         six.write(native/'host-1/failure.json', dict(error='synthetic'))
         rejects('six-case failure cannot qualify', six.qualification)
 checks.append('six-case qualification counts only six and rejects retained failures')
+
+with patch.dict(os.environ, {'VALIDATION_SCOPE': r.FINAL_SCOPE}):
+    final_spec = importlib.util.spec_from_file_location('recent_final_selfcheck', r.__file__)
+    final = importlib.util.module_from_spec(final_spec)
+    final_spec.loader.exec_module(final)
+assert final.SCOPE == r.FINAL_SCOPE and final.BASE == r.FINAL_BASE
+assert final.TOTAL == final.EXECUTIONS == 2 and set(final.selection()) == {'host-3', 'ui-1'}
+assert len(final.ALLOWED) == 5 and not final.NEW
+for group in final.GROUPS:
+    assert final.parse_log(group, fixture(group), 0, False)['executions'] == 1
+rejects('two-case scope refuses already passed Host1', lambda: final.command('host-1', destination, Path('x')))
+previous_tree = r.tree(final.BASE); final_tree = copy.deepcopy(previous_tree)
+for p in final.ALLOWED:
+    final_tree[p] = ['100644', 'blob', 'f'*40]
+final_project = r.git('show', final.BASE + ':project.yml')
+def finalgit(*args):
+    if args == ('show', final.BASE + ':project.yml'): return final_project
+    return fakegit(*args)
+with patch.dict(os.environ, {**env, 'VALIDATION_SCOPE': final.SCOPE}), \
+     patch.object(final, 'git', side_effect=finalgit), \
+     patch.object(final, 'tree', side_effect=lambda rev: previous_tree if rev == final.BASE else final_tree), \
+     patch.object(final, 'dispatch_permission', return_value=True):
+    final_receipt = final.scope_receipt()
+    assert final_receipt['native_tests_planned'] == 2
+    for p in ('App/EPUB/EPUBWebView.swift', 'Tests/YueJingHostTests/EPUBReaderHostTests.swift', 'project.yml'):
+        saved = final_tree[p]; final_tree[p] = ['100644', 'blob', 'e'*40]
+        rejects('two-case isolation rejects ' + p, final.scope_receipt)
+        final_tree[p] = saved
+with tempfile.TemporaryDirectory(prefix='epub-final-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    out = Path(temp); native = out/'epub-freeze'; native.mkdir()
+    (out/'simulator-selection.json').write_text(json.dumps(dict(udid=destination.split('id=')[1])))
+    with patch.object(final, 'OUT', out), patch.object(final, 'NATIVE_OUT', native), \
+         patch.object(final, 'live_scope', return_value=final_receipt), \
+         patch.object(final.compat, 'validate_toolchain_and_dependencies'), patch.object(final.compat, 'validate_destination'), \
+         patch.object(final.reading, 'validate_group_settings'), patch.object(final.paging, 'require_xcresult'):
+        for group, spec in final.GROUPS.items():
+            folder = native/group; folder.mkdir(); bundle = folder/(spec['target']+'.xcresult')
+            want = final.provenance(group, destination, bundle, final_receipt)
+            final.write(folder/'selection.json', want)
+            final.write(folder/'execution.json', dict(**want, native_exit=0, timed_out=False))
+            (folder/(spec['target']+'.log')).write_bytes(fixture(group))
+            final.write(folder/'counts.json', dict(**final.parse_log(group, fixture(group), 0, False), parameter_xcresult=None))
+        result = final.qualification()
+        assert result['verified_passed'] == result['native_tests_executed_this_run'] == 2
+        assert result['not_executed_this_run'] == 228
+        summary = final.summarize()
+        assert sum(x['status'] == 'not_selected' for x in summary['ui_inventory']) == 14
+        final.write(native/'host-3/failure.json', dict(error='synthetic'))
+        rejects('two-case failure cannot qualify', final.qualification)
+ui_source = (r.ROOT/'Tests/YueJingEPUBUITests/EPUBFlowUITests.swift').read_text('utf-8')
+assert 'waitFor { abs(Double(coordinate("scrollX") - initialX) - Double(initialFrame.width)) <= 2 }' in ui_source
+assert 'XCTAssertEqual(Double(nextX - initialX), Double(view.frame.width), accuracy: 2)' in ui_source
+assert 348 > 0 and not abs(348 - 375) <= 2 and abs(375 - 375) <= 2
+checks.append('two-case identity/counts/isolation and exact paging completion wait; no budget/assertion relaxation')
 
 print(json.dumps(dict(offline_checks_passed=len(checks), checks=checks, native_tests_executed=0,
                      release_source_ready=not blockers, source_blockers=blockers), indent=2))
