@@ -539,10 +539,12 @@ struct EPUBReaderHostTests {
             let receipt = try await fixture.install(archive)
             let cache = EPUBWarmRendererCache()
             defer { cache.discard() }
+            @MainActor
             func makeModel() -> EPUBReaderViewModel {
                 EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service,
                                     readingMode: .scroll, rendererCache: cache)
             }
+            @MainActor
             func bind(_ model: EPUBReaderViewModel, _ controller: EPUBWebViewController) {
                 controller.onLocatorEvent = { model.handleLocatorEvent($0) }
                 controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
@@ -637,6 +639,7 @@ struct EPUBReaderHostTests {
                 try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: title)
                 ids.append(try await fixture.install(archive).book.id)
             }
+            @MainActor
             func openAndClose(_ id: String, expected: EPUBWebViewController? = nil,
                               root: URL? = nil, changedLayout: Bool = false) async throws -> (EPUBWebViewController, URL) {
                 let model = EPUBReaderViewModel(bookID: id, service: fixture.service,

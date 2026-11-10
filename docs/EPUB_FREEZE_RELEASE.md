@@ -35,3 +35,11 @@
 产物下载核验API摘要、ZIP CRC/路径/成员，独立核验source/run/attempt、实际Release二进制及交付副本摘要。未知执行总数保留null，单列已知/未知。结果只存ignored artifacts，不发布私有记录、用户脚本、书籍、录屏或Skills。
 
 真机通过现有TrollStore覆盖安装，不卸载、不清库、不重导入。分别测试首开、A→A、A→B→A、多书轮换、后台与进程重启，观察正确进度和实际可交互时间；出包不是微信读书级性能已达到的证明。
+
+## 初轮结果与受影响复测
+
+初轮提交 `0cf3849908f9e142733a378848ae70a6bc9366b7`、run `42764634775/1` 已结束并完整采集：Domain14声明/15展开通过；Host3和UI3均实际发起，但同一Host测试文件的3个局部辅助函数缺少主actor隔离，编译退出65，行为测试未开始。没有将6项编译失败写成行为通过；初轮未请求设备包。
+
+统一修复仅为 `makeModel`、`bind`、`openAndClose` 添加 `@MainActor`：这些函数构造或操作主actor拥有的UI模型/控制器，原断言、时间预算和生产实现不变。
+
+复测 `epub-recent-host-ui-6` 仅选原Host3＋UI3，当前运行计划6次、资格名 `EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE`；Domain15次通过仍归属初轮，不写进本轮通过数。相对初轮仅允许Host测试、workflow、runner、自检及本文5路径变化，严格保持产品、Domain测试、工具链、依赖和project不变。此前25组Chromium/16项脚本检查因受测生产JS未变不重复执行。设备阶段使用 `build_ipa=true`；诊断许可与正式资格仍独立，任何编译/完整性失败均不交付。

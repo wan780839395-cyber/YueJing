@@ -22,6 +22,11 @@ from epub_diagnostic_package import git, tree
 
 BASE = "eee357c1bce90cd576657b1610116e55b75c1b92"
 SCOPE = "epub-recent-20"
+RETEST_SCOPE = "epub-recent-host-ui-6"
+RETEST_BASE = "0cf3849908f9e142733a378848ae70a6bc9366b7"
+RETEST_ALLOWED = frozenset({"Tests/YueJingHostTests/EPUBReaderHostTests.swift",
+    ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
+    "scripts/check_epub_freeze_validation.py", "docs/EPUB_FREEZE_RELEASE.md"})
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
 VERSION, BUILD = "0.2.9", "11"
 TOTAL, EXECUTIONS = 20, 21
@@ -80,6 +85,14 @@ for _kind, _target in (("domain", "ReaderDomainTests"), ("host", "YueJingHostTes
         _key = _kind + "-" + str(_index)
         GROUPS[_key] = dict(kind=_kind, target=_target, timeout=480, pairs=_chunk, cases=[n for _, n in _chunk])
 del _kind, _target, _pairs, _index, _chunk, _key
+
+# A test-helper-only repair cannot invalidate the independent Domain target.
+# This scope reports only its own six executions; prior Domain evidence is separate.
+if os.environ.get("VALIDATION_SCOPE") == RETEST_SCOPE:
+    SCOPE, TOTAL, EXECUTIONS = RETEST_SCOPE, 6, 6
+    QUALIFICATION = "EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE"
+    SELECTED_FILES = {p: n for p, n in SELECTED_FILES.items() if not p.startswith("ReaderDomainTests/")}
+    GROUPS = {g: s for g, s in GROUPS.items() if s["kind"] != "domain"}
 require, load, write, sha = v.require, compat.load_json, compat.write_new, compat.digest_path
 
 
@@ -92,9 +105,9 @@ def selection():
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == 14 and
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == (0 if SCOPE == RETEST_SCOPE else 14) and
             SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] ==
-            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain14/Host3/all EPUB UI3")
+            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected selected Domain/Host3/all EPUB UI3")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -141,6 +154,12 @@ def scope_receipt():
     require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
             "Release changes outside exact 21-path boundary / four approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
+    if SCOPE == RETEST_SCOPE:
+        git("merge-base", "--is-ancestor", RETEST_BASE, head)
+        initial = tree(RETEST_BASE)
+        repair_changed = {p for p in set(initial) | set(after) if initial.get(p) != after.get(p)}
+        require(repair_changed == RETEST_ALLOWED and set(initial) == set(after),
+                "Host/UI-only retest requires unchanged product, Domain sources, dependencies and build settings")
     old_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
     new_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
     old_project = git("show", BASE + ":project.yml")

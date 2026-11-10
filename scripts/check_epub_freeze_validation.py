@@ -9,7 +9,9 @@ import tempfile
 from unittest.mock import patch
 import zipfile
 
-import run_epub_freeze_validation as r
+# Exercise the original parameterized parser/gates regardless of the dispatch scope.
+with patch.dict(os.environ, {'VALIDATION_SCOPE': 'epub-recent-20'}):
+    import run_epub_freeze_validation as r
 import validate_task3 as v
 
 checks = []
@@ -110,7 +112,8 @@ workflow = (r.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding=
 job = workflow.split('\n  epub_freeze:\n')[1]
 assert 'default: ' + r.SCOPE in workflow
 assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
+assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' || inputs.validation_scope == '" + r.RETEST_SCOPE + "' }}" in job
+assert "inputs.validation_scope != '" + r.RETEST_SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
 assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow
 assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
 assert 'Show every selected result and the complete UI inventory\n        if: always()' in job
@@ -485,6 +488,57 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         rejects('linkage receipt cannot be reused across runs', lambda: r.validate_linkage('device', {**scope, 'run_id': '999'}))
         (linkage/'image').write_bytes(b'changed linkage evidence')
         rejects('linkage evidence hash drift rejected', lambda: r.validate_linkage('device', scope))
+
+# Load the six-case entry independently; never count previous Domain tests as this run.
+import importlib.util
+with patch.dict(os.environ, {'VALIDATION_SCOPE': r.RETEST_SCOPE}):
+    module_spec = importlib.util.spec_from_file_location('recent_six_selfcheck', r.__file__)
+    six = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(six)
+assert six.SCOPE == r.RETEST_SCOPE and six.TOTAL == six.EXECUTIONS == 6
+assert six.QUALIFICATION == 'EPUB_RECENT_HOST_UI_6_TARGETED_NATIVE'
+assert set(six.selection()) == {'host-1', 'host-2', 'host-3', 'ui-1', 'ui-2', 'ui-3'}
+assert all(s['kind'] != 'domain' for s in six.GROUPS.values())
+rejects('six-case scope refuses Domain invocation', lambda: six.command('domain-1', destination, Path('x')))
+for group in six.GROUPS:
+    assert six.parse_log(group, fixture(group), 0, False)['executions'] == 1
+checks.append('six-case entry selects exactly Host3/UI3; no reused passes added')
+initial_tree = r.tree(r.RETEST_BASE)
+repair_tree = copy.deepcopy(initial_tree)
+for p in six.RETEST_ALLOWED:
+    repair_tree[p] = ['100644', 'blob', 'f'*40]
+original_tree = r.tree(r.BASE)
+with patch.dict(os.environ, {**env, 'VALIDATION_SCOPE': six.SCOPE}), \
+     patch.object(six, 'git', side_effect=fakegit), \
+     patch.object(six, 'tree', side_effect=lambda rev: original_tree if rev == six.BASE else initial_tree if rev == six.RETEST_BASE else repair_tree), \
+     patch.object(six, 'dispatch_permission', return_value=False):
+    six_receipt = six.scope_receipt()
+    assert six_receipt['native_tests_planned'] == 6 and six_receipt['selected_declarations'] == 6
+    for p in ('Sources/ReaderDomain/EPUB/EPUBContentPool.swift', 'project.yml', 'Tests/ReaderDomainTests/EPUBContentPoolTests.swift'):
+        saved = repair_tree[p]; repair_tree[p] = ['100644', 'blob', 'e'*40]
+        rejects('six-case isolation rejects ' + p, six.scope_receipt)
+        repair_tree[p] = saved
+checks.append('six-case source boundary rejects product/Domain/build-setting drift')
+with tempfile.TemporaryDirectory(prefix='epub-six-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    out = Path(temp); native = out/'epub-freeze'; native.mkdir()
+    (out/'simulator-selection.json').write_text(json.dumps(dict(udid=destination.split('id=')[1])))
+    with patch.object(six, 'OUT', out), patch.object(six, 'NATIVE_OUT', native), \
+         patch.object(six, 'live_scope', return_value=six_receipt), \
+         patch.object(six.compat, 'validate_toolchain_and_dependencies'), patch.object(six.compat, 'validate_destination'), \
+         patch.object(six.reading, 'validate_group_settings'), patch.object(six.paging, 'require_xcresult'):
+        for group, spec in six.GROUPS.items():
+            folder = native/group; folder.mkdir(); bundle = folder/(spec['target']+'.xcresult')
+            want = six.provenance(group, destination, bundle, six_receipt)
+            six.write(folder/'selection.json', want)
+            six.write(folder/'execution.json', dict(**want, native_exit=0, timed_out=False))
+            (folder/(spec['target']+'.log')).write_bytes(fixture(group))
+            six.write(folder/'counts.json', dict(**six.parse_log(group, fixture(group), 0, False), parameter_xcresult=None))
+        result = six.qualification()
+        assert result['verified_passed'] == result['native_tests_executed_this_run'] == 6
+        assert result['not_executed_this_run'] == 224
+        six.write(native/'host-1/failure.json', dict(error='synthetic'))
+        rejects('six-case failure cannot qualify', six.qualification)
+checks.append('six-case qualification counts only six and rejects retained failures')
 
 print(json.dumps(dict(offline_checks_passed=len(checks), checks=checks, native_tests_executed=0,
                      release_source_ready=not blockers, source_blockers=blockers), indent=2))
