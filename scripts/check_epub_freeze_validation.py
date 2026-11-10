@@ -44,13 +44,13 @@ def fixture(group):
 
 
 selected = r.selection()
-assert len(selected) == r.TOTAL == 9 and r.EXECUTIONS == 10 and all(len(n) == 1 for n in selected.values())
+assert len(selected) == r.TOTAL == 20 and r.EXECUTIONS == 21 and all(len(n) == 1 for n in selected.values())
 PARAM_GROUP = next(g for g, s in r.GROUPS.items() if any(n in r.inventory.PARAMETERIZED for n in s['cases']))
-assert len(r.ALLOWED) == 18 and r.NEW == {'App/EPUB/EPUBRuntimeTrace.swift', 'Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift'}
+assert len(r.ALLOWED) == 21 and r.NEW == {'App/EPUB/EPUBWarmRendererCache.swift', 'App/EPUB/EPUBParkReply.swift', 'Sources/ReaderDomain/EPUB/EPUBContentPool.swift', 'Tests/ReaderDomainTests/EPUBContentPoolTests.swift'}
 reviewed = r.inventory.validate_source()
 assert json.loads(json.dumps(reviewed)) == reviewed
 checks.append('candidate inventory survives JSON roundtrip')
-checks.append('exact Domain3 Host3 UI3 independently selected / inventory222 declarations, 223 expansions')
+checks.append('exact Domain14 Host3 UI3 independently selected / inventory229 declarations, 230 expansions')
 destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
 for group in r.GROUPS:
     raw = fixture(group)
@@ -115,7 +115,8 @@ assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workf
 assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
 assert 'Show every selected result and the complete UI inventory\n        if: always()' in job
 assert 'run_epub_freeze_validation.py report' in job
-assert job.index('Compile actual unsigned') < job.index('run-all') < job.index('run_epub_freeze_validation.py gate') < job.index('package-gate-epub-freeze') < job.index('verify-ipa-epub-freeze')
+assert job.index('run-all') < job.index('run_epub_freeze_validation.py gate') < job.index('Compile actual unsigned') < job.index('package-gate-epub-freeze') < job.index('verify-ipa-epub-freeze')
+assert job.count('!cancelled() && inputs.build_ipa &&') == 2 and "BUILD_IPA: ${{ inputs.build_ipa && 'true' || 'false' }}" in job
 assert 'continue-on-error' not in job and 'Publish verified unsigned IPA' in job and 'if: success()' not in job
 checks.append('exclusive scope routing / independent device build / strict native and delivery gates separated')
 
@@ -126,7 +127,7 @@ current = {**old, **{p: ['100644', 'blob', '2'*40] for p in r.ALLOWED}}
 head = 'a'*40
 env = dict(VALIDATION_SCOPE=r.SCOPE, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main',
            GITHUB_RUN_ATTEMPT='1', GITHUB_REPOSITORY='wan780839395-cyber/YueJing', GITHUB_SHA=head, GITHUB_RUN_ID='12345',
-           GITHUB_EVENT_PATH=__file__, ALLOW_UNQUALIFIED_IPA='false')
+           GITHUB_EVENT_PATH=__file__, ALLOW_UNQUALIFIED_IPA='false', BUILD_IPA='true')
 def fakegit(*args):
     if args == ('rev-parse', 'HEAD'): return head.encode()
     if args[0] in ('merge-base', 'status'): return b''
@@ -137,8 +138,8 @@ with patch.dict(os.environ, env), patch.object(r, 'git', side_effect=fakegit), \
      patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current), \
      patch.object(r, 'ui_reopen_contract'), patch.object(r, 'dispatch_permission', return_value=False):
     receipt = r.scope_receipt()
-    assert receipt['native_tests_planned'] == 10 and 'verified_passed' not in receipt
-    checks.append('scope binds exact18 paths including two additions and makes no native-pass claim')
+    assert receipt['native_tests_planned'] == 21 and 'verified_passed' not in receipt
+    checks.append('scope binds exact21 paths including four additions and makes no native-pass claim')
     for key, value in [('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
                        ('GITHUB_SHA', 'b'*40), ('GITHUB_RUN_ATTEMPT', '2'),
                        ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other')]:
@@ -194,7 +195,7 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
             r.write(folder/'counts.json', parsed)
         qualified = r.qualification()
         r.write(out/'gate.json', qualified)
-        assert r.release_gate()['verified_passed'] == 10
+        assert r.release_gate()['verified_passed'] == 21
         checks.append('synthetic complete artifact / release acceptance (native helpers mocked)')
         for failure_path in (native/'ui-1/failure.json', out/'case-scheduling-error.json'):
             r.write(failure_path, dict(error='synthetic failure after passing receipt'))
@@ -204,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix='epub-reopen-selfcheck-', dir=os.environ
         previous = broken.read_bytes()
         broken.write_bytes(b'{invalid')
         summary = r.summarize()
-        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 8
+        assert summary['counts']['error'] == 1 and summary['counts']['passed'] == 19
         assert len(summary['ui_inventory']) == 15
         broken.write_bytes(previous)
         checks.append('one corrupt result is visible and does not hide remaining UI cases')
@@ -325,19 +326,19 @@ with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI
                 assert visited == list(r.GROUPS)
                 checks.append(scenario + ': production scheduler attempted every selected identity once')
             report = r.summarize(publish=True)
-            assert len(report['cases']) == 9 and len(report['ui_inventory']) == 15
+            assert len(report['cases']) == 20 and len(report['ui_inventory']) == 15
             assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 12
             assert {x['case'] for x in report['ui_inventory']} == set(r.inventory.expected_names('YueJingUITests') + r.inventory.expected_names('YueJingEPUBUITests'))
             if scenario == 'mixed':
-                assert report['counts'] == dict(passed=5, failed=2, timed_out=1, error=0, blocked=1, not_run=0)
+                assert report['counts'] == dict(passed=16, failed=2, timed_out=1, error=0, blocked=1, not_run=0)
                 assert all(x['status'] == 'passed' for x in report['cases'] if x['group'] in ('ui-2', 'ui-3'))
                 rejects('failed cases cannot qualify even after later cases pass', r.qualification)
                 checks.append('first/middle/UI failures and timeout continue; failure statuses retained')
             elif scenario == 'all_pass':
-                assert report['counts']['passed'] == 9
-                assert sum(x['planned_executions'] for x in report['cases']) == 10
+                assert report['counts']['passed'] == 20
+                assert sum(x['planned_executions'] for x in report['cases']) == 21
             elif scenario == 'preflight':
-                assert report['counts']['blocked'] == 9 and report['counts']['passed'] == 0
+                assert report['counts']['blocked'] == 20 and report['counts']['passed'] == 0
             else:
                 assert report['counts']['not_run'] == 6
             markdown = (out/'case-results.md').read_text('utf-8')
@@ -356,14 +357,18 @@ with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI
 import re
 blocks = {re.search(r'\n        id: (\w+)', block)[1]: block for block in job.split('      - name: ')
           if re.search(r'\n        id: (\w+)', block)}
-def admitted(step, outcomes, cancelled=False):
+def admitted(step, outcomes, cancelled=False, build_ipa=True):
     expression = re.search(r'\n        if: \$\{\{ (.+) \}\}', blocks[step])[1]
     expression = expression.replace('!cancelled()', str(not cancelled)).replace('&&', ' and ')
+    expression = expression.replace('inputs.build_ipa', str(build_ipa))
     expression = re.sub(r"steps\.(\w+)\.outcome", lambda m: repr(outcomes.get(m[1], 'skipped')), expression)
     return eval(expression, {'__builtins__': {}}, {})
 good = dict(scope='success', toolchain='success', dependencies='success', device='success',
             simulator='success', boot='success', tests='failure', native_gate='failure')
 assert admitted('device', good) and admitted('package', good) and admitted('simulator_linkage', good)
+assert not admitted('device', good, build_ipa=False) and not admitted('package', good, build_ipa=False)
+assert admitted('tests', good, build_ipa=False)
+checks.append('validation-only dispatch still runs tests but cannot build/package')
 checks.append('UI/test failure does not block device, package or simulator linkage integrity validation')
 assert admitted('simulator', {**good, 'device': 'failure'}) and admitted('tests', {**good, 'device': 'failure'})
 checks.append('device failure does not block independent simulator/tests')
@@ -379,7 +384,7 @@ checks.append('cancelled package/upload excluded; diagnostic permission defaults
 with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
     out = Path(temp)
     event = out/'event.json'
-    with patch.dict(os.environ, {'GITHUB_EVENT_PATH': str(event), 'ALLOW_UNQUALIFIED_IPA': 'false'}):
+    with patch.dict(os.environ, {'GITHUB_EVENT_PATH': str(event), 'ALLOW_UNQUALIFIED_IPA': 'false', 'BUILD_IPA': 'false'}):
         event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE))))
         assert r.dispatch_permission() is False
         checks.append('missing explicit dispatch permission defaults false')
@@ -391,6 +396,11 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         rejects('dispatch true cannot be changed to environment false', r.dispatch_permission)
         event.write_text(json.dumps(dict(inputs=dict(validation_scope='full', allow_unqualified_ipa=False))))
         rejects('diagnostic permission cannot cross scope', r.dispatch_permission)
+        event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=True))))
+        rejects('build environment cannot differ from dispatch stage', r.dispatch_permission)
+        with patch.dict(os.environ, {'BUILD_IPA': 'true'}):
+            assert r.dispatch_permission() is False
+            checks.append('explicit build phase bound to dispatch event')
     frozen = out/'frozen.json'
     frozen.write_text(json.dumps(receipt))
     with patch.object(r, 'SCOPE_JSON', frozen), patch.object(r, 'scope_receipt', return_value={**receipt, 'allow_unqualified_ipa': True}):
@@ -413,10 +423,12 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         result = r.delivery_gate()
         assert result['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY' and result['coverage'] == 'UI_NOT_QUALIFIED'
         assert result['verified_passed'] is None and result['native_tests_executed_this_run'] is None
-        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 8
-        assert len(result['cases']) == 9 and result['evidence_sha256']
+        assert result['known_executions'] == 1 and len(result['unknown_execution_groups']) == 19
+        assert len(result['cases']) == 20 and result['evidence_sha256']
         assert not (out/'package.json').exists()
-        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/10 or premature IPA receipt')
+        checks.append('partial evidence retains one known execution, unknown remainder, no fake zero/21 or premature IPA receipt')
+        with patch.object(r, 'live_scope', return_value={**scope, 'build_ipa': False}):
+            rejects('validation-only source receipt cannot package even with diagnostic opt-in', r.delivery_gate)
         with patch.object(r, 'live_scope', return_value={**scope, 'allow_unqualified_ipa': False}):
             rejects('UI failure without explicit diagnostic permission refuses delivery', r.delivery_gate)
         with patch.object(r, 'live_scope', side_effect=ValueError('source mismatch')):
@@ -434,7 +446,7 @@ with tempfile.TemporaryDirectory(prefix='epub-delivery-', dir=os.environ.get('PI
         assert not (out/'package.json').exists()
         with patch.object(r, 'release_gate', return_value=qualified):
             formal = r.delivery_gate()
-            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 10
+            assert formal['strict_native_qualification'] == 'passed' and formal['verified_passed'] == 21
             checks.append('formal delivery still obtains strict release_gate qualification')
         artifacts = out/'artifacts'; artifacts.mkdir()
         app = out/'YueJing.app'; app.mkdir()

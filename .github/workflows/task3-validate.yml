@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB P0 targeted9 (10 executions); independent tests and diagnostic device delivery
+        description: Recent EPUB lifecycle20 (21 executions); validate first then repair and package
         required: true
         type: choice
-        default: epub-p0-9
+        default: epub-recent-20
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,9 +17,14 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-p0-9
+          - epub-recent-20
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
+        required: true
+        type: boolean
+        default: false
+      build_ipa:
+        description: Build device IPA only after the initial validation and consolidated repair stage
         required: true
         type: boolean
         default: false
@@ -29,7 +34,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-p0-9' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-recent-20' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1135,7 +1140,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-p0-9' }}
+    if: ${{ inputs.validation_scope == 'epub-recent-20' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1144,11 +1149,12 @@ jobs:
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
       VALIDATION_SCOPE: ${{ inputs.validation_scope }}
       ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa && 'true' || 'false' }}
+      BUILD_IPA: ${{ inputs.build_ipa && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
     steps:
-      - name: Check out the approved EPUB P0 observation and scroll candidate
+      - name: Check out the approved recent-book lifecycle candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1193,25 +1199,6 @@ jobs:
             -clonedSourcePackagesDirPath build/SourcePackages 2>&1 | tee artifacts/task3/dependency-resolution.log
           python3 -B scripts/validate_task3.py resolved
 
-      - name: Compile actual unsigned iPhoneOS arm64 Release
-        id: device
-        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
-        run: |
-          set -uo pipefail
-          set +e
-          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' \
-            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
-            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            -resultBundlePath artifacts/task3/AppBuild.xcresult \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-            build 2>&1 | tee artifacts/task3/app-build.log
-          pipeline=("${PIPESTATUS[@]}")
-          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
-          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
-          exit "${pipeline[1]}"
-
       - name: Select installed arm64 simulator and verify test settings
         id: simulator
         if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
@@ -1249,7 +1236,7 @@ jobs:
           assert code == 0 and not timed_out, 'Selected simulator did not become ready'
           PY
 
-      - name: Run all 9 selected cases independently and continue after individual failures
+      - name: Run all 20 selected cases independently and continue after individual failures
         id: tests
         if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
         run: |
@@ -1279,9 +1266,28 @@ jobs:
           set -euo pipefail
           python3 -B scripts/run_epub_freeze_validation.py gate
 
+      - name: Compile actual unsigned iPhoneOS arm64 Release after validation and repair
+        id: device
+        if: ${{ !cancelled() && inputs.build_ipa && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
       - name: Verify device dependency graph and every IPA payload byte
         id: package
-        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.device.outcome == 'success' }}
+        if: ${{ !cancelled() && inputs.build_ipa && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.device.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 -B scripts/check_webkit_linkage.py \

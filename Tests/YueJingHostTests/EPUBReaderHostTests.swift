@@ -137,6 +137,7 @@ struct EPUBReaderHostTests {
             }
             try await reopened.close(position: saved, sequence: 1, token: reopenToken, preferences: reopened.preferences)
         }
+        try await verifySameBookWarmRenderer()
     }
 
     @Test func epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking() async throws {
@@ -531,6 +532,167 @@ struct EPUBReaderHostTests {
         #expect(controller.resourceHandler.servedPaths.contains("OPS/page.webp"))
     }
 
+    private func verifySameBookWarmRenderer() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("WarmRenderer.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Warm Renderer")
+            let receipt = try await fixture.install(archive)
+            let cache = EPUBWarmRendererCache()
+            defer { cache.discard() }
+            func makeModel() -> EPUBReaderViewModel {
+                EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service,
+                                    readingMode: .scroll, rendererCache: cache)
+            }
+            func bind(_ model: EPUBReaderViewModel, _ controller: EPUBWebViewController) {
+                controller.onLocatorEvent = { model.handleLocatorEvent($0) }
+                controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
+                controller.onChapterBoundary = { model.turnChapter($0, from: $1) }
+            }
+            let first = makeModel()
+            let controller = first.webView.makeController()
+            bind(first, controller)
+            try await fixture.withHostedController(controller) {
+                await first.load()
+                let initial = try #require(first.currentToken)
+                try await waitUntilReady(model: first, expectedToken: initial)
+                try await waitForChapterWindow(controller, count: 3)
+                #expect(controller.documentLoadCount == 1 && controller.closedDocumentReuseCount == 0)
+                #expect(!controller.webView.isHidden)
+                let oldReader = try #require(first.reader)
+                let root = oldReader.publication.resourceRoot
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+                window.__warmDocument = document;
+                window.__warmNode = document.querySelector('[data-yj-chapter]');
+                window.__warmImage = document.querySelector('img');
+                window.scrollTo(0, 500); true;
+                """)
+                let oldPayload = try #require(await controller.sampleVisibleNow())
+                #expect(oldPayload.scrollY > 0)
+                first.handleLocatorEvent(oldPayload)
+                #expect(await first.close())
+                #expect(controller.hasParkedDocument && controller.activeRequest == nil)
+                #expect(controller.onLocatorEvent == nil && controller.webView.isHidden)
+                #expect(await controller.sampleVisibleNow() == nil)
+                #expect(try await oldReader.markReady(initial) == false)
+
+                let second = makeModel()
+                let reused = second.webView.makeController()
+                #expect(reused === controller)
+                // A delayed dismantle belonging to the old SwiftUI route must be harmless.
+                first.webView.detach(controller)
+                #expect(controller.hasParkedDocument)
+                bind(second, reused)
+                await second.load()
+                let fresh = try #require(second.currentToken)
+                #expect(fresh.sessionID != initial.sessionID)
+                try await waitUntilReady(model: second, expectedToken: fresh)
+                let latestReader = try #require(second.reader)
+                #expect(latestReader.publication.resourceRoot == root)
+                #expect(second.currentPosition == latestReader.reading.position)
+                #expect(controller.documentLoadCount == 1 && controller.closedDocumentReuseCount == 1)
+                #expect(!controller.webView.isHidden)
+                let sameDOM = try await controller.evaluateLocatorJavaScriptForTesting("""
+                document === window.__warmDocument && document.querySelector('[data-yj-chapter]') === window.__warmNode &&
+                document.querySelector('img') === window.__warmImage;
+                """) as? Bool
+                #expect(sameDOM == true)
+                let beforeStale = second.currentPosition
+                second.handleLocatorEvent(oldPayload)
+                #expect(second.currentPosition == beforeStale && second.currentToken == fresh)
+                try await waitForChapterWindow(controller, count: 3)
+                #expect(await second.close())
+                #expect(controller.hasParkedDocument)
+
+                // A new verified directory must not inherit even a visually valid old DOM.
+                try FileManager.default.removeItem(at: root.appendingPathComponent(initial.path))
+                let third = makeModel()
+                #expect(third.webView.makeController() === controller)
+                bind(third, controller)
+                await third.load()
+                let recovered = try #require(third.currentToken)
+                try await waitUntilReady(model: third, expectedToken: recovered)
+                #expect(third.reader?.publication.resourceRoot != root)
+                #expect(controller.documentLoadCount == 2 && controller.closedDocumentReuseCount == 1)
+                #expect(!controller.webView.isHidden)
+                try await waitForChapterWindow(controller, count: 3)
+                #expect(await third.close())
+                #expect(controller.hasParkedDocument)
+                cache.discard() // Same path used for memory warning/background; no session cache survives.
+                #expect(!controller.hasParkedDocument)
+                let fourth = makeModel()
+                let cold = fourth.webView.makeController()
+                #expect(cold !== controller && cold.documentLoadCount == 0)
+                cold.detachCallbacks()
+            }
+        }
+    }
+
+    @Test func epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU() async throws {
+        try await withHostFixture { fixture in
+            let cache = EPUBWarmRendererCache()
+            defer { cache.discard() }
+            var ids: [String] = []
+            for title in ["Recent A", "Recent B", "Recent C", "Recent D"] {
+                let archive = fixture.root.appendingPathComponent(title + ".epub")
+                try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: title)
+                ids.append(try await fixture.install(archive).book.id)
+            }
+            func openAndClose(_ id: String, expected: EPUBWebViewController? = nil,
+                              root: URL? = nil, changedLayout: Bool = false) async throws -> (EPUBWebViewController, URL) {
+                let model = EPUBReaderViewModel(bookID: id, service: fixture.service,
+                    readingMode: changedLayout ? .paged : .scroll, rendererCache: cache)
+                let controller = model.webView.makeController()
+                if let expected { #expect(controller === expected) }
+                let loads = controller.documentLoadCount
+                controller.onLocatorEvent = { model.handleLocatorEvent($0) }
+                controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
+                var actualRoot: URL?
+                try await fixture.withHostedController(controller, preservingParked: true) {
+                    await model.load()
+                    let token = try #require(model.currentToken)
+                    try await waitUntilReady(model: model, expectedToken: token)
+                    try await waitForChapterWindow(controller, count: 3)
+                    actualRoot = model.reader?.publication.resourceRoot
+                    if let root { #expect(actualRoot == root) }
+                    #expect(controller.documentLoadCount == loads + (expected == nil ? 1 : 0))
+                    #expect(await model.close())
+                    #expect(controller.hasParkedDocument)
+                }
+                #expect(cache.idleCount <= 3)
+                return (controller, try #require(actualRoot))
+            }
+            let a = try await openAndClose(ids[0])
+            let b = try await openAndClose(ids[1])
+            _ = try await openAndClose(ids[2])
+            #expect(cache.idleCount == 3)
+            NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+            #expect(cache.idleCount == 3) // Background alone does not invalidate content or pages.
+            _ = try await openAndClose(ids[0], expected: a.0, root: a.1, changedLayout: true)
+            #expect(a.0.closedDocumentReuseCount == 1)
+            _ = try await openAndClose(ids[3])
+            #expect(!b.0.hasParkedDocument && cache.evictions >= 1)
+            let bAgain = try await openAndClose(ids[1], root: b.1)
+            #expect(bAgain.0 !== b.0) // Warm disk recovery after renderer eviction, same resource root.
+            let opening = EPUBReaderViewModel(bookID: ids[1], service: fixture.service,
+                                             readingMode: .scroll, rendererCache: cache)
+            let duringOpen = opening.webView.makeController()
+            #expect(duringOpen === bAgain.0)
+            duringOpen.onLocatorEvent = { opening.handleLocatorEvent($0) }
+            duringOpen.onLoadFailure = { opening.handleLoadFailure($0, token: $1) }
+            cache.discard() // Between take/mount and apply: keep the new route's business callbacks.
+            #expect(duringOpen.onLocatorEvent != nil && duringOpen.onLoadFailure != nil)
+            try await fixture.withHostedController(duringOpen) {
+                await opening.load()
+                let token = try #require(opening.currentToken)
+                try await waitUntilReady(model: opening, expectedToken: token)
+                #expect(duringOpen.documentLoadCount == 2)
+                #expect(await opening.close())
+            }
+            #expect(cache.idleCount == 0)
+            #expect(FileManager.default.fileExists(atPath: b.1.path))
+        }
+    }
+
     // MARK: - Helpers
 
     private struct HostFixture {
@@ -551,7 +713,8 @@ struct EPUBReaderHostTests {
         }
 
         @MainActor
-        func withHostedController(_ controller: UIViewController, _ body: @MainActor () async throws -> Void) async throws {
+        func withHostedController(_ controller: UIViewController, preservingParked: Bool = false,
+                                  _ body: @MainActor () async throws -> Void) async throws {
             let scene = try #require(
                 UIApplication.shared.connectedScenes
                     .compactMap { $0 as? UIWindowScene }
@@ -560,7 +723,8 @@ struct EPUBReaderHostTests {
             let window = UIWindow(windowScene: scene)
             window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
             defer {
-                if let webController = controller as? EPUBWebViewController {
+                if let webController = controller as? EPUBWebViewController,
+                   !preservingParked || !webController.hasParkedDocument {
                     webController.detachCallbacks()
                 }
                 window.isHidden = true

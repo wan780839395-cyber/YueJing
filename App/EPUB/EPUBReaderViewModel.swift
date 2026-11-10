@@ -21,7 +21,9 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var openingPerformanceSummary: String?
     @Published private(set) var loadingStage = "正在校验并准备书籍…"
 
-    let webView = EPUBWebViewHandle()
+    let webView: EPUBWebViewHandle
+    private let rendererCache: EPUBWarmRendererCache?
+    private let rendererGeneration: UUID
     private let bookID: String
     private let service: LibraryService
     private(set) var reader: OpenedEPUBReader?
@@ -43,9 +45,14 @@ final class EPUBReaderViewModel: ObservableObject {
     private var openingStarted: ContinuousClock.Instant?
     private var openingResourcesReady: ContinuousClock.Instant?
 
-    init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil) {
+    init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil,
+         rendererCache: EPUBWarmRendererCache? = nil) {
         self.bookID = bookID
         self.service = service
+        self.rendererCache = rendererCache
+        let retained = rendererCache?.take(bookID: bookID, service: service)
+        rendererGeneration = retained?.generation ?? UUID()
+        webView = EPUBWebViewHandle(preparedController: retained?.controller)
         self.readingMode = readingMode ?? EPUBReadingMode(
             rawValue: UserDefaults.standard.string(forKey: EPUBReadingMode.defaultsKey) ?? ""
         ) ?? .scroll
@@ -80,6 +87,10 @@ final class EPUBReaderViewModel: ObservableObject {
             }
             guard lifecycle == request, !closing, !suspended, !Task.isCancelled else {
                 try? await opened.abandon()
+                if lifecycle == request {
+                    webView.discardPendingReopen()
+                    rendererCache?.finish(rendererGeneration)
+                }
                 return
             }
             openTask = nil
@@ -112,7 +123,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     fragment: nil,
                     preserveTargetAnchor: true,
                     persistOnReady: false,
-                    reloadDocument: true
+                    reloadDocument: false // Cold/mismatched renderer still takes the normal full-load path.
                 )
             } else if let firstPath = package.spine.first {
                 currentPosition = nil
@@ -125,7 +136,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     fragment: nil,
                     preserveTargetAnchor: false,
                     persistOnReady: false,
-                    reloadDocument: true
+                    reloadDocument: false
                 )
             } else {
                 loading = false
@@ -133,6 +144,8 @@ final class EPUBReaderViewModel: ObservableObject {
             }
         } catch {
             guard lifecycle == request else { return }
+            webView.discardPendingReopen()
+            rendererCache?.finish(rendererGeneration)
             openTask = nil
             loading = false
             ready = false
@@ -398,7 +411,7 @@ final class EPUBReaderViewModel: ObservableObject {
                             format: "打开→章节就绪 %.3fs\n资源准备 %.3fs；章节排版/恢复 %.3fs\n首绘未单列；仅本地摘要。",
                             seconds, preparationSeconds, max(0, seconds - preparationSeconds)
                         ) + (activeReader.reusedResources
-                            ? "\n已复用已验证资源，未重新解压或解析全书。"
+                            ? "\n多本版本内容命中：本次整书解析0、资源复制0；原书和逐资源SHA仍完整校验。"
                             : "\n本次重新构建资源缓存。")
                             + "\n" + activeReader.openingTimings.summary
                             + "\n细分项未覆盖全部等待/调度，不与上方总耗时重复相加。"
@@ -683,6 +696,11 @@ final class EPUBReaderViewModel: ObservableObject {
         sequence += 1
         preferencesSequence += 1
         let old = reader
+        // A renderer needs its own file-lifetime lease before closing releases the reader's lease.
+        // Failure to obtain this optional pin only disables the hot cache, not the reading save.
+        var rendererLease: EPUBContentLease?
+        var retainedRenderer = false
+        if wasReady, rendererCache != nil, let old { rendererLease = try? await old.leaseForRenderer() }
         do {
             if let old {
                 try await old.close(
@@ -693,14 +711,25 @@ final class EPUBReaderViewModel: ObservableObject {
                 )
             }
             if let controller = webView.controller {
-                webView.detach(controller)
+                if wasReady, let rendererCache, let rendererLease,
+                   await controller.parkForReopen(lease: rendererLease) {
+                    webView.releaseParkedController(controller)
+                    retainedRenderer = rendererCache.retain(controller, bookID: bookID, service: service, generation: rendererGeneration)
+                } else {
+                    webView.detach(controller)
+                }
             }
+            webView.detachAll() // Includes an unmounted prepared controller; transferred handles are already empty.
+            if !retainedRenderer { await rendererLease?.release() }
+            rendererCache?.finish(rendererGeneration)
             reader = nil
             navigationRequest = nil
             currentToken = nil
             ready = false
             return true
         } catch {
+            await rendererLease?.release()
+            rendererCache?.finish(rendererGeneration)
             closing = false
             exitSaveFailed = true
             message = "最后保存失败，未覆盖已保存记录。请返回书架后重新打开。"
@@ -728,9 +757,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 preferences: preferences.validated
             )
         }
-        if let controller = webView.controller {
-            webView.detach(controller)
-        }
+        webView.detachAll()
+        rendererCache?.finish(rendererGeneration)
         reader = nil
         navigationRequest = nil
         currentToken = nil

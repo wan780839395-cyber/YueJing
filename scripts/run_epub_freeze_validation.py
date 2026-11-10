@@ -1,7 +1,7 @@
-"""EPUB P0 release: Domain3 + Host3 + UI3 declarations, 10 executions.
+"""Recent EPUB lifecycle validation: Domain14 + Host3 + UI3, 21 executions.
 
-Diagnostic delivery requires an explicit dispatch opt-in; strict release stays separate.
-This batch permits one push and one dispatch; failed evidence is never overwritten.
+Run the full selected batch before any product repair. Device packaging is explicitly staged.
+Strict qualification remains separate from explicitly labelled diagnostic delivery.
 """
 import argparse
 import json
@@ -20,38 +20,52 @@ import task3_test_inventory as inventory
 import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
-BASE = "51f5e113295e98a32289335f9dcab0cbc2323f53"
-SCOPE = "epub-p0-9"
+BASE = "eee357c1bce90cd576657b1610116e55b75c1b92"
+SCOPE = "epub-recent-20"
 DIAGNOSTIC_SCOPE = "epub-freeze-diagnostic"  # Explicitly disabled for this baseline.
-VERSION, BUILD = "0.2.8", "10"
-TOTAL, EXECUTIONS = 9, 10
-QUALIFICATION = "EPUB_P0_9_TARGETED_NATIVE"
+VERSION, BUILD = "0.2.9", "11"
+TOTAL, EXECUTIONS = 20, 21
+QUALIFICATION = "EPUB_RECENT_20_TARGETED_NATIVE"
 ROOT, OUT = v.ROOT, v.OUT
 SCOPE_JSON = OUT / "epub-freeze-scope.json"
 GATE_JSON = OUT / "epub-freeze-gate.json"
 PACKAGE_JSON = OUT / "epub-freeze-package.json"
 NATIVE_OUT = OUT / "epub-freeze"
-NEW = frozenset({"App/EPUB/EPUBRuntimeTrace.swift", "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift"})
+NEW = frozenset({"App/EPUB/EPUBWarmRendererCache.swift", "App/EPUB/EPUBParkReply.swift",
+                 "Sources/ReaderDomain/EPUB/EPUBContentPool.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift"})
 ALLOWED = frozenset({
-    "App/EPUB/EPUBLocationScript.swift", "App/EPUB/EPUBReaderScreen.swift",
-    "App/EPUB/EPUBReaderViewModel.swift", "App/EPUB/EPUBSettingsView.swift",
-    "App/EPUB/EPUBWebView.swift", "App/EPUB/EPUBRuntimeTrace.swift",
-    "Sources/ReaderDomain/EPUB/EPUBImportService.swift", "Sources/ReaderDomain/EPUB/OpenedEPUBReader.swift",
-    "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift", "Sources/ReaderDomain/LibraryService.swift",
-    "Tests/ReaderDomainTests/EPUBLibraryTests.swift", "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
-    "scripts/check_epub_continuous_script.cjs", ".github/workflows/task3-validate.yml",
-    "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
+    "App/EPUB/EPUBLocationScript.swift", "App/EPUB/EPUBReaderViewModel.swift",
+    "App/EPUB/EPUBWebView.swift", "App/EPUB/EPUBWarmRendererCache.swift", "App/EPUB/EPUBParkReply.swift",
+    "App/Library/BookReadingRouteOwner.swift", "Sources/ReaderDomain/EPUB/EPUBContentPool.swift",
+    "Sources/ReaderDomain/EPUB/OpenedEPUBReader.swift", "Sources/ReaderDomain/EPUB/EPUBOpeningTimings.swift",
+    "Sources/ReaderDomain/LibraryService.swift", "Sources/ReaderDomain/LibraryStore.swift",
+    "Tests/ReaderDomainTests/EPUBLibraryTests.swift", "Tests/ReaderDomainTests/EPUBContentPoolTests.swift",
+    "Tests/YueJingHostTests/EPUBReaderHostTests.swift", "scripts/check_epub_continuous_script.cjs",
+    ".github/workflows/task3-validate.yml", "scripts/run_epub_freeze_validation.py",
+    "scripts/check_epub_freeze_validation.py", "scripts/task3_test_inventory.py",
     "project.yml", "docs/EPUB_FREEZE_RELEASE.md",
 })
 SELECTED_FILES = {
     "ReaderDomainTests/EPUBLibraryTests.swift": """
         epubOriginalArchiveAndValidatedResourcesSurviveReopen
         epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences
-        epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime""".split(),
+        epubOverlappingReadersUseIndependentLeasesAndSessions
+        epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime
+        epubFailedOrCancelledCloseNeverReturnsWorkspace
+        epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination
+        epubFailedImportCleansOnlyItsWorkspace
+        epubBooksAndTXTStayIsolated""".split(),
+    "ReaderDomainTests/EPUBContentPoolTests.swift": """
+        recentBooksReuseIndependentVersionsWithoutCopying
+        contentLeaseEvictionWaitsForEveryHolderAndRejectsReleasedTokens
+        diskContentSurvivesPoolRecreationAndCancellationPublishesNothing
+        corruptedLeasedVersionIsNotDeletedUntilOldRendererReleasesIt
+        invalidPeerReceiptDoesNotBlockOtherBooks
+        unavailableOptionalCacheFallsBackToTemporaryLeasedContent""".split(),
     "YueJingHostTests/EPUBReaderHostTests.swift": [
         "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
-        "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor",
-        "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks"],
+        "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
+        "epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU"],
     "YueJingEPUBUITests/EPUBFlowUITests.swift": [
         "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
         "testEPUBProgressSurvivesExitAndProcessRelaunch",
@@ -71,16 +85,16 @@ require, load, write, sha = v.require, compat.load_json, compat.write_new, compa
 
 def selection():
     reviewed = inventory.validate_source(ROOT)
-    require(reviewed["selected"] == inventory.TOTAL == 222 and reviewed["selected_executions"] == 223, "Inventory drift")
+    require(reviewed["selected"] == inventory.TOTAL == 229 and reviewed["selected_executions"] == 230, "Inventory drift")
     names = []
     for rel, selected in SELECTED_FILES.items():
         actual = inventory.source_names(rel, (ROOT / "Tests" / rel).read_text(encoding="utf-8"))
         require(actual == inventory.FILES[rel].split() and set(selected) <= set(actual), "Selection/source drift")
         names.extend(selected)
     require(len(names) == len(set(names)) == TOTAL and
-            sum(g["kind"] == "domain" for g in GROUPS.values()) == 3 and
+            sum(g["kind"] == "domain" for g in GROUPS.values()) == 14 and
             SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] ==
-            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain3/Host3/all EPUB UI3")
+            inventory.FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"].split(), "Expected Domain14/Host3/all EPUB UI3")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -105,6 +119,10 @@ def dispatch_permission():
     require(inputs.get("validation_scope") == SCOPE and
             os.environ.get("ALLOW_UNQUALIFIED_IPA") == ("true" if allowed else "false"),
             "Dispatch permission/scope differs from environment")
+    build = inputs.get("build_ipa", False)
+    require(type(build) is bool or build in ("true", "false"), "Invalid build phase")
+    requested = build is True or build == "true"
+    require(os.environ.get("BUILD_IPA") == ("true" if requested else "false"), "Build phase differs from dispatch")
     return allowed
 
 
@@ -121,10 +139,10 @@ def scope_receipt():
     before, after = tree(BASE), tree("HEAD")
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
     require(changed == ALLOWED and set(after) - set(before) == NEW and not set(before) - set(after),
-            "Release changes outside exact 18-path boundary / two approved additions")
+            "Release changes outside exact 21-path boundary / four approved additions")
     require(all(after[p][:2] == ["100644", "blob"] for p in changed), "Nonregular approved source")
-    old_version = b'        MARKETING_VERSION: "0.2.7"\n        CURRENT_PROJECT_VERSION: "9"\n'
-    new_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
+    old_version = b'        MARKETING_VERSION: "0.2.8"\n        CURRENT_PROJECT_VERSION: "10"\n'
+    new_version = b'        MARKETING_VERSION: "0.2.9"\n        CURRENT_PROJECT_VERSION: "11"\n'
     old_project = git("show", BASE + ":project.yml")
     require(old_project.count(old_version) == 1 and (ROOT / "project.yml").read_bytes() ==
             old_project.replace(old_version, new_version, 1), "Only approved version lines may change")
@@ -132,8 +150,9 @@ def scope_receipt():
     return dict(scope=SCOPE, source_commit=head, baseline_commit=BASE,
                 run_id=env["GITHUB_RUN_ID"], run_attempt="1", version=VERSION, build=BUILD,
                 allow_unqualified_ipa=dispatch_permission(), dispatch_event_sha256=sha(Path(env["GITHUB_EVENT_PATH"])),
+                build_ipa=os.environ.get("BUILD_IPA") == "true",
                 changed_paths=sorted(changed), selected=selection(), selected_declarations=TOTAL,
-                native_tests_planned=EXECUTIONS, full_inventory_declared=222, full_inventory_executions=223,
+                native_tests_planned=EXECUTIONS, full_inventory_declared=229, full_inventory_executions=230,
                 files=v.candidate_files(), approved_files={p: sha(ROOT / p) for p in sorted(ALLOWED)},
                 physical_acceptance="not performed", full_regression_passed=False)
 
@@ -457,7 +476,7 @@ def qualification():
     require(sum(g["declarations_passed"] for g in groups) == TOTAL and sum(g["executions"] for g in groups) == EXECUTIONS, "Combined execution count differs")
     return dict(**scope, qualification=QUALIFICATION, coverage="EPUB_TARGETED_NOT_FULL",
                 native_tests_executed_this_run=EXECUTIONS, verified_passed=EXECUTIONS,
-                verified_declarations=TOTAL, not_executed_this_run=223-EXECUTIONS,
+                verified_declarations=TOTAL, not_executed_this_run=230-EXECUTIONS,
                 groups=groups, simulator=sim)
 
 
@@ -496,6 +515,7 @@ def validate_linkage(kind, scope):
 def delivery_gate():
     """Admission only, not IPA success. Source/common prerequisites never fall back."""
     scope = live_scope()
+    require(scope.get("build_ipa") is True, "Validation-only phase cannot package an IPA")
     compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
     require((OUT / "app-build-exit-code.txt").read_text().strip() == "0", "Device App build did not pass")
     device_linkage = validate_linkage("device", scope)

@@ -8,28 +8,33 @@ public actor OpenedEPUBReader {
     public nonisolated let reusedResources: Bool
     public nonisolated let openingTimings: EPUBOpeningTimings
     private let store: LibraryStore
-    private let importer: EPUBImportService
+    private let contentLease: EPUBContentLease
     private var closed = false
     private var closing: Task<Void, Error>?
 
     init(book: LibraryBook, publication: EPUBPublication, reading: EPUBReadingStart,
-         preferences: ReaderPreferences, store: LibraryStore, importer: EPUBImportService,
+         preferences: ReaderPreferences, store: LibraryStore, contentLease: EPUBContentLease,
          reusedResources: Bool = false, openingTimings: EPUBOpeningTimings = .init()) {
         self.book = book; self.publication = publication; self.reading = reading
         self.preferences = preferences; self.store = store
-        self.importer = importer
+        self.contentLease = contentLease
         self.reusedResources = reusedResources
         self.openingTimings = openingTimings
     }
     deinit {
-        // A terminal task owns cleanup/transfer from the instant it is installed.
-        // In particular, deinit must not remove a folder already handed to a new reader.
+        // A terminal task owns release from the instant it is installed.
         guard closing == nil else { return }
-        let owner = store, session = reading.session, folder = publication.resourceRoot
+        let owner = store, session = reading.session, lease = contentLease
         Task {
             try? await owner.abandonEPUB(session: session)
-            try? FileManager.default.removeItem(at: folder)
+            await lease.release()
         }
+    }
+
+    /// Pins only immutable files for an idle renderer; never retains this reading session.
+    public func leaseForRenderer() async throws -> EPUBContentLease {
+        guard !closed else { throw EPUBError.staleSession }
+        return try await contentLease.duplicate()
     }
 
     public func beginNavigation(path: String) async throws -> EPUBNavigationToken {
@@ -52,10 +57,15 @@ public actor OpenedEPUBReader {
     public func abandon() async throws {
         if let closing { try await closing.value; return }
         closed = true
-        let owner = store, session = reading.session, folder = publication.resourceRoot
+        let owner = store, session = reading.session, lease = contentLease
         let operation = Task {
-            defer { try? FileManager.default.removeItem(at: folder) }
-            try await owner.abandonEPUB(session: session)
+            do {
+                try await owner.abandonEPUB(session: session)
+                await lease.release()
+            } catch {
+                await lease.release()
+                throw error
+            }
         }
         closing = operation
         try await operation.value
@@ -65,18 +75,19 @@ public actor OpenedEPUBReader {
                       preferences: ReaderPreferences) async throws {
         if let closing { try await closing.value; return }
         closed = true
-        let owner = store, session = reading.session, publication = publication, importer = importer
+        let owner = store, session = reading.session, lease = contentLease
         let cancelledAtStart = Task.isCancelled
         let operation = Task {
-            var transferred = false
-            defer { if !transferred { try? FileManager.default.removeItem(at: publication.resourceRoot) } }
-            try await owner.finishEPUB(session: session, position: position, sequence: sequence,
-                                      token: token, preferences: preferences)
-            if cancelledAtStart { throw CancellationError() }
-            try Task.checkCancellation()
-            // Nonthrowing consume: after this await neither close nor deinit owns the directory.
-            await importer.retainClosed(publication)
-            transferred = true
+            do {
+                try await owner.finishEPUB(session: session, position: position, sequence: sequence,
+                                          token: token, preferences: preferences)
+                if cancelledAtStart { throw CancellationError() }
+                try Task.checkCancellation()
+                await lease.finish(retain: true)
+            } catch {
+                await lease.release()
+                throw error
+            }
         }
         closing = operation
         try await withTaskCancellationHandler {

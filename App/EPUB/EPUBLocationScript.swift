@@ -1159,6 +1159,27 @@ enum EPUBLocationScript {
         window.__yjEpub = {
             configure: configure,
             syncWindow: syncWindow,
+            parkForReopen: function() {
+                // Keep nodes/pixels only. No old async transaction, sample or epoch survives closing.
+                state.syncGeneration += 1;
+                cancelImagePreloads();
+                if (state.scrollTimer !== null) { window.clearTimeout(state.scrollTimer); }
+                state.scrollTimer = null;
+                state.ready = false;
+                state.syncing = false;
+                state.suppressingReflow = true;
+                state.scrollActive = false;
+                state.reflowRevision += 1;
+                state.sessionID = "";
+                state.epoch = "";
+                var imageBytes = 0;
+                state.chapters.forEach(function(c) {
+                    Array.prototype.forEach.call(c.element.querySelectorAll('img'), function(img) {
+                        imageBytes = Math.min(536870912, imageBytes + (img.naturalWidth || 0) * (img.naturalHeight || 0) * 4);
+                    });
+                });
+                return {paths: state.chapters.map(function(c) { return c.path; }), imageBytes: imageBytes};
+            },
             setScrollActive: function(active) {
                 if (state.scrollActive !== (active === true)) { recordDiagnostic(active === true ? "motion-start" : "motion-end"); }
                 state.scrollActive = active === true;

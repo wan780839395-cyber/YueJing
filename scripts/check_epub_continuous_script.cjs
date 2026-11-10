@@ -451,6 +451,38 @@ async function fixture(source, css, pagedCSS) {
     ok(!originalDiagnostics.includes('OEBPS/') && !originalDiagnostics.includes('chapter3 paragraph') && !originalDiagnostics.includes('sessionID'),
         'diagnostic output excludes publication paths, body text and session identity');
     results.push('bounded numeric diagnostics distinguish outcomes, measure sampling, and stay read-only/private');
+    await configure(3);
+    const reopenDocument = document, reopenNode = section(3), reopenPaths = api.windowPaths().join('|');
+    const closeMessages = messages.length;
+    ok(typeof api.parkForReopen === 'function', 'closed renderer must support authority-free parking for same-book reopen');
+    const parkedReply = api.parkForReopen();
+    ok(parkedReply.paths.join('|') === reopenPaths && Number.isInteger(parkedReply.imageBytes) && parkedReply.imageBytes >= 0,
+        'parking acknowledgement contains installed paths and bounded pixel estimate');
+    window.dispatchEvent(new Event('scroll')); await settle();
+    ok(api.sampleNow() === null && messages.length === closeMessages, 'parked renderer cannot report old progress');
+    ok(!api.syncWindow({sessionID:'session', epoch, chapters:[], keepPaths:[]}), 'parked renderer rejects old preload authority');
+    ok(document === reopenDocument && section(3) === reopenNode && api.windowPaths().join('|') === reopenPaths,
+        'parking preserves content rather than recreating or blanking the document');
+    const newSession = 'reopened-session'; epoch = 'reopened-epoch';
+    api.configure(config(3, {sessionID:newSession, targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
+    await settle();
+    const resumed = messages.slice(closeMessages).find(m => m.kind === 'ready');
+    ok(resumed && resumed.sessionID === newSession && resumed.epoch === epoch && resumed.restoredNode === 2 && resumed.restoredOffset === 5,
+        'reopen restores latest requested position under fresh session');
+    ok(document === reopenDocument && section(3) === reopenNode, 'reopen must reuse actual document and text nodes');
+    ok(api.sampleNow().sessionID === newSession, 'subsequent sampling belongs only to the new session');
+    results.push('same-book park/reopen keeps DOM, revokes old authority and restores fresh-session position');
+    api.parkForReopen();
+    epoch = 'reopen-layout-change';
+    api.configure(config(3, {sessionID:'third-session', readingMode:'paged', css:css + pagedCSS,
+        targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
+    await settle();
+    const reflowed = api.sampleNow();
+    ok(reflowed && reflowed.sessionID === 'third-session' && document === reopenDocument && section(3) === reopenNode,
+        'layout change on reopen reflows existing DOM instead of reconstructing content');
+    ok(messages.some(m => m.kind === 'ready' && m.epoch === epoch && m.restoredNode === 2 && m.restoredOffset === 5),
+        'reopened changed-layout page restores latest anchor');
+    results.push('park acknowledgement and fresh-session changed-layout reopen reuse existing content');
     return results;
 }
 

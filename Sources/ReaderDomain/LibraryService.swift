@@ -582,23 +582,20 @@ extension LibraryService {
         let catalogStarted = ContinuousClock.now
         guard let book = try await store.book(id: id), book.format == .epub else { throw LibraryError.missingBook }
         let permit = try await store.reserveReaderOpen(bookID: id)
-        let work = await store.epubWorkURL(id: UUID())
-        var ownedWork = work
-        var keep = false
-        defer { if !keep { Self.removeStaging(ownedWork) } }
+        var lease: EPUBContentLease?
         do {
             let source = try await store.epubFileURL(bookID: id)
             let expected = try await store.storedEPUBPackage(bookID: id)
-            let cache = await store.epubCacheURL()
+            let cache = await store.epubContentPoolURL()
             let catalogFinished = ContinuousClock.now
-            let prepared = try await epubImporter.prepareForReading(
-                archiveURL: source, destination: work, expected: expected, cache: cache
+            let prepared = try await EPUBContentPool.shared.acquire(
+                bookID: id, archive: source, expected: expected, root: cache
             )
-            let publication = prepared.publication
+            lease = prepared.lease
+            let publication = prepared.lease.publication
             var timings = prepared.timings
             timings.record(.catalog, since: catalogStarted, until: catalogFinished)
-            // prepareForReading transfers exclusive ownership; warm opens need not use `work`.
-            ownedWork = publication.resourceRoot
+            // The pool, not this service/reader, owns the stable version directory.
             try Task.checkCancellation()
             let sessionStarted = ContinuousClock.now
             let preferences = try await store.preferences()
@@ -613,11 +610,11 @@ extension LibraryService {
                 throw error
             }
             timings.record(.session, since: sessionStarted)
-            keep = true
             return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
-                                    store: store, importer: epubImporter, reusedResources: prepared.reused,
+                                    store: store, contentLease: prepared.lease, reusedResources: prepared.reused,
                                     openingTimings: timings)
         } catch {
+            await lease?.release()
             await store.endReaderOpen(permit)
             throw error
         }

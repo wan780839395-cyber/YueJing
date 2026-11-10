@@ -7,6 +7,7 @@ import ReaderDomain
 final class BookReadingRouteOwner: ObservableObject {
     @Published private(set) var presentation: BookReadingRoute?
     private let txtRoutes = ReaderRouteOwner()
+    private let epubRenderers = EPUBWarmRendererCache()
 
     func open(book: LibraryBook, service: LibraryService) {
         open(bookID: book.id, format: book.format, service: service)
@@ -16,12 +17,13 @@ final class BookReadingRouteOwner: ObservableObject {
         guard presentation == nil else { return }
         switch format {
         case .txt:
+            epubRenderers.leaveEPUB()
             guard txtRoutes.presentation == nil else { return }
             txtRoutes.open(bookID: bookID, service: service)
             guard let txtPresentation = txtRoutes.presentation else { return }
             presentation = BookReadingRoute(txt: txtPresentation, bookID: bookID)
         case .epub:
-            let model = EPUBReaderViewModel(bookID: bookID, service: service)
+            let model = EPUBReaderViewModel(bookID: bookID, service: service, rendererCache: epubRenderers)
             presentation = BookReadingRoute(epub: model, bookID: bookID)
         }
     }

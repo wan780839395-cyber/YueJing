@@ -2,6 +2,12 @@ import Foundation
 
 /// One opening's bounded, local timings. Never stores publication identities or content.
 public struct EPUBOpeningTimings: Sendable {
+    public enum ContentCacheOutcome: String, Sendable {
+        case notRequested, verifiedVersion, rebuilt, rebuiltAfterInvalidation, temporary
+    }
+    public internal(set) var contentCacheOutcome: ContentCacheOutcome = .notRequested
+    public internal(set) var resourceCount = 0
+    public internal(set) var resourceBytes = 0
     public enum Phase: String, CaseIterable, Sendable {
         case catalog, sourceVerification, warmResourceVerification, diskRestore, rebuild, cacheWrite, session
         var label: String {
@@ -45,7 +51,8 @@ public struct EPUBOpeningTimings: Sendable {
     }
 
     public var summary: String {
-        Phase.allCases.flatMap { phase in
+        let cache = "内容缓存：\(contentCacheOutcome.rawValue)；资源清单 \(resourceCount) 项 / \(resourceBytes) 字节\n"
+        return cache + Phase.allCases.flatMap { phase in
             samples.filter { $0.phase == phase }.map {
                 phase.label + String(format: " %.3fs", $0.seconds) + ($0.succeeded ? "" : "（未成功，已回退）")
             }

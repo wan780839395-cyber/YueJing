@@ -37,6 +37,38 @@ struct EPUBNavigationRequest: Equatable {
 final class EPUBWebViewHandle {
     weak var controller: EPUBWebViewController?
     private(set) var latestPayload: EPUBLocatorPayload?
+    private var preparedController: EPUBWebViewController?
+
+    init(preparedController: EPUBWebViewController? = nil) {
+        self.preparedController = preparedController
+    }
+
+    func makeController() -> EPUBWebViewController {
+        let value = preparedController ?? EPUBWebViewController()
+        preparedController = nil
+        value.restoreCallbacks()
+        attach(value)
+        return value
+    }
+
+    func discardPendingReopen() {
+        preparedController?.detachCallbacks()
+        preparedController = nil
+        controller?.discardParkedState() // Keep attached business callbacks available for retry/cold loading.
+    }
+
+    func detachAll() {
+        if let controller { detach(controller) }
+        preparedController?.detachCallbacks()
+        preparedController = nil
+        latestPayload = nil
+    }
+
+    func releaseParkedController(_ value: EPUBWebViewController) {
+        guard controller === value else { return }
+        controller = nil // Old SwiftUI dismantle must not invalidate a transferred renderer.
+        latestPayload = nil
+    }
 
     func attach(_ value: EPUBWebViewController) {
         if let old = controller, old !== value {
@@ -138,6 +170,20 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var windowDeferredToken: EPUBNavigationToken?
     private var nativeScrollActive = false
     private var runtimeTrace = EPUBRuntimeTrace()
+    private struct ParkedDocument {
+        let request: EPUBNavigationRequest
+        let paths: Set<String>
+        let chapterCount: Int
+        let viewport: CGSize
+    }
+    private var parkedDocument: ParkedDocument?
+    private var parkedLease: EPUBContentLease?
+    private var parkingID: UUID?
+    private var pendingParkReply: EPUBParkReply?
+    private(set) var parkedEstimatedBytes = 0
+    var hasParkedDocument: Bool { parkedDocument != nil }
+    private(set) var closedDocumentReuseCount = 0
+    private var pendingClosedReuseToken: EPUBNavigationToken?
     var onPreloadFailure: (@MainActor () -> Void)?
     var interactionEnabled = true {
         didSet {
@@ -267,12 +313,29 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         applyTheme(request.preferences.theme)
         guard activeRequest != request else { return }
         runtimeTrace.record(request.preserveViewport ? .promotion : .navigation)
-        let previous = activeRequest
-        let reuseDOM = !request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
+        let parked = parkedDocument
+        let reuseClosed = !request.reloadDocument && parked?.paths.contains(request.token.path) == true &&
+            parked?.request.publication.package == request.publication.package &&
+            parked?.request.publication.resourceRoot == request.publication.resourceRoot &&
+            parked?.request.token.sessionID != request.token.sessionID
+        let previous = activeRequest ?? parked?.request
+        let reuseDOM = reuseClosed || (!request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
             readyToken != nil && readyToken == previous?.token &&
             loadedDocumentToken?.sessionID == request.token.sessionID &&
             previous?.publication.package == request.publication.package &&
-            previous?.publication.resourceRoot == request.publication.resourceRoot
+            previous?.publication.resourceRoot == request.publication.resourceRoot)
+        if parked != nil || webView.navigationDelegate == nil { restoreCallbacks() }
+        parkedDocument = nil // One take; fallback/retry cannot reuse a stale closed document.
+        parkedLease = nil // The newly verified reader now owns an independent resource lease.
+        pendingClosedReuseToken = nil
+        if reuseClosed, let parked {
+            renderedChapterPaths = parked.paths
+            windowRequestedPaths = parked.paths
+            windowChapterCount = parked.chapterCount
+            pendingClosedReuseToken = request.token
+        }
+        // Verification has completed. Hidden WebViews may throttle animation frames needed by configure.
+        webView.isHidden = false
         // Invalidated async preload work must not mutate a newly navigated document.
         if windowInFlight { runtimeTrace.record(.windowCancelled) }
         windowTask?.cancel()
@@ -315,7 +378,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         if reuseDOM, let previous {
             // The DOM is verified already. Move resource/link URLs to the new capability
             // without admitting the old epoch's URLs or downloading the XHTML again.
-            rebaseLoadedDOM(from: previous.token, to: request)
+            rebaseLoadedDOM(from: previous.token, to: request, reopening: reuseClosed)
             return
         }
         if loadedDocumentPath != nil, transitionSnapshot == nil {
@@ -372,7 +435,70 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         onLoadFailure?(URLError(.timedOut), token)
     }
 
+    /// Revoke native authority first; cancel JS transactions and retain only acknowledged installed paths.
+    func parkForReopen(lease: EPUBContentLease) async -> Bool {
+        guard let request = activeRequest, readyToken == request.token,
+              loadedDocumentToken != nil, renderedChapterPaths.contains(request.token.path),
+              lease.publication.resourceRoot == request.publication.resourceRoot,
+              lease.publication.package == request.publication.package, let webView else { return false }
+        let permitted = renderedChapterPaths.union(windowRequestedPaths)
+        let count = windowChapterCount, viewport = view.bounds.size
+        detachCallbacks()
+        let id = UUID(); parkingID = id
+        parkedLease = lease
+        webView.isHidden = true
+        webView.navigationDelegate = self
+        let state: EPUBParkState? = await withCheckedContinuation { continuation in
+            let reply = EPUBParkReply(continuation)
+            pendingParkReply = reply
+            let script = "window.__yjEpub && JSON.stringify(window.__yjEpub.parkForReopen());"
+            webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { value, error in
+                guard error == nil, let json = value as? String, json.utf8.count <= 32768,
+                      let data = json.data(using: .utf8), let parsed = try? JSONDecoder().decode(EPUBParkState.self, from: data) else {
+                    reply.finish(nil); return
+                }
+                reply.finish(parsed)
+            }
+        }
+        guard parkingID == id else { return false }
+        pendingParkReply = nil; parkingID = nil
+        guard !Task.isCancelled, let state, state.paths.contains(request.token.path),
+              !state.paths.isEmpty, state.paths.count <= EPUBChapterWindow.maximumChapters,
+              Set(state.paths).count == state.paths.count, Set(state.paths).isSubset(of: permitted),
+              state.imageBytes >= 0, state.imageBytes <= 512 * 1024 * 1024 else {
+            detachCallbacks(); return false
+        }
+        parkedEstimatedBytes = 16 * 1024 * 1024 + state.imageBytes +
+            request.publication.package.resources.filter { $0.mediaType == "application/xhtml+xml" }.reduce(0) { $0 + $1.byteCount * 2 }
+        parkedDocument = ParkedDocument(request: request, paths: Set(state.paths), chapterCount: count, viewport: viewport)
+        return true
+    }
+
+    func restoreCallbacks() {
+        setupWebViewIfNeeded()
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.scrollView.delegate = self
+        let userContent = webView.configuration.userContentController
+        userContent.removeScriptMessageHandler(forName: EPUBLocationScript.handlerName, contentWorld: EPUBLocationScript.world)
+        let proxy = WeakScriptMessageProxy(target: self)
+        messageProxy = proxy
+        userContent.add(proxy, contentWorld: EPUBLocationScript.world, name: EPUBLocationScript.handlerName)
+    }
+
+    func discardParkedState() {
+        parkingID = nil
+        pendingParkReply?.finish(nil); pendingParkReply = nil
+        parkedLease = nil
+        parkedEstimatedBytes = 0
+        pendingClosedReuseToken = nil
+        parkedDocument = nil
+    }
+
     func detachCallbacks() {
+        discardParkedState()
+        nativeScrollActive = false
+        interactionEnabled = false
         readinessTask?.cancel()
         readinessTask = nil
         loadTask?.cancel()
@@ -387,6 +513,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowTask = nil
         windowInFlight = false
         renderedChapterPaths.removeAll()
+        windowRequestedPaths.removeAll()
         onPreloadFailure = nil
         onChapterBoundary = nil
         loadedDocumentPath = nil
@@ -427,7 +554,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         controller.add(list)
     }
 
-    private func rebaseLoadedDOM(from oldToken: EPUBNavigationToken, to request: EPUBNavigationRequest) {
+    private func rebaseLoadedDOM(from oldToken: EPUBNavigationToken, to request: EPUBNavigationRequest, reopening: Bool = false) {
         let oldHost = EPUBResourceCapability.host(for: oldToken)
         let prefix = oldHost.components(separatedBy: "--e-")[0] + "--e-"
         let hosts = [prefix, EPUBResourceCapability.host(for: request.token)]
@@ -435,6 +562,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
               let json = String(data: data, encoding: .utf8) else { return }
         let script = """
         (function(hosts) {
+            if (!window.__yjEpub) { throw new Error('retained-document-unavailable'); }
             document.querySelectorAll('[src], [href]').forEach(function(el) {
                 ['src', 'href'].forEach(function(attr) {
                     var value = el.getAttribute(attr); if (!value) return;
@@ -452,6 +580,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         """
         webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
             guard let self, self.activeRequest == request else { return }
+            if error != nil && reopening {
+                // A discarded WebContent process/DOM is recoverable, not a reason to strand opening.
+                self.activeRequest = nil
+                self.loadedDocumentToken = nil
+                self.loadedDocumentPath = nil
+                self.apply(request)
+                return
+            }
             if let error {
                 self.loadedDocumentPath = nil
                 self.loadedDocumentToken = nil
@@ -616,6 +752,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         if payload.kind == .ready {
+            if pendingClosedReuseToken == current.token {
+                closedDocumentReuseCount += 1
+                pendingClosedReuseToken = nil
+            }
             runtimeTrace.record(.locatorReady)
             readinessTask?.cancel()
             readinessTask = nil
@@ -641,7 +781,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     /// Read once on demand. Never samples/changes the locator or drives navigation.
     func performanceSummary() async -> String {
-        let native = runtimeTrace.summary
+        let native = runtimeTrace.summary + "\n同书关闭页面复用次数：\(closedDocumentReuseCount)；全文档加载次数：\(documentLoadCount)"
         guard let expected = activeRequest?.token, let webView else { return native }
         let script = "window.__yjEpub && JSON.stringify(window.__yjEpub.diagnostics());"
         let browser: String = await withCheckedContinuation { continuation in
@@ -868,6 +1008,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        parkingID = nil
+        pendingParkReply?.finish(nil); pendingParkReply = nil
+        parkedLease = nil
+        parkedDocument = nil
         handleWebKitNavigationFailure(EPUBError.corruptResource)
     }
 
@@ -1129,8 +1273,7 @@ struct EPUBWebView: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> EPUBWebViewController {
-        let controller = EPUBWebViewController()
-        handle.attach(controller)
+        let controller = handle.makeController()
         controller.onLocatorEvent = onLocatorEvent
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink

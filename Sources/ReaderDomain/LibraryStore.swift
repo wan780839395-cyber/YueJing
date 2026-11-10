@@ -520,6 +520,10 @@ extension LibraryStore {
         root.appendingPathComponent("EPUBCache", isDirectory: true)
             .appendingPathComponent("last-publication-v1", isDirectory: true)
     }
+    func epubContentPoolURL() -> URL {
+        root.appendingPathComponent("EPUBContent-v2", isDirectory: true)
+    }
+
 
     func storedEPUBPackage(bookID: String) throws -> EPUBPackage {
         guard let book = try book(id: bookID), book.format == .epub else { throw LibraryError.missingBook }
