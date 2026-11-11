@@ -523,18 +523,50 @@ extension LibraryStore {
     func epubContentPoolURL() -> URL {
         root.appendingPathComponent("EPUBContent-v2", isDirectory: true)
     }
+    func epubReadyURL() -> URL { root.appendingPathComponent("EPUBReady-v1", isDirectory: true) }
+
+    func referencedEPUBReadyDirectories() throws -> Set<String> {
+        try queue.read { db in Set(try String.fetchAll(db, sql: "SELECT directory FROM epubReadyVersions")) }
+    }
+
+    /// Disk publication precedes this compare-and-swap. A failed transaction leaves old metadata/progress untouched.
+    func publishEPUBReady(bookID: String, previous: EPUBMetadataSnapshot, lease: EPUBContentLease) throws {
+        try Task.checkCancellation()
+        let package = lease.publication.package
+        guard let ready = package.ready, package.sourceSHA256 == bookID,
+              package.versionID == previous.package.versionID else { throw EPUBError.corruptResource }
+        try EPUBReadyArtifact.validate(ready, package: package)
+        guard package == previous.package.withReady(ready) else { throw EPUBError.corruptResource }
+        if let old = previous.package.ready {
+            guard ready.hasSameContent(as: old) else { throw EPUBError.corruptResource }
+        } else {
+            guard try EPUBMetadataFingerprintCache.canonical(previous.package) == ready.legacyPackageSHA256 else { throw EPUBError.corruptResource }
+        }
+        let metadata = try JSONEncoder().encode(package)
+        try queue.write { db in
+            guard let old = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [bookID]),
+                  previous.matches(old) else { throw EPUBError.corruptResource }
+            try db.execute(sql: "UPDATE epubPackages SET metadata=? WHERE bookID=?", arguments: [metadata, bookID])
+            try db.execute(sql: "INSERT INTO epubReadyVersions(bookID,directory) VALUES(?,?) ON CONFLICT(bookID) DO UPDATE SET directory=excluded.directory",
+                           arguments: [bookID, ready.directory])
+            try Task.checkCancellation()
+        }
+    }
 
 
     func storedEPUBSnapshot(bookID: String, reusing: EPUBMetadataSnapshot.Decoded? = nil) throws -> EPUBMetadataSnapshot {
         guard let book = try book(id: bookID), book.format == .epub else { throw LibraryError.missingBook }
+        let readyRoot = epubReadyURL()
         return try queue.read { db in
             guard let metadata = try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [bookID]) else {
                 throw EPUBError.corruptResource
             }
-            let snapshot = try EPUBMetadataSnapshot(metadata: metadata, reusing: reusing)
+            let snapshot = try EPUBMetadataSnapshot(metadata: metadata, reusing: reusing, readyRoot: readyRoot)
             let package = snapshot.package
             guard package.sourceSHA256 == bookID, package.versionID == book.versionID,
                   package.parserVersion == EPUBFormat.parserVersion else { throw EPUBError.corruptResource }
+            let directory = try String.fetchOne(db, sql: "SELECT directory FROM epubReadyVersions WHERE bookID=?", arguments: [bookID])
+            guard directory == package.ready?.directory else { throw EPUBError.corruptResource }
             return snapshot
         }
     }
@@ -561,6 +593,7 @@ extension LibraryStore {
             return receipt
         }
         let metadata = try JSONEncoder().encode(package)
+        if let ready = package.ready { try EPUBReadyArtifact.validate(ready, package: package) }
         guard !files.fileExists(atPath: destination.path) else { throw LibraryError.changedFile }
         try files.moveItem(at: staging, to: destination)
         do {
@@ -569,6 +602,9 @@ extension LibraryStore {
                 try db.execute(sql: "INSERT INTO bookFormats(bookID,format) VALUES(?,'epub')", arguments: [proposed.id])
                 try db.execute(sql: "INSERT INTO epubPackages(bookID,versionID,metadata,cover) VALUES(?,?,?,?)",
                                arguments: [proposed.id, proposed.versionID, metadata, cover])
+                if let ready = package.ready {
+                    try db.execute(sql: "INSERT INTO epubReadyVersions(bookID,directory) VALUES(?,?)", arguments: [proposed.id, ready.directory])
+                }
                 try Task.checkCancellation()
             }
         } catch {
@@ -647,6 +683,7 @@ extension LibraryStore {
         guard var authority = epubSessions[session.id], !closedSessions.contains(session.id),
               authority.package.spine.contains(path),
               let book = try book(id: session.bookID), book.activeSession == session.id else { throw EPUBError.staleSession }
+        guard try authority.package.nodes(at: path) != nil else { throw EPUBError.corruptResource }
         let token = EPUBNavigationToken(sessionID: session.id, path: path)
         authority.token = token; authority.ready = false; epubSessions[session.id] = authority
         return token

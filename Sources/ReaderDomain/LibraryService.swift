@@ -573,9 +573,21 @@ extension LibraryService {
         let size = try staging.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         let book = LibraryBook(id: package.sourceSHA256, title: package.title, encodingRaw: "epub",
                                versionID: package.versionID, byteCount: size, utf16Count: 0, format: .epub)
-        let receipt = try await store.commitEPUB(ticket: ticket, proposed: book, package: package, cover: cover)
-        observe?(.committed)
-        return .completed(receipt)
+        let readyRoot = await store.epubReadyURL()
+        let staged = try await EPUBContentPool.shared.stageReady(publication: publication, root: readyRoot)
+        do {
+            try check(ticket)
+            let receipt = try await store.commitEPUB(ticket: ticket, proposed: book, package: staged.publication.package, cover: cover)
+            if !receipt.duplicate, let reference = staged.publication.package.ready {
+                await EPUBContentPool.shared.commitReady(directory: reference.directory, root: readyRoot)
+            }
+            await staged.release()
+            observe?(.committed)
+            return .completed(receipt)
+        } catch {
+            await staged.release()
+            throw error
+        }
     }
 
     public func openEPUB(id: String) async throws -> OpenedEPUBReader {
@@ -585,18 +597,41 @@ extension LibraryService {
         var lease: EPUBContentLease?
         do {
             let source = try await store.epubFileURL(bookID: id)
-            let cache = await store.epubContentPoolURL()
-            let decoded = await EPUBContentPool.shared.reusableMetadata(bookID: id, root: cache)
-            let snapshot = try await store.storedEPUBSnapshot(bookID: id, reusing: decoded)
+            let readyRoot = await store.epubReadyURL()
+            let references = try await store.referencedEPUBReadyDirectories()
+            try await EPUBContentPool.shared.reconcileReady(root: readyRoot, referenced: references)
+            let decoded = await EPUBContentPool.shared.reusableMetadata(bookID: id, root: readyRoot)
+            var snapshot = try await store.storedEPUBSnapshot(bookID: id, reusing: decoded)
+            var preparedOnce = false
+            if snapshot.package.ready == nil {
+                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot)
+                preparedOnce = true
+            }
             let catalogFinished = ContinuousClock.now
-            let prepared = try await EPUBContentPool.shared.acquire(
-                bookID: id, archive: source, snapshot: snapshot, root: cache
-            )
+            let prepared: (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings)
+            do {
+                prepared = try await EPUBContentPool.shared.acquireReady(archive: source, snapshot: snapshot, root: readyRoot)
+            } catch is CancellationError { throw CancellationError() }
+            catch LibraryError.changedFile { throw LibraryError.changedFile }
+            catch {
+                // One exact-source repair, not an unbounded retry or a reason to accept modified metadata.
+                let repairStarted = ContinuousClock.now
+                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot)
+                let repairFinished = ContinuousClock.now
+                let restored = try await EPUBContentPool.shared.acquireReady(archive: source, snapshot: snapshot, root: readyRoot)
+                var recoveryTimings = restored.timings
+                recoveryTimings.record(.rebuild, since: repairStarted, until: repairFinished)
+                recoveryTimings.contentCacheOutcome = .rebuiltAfterInvalidation
+                prepared = (restored.lease, false, recoveryTimings)
+                preparedOnce = true
+            }
             lease = prepared.lease
             let publication = prepared.lease.publication
             var timings = prepared.timings
             timings.metadataDecodeReused = snapshot.decodeReused
             timings.metadataReuseReason = snapshot.reuseReason
+            timings.readyPreparationOccurred = preparedOnce
+            timings.chapterIndexedMetadata = snapshot.package.ready != nil
             timings.record(.catalog, since: catalogStarted, until: catalogFinished)
             // The pool, not this service/reader, owns the stable version directory.
             try Task.checkCancellation()
@@ -613,6 +648,8 @@ extension LibraryService {
             sessionBreakdown.record(.returnResume, since: measured.finishedAt, until: beginReturned)
             let start = measured.start
             do {
+                guard let firstPath = start.position?.path ?? publication.package.spine.first,
+                      try publication.package.nodes(at: firstPath) != nil else { throw EPUBError.corruptResource }
                 let confirmationStarted = ContinuousClock.now
                 try await store.confirmReaderOpen(permit, session: start.session)
                 sessionBreakdown.record(.confirmCall, since: confirmationStarted)
@@ -628,12 +665,37 @@ extension LibraryService {
             timings.record(.session, since: sessionStarted)
             timings.sessionBreakdown = sessionBreakdown
             return OpenedEPUBReader(book: book, publication: publication, reading: start, preferences: preferences,
-                                    store: store, contentLease: prepared.lease, reusedResources: prepared.reused,
+                                    store: store, contentLease: prepared.lease, reusedResources: prepared.reused && !preparedOnce,
                                     openingTimings: timings)
         } catch {
             await lease?.release()
             await store.endReaderOpen(permit)
             throw error
         }
+    }
+
+    private func publishReadyForOpen(bookID: String, source: URL, root: URL,
+                                     previous: EPUBMetadataSnapshot) async throws -> EPUBMetadataSnapshot {
+        let pool = EPUBContentPool.shared
+        let staged: EPUBContentLease
+        if previous.package.ready == nil {
+            let legacyRoot = await store.epubContentPoolURL()
+            let legacy = try await pool.acquire(bookID: bookID, archive: source, snapshot: previous, root: legacyRoot)
+            do {
+                staged = try await pool.stageReady(publication: legacy.lease.publication, root: root)
+                await legacy.lease.release()
+            } catch { await legacy.lease.release(); throw error }
+        } else {
+            let work = await store.epubWorkURL(id: UUID())
+            staged = try await pool.rebuildReady(archive: source, expected: previous.package, root: root, work: work)
+        }
+        do {
+            try await store.publishEPUBReady(bookID: bookID, previous: previous, lease: staged)
+            if let reference = staged.publication.package.ready {
+                await pool.commitReady(directory: reference.directory, root: root, replacing: previous.package.ready?.directory)
+            }
+            await staged.release()
+            return try await store.storedEPUBSnapshot(bookID: bookID)
+        } catch { await staged.release(); throw error }
     }
 }

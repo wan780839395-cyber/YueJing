@@ -50,16 +50,17 @@ FILES = {
     "YueJingHostTests/EPUBReaderHostTests.swift": """epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU""",
     "YueJingEPUBUITests/EPUBFlowUITests.swift": """testEPUBShelfCoverAndDirectoryCrossChapterNavigation testEPUBProgressSurvivesExitAndProcessRelaunch testEPUBTypographyNoCoverFallbackAndTXTIsolation""" ,
     "ReaderDomainTests/EPUBCompatibilityTests.swift": """epubCompatibilityStandardDoctypesPreserveAcceptedTextBytesAndNodes epubCompatibilityRejectsEntitiesUnknownDuplicateAndMisplacedDoctypes epubCompatibilityStaticSVGBecomesLocalJPEGAndPreservesIDs epubCompatibilityRejectsComplexActiveAndEscapingSVG epubCompatibilityImageOnlyPagesHaveStableAnchorButBlankPagesFail epubCompatibilityWebPRequiresRealBoundedSingleFrameDecode epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen epubCompatibilityWebPResourcesStillEnforceSizeAndDigestIntegrity""",
+    "ReaderDomainTests/EPUBReadyTests.swift": """readyNodePackKeepsExactNodesWithSmallManifest readyImportColdReaderDoesNotDependOnParkedLease legacyMigrationPreservesProgressPreferencesAndOriginal readyUnvisitedNodeDamageIsDetectedBeforeOpenAndRepairedWithLeaseIsolation readyPublicationRollbackAndReconciliationProtectLiveVersions readyManifestMutationCannotBeBlessedByRepair boundedParallelVerificationMatchesSerialIntegrityAndCancellation""",
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 160, "TXTBlockDecoderTests": 6,
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 167, "TXTBlockDecoderTests": 6,
           "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 19,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 229  # Declaration identities; the Bool parameter adds one execution (230).
+TOTAL = 236  # Declaration identities; the Bool parameter adds one execution (237).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
-EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 161}
-EXECUTION_TOTAL = 230
+EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 168}
+EXECUTION_TOTAL = 237
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

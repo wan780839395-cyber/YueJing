@@ -1,36 +1,35 @@
-# EPUB 复开原因诊断发布：0.2.13 / build15
+# EPUB Ready 打开提速发布：0.2.14 / build16
 
-基线 `fa25f9757f33010111419d10da3fe0e50abf5aba`；入口 `epub-reopen-diagnostics-3`，仅 Task3 的独立 epub_freeze 作业。
+基线 `46d0ea00661cd1a05049f88cf2c4153e4d6f1a63`；入口 `epub-ready-open-36`，仅Task3独立epub_freeze作业。
 
 ## 授权与边界
-用户批准本批白名单普通提交/push、Domain1+Host2定向原生验证、独立设备Release与IPA核验。重复批准消息不代表额外dispatch。单项失败保留原日志、退出码与超时状态，继续独立步骤；汇总后仅修复并复测受影响项，不放宽预算或断言。
+用户批准本批白名单普通提交/push、36个定向测试身份/37次展开、独立设备Release与IPA核验。一次初始dispatch；重复批准消息不代表额外dispatch。单项失败保留原日志、退出码与超时状态，继续独立步骤；汇总后仅修复并复测受影响项，不放宽预算或断言。
 
-本批精确16路径由runner ALLOWED限制：11个实现/回归/源码检查文件及workflow、runner、自检、project和本说明5个发布文件。新增仅EPUBReopenDiagnostics.swift与check_epub_reopen_diagnostics.py。project只允许0.2.12/build14→0.2.13/build15。用户文件、私有书籍、截图、Skills和内部证据不公开。
+精确25路径由runner ALLOWED限制：20个实现/回归/检查文件和workflow、runner、自检、project、本说明5个发布文件。新增仅EPUBReadyArtifact.swift、EPUBReadyTests.swift、check_epub_ready_open.py。project只允许0.2.13/build15→0.2.14/build16。用户文件、私有书籍、截图、Skills、内部证据不公开。
 
-## 本包用途
-用户确认0.2.12/build14，真机总耗时1.040s，元数据复用false、关闭页面复用0、资源校验0.564s、书库/许可0.328s、会话0.014s。尚未证明长书预算拒收、内存警告或停驻失败中的哪项发生；本包补齐原因证据，不宣称提速成功。
+## 实现与约束
+- 导入净化资源经完整校验后保存为UUID Ready版本，数据库存轻量描述/按章节点索引；节点数据存有完整摘要的nodes.bin。原节点编号、UTF-16/字素坐标、book/version ID保持。运行时节点缓存最多4章/8MiB估算，不增加独立整书常驻缓存。
+- v7只新增EPUB版本目录引用表，旧TXT/进度/偏好结构不变。旧书自动一次性迁移：先落盘并由租约保护，再按旧metadata实际字节CAS事务切换。取消/失败不覆盖旧描述；数据库提交后无取消点阻止持久化确认。旧版本最后租约释放后才回收。
+- 每次开书仍完整读取原书SHA、校验manifest和全节点包SHA、验证全部净化资源。每次打开最多4个资源任务，沿用真实路径/符链/类型/大小/读取上限/完整SHA，全部完成后才创建阅读会话。不是延后到使用时才发现未访问章节损坏。
+- 损坏只做一次精确原书重建，全部语义字段、节点摘要/偏移须匹配旧描述，目录代号可更换。没有mtime/TTL短路。最新进度、设置、permit/session/epoch保持当次确认。
+- 停驻仅裁掉视口外无关邻章，保留当前可见正文及图片位置；像素锚点无法保持时恢复原DOM顺序与滚动坐标。原16MiB+图片解码估算+2×整书XHTML公式和3renderer/96MiB上限不变。当前章自身超预算仍真实拒绝，不靠少算内存或隐藏内容达标。
+- `chapter-ready-v1`区分按章路径及本次迁移/重建；发生准备时不显示解析0/复制0。原`reopen-reasons-v1`和分段计时继续保留，不含书名/路径/正文，不上传。
 
-`reopen-reasons-v1`记录关闭、停驻、准入/拒收、逐出、内存回收、WebContent终止、下次take原因。最多64条内存记录，同书同服务输出最近16条；只输出固定原因码和数值成本，无书名/路径/正文/私有错误，服务弱引用，不持久化、不上传。观察身份与缓存准入分开，旧generation不能污染新路由诊断，观察不授予缓存权限。
+## 定向验证与依据
+选择完整身份由runner SELECTED_FILES列出：
+1. Domain29：Ready新增7，受影响导入/关闭/重建/迁移/隔离12，内容池租约与恢复4，进度权限4，图像兼容1，TXT迁移保护1。损坏文件用例Bool双参数，Domain共30次展开。
+2. Host5：资源与UTF-16定位、WebKit安全、字体/epoch、图片兼容、同书/多书页面复用与LRU。
+3. EPUB UI2：目录跨章/同进程重开，进度退出/进程重启恢复。
 
-元数据原因包括reused/noLeaseProof/metadataChanged/notChecked；仍用新数据库实际字节完整SHA判断。停驻成本原公式16MiB+图片解码估算+2×全书XHTML保持，96MiB/3renderer不变；估算不是RSS。2秒停驻期限原本存在，本批仅加超时原因回调。
+全库236声明/237展开，本批36声明/37次计划执行；200展开未选择，全部15项UI中13项not_selected。原生实际计数来自原始事件及xcresult参数叶，未知保持null，不能将计划37填为实际通过。
+本地27组Chromium布局、16项synthetic/static横排检查及Ready源码合同不代替Swift、WKWebView、原生或真机验收。
 
-原书及逐资源完整SHA、路径/符链/类型/大小/预算、最新偏好/进度、permit/session/epoch和事务不变。无JS、加载提示、schema、字体/CSS或资源验证时机改动；不清库、不重导入。修补诊断丢失/重复不等于已找到用户未命中根因。
+## 工具链与发布资格
+固定macOS15、Xcode16.4/16F6、Swift6.1.2、XcodeGen2.46.0、GRDB7.0.0/ZIPFoundation0.9.19、iOS16.6。保持480秒调用、180秒用例、120秒模拟器启动、60分钟job预算。
+测试失败不阻断独立设备Release；编译、测试资格、IPA完整性及真机性能分别报告。默认allow_unqualified_ipa=false，37次真实展开全通过才获 `EPUB_READY_OPEN_36_TARGETED_NATIVE`。只有另行明确授权才启用DEVICE_DIAGNOSTIC_ONLY/UI_NOT_QUALIFIED，且不能绕过设备和完整性门。
+下载后独立核对API摘要/大小、ZIP CRC/安全成员、source/run/attempt、原始事件/xcresult、实际Release二进制、Swift SDK/TAPI、资源/图标/许可证、unsigned arm64/iPhoneOS/minOS与IPA摘要，交付副本再次核对。定向通过不等于全量、真机首绘/FPS/RSS或提速通过。
 
-## 定向用例及依据
-1. Domain `recentBooksReuseIndependentVersionsWithoutCopying`：已有租约/元数据/完整性回归中补无证明、相同SHA复用、元数据变化和最后租约释放后原因。
-2. Host `epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position`：真实WKWebView资源/位置及verifySameBookWarmRenderer，覆盖同书停驻、新会话恢复。
-3. Host `epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU`：多书LRU与本批预算拒收、非法停驻状态、进程终止、旧代号隔离、有界诊断、超时晚回等新增断言；1633章仅合成成本数据，不冒充私人长书全链测试。
-
-共3身份/3次计划执行，无实际参数化或UI用例；全库229声明/230展开，本次226声明/227展开未选择，全部15项UI not_selected。离线参数/UI解析负例保留但不进入云选择。原生执行数只能来自真实事件，未知保留null，不能填计划3。
-
-## 验证与资格
-固定macOS15、Xcode16.4/16F6、Swift6.1.2、XcodeGen2.46.0、既定GRDB7.0.0/ZIPFoundation0.9.19、iOS16.6。原480秒调用、180秒用例、120秒模拟器启动及60分钟job预算保持。
-
-测试失败不阻断独立设备编译；编译、测试资格、IPA完整性和真机性能分别报告。本批默认allow_unqualified_ipa=false；3项全部真实通过才获EPUB_REOPEN_DIAGNOSTICS_3_TARGETED_NATIVE资格。既有显式诊断降级能力保留，只有另行明确许可才启用DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED，且仍不能绕过设备编译及完整性。
-
-下载后独立核对API摘要/大小、ZIP CRC/安全成员、source/run/attempt、原始测试事件/xcresult、实际Release二进制、Swift SDK/TAPI、资源/图标/许可证、unsigned arm64/iPhoneOS/minOS和IPA字节；交付副本再次核对哈希。定向通过不是全量、UI、首绘/FPS/RSS或真机提速验收。
-
-## 真机步骤
-TrollStore覆盖安装，不卸载、清库或重导入。确认0.2.13/build15和reopen-reasons-v1。同机同书同位置设置，记录初次打开后返回书架，再连续3次暖复开及A→B→A；进程重启单独记录。
-
-保存总阶段、元数据复用标志及原因、完整reopen-reasons-v1链和数值成本。只有takeMiss不能推断更早原因（可能本进程首次/不同服务/有界记录淘汰）。看到具体拒收/失效原因后再选择性能修复；完整校验、数据库和WebKit恢复仍有成本，不承诺零等待。
+## 真机验收
+TrollStore覆盖安装，不卸载、清库或重导入。新格式读取旧数据，但旧0.2.13不保证读取已迁移的轻量metadata，未经验证不要降级。
+目标从点书到正确正文可见且可立即滚动/翻页：常规300ms内、P95≤500ms，并由用户确认无明显等待。录屏与实际交互交叉核对；locatorReady/windowCommitted不作为首绘证明。
+同机同书同位置设置，分别记录Ready后首开、同进程重开、A→B→A、进程重启回书架后点书。先3次冒烟，再每组至少20次，报告中位数/P95/最大值；旧书一次性迁移单列且报告实际等待，不混入正常暖开。完整校验仍随整书规模增长，不承诺任意大书固定耗时，不以理论并行倍数宣称提速。

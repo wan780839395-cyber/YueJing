@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {spawn} = require('node:child_process');
-const swift = fs.readFileSync(path.join(__dirname, '../App/EPUB/EPUBLocationScript.swift'), 'utf8');
+const swift = fs.readFileSync(process.env.EPUB_LOCATION_SOURCE || path.join(__dirname, '../App/EPUB/EPUBLocationScript.swift'), 'utf8');
 const source = swift.match(/static let bootstrapSource: String = """\r?\n([\s\S]*?)\r?\n    """/)[1].replace(/^    /gm, '');
 assert.ok(!source.includes('\\'), 'Swift JS escaping must be decoded if introduced');
 let base = swift.match(/let base = """\r?\n([\s\S]*?)\r?\n        """/)[1];
@@ -452,17 +452,31 @@ async function fixture(source, css, pagedCSS) {
         'diagnostic output excludes publication paths, body text and session identity');
     results.push('bounded numeric diagnostics distinguish outcomes, measure sampling, and stay read-only/private');
     await configure(3);
-    const reopenDocument = document, reopenNode = section(3), reopenPaths = api.windowPaths().join('|');
+    await sync([2,3,4]);
+    const parkCanvas = document.createElement('canvas'); parkCanvas.width = 512; parkCanvas.height = 1024;
+    parkCanvas.getContext('2d').fillRect(0,0,512,1024);
+    const parkImageURL = parkCanvas.toDataURL('image/png');
+    async function appendParkImage(i) {
+        const img = document.createElement('img'); img.src = parkImageURL;
+        section(i).appendChild(img); await img.decode(); return img;
+    }
+    await appendParkImage(2); await appendParkImage(4);
+    await configure(3, {targetNode:2, targetOffset:5, preserveTargetAnchor:true});
+    const reopenDocument = document, reopenNode = section(3), reopenPaths = api.windowPaths();
+    const parkedAnchor = api.sampleNow(), parkedRect = rectFor(parkedAnchor);
     const closeMessages = messages.length;
     ok(typeof api.parkForReopen === 'function', 'closed renderer must support authority-free parking for same-book reopen');
     const parkedReply = api.parkForReopen();
-    ok(parkedReply.paths.join('|') === reopenPaths && Number.isInteger(parkedReply.imageBytes) && parkedReply.imageBytes >= 0,
-        'parking acknowledgement contains installed paths and bounded pixel estimate');
+    ok(parkedReply.paths.length < reopenPaths.length && parkedReply.paths.includes(chapter(3).path),
+        'parking must trim offscreen image neighbors, not just lower their estimate');
+    ok(parkedReply.paths.every(p => reopenPaths.includes(p)) && parkedReply.imageBytes === 0,
+        'parking acknowledges actual remaining paths and actual decoded image costs');
+    sameRect(parkedRect, rectFor(parkedAnchor), 'parking preserves exact visible character');
     window.dispatchEvent(new Event('scroll')); await settle();
     ok(api.sampleNow() === null && messages.length === closeMessages, 'parked renderer cannot report old progress');
     ok(!api.syncWindow({sessionID:'session', epoch, chapters:[], keepPaths:[]}), 'parked renderer rejects old preload authority');
-    ok(document === reopenDocument && section(3) === reopenNode && api.windowPaths().join('|') === reopenPaths,
-        'parking preserves content rather than recreating or blanking the document');
+    ok(document === reopenDocument && section(3) === reopenNode && api.windowPaths().join('|') === parkedReply.paths.join('|'),
+        'parking preserves visible content rather than recreating or blanking the document');
     const newSession = 'reopened-session'; epoch = 'reopened-epoch';
     api.configure(config(3, {sessionID:newSession, targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
     await settle();
@@ -483,6 +497,41 @@ async function fixture(source, css, pagedCSS) {
     ok(messages.some(m => m.kind === 'ready' && m.epoch === epoch && m.restoredNode === 2 && m.restoredOffset === 5),
         'reopened changed-layout page restores latest anchor');
     results.push('park acknowledgement and fresh-session changed-layout reopen reuse existing content');
+    // Paged trimming must preserve the same character fragment, not just the requested node number.
+    api.configure(config(3, {readingMode:'paged', css:css + pagedCSS, targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
+    await settle(); await sync([2,3,4]);
+    api.configure(config(3, {readingMode:'paged', css:css + pagedCSS, targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
+    await settle();
+    const pagedAnchor = api.sampleNow(), pagedRect = rectFor(pagedAnchor), pagedNode = span(3,2);
+    const pagedPark = api.parkForReopen();
+    ok(pagedPark.paths.includes(chapter(3).path) && pagedPark.paths.length < 3, 'paged park trims offscreen chapters');
+    sameRect(pagedRect, rectFor(pagedAnchor), 'paged parking pixel position');
+    epoch = 'parked-paged-resume';
+    api.configure(config(3, {readingMode:'paged', css:css + pagedCSS, targetNode:2, targetOffset:5, preserveTargetAnchor:true}));
+    await settle();
+    ok(span(3,2) === pagedNode && api.sampleNow(), 'paged resume keeps actual text node');
+    results.push('paged parked-window slimming preserves exact character pixels and fresh resume');
+
+    await configure(3); await sync([2,3,4]);
+    scrollTo(0, scrollY + section(3).getBoundingClientRect().top - 130); await settle();
+    const crossAnchor = api.sampleNow(), crossRect = rectFor(crossAnchor);
+    ok(crossAnchor.visibleText.includes('chapter2') && crossAnchor.visibleText.includes('chapter3'), 'cross-chapter park fixture');
+    const crossReply = api.parkForReopen();
+    ok(crossReply.paths.includes(chapter(2).path) && crossReply.paths.includes(chapter(3).path), 'park keeps both visible chapters');
+    sameRect(crossRect, rectFor(crossAnchor), 'cross-chapter park pixels');
+    epoch = 'cross-park-resume'; await configure(3); await sync([2,3,4]);
+    const visibleImage = await appendParkImage(3);
+    scrollTo(0, scrollY + visibleImage.getBoundingClientRect().top + 100); await settle();
+    const imageRect = visibleImage.getBoundingClientRect(), imageMessages = messages.length;
+    const imagePark = api.parkForReopen();
+    sameRect(imageRect, visibleImage.getBoundingClientRect(), 'park preserves image-internal offset');
+    ok(visibleImage.isConnected && imagePark.imageBytes === 512 * 1024 * 4, 'visible image is retained and fully counted');
+    await settle(); ok(messages.length === imageMessages, 'park compensation cannot save stale progress');
+    epoch = 'image-park-resume'; await configure(3);
+    await sync([2,3,4]);
+    atChapter(2,20); await settle(); ok(api.sampleNow().path === chapter(2).path, 'backward window recovery after park');
+    atChapter(3,20); await settle(); ok(api.sampleNow().path === chapter(3).path, 'forward window recovery after park');
+    results.push('park keeps both visible chapters and image offsets; later neighbors remain recoverable');
     return results;
 }
 

@@ -33,9 +33,9 @@ struct EPUBContentPoolTests {
         await pin.release()
         try EPUBPublicationCache.verifyResources(reopened.publication)
         try await reopened.abandon()
-        let cacheRoot = await f.store.epubContentPoolURL()
+        let cacheRoot = await f.store.epubReadyURL()
         await EPUBContentPool.shared.discardUnused(root: cacheRoot)
-        #expect(!FileManager.default.fileExists(atPath: aRoot.path))
+        #expect(FileManager.default.fileExists(atPath: aRoot.path)) // Published Ready survives idle cache cleanup.
         try await verifyMetadataSnapshotReuse()
         try await verifyMetadataMutationRejectsSession()
         try await verifyLeaseHeldMetadataReuse()
@@ -215,7 +215,8 @@ private extension EPUBContentPoolTests {
         })
         let changed = Data(String(decoding: original, as: UTF8.self).replacingOccurrences(of: "Snapshot A", with: "Snapshot B").utf8)
         #expect(changed.count == original.count && !snapshot.matches(changed))
-        #expect(try EPUBMetadataSnapshot(metadata: changed).package.versionID == snapshot.package.versionID)
+        let readyRoot = await f.store.epubReadyURL()
+        #expect(try EPUBMetadataSnapshot(metadata: changed, readyRoot: readyRoot).package.versionID == snapshot.package.versionID)
         try await queue.write { db in
             try db.execute(sql: "UPDATE epubPackages SET metadata=? WHERE bookID=?", arguments: [changed, id])
         }

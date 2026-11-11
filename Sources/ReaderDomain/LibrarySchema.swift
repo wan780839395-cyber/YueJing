@@ -81,6 +81,12 @@ enum LibrarySchema {
                 );
                 """)
         }
+        migrator.registerMigration("v7-epub-ready-versions") { db in
+            try db.create(table: "epubReadyVersions") { t in
+                t.primaryKey("bookID", .text).references("books", onDelete: .cascade)
+                t.column("directory", .text).notNull().unique()
+            }
+        }
         return migrator
     }
 }

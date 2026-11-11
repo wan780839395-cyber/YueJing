@@ -69,7 +69,7 @@ struct EPUBLibraryFixture: Sendable {
     }
     static func position(_ reader: OpenedEPUBReader, path: String? = nil, offset: Int = 0) throws -> EPUBReadingPosition {
         let package = reader.publication.package, href = path ?? reader.publication.package.spine[0]
-        let nodes = try #require(package.textNodes[href])
+        let nodes = try #require(try package.nodes(at: href))
         let index = try #require(nodes.firstIndex(where: { $0.contains("A😀") }))
         return EPUBReadingPosition(bookID: reader.book.id, versionID: reader.book.versionID, path: href, node: index, utf16Offset: offset)
     }
@@ -88,7 +88,8 @@ struct EPUBLibraryTests {
         #expect(try Data(contentsOf: stored) == bytes)
         #expect(try Data(contentsOf: source) == bytes)
         let reader = try await f.service.openEPUB(id: receipt.book.id)
-        #expect(!reader.reusedResources)
+        #expect(reader.reusedResources && reader.openingTimings.chapterIndexedMetadata)
+        #expect(!reader.openingTimings.readyPreparationOccurred) // Import published Ready; first open does not rebuild.
         #expect(reader.publication.package.spine == ["OPS/one.xhtml", "OPS/two.xhtml"])
         for path in reader.publication.package.spine {
             let data = try EPUBResourceStore.data(path: path, publication: reader.publication)
@@ -109,7 +110,7 @@ struct EPUBLibraryTests {
         try await reopened.abandon()
         #expect(FileManager.default.fileExists(atPath: reopened.publication.resourceRoot.path))
 
-        let cache = await f.store.epubContentPoolURL()
+        let cache = await f.store.epubReadyURL()
         let cachedChapter = folder.appendingPathComponent("OPS/one.xhtml")
         let expectedChapter = try Data(contentsOf: cachedChapter)
         var damaged = expectedChapter
@@ -201,8 +202,8 @@ struct EPUBLibraryTests {
         #expect(!(try EPUBResourceStore.data(path: position.path, publication: reopened.publication)).isEmpty)
         try await reopened.abandon()
         #expect(FileManager.default.fileExists(atPath: folder.path))
-        await EPUBContentPool.shared.discardUnused(root: await f.store.epubContentPoolURL())
-        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        await EPUBContentPool.shared.discardUnused(root: await f.store.epubReadyURL())
+        #expect(FileManager.default.fileExists(atPath: folder.path)) // Durable Ready is not an idle cache entry.
     }
 
     @Test func epubOverlappingReadersUseIndependentLeasesAndSessions() async throws {
@@ -307,17 +308,20 @@ struct EPUBLibraryTests {
         await #expect(throws: EPUBError.invalidPosition) {
             try await reader.close(position: invalid, sequence: 1, token: token, preferences: reader.preferences)
         }
-        #expect(!FileManager.default.fileExists(atPath: reader.publication.resourceRoot.path))
+        #expect(FileManager.default.fileExists(atPath: reader.publication.resourceRoot.path))
         let next = try await f.service.openEPUB(id: receipt.book.id)
-        #expect(next.publication.resourceRoot != reader.publication.resourceRoot)
+        #expect(next.publication.resourceRoot == reader.publication.resourceRoot)
+        #expect(next.reading.session.id != reader.reading.session.id)
+        #expect(try await reader.markReady(token) == false) // Failed close must not revive authority.
         let cancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             try await next.close(position: nil, sequence: 1, token: nil, preferences: next.preferences)
         }
         await #expect(throws: CancellationError.self) { try await cancelled.value }
-        #expect(!FileManager.default.fileExists(atPath: next.publication.resourceRoot.path))
+        #expect(FileManager.default.fileExists(atPath: next.publication.resourceRoot.path))
         let final = try await f.service.openEPUB(id: receipt.book.id)
-        #expect(final.publication.resourceRoot != next.publication.resourceRoot)
+        #expect(final.publication.resourceRoot == next.publication.resourceRoot)
+        #expect(final.reading.session.id != next.reading.session.id)
         try await final.abandon()
     }
 

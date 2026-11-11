@@ -17,7 +17,7 @@ public struct EPUBReadingPosition: Codable, Sendable, Equatable {
     public func validate(in package: EPUBPackage) throws {
         guard bookID == package.sourceSHA256, versionID == package.versionID,
               package.parserVersion == EPUBFormat.parserVersion, unit == EPUBFormat.positionUnit,
-              package.spine.contains(path), let nodes = package.textNodes[path],
+              package.spine.contains(path), let nodes = try package.nodes(at: path),
               nodes.indices.contains(node), utf16Offset >= 0 else { throw EPUBError.invalidPosition }
         let text = nodes[node]
         guard utf16Offset <= text.utf16.count else { throw EPUBError.invalidPosition }

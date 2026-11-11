@@ -96,7 +96,7 @@ struct EPUBReaderHostTests {
                 try await verifyViewportWhitespaceTap(controller)
 
                 #expect(try await reader.markReady(token))
-                let nodes = try #require(reader.publication.package.textNodes[path])
+                let nodes = try #require(try reader.publication.package.nodes(at: path))
                 let targetNode = try #require(nodes.firstIndex(where: { $0.contains("EPUB_A_C1_P18") }))
                 let targetPosition = try EPUBLocationScript.makeValidatedPosition(
                     bookID: receipt.book.id,
@@ -170,7 +170,7 @@ struct EPUBReaderHostTests {
             let reader = try await fixture.service.openEPUB(id: receipt.book.id)
             let path = try #require(reader.publication.package.spine.first)
             let token = try await reader.beginNavigation(path: path)
-            let nodes = try #require(reader.publication.package.textNodes[path])
+            let nodes = try #require(try reader.publication.package.nodes(at: path))
 
             // Construct a raw hostile XHTML payload matching the expected yj-tN text nodes,
             // plus inline scripts, event handlers, and an external network image to test WebKit controls directly.
@@ -276,7 +276,7 @@ struct EPUBReaderHostTests {
 
                 let firstToken = try #require(model.currentToken)
                 let package = try #require(model.reader?.publication.package)
-                let ch1Nodes = try #require(package.textNodes[firstToken.path])
+                let ch1Nodes = try #require(try package.nodes(at: firstToken.path))
                 let anchorNode = try #require(ch1Nodes.firstIndex(where: { $0.contains("EPUB_A_C1_P20") }))
                 let scrolledPayload = EPUBLocatorPayload(
                     kind: .scroll,
@@ -476,7 +476,7 @@ struct EPUBReaderHostTests {
             let reader = try await fixture.service.openEPUB(id: receipt.book.id)
             #expect(reader.publication.package.resource(at: "OPS/page.webp")?.mediaType == (mislabeledJPEG ? "image/jpeg" : "image/webp"))
             let path = "OPS/page.xhtml"
-            #expect(reader.publication.package.textNodes[path] == ["图片页"])
+            #expect(try reader.publication.package.nodes(at: path) == ["图片页"])
             let position = EPUBReadingPosition(bookID: reader.book.id, versionID: reader.book.versionID,
                                                path: path, node: 0, utf16Offset: 0)
             let token = try await reader.beginNavigation(path: path)

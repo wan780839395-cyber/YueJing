@@ -65,7 +65,38 @@ enum EPUBPublicationCache {
         }
     }
 
-    private static func copyVerified(_ publication: EPUBPublication, to destination: URL) throws {
+    /// At most four actual resource reads at once (<=64 MiB raw buffers with existing per-file limits).
+    /// Preflight is serial; every leaf still uses the same path/type/size/full-SHA verifier.
+    static func verifyResourcesConcurrently(_ publication: EPUBPublication) async throws {
+        guard publication.package.parserVersion == EPUBFormat.parserVersion,
+              !publication.package.spine.isEmpty,
+              publication.package.resources.count <= EPUBLimits().entries else { throw EPUBError.corruptResource }
+        try requireDirectory(publication.resourceRoot.deletingLastPathComponent())
+        try requireDirectory(publication.resourceRoot)
+        var total = 0
+        var paths = Set<String>()
+        for resource in publication.package.resources {
+            try Task.checkCancellation()
+            guard paths.insert(resource.path).inserted, resource.byteCount >= 0,
+                  resource.byteCount <= EPUBLimits().expandedBytes - total else { throw EPUBError.limitExceeded }
+            total += resource.byteCount
+        }
+        let resources = publication.package.resources
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for lane in 0..<min(4, resources.count) {
+                group.addTask {
+                    for index in stride(from: lane, to: resources.count, by: 4) {
+                        try Task.checkCancellation()
+                        _ = try EPUBResourceStore.data(resource: resources[index], root: publication.resourceRoot)
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+        try Task.checkCancellation()
+    }
+
+    static func copyVerified(_ publication: EPUBPublication, to destination: URL) throws {
         let files = FileManager.default
         guard publication.package.parserVersion == EPUBFormat.parserVersion,
               !publication.package.spine.isEmpty,

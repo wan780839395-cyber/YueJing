@@ -247,8 +247,8 @@ struct EPUBCompatibilityTests {
         let reader = try await fixture.service.openEPUB(id: receipt.book.id)
         let package = reader.publication.package
         #expect(package.spine == ["OEBPS/page.xhtml", "OEBPS/text.xhtml"])
-        #expect(package.textNodes["OEBPS/page.xhtml"] == ["图片页"])
-        #expect(package.textNodes["OEBPS/text.xhtml"] == ["Unchanged synthetic text"])
+        #expect(try package.nodes(at: "OEBPS/page.xhtml") == ["图片页"])
+        #expect(try package.nodes(at: "OEBPS/text.xhtml") == ["Unchanged synthetic text"])
         #expect(package.navigation == [EPUBNavigationItem(title: "Image page", path: "OEBPS/page.xhtml", fragment: "heading")])
         #expect(package.parserVersion == "epub-dom-v1")
         #expect(try EPUBResourceStore.data(path: Self.webpPath, publication: reader.publication) == Self.webpData())

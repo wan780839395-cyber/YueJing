@@ -56,7 +56,7 @@ enum EPUBChapterWindow {
             guard byteCount <= maximumXHTMLBytes else { throw EPUBError.limitExceeded }
             if installedPaths.contains(path) { continue }
             guard let index = publication.package.spine.firstIndex(of: path),
-                  let nodes = publication.package.textNodes[path], let url = urls[path],
+                  let nodes = try publication.package.nodes(at: path), let url = urls[path],
                   let xhtml = String(data: try EPUBResourceStore.data(path: path, publication: publication), encoding: .utf8)
             else { throw EPUBError.corruptResource }
             chapters.append(["path": path, "index": index, "xhtml": xhtml, "url": url,

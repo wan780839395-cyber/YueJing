@@ -183,7 +183,7 @@ enum EPUBLocationScript {
         rawUTF16Offset: Int
     ) throws -> EPUBReadingPosition {
         guard package.spine.contains(path),
-              let nodes = package.textNodes[path],
+              let nodes = try package.nodes(at: path),
               nodes.indices.contains(node),
               let snapped = snapUTF16OffsetToCharacterBoundary(rawUTF16Offset, in: nodes[node]) else {
             throw EPUBError.invalidPosition
@@ -211,7 +211,7 @@ enum EPUBLocationScript {
         preserveViewport: Bool = false
     ) throws -> String {
         guard let chapterIndex = package.spine.firstIndex(of: token.path),
-              let nodes = package.textNodes[token.path] else {
+              let nodes = try package.nodes(at: token.path) else {
             throw EPUBError.invalidPackage
         }
         let lengths = nodes.map { $0.utf16.count }
@@ -1156,6 +1156,44 @@ enum EPUBLocationScript {
             resizeObserver.observe(document.body);
         }
 
+        function trimParkedWindow() {
+            var anchor = sampleVisible(), before = anchor && anchorRect(anchor);
+            if (!anchor || !before || !chapterFor(state.path)) { return; }
+            var previous = state.chapters.slice();
+            var x = window.scrollX || 0, y = window.scrollY || 0;
+            var required = previous.filter(function(c) {
+                return c.path === state.path || c.path === anchor.path ||
+                    Array.prototype.some.call(c.element.getClientRects(), inViewport);
+            });
+            if (!required.length) { return; }
+            var low = Math.min.apply(null, required.map(function(c) { return c.index; }));
+            var high = Math.max.apply(null, required.map(function(c) { return c.index; }));
+            var kept = previous.filter(function(c) { return c.index >= low && c.index <= high; });
+            if (kept.length === previous.length) { return; }
+            previous.forEach(function(c) { if (kept.indexOf(c) < 0) { c.element.remove(); } });
+            state.chapters = kept;
+            updatePageMetrics();
+            var after = anchorRect(anchor);
+            if (after) {
+                observedScrollTo((window.scrollX || 0) + (state.paginated ? after.left - before.left : 0),
+                    state.paginated ? 0 : (window.scrollY || 0) + after.top - before.top);
+            }
+            var settled = anchorRect(anchor);
+            if (!settled || Math.abs(settled.left - before.left) > 0.5 || Math.abs(settled.top - before.top) > 0.5) {
+                // Clamping/reflow prevented exact preservation. Restore original nodes, not new HTML or a stale screenshot.
+                for (var i = previous.length - 1; i >= 0; i--) {
+                    if (kept.indexOf(previous[i]) < 0) {
+                        document.body.insertBefore(previous[i].element, i + 1 < previous.length ? previous[i + 1].element : null);
+                    }
+                }
+                state.chapters = previous;
+                updatePageMetrics();
+                observedScrollTo(x, y);
+            }
+            state.observedScrollX = window.scrollX || 0;
+            state.observedScrollY = window.scrollY || 0;
+        }
+
         window.__yjEpub = {
             configure: configure,
             syncWindow: syncWindow,
@@ -1172,6 +1210,7 @@ enum EPUBLocationScript {
                 state.reflowRevision += 1;
                 state.sessionID = "";
                 state.epoch = "";
+                trimParkedWindow();
                 var imageBytes = 0;
                 state.chapters.forEach(function(c) {
                     Array.prototype.forEach.call(c.element.querySelectorAll('img'), function(img) {

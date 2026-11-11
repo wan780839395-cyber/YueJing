@@ -42,6 +42,7 @@ actor EPUBContentPool {
         var tokens: Set<UUID> = []
         var retained = false
         var retired = false
+        var persistent = false
     }
     private struct Holder {
         let folder: URL
@@ -52,6 +53,7 @@ actor EPUBContentPool {
     private var holders: [UUID: Holder] = [:]
     private var packageFingerprints = EPUBMetadataFingerprintCache()
     private let limits: Limits
+    private var reconciledReadyRoots: Set<URL> = []
     init(limits: Limits = Limits()) { self.limits = limits }
 
     /// Only borrow a package already held by an active/parked lease. Idle disk entries
@@ -235,7 +237,7 @@ actor EPUBContentPool {
         guard let holder = holders.removeValue(forKey: token), var entry = entries[holder.folder] else { return }
         entry.tokens.remove(token)
         entry.record.touched = Date()
-        if retain && !entry.retired {
+        if retain && !entry.retired && !entry.persistent {
             do {
                 try Self.requireDirectory(entry.root)
                 try Self.requireDirectory(entry.folder)
@@ -256,7 +258,8 @@ actor EPUBContentPool {
         trim(entry.root)
     }
     private func removeIfUnused(_ folder: URL) {
-        guard let entry = entries[folder], entry.tokens.isEmpty, entry.retired || !entry.retained else { return }
+        guard let entry = entries[folder], entry.tokens.isEmpty,
+              entry.retired || (!entry.persistent && !entry.retained) else { return }
         // Only generated folders registered under this pool root are ever removed.
         do {
             try Self.requireDirectory(entry.root)
@@ -270,7 +273,7 @@ actor EPUBContentPool {
         }
     }
     private func trim(_ root: URL) {
-        let all = entries.values.filter { $0.root == root }
+        let all = entries.values.filter { $0.root == root && !$0.persistent }
         var bytes = all.reduce(0) { $0 + $1.record.bytes }
         var count = all.count
         for entry in all.sorted(by: { $0.record.touched < $1.record.touched }) where entry.tokens.isEmpty {
@@ -282,9 +285,133 @@ actor EPUBContentPool {
         // Active/parked leases may exceed a cache target; never evict their files.
     }
     func discardUnused(root: URL) {
-        for entry in entries.values.filter({ $0.root == root && $0.tokens.isEmpty }) {
+        for entry in entries.values.filter({ $0.root == root && $0.tokens.isEmpty && !$0.persistent }) {
             entries[entry.folder]?.retired = true
             removeIfUnused(entry.folder)
         }
+    }
+}
+
+extension EPUBContentPool {
+    /// First-process reconciliation skips every live registered version, including pending database commits.
+    /// A stale caller's reference list therefore cannot delete a concurrently published version.
+    func reconcileReady(root: URL, referenced: Set<String>) throws {
+        guard !reconciledReadyRoots.contains(root) else { return }
+        try Self.requireDirectory(root.deletingLastPathComponent())
+        let files = FileManager.default
+        if !files.fileExists(atPath: root.path) { try files.createDirectory(at: root, withIntermediateDirectories: false) }
+        try Self.requireDirectory(root)
+        for folder in try files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+            guard UUID(uuidString: folder.lastPathComponent) != nil,
+                  !referenced.contains(folder.lastPathComponent), entries[folder] == nil else { continue }
+            // Removing a directory entry does not traverse a symlink. Never recursively enumerate unknown names.
+            try files.removeItem(at: folder)
+        }
+        reconciledReadyRoots.insert(root)
+    }
+
+    /// Freeze a prepared import/migration without parsing the source again. A live lease protects the DB publication gap.
+    func stageReady(publication: EPUBPublication, root: URL) throws -> EPUBContentLease {
+        try Task.checkCancellation()
+        try Self.requireDirectory(root.deletingLastPathComponent())
+        let files = FileManager.default
+        if !files.fileExists(atPath: root.path) { try files.createDirectory(at: root, withIntermediateDirectories: false) }
+        try Self.requireDirectory(root)
+        let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try files.createDirectory(at: folder, withIntermediateDirectories: false)
+        var published = false
+        defer { if !published { try? files.removeItem(at: folder) } }
+        let resources = folder.appendingPathComponent("resources", isDirectory: true)
+        try EPUBPublicationCache.copyVerified(publication, to: resources)
+        let compact = try EPUBReadyArtifact.writeNodes(package: publication.package, folder: folder)
+        try EPUBReadyArtifact.writeManifest(package: compact, folder: folder)
+        try EPUBReadyArtifact.verifyNodes(package: compact, folder: folder)
+        try EPUBPublicationCache.verifyResources(EPUBPublication(package: compact, resourceRoot: resources))
+        try Task.checkCancellation()
+        let bound = try compact.attachingNodes(folder: folder)
+        let digest = try EPUBMetadataFingerprintCache.canonical(compact)
+        entries[folder] = Entry(root: root, folder: folder,
+            record: Record(key: compact.sourceSHA256, packageDigest: digest,
+                           bytes: try Self.size(compact), touched: Date()))
+        let lease = grant(EPUBPublication(package: bound, resourceRoot: resources), folder: folder, decoded: nil)
+        published = true
+        return lease
+    }
+
+    /// Mark persistent only after the database commits the matching reference. No cancellation point here.
+    func commitReady(directory: String, root: URL, replacing: String? = nil) {
+        let folder = root.appendingPathComponent(directory, isDirectory: true)
+        if entries[folder] != nil { entries[folder]?.persistent = true }
+        if let replacing, replacing != directory, UUID(uuidString: replacing) != nil {
+            let old = root.appendingPathComponent(replacing, isDirectory: true)
+            if entries[old] != nil {
+                entries[old]?.persistent = false; entries[old]?.retired = true
+                removeIfUnused(old)
+            } else {
+                // All Ready readers register with this process-wide owner before reading.
+                if (try? Self.requireDirectory(root)) != nil { try? FileManager.default.removeItem(at: old) }
+            }
+        }
+    }
+
+    func acquireReady(archive: URL, snapshot: EPUBMetadataSnapshot, root: URL) async throws
+        -> (lease: EPUBContentLease, reused: Bool, timings: EPUBOpeningTimings) {
+        try Task.checkCancellation()
+        let package = snapshot.package
+        guard let reference = package.ready else { throw EPUBError.corruptResource }
+        try EPUBReadyArtifact.validate(reference, package: package)
+        var timings = EPUBOpeningTimings()
+        guard try timings.measure(.sourceVerification, { try EPUBResourceStore.sourceDigest(archive) }) == package.sourceSHA256 else {
+            throw LibraryError.changedFile
+        }
+        let fingerprint = try timings.measure(.packageFingerprint) { try packageFingerprints.resolve(snapshot) }
+        timings.packageFingerprintReused = fingerprint.reused
+        let folder = try EPUBReadyArtifact.folder(root: root, reference: reference)
+        try EPUBReadyArtifact.verifyManifest(folder: folder, expectedSHA256: fingerprint.digest)
+        let publication = EPUBPublication(package: package, resourceRoot: folder.appendingPathComponent("resources"))
+        let bytes = try Self.size(package)
+        if entries[folder] == nil {
+            entries[folder] = Entry(root: root, folder: folder,
+                record: Record(key: package.sourceSHA256, packageDigest: snapshot.metadataSHA256,
+                               bytes: bytes, touched: Date()), persistent: true)
+        }
+        guard entries[folder]?.retired == false else { throw EPUBError.corruptResource }
+        // Pin before await: a replacement/other open may retire, but cannot delete this version during verification.
+        let lease = grant(publication, folder: folder, decoded: snapshot.decoded)
+        do {
+            let started = ContinuousClock.now
+            try EPUBReadyArtifact.verifyNodes(package: package, folder: folder)
+            try await EPUBPublicationCache.verifyResourcesConcurrently(publication)
+            timings.record(.warmResourceVerification, since: started)
+            try Task.checkCancellation()
+            guard entries[folder]?.retired == false else { throw EPUBError.corruptResource }
+            timings.contentCacheOutcome = .verifiedVersion
+            timings.resourceCount = package.resources.count
+            timings.resourceBytes = bytes
+            return (lease, true, timings)
+        } catch {
+            await lease.release()
+            throw error
+        }
+    }
+
+    /// Recovery is permitted only when the freshly parsed source proves the exact old semantic package.
+    func rebuildReady(archive: URL, expected: EPUBPackage, root: URL, work: URL) throws -> EPUBContentLease {
+        defer { try? FileManager.default.removeItem(at: work) }
+        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work)
+        let expectedDigest = try expected.ready?.legacyPackageSHA256 ?? EPUBMetadataFingerprintCache.canonical(expected)
+        guard try EPUBMetadataFingerprintCache.canonical(package) == expectedDigest else { throw EPUBError.corruptResource }
+        if let reference = expected.ready {
+            // The legacy digest alone must not authorize modified lightweight fields/indexes.
+            guard package.sourceSHA256 == expected.sourceSHA256, package.parserVersion == expected.parserVersion,
+                  package.title == expected.title, package.spine == expected.spine,
+                  package.navigation == expected.navigation, package.resources == expected.resources,
+                  package.coverPath == expected.coverPath else { throw EPUBError.corruptResource }
+            for path in package.spine {
+                guard let nodes = package.textNodes[path], let chapter = reference.chapters[path],
+                      EPUBResourceStore.digest(try JSONEncoder().encode(nodes)) == chapter.sha256 else { throw EPUBError.corruptResource }
+            }
+        }
+        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root)
     }
 }

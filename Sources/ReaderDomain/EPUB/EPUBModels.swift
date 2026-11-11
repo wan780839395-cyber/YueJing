@@ -36,15 +36,48 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
     public let resources: [EPUBResource]
     public let textNodes: [String: [String]]
     public let coverPath: String?
+    public let ready: EPUBReadyReference?
+    private var chapterNodes: EPUBChapterNodes? = nil
+    private enum CodingKeys: String, CodingKey {
+        case sourceSHA256, parserVersion, title, spine, navigation, resources, textNodes, coverPath, ready
+    }
     public init(sourceSHA256: String, parserVersion: String = EPUBFormat.parserVersion, title: String,
                 spine: [String], navigation: [EPUBNavigationItem], resources: [EPUBResource],
-                textNodes: [String: [String]], coverPath: String?) {
+                textNodes: [String: [String]], coverPath: String?, ready: EPUBReadyReference? = nil) {
         self.sourceSHA256 = sourceSHA256; self.parserVersion = parserVersion; self.title = title
         self.spine = spine; self.navigation = navigation; self.resources = resources
         self.textNodes = textNodes; self.coverPath = coverPath
+        self.ready = ready
     }
     public var versionID: String { sourceSHA256 + ":" + parserVersion }
     public func resource(at path: String) -> EPUBResource? { resources.first { $0.path == path } }
+
+    public func nodes(at path: String) throws -> [String]? {
+        if ready == nil { return textNodes[path] }
+        guard let chapterNodes else { throw EPUBError.corruptResource }
+        return try chapterNodes.nodes(at: path)
+    }
+
+    func withReady(_ reference: EPUBReadyReference) -> EPUBPackage {
+        EPUBPackage(sourceSHA256: sourceSHA256, parserVersion: parserVersion, title: title,
+                    spine: spine, navigation: navigation, resources: resources,
+                    textNodes: [:], coverPath: coverPath, ready: reference)
+    }
+
+    func attachingNodes(folder: URL) throws -> EPUBPackage {
+        guard let ready else { return self }
+        try EPUBReadyArtifact.validate(ready, package: self)
+        var copy = self
+        copy.chapterNodes = EPUBChapterNodes(folder: folder, reference: ready)
+        return copy
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sourceSHA256 == rhs.sourceSHA256 && lhs.parserVersion == rhs.parserVersion &&
+        lhs.title == rhs.title && lhs.spine == rhs.spine && lhs.navigation == rhs.navigation &&
+        lhs.resources == rhs.resources && lhs.textNodes == rhs.textNodes &&
+        lhs.coverPath == rhs.coverPath && lhs.ready == rhs.ready
+    }
 }
 
 public struct EPUBPublication: Sendable {

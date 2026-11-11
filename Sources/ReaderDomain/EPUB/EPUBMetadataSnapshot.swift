@@ -18,7 +18,7 @@ struct EPUBMetadataSnapshot: Sendable {
     let decodeReused: Bool
     let reuseReason: EPUBOpeningTimings.MetadataReuseReason
 
-    init(metadata: Data, reusing: Decoded? = nil) throws {
+    init(metadata: Data, reusing: Decoded? = nil, readyRoot: URL? = nil) throws {
         self.metadata = metadata
         metadataSHA256 = EPUBResourceStore.digest(metadata)
         if let reusing, reusing.metadataSHA256 == metadataSHA256 {
@@ -26,8 +26,13 @@ struct EPUBMetadataSnapshot: Sendable {
             decodeReused = true
             reuseReason = .reused
         } else {
-            decoded = Decoded(package: try JSONDecoder().decode(EPUBPackage.self, from: metadata),
-                              metadataSHA256: metadataSHA256)
+            var package = try JSONDecoder().decode(EPUBPackage.self, from: metadata)
+            if let reference = package.ready {
+                guard let readyRoot, UUID(uuidString: reference.directory) != nil else { throw EPUBError.corruptResource }
+                // Attach only our own root; no URL from serialized metadata is trusted.
+                package = try package.attachingNodes(folder: readyRoot.appendingPathComponent(reference.directory))
+            }
+            decoded = Decoded(package: package, metadataSHA256: metadataSHA256)
             decodeReused = false
             reuseReason = reusing == nil ? .noLeaseProof : .metadataChanged
         }
