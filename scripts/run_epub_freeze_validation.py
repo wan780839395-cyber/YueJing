@@ -1,7 +1,7 @@
-"""Opening continuity: 24 declarations / 25 fresh native executions.
+"""Opening followup: 3 fresh declarations / 4 expansions plus pinned historical21.
 
-Delivery reuses only a successful same-source initial validation, executes zero
-tests and never starts a simulator. No historical or diagnostic qualification.
+Delivery executes zero tests and reuses a successful same-source followup4 plus
+its single fixed historical21 chain. No arbitrary recursion or diagnostic IPA.
 """
 import argparse
 import hashlib
@@ -31,16 +31,25 @@ import validate_task3 as v
 from epub_diagnostic_package import git, tree
 
 BASE = "d5fde953ca544deaecace0434a45b014ebd630b0"
-SCOPE = "epub-opening-continuity-24"
+SCOPE = "epub-opening-followup-3"
 VERSION, BUILD = "0.2.15", "17"
-TOTAL, EXECUTIONS = 24, 25
-COMBINED_TOTAL, COMBINED_EXECUTIONS = TOTAL, EXECUTIONS
+TOTAL, EXECUTIONS = 3, 4
+COMBINED_TOTAL, COMBINED_EXECUTIONS = 24, 25
+HISTORICAL_TOTAL, HISTORICAL_EXECUTIONS = 21, 21
+HISTORICAL_RUN = 43014129792
+HISTORICAL_SOURCE = "3f16c2963f2d165f80500d9b23eb4036ff919260"
+HISTORICAL_SCOPE = "epub-opening-continuity-24"
+HISTORICAL_ARTIFACT = 13853970619
+HISTORICAL_NAME = f"task3-evidence-{HISTORICAL_RUN}-{HISTORICAL_SOURCE}"
+HISTORICAL_BYTES = 129375479
+HISTORICAL_SHA256 = "20bcce9f3167691818fb454e2900de70a90de4734f4f77ee3e952e2ebd10f2e5"
+HISTORICAL_FOLDER = f"historical-{HISTORICAL_RUN}"
 INVENTORY_TOTAL, INVENTORY_EXECUTIONS = 241, 242
 REPO = "wan780839395-cyber/YueJing"
 WORKFLOW_ID = 398234793
 WORKFLOW_PATH = ".github/workflows/task3-validate.yml"
-VALIDATION_QUALIFICATION = "EPUB_OPENING_CONTINUITY_24_TARGETED_NATIVE"
-DELIVERY_QUALIFICATION = "EPUB_OPENING_CONTINUITY_DELIVERY_REUSED_25_TARGETED_NATIVE"
+VALIDATION_QUALIFICATION = "EPUB_OPENING_FOLLOWUP_3_NEW_4_REUSED_21_TARGETED_NATIVE"
+DELIVERY_QUALIFICATION = "EPUB_OPENING_FOLLOWUP_DELIVERY_REUSED_25_TARGETED_NATIVE"
 QUALIFICATION = VALIDATION_QUALIFICATION
 
 ROOT, OUT = v.ROOT, v.OUT
@@ -66,7 +75,7 @@ CANDIDATE_SHA256 = {
     "Sources/ReaderDomain/EPUB/EPUBResourceStore.swift": "6cdfff729ac028abe6b430bc522d1adafc44f96943b2acdb1d76c4806349c04e",
     "Tests/ReaderDomainTests/EPUBReadyTests.swift": "6ee16926dc4579daa0a17550812e3d1a8cff5cd6924a7d5c481abc90f3d952ac",
     "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift": "85e2c517498d630ef2a93399a5eaa8f79ee51460be0b1d4889ae52865439461d",
-    "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "03c90d93bb12f04096d0eab57a08769e56d395cac510f438f884c328c39a3bef",
+    "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "10440e606ecb1e931c7993d351528625e0bf7e026f0b1665aeab72de7ead642f",
     "docs/EPUB_OPENING_PRESENTATION.md": "3474307453ee703bb29cfdedcd88c1050720213b15792c71a7a7e623c76a1b72",
     "scripts/check_epub_opening_presentation.py": "778cb4a28fec5ee5fc661cc0b351d794ad80ad4727657e2625738b7456a00ed0",
 }
@@ -77,7 +86,7 @@ ALLOWED = frozenset(CANDIDATE_SHA256) | {
     "scripts/run_epub_freeze_validation.py", "scripts/check_epub_freeze_validation.py",
     "docs/EPUB_FREEZE_RELEASE.md",
 }
-SELECTED_FILES = {
+HISTORICAL_FILES = {
     "ReaderDomainTests/EPUBReadyTests.swift": [
         "readyImportColdReaderDoesNotDependOnParkedLease",
         "legacyMigrationPreservesProgressPreferencesAndOriginal",
@@ -107,22 +116,26 @@ SELECTED_FILES = {
         "testEPUBProgressSurvivesExitAndProcessRelaunch",
         "testEPUBTypographyNoCoverFallbackAndTXTIsolation"],
 }
-GROUPS = {}
+HISTORICAL_GROUPS = {}
 for _kind, _target in (("domain", "ReaderDomainTests"), ("host", "YueJingHostTests"), ("ui", "YueJingEPUBUITests")):
-    _pairs = [(rel, n) for rel, names in SELECTED_FILES.items() if rel.startswith(_target + "/") for n in names]
+    _pairs = [(rel, n) for rel, names in HISTORICAL_FILES.items() if rel.startswith(_target + "/") for n in names]
     for _index, _pair in enumerate(_pairs, 1):
-        GROUPS[_kind + "-" + str(_index)] = dict(kind=_kind, target=_target, timeout=480,
-                                                pairs=[_pair], cases=[_pair[1]])
+        HISTORICAL_GROUPS[_kind + "-" + str(_index)] = dict(kind=_kind, target=_target, timeout=480,
+                                                           pairs=[_pair], cases=[_pair[1]])
 del _kind, _target, _pairs, _index, _pair
+GROUPS = {key: HISTORICAL_GROUPS[key] for key in ("domain-12", "host-2", "ui-2")}
+REUSED_GROUPS = {key: spec for key, spec in HISTORICAL_GROUPS.items() if key not in GROUPS}
+SELECTED_FILES = {rel: [name for spec in GROUPS.values() for path, name in spec["pairs"] if path == rel]
+                  for rel in HISTORICAL_FILES if any(path == rel for spec in GROUPS.values() for path, _ in spec["pairs"])}
 require, load, write, sha = v.require, compat.load_json, compat.write_new, compat.digest_path
 
 
 def reviewed_inventory():
     """Explicit five-case overlay; never infer permission from newly found source."""
     expected = {p: names.split() for p, names in inventory.FILES.items()}
-    expected["ReaderDomainTests/EPUBReadyTests.swift"] += SELECTED_FILES["ReaderDomainTests/EPUBReadyTests.swift"][-3:]
+    expected["ReaderDomainTests/EPUBReadyTests.swift"] += HISTORICAL_FILES["ReaderDomainTests/EPUBReadyTests.swift"][-3:]
     expected["YueJingHostTests/EPUBReaderHostTests.swift"] = (
-        SELECTED_FILES["YueJingHostTests/EPUBReaderHostTests.swift"][:2]
+        HISTORICAL_FILES["YueJingHostTests/EPUBReaderHostTests.swift"][:2]
         + expected["YueJingHostTests/EPUBReaderHostTests.swift"])
     actual = {}
     for path in sorted((ROOT / "Tests").rglob("*.swift")):
@@ -147,9 +160,12 @@ def selection():
     names = [name for rel, selected in SELECTED_FILES.items() for name in selected
              if name in reviewed["cases"][rel]]
     require(len(names) == len(set(names)) == TOTAL and
-            [sum(g["kind"] == kind for g in GROUPS.values()) for kind in ("domain", "host", "ui")] == [14, 7, 3]
+            [sum(g["kind"] == kind for g in GROUPS.values()) for kind in ("domain", "host", "ui")] == [1, 1, 1]
             and sum(len(inventory.PARAMETERIZED.get(n, {}).get("values", [None])) for n in names) == EXECUTIONS,
             "Unexpected selected identities/count")
+    require(set(GROUPS) == {"domain-12", "host-2", "ui-2"}
+            and len(REUSED_GROUPS) == HISTORICAL_TOTAL and len(HISTORICAL_GROUPS) == COMBINED_TOTAL,
+            "Followup/historical partition drift")
     return {group: list(spec["cases"]) for group, spec in GROUPS.items()}
 
 
@@ -206,12 +222,102 @@ def validate_followup_sources(source_files=None, *, pending=False):
     if source_files is not None:
         require(source_files == current, "Prior source manifest differs from current candidate")
     validate_version_boundary()
+    validate_historical_sources(pending=pending)
     if not pending:
         require(not status, "Cloud requires clean source")
         require(set(current) <= set(after) and set(after) - set(before) == NEW, "Cloud candidate not committed")
     else:
         changed |= working_paths | {p for p in NEW if (ROOT / p).is_file()}
     return dict(source_status="pending" if pending else "clean", changed_paths=sorted(changed))
+
+
+HOST_SOURCE = "Tests/YueJingHostTests/EPUBReaderHostTests.swift"
+FOLLOWUP_CONFIG = frozenset({HOST_SOURCE, WORKFLOW_PATH, "scripts/run_epub_freeze_validation.py",
+                             "scripts/check_epub_freeze_validation.py", "docs/EPUB_FREEZE_RELEASE.md"})
+
+
+def swift_function_span(text, name):
+    """Bound a unique Swift function block; comments/string contents cannot end it."""
+    declarations = list(re.finditer(r"\bfunc\s+" + re.escape(name) + r"\s*\(", text))
+    require(len(declarations) == 1, "Missing/duplicate Swift function")
+    start = text.index("{", declarations[0].end())
+    depth, i = 1, start + 1
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i); i = len(text) if end < 0 else end + 1
+        elif text.startswith("/*", i):
+            comments = 1; i += 2
+            while comments and i < len(text):
+                if text.startswith("/*", i): comments += 1; i += 2
+                elif text.startswith("*/", i): comments -= 1; i += 2
+                else: i += 1
+            require(comments == 0, "Unterminated Swift comment")
+        elif text[i] == '"':
+            quote = '"""' if text.startswith('"""', i) else '"'; i += len(quote)
+            while i < len(text) and not text.startswith(quote, i):
+                i += 2 if text[i] == "\\" else 1
+            require(i < len(text), "Unterminated Swift string"); i += len(quote)
+        else:
+            if text[i] == "{": depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0: return start, i + 1
+            i += 1
+    raise ValueError("Unterminated Swift function")
+
+
+def validate_host_diagnostic_isolation(original, candidate):
+    require(compat.digest_bytes(candidate.encode()) == CANDIDATE_SHA256[HOST_SOURCE], "Unapproved Host diagnostic bytes")
+    name = GROUPS["host-2"]["cases"][0]
+    old_start, old_end = swift_function_span(original, name)
+    start, end = swift_function_span(candidate, name)
+    require(original[:old_start] == candidate[:start] and original[old_end:] == candidate[end:],
+            "Reused Host methods/shared helpers must be byte-identical")
+    old_body, body = original[old_start:old_end], candidate[start:end]
+    call = "                    try await waitUntilReady(model: model, expectedToken: token)\n"
+    opening = "                    do {\n" + "    " + call
+    closing = "                    }\n                    let deadline"
+    require(body.count(opening) == body.count(closing) == old_body.count(call) == 1, "Host diagnostic block boundary drift")
+    first = body.index(opening); last = body.index(closing, first) + len("                    }\n")
+    diagnostic = body[first:last]
+    require("timeout: 2)" in diagnostic and "throw error // Preserve the original failure" in diagnostic
+            and diagnostic.count("waitUntilReady(") == 1, "Host failure must retain bounded diagnostics/rethrow")
+    require(body[:first] + call + body[last:] == old_body, "Host diagnostic changed actions/assertions/waits")
+
+
+def historical_source_manifest():
+    entries = tree(HISTORICAL_SOURCE)
+    paths = [p for p in entries if p == "project.yml" or
+             (p.split("/")[0] in ("App", "Sources", "Tests", "scripts", ".github")
+              and Path(p).suffix in (".swift", ".py", ".yml", ".txt"))]
+    # Batch cat-file avoids hundreds of git subprocesses without reading private files.
+    objects = [entries[p][2] for p in paths]
+    raw = subprocess.check_output(["git", "cat-file", "--batch"], input=("\n".join(objects) + "\n").encode(), cwd=ROOT, timeout=30)
+    position, result = 0, {}
+    for path, oid in zip(paths, objects):
+        end = raw.index(b"\n", position); header = raw[position:end].decode().split()
+        require(header[:2] == [oid, "blob"], "Historical source blob mismatch")
+        size = int(header[2]); data = raw[end + 1:end + 1 + size]
+        require(len(data) == size, "Truncated historical source blob")
+        result[path] = compat.digest_bytes(data); position = end + 2 + size
+    require(position == len(raw), "Extra historical source bytes")
+    return result
+
+
+def validate_historical_sources(source_files=None, *, pending=False):
+    baseline = historical_source_manifest()
+    if source_files is not None:
+        require(source_files == baseline, "Historical source manifest differs from fixed git revision")
+    current = v.candidate_files()
+    require(set(current) == set(baseline), "Followup source inventory drift")
+    require(all(current[p] == digest for p, digest in baseline.items() if p not in FOLLOWUP_CONFIG),
+            "Product/Domain/UI/shared source drift relative to historical21")
+    before, after = tree(HISTORICAL_SOURCE), tree("HEAD")
+    require(set(before) == set(after) and all(before[p] == after[p] for p in before if p not in FOLLOWUP_CONFIG),
+            "Committed changes outside followup boundary")
+    original = git("show", HISTORICAL_SOURCE + ":" + HOST_SOURCE).decode("utf-8")
+    validate_host_diagnostic_isolation(original, (ROOT / HOST_SOURCE).read_text(encoding="utf-8"))
+    return baseline
 
 
 def dispatch_context():
@@ -282,9 +388,9 @@ def scope_receipt():
         selected=selection(),
         selected_declarations=0 if dispatch["phase"] == "delivery" else TOTAL,
         native_tests_planned=0 if dispatch["phase"] == "delivery" else EXECUTIONS,
-        reused_native_planned=EXECUTIONS if dispatch["phase"] == "delivery" else 0,
-        combined_target_declarations=TOTAL,
-        combined_target_executions=EXECUTIONS,
+        reused_native_planned=COMBINED_EXECUTIONS if dispatch["phase"] == "delivery" else HISTORICAL_EXECUTIONS,
+        combined_target_declarations=COMBINED_TOTAL,
+        combined_target_executions=COMBINED_EXECUTIONS,
         full_inventory_declared=INVENTORY_TOTAL,
         full_inventory_executions=INVENTORY_EXECUTIONS,
         files=v.candidate_files(),
@@ -376,27 +482,35 @@ def parameter_result(document):
     """Xcode16 test-results/tests: require both real Bool argument leaves, not parent-only green."""
     name = next(iter(inventory.PARAMETERIZED))
     found = []
+    parents = []
 
     def visit(node, inside=False):
         require(isinstance(node, dict), "Malformed xcresult test node")
         signature = name + inventory.PARAMETERIZED[name]["signature"]
         labels = [str(node.get(key, "")) for key in ("nodeIdentifier", "name")]
-        inside = inside or any(label == signature or label.endswith("/" + signature) for label in labels)
+        matches = any(label == signature or label.endswith("/" + signature) for label in labels)
+        if matches and not inside:
+            parents.append(node)
+        inside = inside or matches
         if inside:
             require(node.get("result") == "Passed", "Failed/skipped parameter ancestor")
         children = node.get("children", [])
         require(isinstance(children, list), "Malformed xcresult children")
         if inside and not children:
-            values = re.findall(r"\b(false|true)\b", str(node.get("name", "")))
-            require(len(values) == 1 and node.get("result") == "Passed", "Missing/failed/skipped parameter result")
-            found.append(values[0])
+            argument = str(node.get("name", "")).strip()
+            if argument.startswith("(") and argument.endswith(")"):
+                argument = argument[1:-1]
+            value = re.fullmatch(r"(?:symlink:\s*)?(false|true)", argument)
+            require(value is not None and node.get("result") == "Passed", "Missing/failed/skipped parameter result")
+            found.append(value[1])
         for child in children:
             visit(child, inside)
 
     require(isinstance(document, dict) and isinstance(document.get("testNodes"), list), "Missing xcresult test tree")
     for node in document["testNodes"]:
         visit(node)
-    require(sorted(found) == ["false", "true"], "Expected exactly two successful Bool argument results")
+    require(len(parents) == 1 and sorted(found) == ["false", "true"],
+            "Expected one declaration with exactly two successful Bool argument results")
     return dict(name=name, passed_arguments=sorted(found))
 
 
@@ -475,9 +589,12 @@ def run_group(group, destination, *, checked_scope=None):
     raw = log.read_bytes()
     if code != 0 and (b"** BUILD FAILED **" in raw or b"** TEST BUILD FAILED **" in raw) and b" started." not in raw:
         raise GroupPrerequisiteError("Shared test build failed; remaining target cases blocked")
+    # Keep both raw exports before parsing or asserting counts, including failed tests.
+    # A rejected result must remain diagnosable without another cloud test invocation.
+    retain_xcresult_exports(folder, bundle)
     parsed = parse_log(group, raw, code, timed_out)
-    verify_group_xcresult(GROUPS[group], bundle)
-    parsed["parameter_xcresult"] = parameter_evidence(group, folder, bundle, export=True)
+    verify_group_xcresult(GROUPS[group], bundle, exported_folder=folder)
+    parsed["parameter_xcresult"] = parameter_evidence(group, folder, bundle)
     require(live_scope() == scope, "Source changed during native execution")
     write(folder / "counts.json", parsed)
     print(json.dumps(parsed, indent=2))
@@ -599,10 +716,14 @@ def _repo_matches(run, key):
             f"Run {key} differs from {REPO}")
 
 
-def validate_prior_run_and_artifact(prior_id, run, artifact, expected_sha, current_run_id):
+def validate_prior_run_and_artifact(prior_id, run, artifact, expected_sha, current_run_id, *, fixed_historical=False):
     require(isinstance(run, dict) and isinstance(artifact, dict), "Invalid prior API metadata")
     require(re.fullmatch(r"[1-9][0-9]*", str(prior_id)), "Invalid prior run ID")
     require(str(prior_id) != str(current_run_id), "Self-referential prior run rejected")
+    if fixed_historical:
+        require(int(prior_id) == HISTORICAL_RUN and expected_sha == HISTORICAL_SOURCE, "Only fixed historical run may fail")
+        require(artifact.get("id") == HISTORICAL_ARTIFACT and artifact.get("size_in_bytes") == HISTORICAL_BYTES
+                and artifact.get("digest") == "sha256:" + HISTORICAL_SHA256, "Pinned historical artifact mismatch")
     require(run.get("id") == int(prior_id)
             and run.get("head_sha") == expected_sha
             and run.get("run_attempt") == 1
@@ -611,7 +732,7 @@ def validate_prior_run_and_artifact(prior_id, run, artifact, expected_sha, curre
             and run.get("event") == "workflow_dispatch"
             and run.get("head_branch") == "main"
             and run.get("status") == "completed"
-            and run.get("conclusion") == "success",
+            and run.get("conclusion") == ("failure" if fixed_historical else "success"),
             "Unexpected prior validation run identity")
     _repo_matches(run, "repository")
     _repo_matches(run, "head_repository")
@@ -651,7 +772,7 @@ def extract_selected_members(zip_path, members, wanted_names, dest_root):
 
 
 def _verify_archive_receipt(folder, *, expected_run_id, expected_source_commit,
-                            expected_artifact_id=None, expected_bytes=None, expected_sha256=None):
+                            expected_artifact_id=None, expected_bytes=None, expected_sha256=None, fixed_historical=False):
     require(folder.is_dir() and not folder.is_symlink(), "Missing reused folder: " + str(folder))
     require({p.name for p in folder.iterdir()} == {"api-run.json", "api-artifact.json", "archive-receipt.json", "archive.zip", "evidence"},
             "Unexpected files in reused folder: " + str(folder))
@@ -681,7 +802,7 @@ def _verify_archive_receipt(folder, *, expected_run_id, expected_source_commit,
         live_run = github_api_json(f"/actions/runs/{expected_run_id}")
         live_artifact = github_api_json(f"/actions/artifacts/{artifact['id']}")
         validate_prior_run_and_artifact(expected_run_id, live_run, live_artifact, expected_source_commit,
-                                        os.environ.get("GITHUB_RUN_ID"))
+                                        os.environ.get("GITHUB_RUN_ID"), fixed_historical=fixed_historical)
         require(live_artifact["digest"] == artifact["digest"]
                 and live_artifact["size_in_bytes"] == artifact["size_in_bytes"], "API artifact identity/digest drift")
     for rel, meta in retained.items():
@@ -806,7 +927,7 @@ def _verify_reused_group_settings(kind, target, group_folder, ev_dir, expected_s
 
 
 def _verify_reused_group(group, spec, ev_dir, members, *, expected_scope, expected_source, expected_run_id,
-                         destination, prefix=""):
+                         destination, prefix="", verify_native=True):
     target, kind = spec["target"], spec["kind"]
     folder = ev_dir / "epub-freeze" / group
     require(folder.is_dir() and not folder.is_symlink(), "Missing reused group directory: " + group)
@@ -839,7 +960,11 @@ def _verify_reused_group(group, spec, ev_dir, members, *, expected_scope, expect
     log_path = folder / f"{target}.log"
     require(log_path.is_file() and not log_path.is_symlink(), "Missing reused log: " + group)
     parsed = parse_log_for_spec(group, spec, log_path.read_bytes(), 0, False)
-    verify_group_xcresult(spec, folder / f"{target}.xcresult")
+    if verify_native:
+        verify_group_xcresult(spec, folder / f"{target}.xcresult")
+    else:
+        require(os.environ.get("GITHUB_ACTIONS") != "true" and group in REUSED_GROUPS,
+                "Offline structural replay cannot bypass current/parameterized native parsing")
     parsed["parameter_xcresult"] = parameter_evidence(
         group, folder, folder / f"{target}.xcresult", group_specs={group: spec})
     require(json.dumps(load(folder / "counts.json"), sort_keys=True) == json.dumps(parsed, sort_keys=True),
@@ -856,22 +981,58 @@ def xcresult_export(bundle, section):
         working = Path(temporary) / bundle.name
         shutil.copytree(bundle, working)
         return subprocess.check_output(["xcrun", "xcresulttool", "get", "test-results", section,
-                                        "--path", str(working)], timeout=60)
+                                        "--path", str(working)], timeout=60, stderr=subprocess.PIPE)
 
 
-def verify_group_xcresult(spec, bundle):
+def retain_xcresult_exports(folder, bundle):
+    """Retain unmodified output (even invalid JSON), plus raw tool failure streams."""
+    first_error = None
+    for section in ("tests", "summary"):
+        path = folder / ("xcresult-" + section + ".json")
+        require(not path.exists() and not path.is_symlink(), "Existing xcresult export; never overwrite")
+        try:
+            raw = xcresult_export(bundle, section)
+            with path.open("xb") as stream:
+                stream.write(raw)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            # Do not fabricate valid JSON/counts from a failed or partial export.
+            for suffix, payload in (("stdout", getattr(error, "output", None)),
+                                    ("stderr", getattr(error, "stderr", None))):
+                if payload is not None:
+                    with (folder / ("xcresult-" + section + "." + suffix)).open("xb") as stream:
+                        stream.write(payload.encode("utf-8") if isinstance(payload, str) else payload)
+            write(folder / ("xcresult-" + section + "-export-error.json"),
+                  dict(error_type=type(error).__name__, error=str(error),
+                       returncode=getattr(error, "returncode", None)))
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+def verify_group_xcresult(spec, bundle, *, exported_folder=None):
     paging.require_xcresult(bundle)
     require((bundle / "Data").is_dir() and any(p.is_file() and p.stat().st_size > 0
             for p in (bundle / "Data").rglob("*")), "Missing xcresult Data")
-    tests = json.loads(xcresult_export(bundle, "tests"))
+    def exported(section):
+        if exported_folder is None:
+            return xcresult_export(bundle, section)
+        path = exported_folder / ("xcresult-" + section + ".json")
+        require(path.is_file() and not path.is_symlink(), "Missing regular xcresult export")
+        return path.read_bytes()
+    tests = json.loads(exported("tests"))
     name = spec["cases"][0]
     signature = name + inventory.PARAMETERIZED.get(name, {}).get("signature", "()")
-    summary = json.loads(xcresult_export(bundle, "summary"))
-    require(summary.get("failedTests") == summary.get("skippedTests") == 0
-            and type(summary.get("totalTestCount")) is int
-            and summary.get("totalTestCount") == summary.get("passedTests")
-            and summary["totalTestCount"] == len(inventory.PARAMETERIZED.get(name, {}).get("values", [None])),
-            "xcresult total/pass/failure/skip mismatch")
+    summary = json.loads(exported("summary"))
+    # Summary presentation may count one declaration or its two argument runs.
+    # Neither is expansion proof: the exact two successful Bool leaves below are
+    # mandatory in BOTH cases. Non-parameterized cases still require exactly one.
+    summary_counts = {len(spec["cases"]), len(inventory.PARAMETERIZED.get(name, {}).get("values", [None]))}
+    require(all(type(summary.get(key)) is int for key in ("totalTestCount", "passedTests", "failedTests", "skippedTests"))
+            and summary["failedTests"] == summary["skippedTests"] == 0
+            and summary["totalTestCount"] == summary["passedTests"]
+            and summary["totalTestCount"] in summary_counts,
+            "xcresult declaration/argument total/pass/failure/skip mismatch")
     matches = []
     def visit(node):
         require(isinstance(node, dict), "Invalid xcresult node")
@@ -894,8 +1055,121 @@ def verify_group_xcresult(spec, bundle):
     return tests
 
 
+def validate_historical_run_and_artifact(run, artifact):
+    validate_prior_run_and_artifact(HISTORICAL_RUN, run, artifact, HISTORICAL_SOURCE,
+                                    os.environ.get("GITHUB_RUN_ID", "local"), fixed_historical=True)
+
+
+def verify_historical_evidence(folder, *, expected_packages=None, verify_native=True):
+    """Only the fixed failed Round2 run's independently passing21; retain all24.
+
+    verify_native=False is local STRUCTURAL REPLAY ONLY, never a qualification.
+    The pinned archive's original receipts/bundles are never rewritten.
+    """
+    require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud requires native bundle parsing")
+    run, artifact, receipt = _verify_archive_receipt(folder, expected_run_id=HISTORICAL_RUN,
+        expected_source_commit=HISTORICAL_SOURCE, expected_artifact_id=HISTORICAL_ARTIFACT,
+        expected_bytes=HISTORICAL_BYTES, expected_sha256=HISTORICAL_SHA256, fixed_historical=True)
+    validate_historical_run_and_artifact(run, artifact)
+    require(receipt["members"] == receipt["retained_files"], "Every historical archive member must be retained")
+    members, ev = receipt["members"], folder / "evidence"
+    require(not any(p.startswith("reused-evidence/") for p in members), "Historical chain cannot recurse")
+    require({p.name for p in (ev / "epub-freeze").iterdir()} == set(HISTORICAL_GROUPS), "Historical24 inventory drift")
+    scope = load(ev / "epub-freeze-scope.json")
+    expected = dict(scope=HISTORICAL_SCOPE, source_commit=HISTORICAL_SOURCE, source_status="clean",
+        baseline_commit=BASE, run_id=str(HISTORICAL_RUN), run_attempt="1", phase="validation",
+        prior_validation_run="", build_ipa=False, allow_unqualified_ipa=False, version=VERSION, build=BUILD,
+        selected={g: s["cases"] for g, s in HISTORICAL_GROUPS.items()}, selected_declarations=24,
+        native_tests_planned=25, reused_native_planned=0, combined_target_declarations=24,
+        combined_target_executions=25, full_inventory_declared=241, full_inventory_executions=242)
+    require(all(k in scope and json.dumps(scope[k], sort_keys=True) == json.dumps(value, sort_keys=True)
+                for k, value in expected.items()), "Historical scope/selection/phase mismatch")
+    event = load(ev / "dispatch-event.json").get("inputs", {})
+    require(sha(ev / "dispatch-event.json") == scope["dispatch_event_sha256"]
+            and event.get("validation_scope") == HISTORICAL_SCOPE and event.get("build_ipa") in (False, "false")
+            and event.get("allow_unqualified_ipa") in (False, "false") and event.get("prior_validation_run", "") in ("", None),
+            "Historical raw dispatch mismatch")
+    sources = load(ev / "candidate-sources.json")
+    require(all(sources.get(k) == expected[k] for k in ("source_commit", "run_id", "run_attempt"))
+            and sources.get("files") == scope.get("files"), "Historical candidate identity/scope mismatch")
+    validate_historical_sources(sources.get("files"))
+    packages = _verify_toolchain_and_deps(ev, HISTORICAL_SOURCE, expected_packages=expected_packages)
+    sim, linkage = _verify_simulator_and_linkage(ev, members, HISTORICAL_SOURCE, HISTORICAL_RUN)
+    destination = "platform=iOS Simulator,id=" + sim["udid"]
+    # All three excluded results remain in the pinned archive, but are never passed
+    # through the reuse verifier or counted. Current domain12 must execute Bool2 anew.
+    for group in GROUPS:
+        require((ev / "epub-freeze" / group / "failure.json").is_file(), "Excluded Round2 failure missing")
+        require(not (ev / "epub-freeze" / group / "counts.json").exists(), "Excluded Round2 case gained a receipt")
+    groups = [_verify_reused_group(g, spec, ev, members, expected_scope=HISTORICAL_SCOPE,
+              expected_source=HISTORICAL_SOURCE, expected_run_id=HISTORICAL_RUN, destination=destination,
+              verify_native=verify_native) for g, spec in REUSED_GROUPS.items()]
+    require(sum(g["executions"] for g in groups) == HISTORICAL_EXECUTIONS
+            and len({n for g in groups for n in g["passed"]}) == HISTORICAL_TOTAL, "Historical21 count drift")
+    return dict(run_id=str(HISTORICAL_RUN), run_attempt="1", source_commit=HISTORICAL_SOURCE,
+        scope=HISTORICAL_SCOPE, artifact_id=HISTORICAL_ARTIFACT, archive_sha256=HISTORICAL_SHA256,
+        archive_bytes=HISTORICAL_BYTES, workflow_conclusion="failure", excluded_groups=list(GROUPS),
+        declarations_passed=HISTORICAL_TOTAL, executions_passed=HISTORICAL_EXECUTIONS, groups=groups,
+        packages=packages, simulator=sim, simulator_linkage_sha256=linkage,
+        native_bundle_parse="passed" if verify_native else "not_executed_local_structural_replay",
+        qualified=verify_native)
+
+
+def retain_historical_evidence(folder, offline=None, *, expected_packages=None, verify_native=True):
+    require(offline is None or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud offline history forbidden")
+    if offline is None:
+        run = github_api_json(f"/actions/runs/{HISTORICAL_RUN}")
+        artifact = _select_artifact_from_payload(github_api_json(f"/actions/runs/{HISTORICAL_RUN}/artifacts"),
+                                                  HISTORICAL_NAME, HISTORICAL_ARTIFACT)
+        validate_historical_run_and_artifact(run, artifact)
+        archive = REUSED_STAGING / f"{HISTORICAL_ARTIFACT}.zip"
+        github_download_artifact_zip(HISTORICAL_ARTIFACT, archive)
+    else:
+        run, artifact = _load_offline_run_and_artifact(offline["run_json"], offline["artifact_json"],
+                                                     HISTORICAL_NAME, HISTORICAL_ARTIFACT)
+        validate_historical_run_and_artifact(run, artifact)
+        archive = Path(offline["zip_path"])
+    require(archive.is_file() and not archive.is_symlink() and archive.stat().st_size == HISTORICAL_BYTES
+            and sha(archive) == HISTORICAL_SHA256, "Pinned historical ZIP size/hash mismatch")
+    require(not folder.exists(), "Never overwrite retained historical evidence")
+    members = safe_zip_members(archive)
+    folder.mkdir(parents=True)
+    shutil.copyfile(archive, folder / "archive.zip")
+    write(folder / "api-run.json", run); write(folder / "api-artifact.json", artifact)
+    retained = extract_selected_members(archive, members, set(members), folder / "evidence")
+    # This is a transport manifest only, not a replacement for any native receipt.
+    write(folder / "archive-receipt.json", dict(run_id=str(HISTORICAL_RUN), run_attempt="1",
+        source_commit=HISTORICAL_SOURCE, artifact_id=HISTORICAL_ARTIFACT, archive_bytes=HISTORICAL_BYTES,
+        archive_sha256=HISTORICAL_SHA256, member_count=len(members), members=members, retained_files=retained))
+    return verify_historical_evidence(folder, expected_packages=expected_packages, verify_native=verify_native)
+
+
+def validation_reuse_receipt(scope, historical):
+    require(historical.get("qualified") is True and historical.get("native_bundle_parse") == "passed"
+            and historical.get("executions_passed") == HISTORICAL_EXECUTIONS
+            and historical.get("archive_sha256") == HISTORICAL_SHA256, "History not qualified")
+    return dict(scope=SCOPE, phase="validation", source_commit=scope["source_commit"], run_id=scope["run_id"],
+                run_attempt="1", passed=True, provenance_valid=True, reused_native_passed=HISTORICAL_EXECUTIONS,
+                reused_declarations=HISTORICAL_TOTAL, reused_historical_passed=HISTORICAL_EXECUTIONS, historical=historical)
+
+
+def verify_validation_reuse_gate(saved, scope, historical):
+    require(json.dumps(saved, sort_keys=True) == json.dumps(validation_reuse_receipt(scope, historical), sort_keys=True),
+            "Fixed historical reuse receipt drift")
+
+
+def verify_validation_reuse(scope, packages):
+    require(REUSED_OUT.is_dir() and not REUSED_OUT.is_symlink()
+            and {p.name for p in REUSED_OUT.iterdir()} == {HISTORICAL_FOLDER, REUSED_GATE_JSON.name},
+            "Validation must contain only fixed historical21")
+    historical = verify_historical_evidence(REUSED_OUT / HISTORICAL_FOLDER, expected_packages=packages)
+    verify_validation_reuse_gate(load(REUSED_GATE_JSON), scope, historical)
+    return historical
+
+
 def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_shared_sources=True):
     """Verify prior validation provenance strictly; report per-case statuses separately."""
+    require(check_shared_sources or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud prior source verification cannot be skipped")
     prior_id = scope["prior_validation_run"]
     run, artifact, receipt = _verify_archive_receipt(
         prior_root,
@@ -904,7 +1178,12 @@ def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_s
     )
     validate_prior_run_and_artifact(prior_id, run, artifact, scope["source_commit"], scope["run_id"])
     ev_dir = prior_root / "evidence"
-    require(not any(m.startswith("reused-evidence/") for m in receipt["members"]), "Recursive/historical reuse rejected")
+    fixed_root = ev_dir / "reused-evidence" / HISTORICAL_FOLDER
+    require({p.name for p in (ev_dir / "reused-evidence").iterdir()} == {HISTORICAL_FOLDER, "reused-evidence-gate.json"},
+            "Only the single fixed historical chain is permitted")
+    historical = verify_historical_evidence(fixed_root, expected_packages=expected_packages)
+    verify_validation_reuse_gate(load(ev_dir / "reused-evidence/reused-evidence-gate.json"),
+                                 dict(source_commit=scope["source_commit"], run_id=str(prior_id)), historical)
     require(not ({"native-test-gate.json", "epub-reading-gate.json", "epub-freeze-package.json"} & set(receipt["members"])),
             "Mixed prior qualification/package evidence")
     require(set(receipt["retained_files"]) == _prior_wanted_members(receipt["members"]), "Prior retained manifest incomplete/extra")
@@ -918,7 +1197,7 @@ def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_s
             and prior_scope.get("native_tests_planned") == EXECUTIONS
             and prior_scope.get("combined_target_declarations") == COMBINED_TOTAL
             and prior_scope.get("combined_target_executions") == COMBINED_EXECUTIONS
-            and prior_scope.get("reused_native_planned") == 0
+            and prior_scope.get("reused_native_planned") == HISTORICAL_EXECUTIONS
             and prior_scope.get("full_inventory_declared") == INVENTORY_TOTAL
             and prior_scope.get("full_inventory_executions") == INVENTORY_EXECUTIONS,
             "Prior validation selection/count drift")
@@ -1034,13 +1313,15 @@ def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_s
                     and type(prior_gate.get("native_tests_executed_this_run")) is int
                     and prior_gate.get("native_tests_executed_this_run") == EXECUTIONS
                     and json.dumps(prior_gate.get("groups"), sort_keys=True) == json.dumps(parsed_groups, sort_keys=True)
-                    and prior_gate.get("reused_native_passed") == 0
+                    and prior_gate.get("reused_native_passed") == HISTORICAL_EXECUTIONS
+                    and prior_gate.get("reused_historical_passed") == HISTORICAL_EXECUTIONS
+                    and prior_gate.get("reused_historical") == historical
                     and prior_gate.get("allow_unqualified_ipa") is False
                     and prior_gate.get("build_ipa") is False
                     and prior_gate.get("prior_validation_run") == ""
                     and prior_gate.get("version") == VERSION and prior_gate.get("build") == BUILD
                     and prior_gate.get("full_regression_passed") is False
-                    and prior_gate.get("unselected_executions") == INVENTORY_EXECUTIONS - EXECUTIONS
+                    and prior_gate.get("unselected_executions") == INVENTORY_EXECUTIONS - COMBINED_EXECUTIONS
                     and prior_gate.get("verified_declarations") == COMBINED_TOTAL
                     and prior_gate.get("run_attempt") == "1"
                     and prior_gate.get("verified_passed") == COMBINED_EXECUTIONS
@@ -1062,6 +1343,8 @@ def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_s
         errors=errors,
         declarations_passed=len(parsed_groups) if passed else None,
         executions_passed=sum(g["executions"] for g in parsed_groups) if passed else None,
+        combined_executions_passed=COMBINED_EXECUTIONS if passed else None,
+        historical=historical,
         simulator=sim,
         simulator_boot_sha256=sha(ev_dir / "simulator-boot.json") if (ev_dir / "simulator-boot.json").is_file() else None,
         simulator_linkage_sha256=sim_linkage_sha,
@@ -1072,46 +1355,9 @@ def inspect_prior_evidence(prior_root, scope, *, expected_packages=None, check_s
 
 
 def _prior_wanted_members(members):
-    wanted = {
-        "epub-freeze-scope.json",
-        "dispatch-event.json",
-        "candidate-sources.json",
-        "toolchain.log",
-        "xcodegen.log",
-        "dependency-resolution.json",
-    }
-    for optional in (
-        "Package.resolved",
-        "effective-test-settings.json",
-        "simulator-selection.json",
-        "simulator-boot.json",
-        "webkit-simulator-linkage/verification.json",
-        "case-results.json",
-        "epub-freeze-gate.json",
-        "case-scheduling-error.json",
-    ):
-        if optional in members:
-            wanted.add(optional)
-    for name in members:
-        if name.startswith("webkit-simulator-linkage/"):
-            wanted.add(name)
-    for group, spec in GROUPS.items():
-        target = spec["target"]
-        base = f"epub-freeze/{group}/"
-        for candidate in (
-            base + "selection.json",
-            base + "execution.json",
-            base + "counts.json",
-            base + "failure.json",
-            base + f"{target}.log",
-            base + f"{target}-settings.json",
-            base + f"{target}.xcresult/Info.plist",
-            base + "xcresult-tests.json",
-        ):
-            if candidate in members:
-                wanted.add(candidate)
-        wanted.update(name for name in members if name.startswith(base + f"{target}.xcresult/"))
-    return wanted
+    # Retain every member, including failures/extra evidence: exact archive binding
+    # is checked before any semantic selection. No receipt regeneration or filtering.
+    return set(members)
 
 
 def _load_offline_run_and_artifact(run_json_path, artifact_json_path, expected_name, expected_id=None):
@@ -1121,18 +1367,23 @@ def _load_offline_run_and_artifact(run_json_path, artifact_json_path, expected_n
     return run, artifact
 
 
-def reuse_evidence(*, require_dependencies=True, offline_prior=None, check_shared_sources=True):
-    """Validation downloads nothing; delivery accepts only an authenticated initial run."""
+def reuse_evidence(*, require_dependencies=True, offline_prior=None, offline_historical=None, check_shared_sources=True):
+    """New4 plus fixed historical21; delivery binds exactly that one-level chain."""
     scope = live_scope()
     require(os.environ.get("GITHUB_ACTIONS") != "true" or
-            (require_dependencies and offline_prior is None and check_shared_sources), "Cloud replay/bypass forbidden")
-    if scope["phase"] == "validation":
-        require(offline_prior is None and not REUSED_OUT.exists(), "Validation cannot reuse evidence")
-        return dict(scope=SCOPE, phase="validation", reused_native_passed=0)
+            (require_dependencies and offline_prior is None and offline_historical is None and check_shared_sources),
+            "Cloud replay/bypass forbidden")
     expected_packages = compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False) if require_dependencies else None
     require(not REUSED_OUT.exists(), "Existing reused evidence; use a fresh dispatch")
     REUSED_OUT.mkdir(parents=True)
-    # Only this batch's 25 fresh executions may qualify delivery.
+    if scope["phase"] == "validation":
+        require(offline_prior is None, "Validation cannot reuse arbitrary prior")
+        historical = retain_historical_evidence(REUSED_OUT / HISTORICAL_FOLDER, offline_historical,
+                                                expected_packages=expected_packages)
+        receipt = validation_reuse_receipt(scope, historical)
+        write(REUSED_GATE_JSON, receipt)
+        return receipt
+    require(offline_historical is None, "Delivery historical evidence must be inside successful prior")
     prior_id = scope["prior_validation_run"]
     expected_prior_name = f"task3-evidence-{prior_id}-{scope['source_commit']}"
     if offline_prior is not None:
@@ -1184,8 +1435,9 @@ def reuse_evidence(*, require_dependencies=True, offline_prior=None, check_share
         run_attempt="1",
         passed=prior_summary["passed"],
         provenance_valid=True,
-        reused_native_passed=EXECUTIONS if prior_summary["passed"] else None,
-        reused_declarations=TOTAL if prior_summary["passed"] else None,
+        reused_native_passed=COMBINED_EXECUTIONS if prior_summary["passed"] else None,
+        reused_declarations=COMBINED_TOTAL if prior_summary["passed"] else None,
+        reused_historical_passed=HISTORICAL_EXECUTIONS if prior_summary["passed"] else None,
         reused_prior_passed=EXECUTIONS if prior_summary["passed"] else None,
         errors=prior_summary["errors"],
         prior=prior_summary,
@@ -1299,20 +1551,34 @@ def summarize(*, publish=False):
     counts = {status: sum(row["status"] == status for row in rows)
               for status in ("passed", "failed", "timed_out", "error", "blocked", "not_run")}
     native_executed_passed = (EXECUTIONS if counts["passed"] == TOTAL else None) if phase == "validation" else 0
-    reused_passed = 0 if phase == "validation" else prior_summary["verified_passed"]
-    combined_passed = native_executed_passed if phase == "validation" else reused_passed
+    historical_summary = None
+    if phase == "validation":
+        try:
+            saved = load(REUSED_GATE_JSON)
+            historical_summary = saved["historical"]
+            verify_validation_reuse_gate(saved, _optional_json(SCOPE_JSON) or {}, historical_summary)
+        except (ValueError, OSError, KeyError, TypeError):
+            historical_summary = None
+        reused_passed = HISTORICAL_EXECUTIONS if historical_summary else None
+        combined_passed = COMBINED_EXECUTIONS if historical_summary and native_executed_passed == EXECUTIONS else None
+    else:
+        reused_passed = COMBINED_EXECUTIONS if prior_summary["status"] == "passed" else None
+        combined_passed = reused_passed
 
-    # All 15 UI declarations: precisely three selected, twelve unselected.
+    # Complete UI inventory distinguishes one fresh selection, two fixed reuses,
+    # and twelve unselected declarations; never relabel historical work as new.
     ui_cases = {row["case"]: row for row in (rows if phase == "validation" else prior_summary["cases"])
                 if row["kind"] == "ui"}
     ui_rows = []
     for target in ("YueJingEPUBUITests", "YueJingUITests"):
         for case in inventory.expected_names(target):
             selected = case in SELECTED_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"]
-            row = dict(ui_cases.get(case, dict(target=target, case=case, status="not_run" if selected else "unselected")))
-            row.update(current_selection="selected" if selected else "unselected",
-                       evidence_origin="current" if phase == "validation" else "prior",
-                       reason=row.get("reason", "Unselected; not counted as passed" if not selected else "Prior evidence not verified"))
+            reused = case in HISTORICAL_FILES["YueJingEPUBUITests/EPUBFlowUITests.swift"] and not selected
+            row = dict(ui_cases.get(case, dict(target=target, case=case, status=("reused" if reused and reused_passed else
+                       "not_verified" if reused else "not_run" if selected else "unselected"))))
+            row.update(current_selection="selected" if selected and phase == "validation" else "reused" if selected or reused else "unselected",
+                       evidence_origin="historical21" if reused else "current" if phase == "validation" else "prior4",
+                       reason=row.get("reason", "Fixed historical reuse" if reused else "Unselected; not counted as passed"))
             ui_rows.append(row)
 
     report = dict(
@@ -1331,9 +1597,11 @@ def summarize(*, publish=False):
         counts=counts,
         cases=rows,
         reused_prior=prior_summary,
+        reused_historical=historical_summary,
+        reused_historical_passed=HISTORICAL_EXECUTIONS if reused_passed is not None else None,
         full_inventory_declared=INVENTORY_TOTAL,
         full_inventory_executions=INVENTORY_EXECUTIONS,
-        unselected_executions=INVENTORY_EXECUTIONS - EXECUTIONS,
+        unselected_executions=INVENTORY_EXECUTIONS - COMBINED_EXECUTIONS,
         ui_inventory=ui_rows,
         scheduling_error=scheduling,
         qualification="DISPLAY_ONLY_NOT_RELEASE_QUALIFICATION",
@@ -1348,7 +1616,7 @@ def summarize(*, publish=False):
              "| Case | Status | Reason |", "|---|---|---|"]
     for row in (rows if phase == "validation" else prior_summary["cases"]):
         lines.append(f"| {cell(row['group'] + ': ' + row['case'])} | {cell(row['status'])} | {cell(row['reason'])} |")
-    lines += ["", "### Complete UI inventory (3 selected / 12 unselected)", "",
+    lines += ["", "### Complete UI inventory (1 fresh / 2 fixed reuse / 12 unselected in validation)", "",
               "| Case | Selection | Status |", "|---|---|---|"]
     for row in ui_rows:
         lines.append(f"| {cell(row['case'])} | {cell(row['current_selection'])} | {cell(row['status'])} |")
@@ -1386,7 +1654,7 @@ def qualification():
     require(not (OUT / "native-test-gate.json").exists() and not (OUT / "epub-reading-gate.json").exists(), "Mixed qualification")
     packages = compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
     if scope["phase"] == "validation":
-        require(not REUSED_OUT.exists(), "Initial validation cannot contain reused evidence")
+        historical = verify_validation_reuse(scope, packages)
         require(not (OUT / "case-scheduling-error.json").exists() and
                 not any((NATIVE_OUT / group / "failure.json").exists() for group in GROUPS),
                 "Failed/blocked cases cannot qualify even if a counts receipt exists")
@@ -1425,12 +1693,14 @@ def qualification():
             qualification=VALIDATION_QUALIFICATION,
             coverage="EPUB_TARGETED_NOT_FULL",
             native_tests_executed_this_run=EXECUTIONS,
-            reused_native_passed=0,
-            verified_passed=EXECUTIONS,
-            combined_verified_passed=EXECUTIONS,
-            verified_declarations=TOTAL,
+            reused_native_passed=HISTORICAL_EXECUTIONS,
+            reused_historical_passed=HISTORICAL_EXECUTIONS,
+            reused_historical=historical,
+            verified_passed=COMBINED_EXECUTIONS,
+            combined_verified_passed=COMBINED_EXECUTIONS,
+            verified_declarations=COMBINED_TOTAL,
             not_executed_this_run=INVENTORY_EXECUTIONS - EXECUTIONS,
-            unselected_executions=INVENTORY_EXECUTIONS - EXECUTIONS,
+            unselected_executions=INVENTORY_EXECUTIONS - COMBINED_EXECUTIONS,
             groups=groups,
             simulator=sim,
         )
@@ -1448,13 +1718,14 @@ def qualification():
         qualification=DELIVERY_QUALIFICATION,
         coverage="EPUB_TARGETED_NOT_FULL",
         native_tests_executed_this_run=0,
-        reused_native_passed=EXECUTIONS,
+        reused_native_passed=COMBINED_EXECUTIONS,
+        reused_historical_passed=HISTORICAL_EXECUTIONS,
         reused_prior_passed=EXECUTIONS,
         verified_passed=COMBINED_EXECUTIONS,
         combined_verified_passed=COMBINED_EXECUTIONS,
         verified_declarations=COMBINED_TOTAL,
         not_executed_this_run=INVENTORY_EXECUTIONS,
-        unselected_executions=INVENTORY_EXECUTIONS - EXECUTIONS,
+        unselected_executions=INVENTORY_EXECUTIONS - COMBINED_EXECUTIONS,
         groups=[],
         reused_prior=prior_summary,
         simulator=None,
@@ -1472,7 +1743,7 @@ def release_gate():
     is_delivery = result.get("phase") == "delivery"
     expected_qual = DELIVERY_QUALIFICATION if is_delivery else VALIDATION_QUALIFICATION
     expected_native = 0 if is_delivery else EXECUTIONS
-    expected_reused = EXECUTIONS if is_delivery else 0
+    expected_reused = COMBINED_EXECUTIONS if is_delivery else HISTORICAL_EXECUTIONS
     require(result.get("scope") == SCOPE
             and result.get("phase") in ("validation", "delivery")
             and result.get("build_ipa") is is_delivery
@@ -1509,9 +1780,10 @@ def _verify_delivery_provenance(scope, packages):
     require(prior_summary["passed"] and saved_reused.get("passed") is True
             and saved_reused.get("scope") == SCOPE and saved_reused.get("run_attempt") == "1"
             and saved_reused.get("prior") == prior_summary
-            and saved_reused.get("reused_native_passed") == EXECUTIONS
+            and saved_reused.get("reused_native_passed") == COMBINED_EXECUTIONS
             and saved_reused.get("reused_prior_passed") == EXECUTIONS
-            and saved_reused.get("reused_declarations") == TOTAL, "Reused gate/results drift")
+            and saved_reused.get("reused_historical_passed") == HISTORICAL_EXECUTIONS
+            and saved_reused.get("reused_declarations") == COMBINED_TOTAL, "Reused gate/results drift")
     return prior_summary
 
 
@@ -1549,7 +1821,7 @@ def delivery_gate():
     rows = prior_summary["case_rows"]
     known_prior = sum(row["executed_count"] or 0 for row in rows)
     unknown_prior = [row["group"] for row in rows if row["executed_count"] is None]
-    known_total = known_prior
+    known_total = HISTORICAL_EXECUTIONS + known_prior
     require(live_scope() == scope, "Source/run changed while collecting package evidence")
     return dict(
         **scope,
@@ -1563,6 +1835,8 @@ def delivery_gate():
         native_tests_executed_this_run=0,
         reused_native_passed=COMBINED_EXECUTIONS,
         reused_prior_passed=EXECUTIONS,
+        reused_historical_passed=HISTORICAL_EXECUTIONS,
+        reused_historical=prior_summary["historical"],
         known_executions=known_total,
         unknown_execution_groups=unknown_prior,
         cases=rows,
@@ -1599,6 +1873,9 @@ def main():
     reuse_cmd.add_argument("--prior-zip", type=Path)
     reuse_cmd.add_argument("--prior-run-json", type=Path)
     reuse_cmd.add_argument("--prior-artifact-json", type=Path)
+    reuse_cmd.add_argument("--historical-zip", type=Path)
+    reuse_cmd.add_argument("--historical-run-json", type=Path)
+    reuse_cmd.add_argument("--historical-artifact-json", type=Path)
     reuse_cmd.add_argument("--skip-dependency-check", action="store_true")
     run = sub.add_parser("run")
     run.add_argument("group", choices=GROUPS)
@@ -1618,6 +1895,10 @@ def main():
         write(SCOPE_JSON, receipt)
         print(json.dumps(receipt, indent=2))
     elif args.action == "reuse":
+        offline_historical = None
+        if args.historical_zip or args.historical_run_json or args.historical_artifact_json:
+            require(args.historical_zip and args.historical_run_json and args.historical_artifact_json, "Offline history needs all three paths")
+            offline_historical = dict(zip_path=args.historical_zip, run_json=args.historical_run_json, artifact_json=args.historical_artifact_json)
         offline_prior = None
         if args.prior_zip or args.prior_run_json or args.prior_artifact_json:
             require(args.prior_zip and args.prior_run_json and args.prior_artifact_json,
@@ -1627,6 +1908,7 @@ def main():
         receipt = reuse_evidence(
             require_dependencies=not args.skip_dependency_check,
             offline_prior=offline_prior,
+            offline_historical=offline_historical,
         )
         print(json.dumps(receipt, indent=2))
     elif args.action == "run":

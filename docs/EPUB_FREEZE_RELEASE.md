@@ -1,51 +1,41 @@
-# EPUB 打开衔接定向验证与交付：0.2.15 / build17
+# EPUB opening continuity 定向复测与严格交付
 
-## 授权与边界
+当前目标：0.2.15 / build17；基础实现基线 `d5fde953ca544deaecace0434a45b014ebd630b0`。本批打开计时、加载与呈现并行、轻量反馈和资源分段计时说明见 `EPUB_OPENING_PRESENTATION.md`。
 
-基线 `d5fde953ca544deaecace0434a45b014ebd630b0`，入口 `epub-opening-continuity-24`。用户已明确批准本批候选和必要版本/验证配置的普通提交、推送、定向云验证、整批结束后必要修复/受影响复验及严格合格IPA交付。失败原始证据保留；用户取消、来源漂移及真实公共前置阻塞仍须遵守。不 force，不安装新工具/运行时，不新增凭据/权限/费用。
+## 当前复测范围
 
-本地候选13路径：App的route/model/screen和新增opening presentation helper；Domain的ResourceStore/PublicationCache/OpeningTimings/ContentPool；Ready Domain、EPUB Host与UI测试；呈现源码检查脚本和说明。另允许版本工程定义、既有Task3 workflow、runner/checker及本说明。`AppVersion.swift`无需改动，它读取Bundle版本；实际版本仅由project.yml的MARKETING_VERSION与CURRENT_PROJECT_VERSION更新。其他工程设置、依赖、TXT和分页JS、renderer缓存预算及完整校验要求保持。
+`epub-opening-followup-3`：新执行3个用例身份、4个展开项：
 
-## 影响与最小原生范围
+- `domain-12`：`epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime`，Bool false/true两个叶。
+- `host-2`：`epubOpeningRouteStartsOnceAndObservesMountedPresentation`。
+- `ui-2`：`testEPUBProgressSurvivesExitAndProcessRelaunch`。
 
-|目标|声明|展开执行|选择依据|
-|---|---:|---:|---|
-|ReaderDomainTests|14|15|9项Ready冷暖恢复/损坏/租约/取消/计时＋5项资源复开/符链拒绝/失败清理/TXT隔离；其中Bool参数展开2次|
-|YueJingHostTests|7|7|2项新增打开观测/提前任务回归＋真实WebView资源、隔离安全、字体/跨章/旧token、图片页、LRU页面复用|
-|YueJingEPUBUITests|3|3|书架与目录跨章、结束进程后精确位置恢复、字号和TXT隔离|
-|合计|24|25|五个新增测试全部纳入|
+另严格复用固定历史 run `43014129792/attempt1` 中已通过且不受本次修改影响的21个单展开用例。历史源码 `3f16c2963f2d165f80500d9b23eb4036ff919260`；artifact `13853970619`、129375479 bytes、SHA256 `20bcce9f3167691818fb454e2900de70a90de4734f4f77ee3e952e2ebd10f2e5`。历史run整体失败，不能把整个run认作通过；只核验明确通过的21项。
 
-全部精确身份见runner的SELECTED_FILES；每声明独立命令和证据目录。总清单241声明/242展开；本轮选25展开，其余217未选。UI展示全部15项，其中选3/未选12；这是定向验证，不是全量回归。
+组合覆盖仍为24个身份/25展开；全库241声明/242展开中217展开未选择。不是全量回归。
 
-本批业务源码已变化，不能直接复用旧0.2.14的Host1＋历史36资格。首次validation的25次全部新执行，历史测试复用0。未改的压缩包解析、纯TXT算法与JS布局检查不默认重跑；已有静检只有在相关源码摘要一致时才引用，不伪装本次原生执行。
+## 历史与修复边界
+
+- 初轮 `43010590017`：24条独立命令均exit65，测试体被编译失败阻塞。长诊断摘要类型检查失败及六处Testing宏可变调用错误已在整批终态收集后修复；摘要内容、六个布尔断言、业务逻辑及预算不变。
+- 次轮 `43014129792`：21展开通过；Bool用例原生exit0但xcresult计数门异常；新增Host打开呈现用例就绪断言失败；UI进程重启用例在首次打开时正文等待失败，尚未进入重启步骤。不是180秒用例超时，也未证明磁盘缓存丢失。
+- 当前仅修正声明数/参数展开数解析，并提前保留原始summary/tests导出；无论summary以声明1或展开2计数，都必须另核验恰好false/true两个成功叶，拒绝缺失、重复、失败与跳过。
+- Host只在该失败方法内补充有界只读失败现场诊断，仍抛出原错误；其余所有方法、共享辅助函数及App/Domain/UI源码保持与次轮一致。尚未证实两个就绪失败的根因，不作生产分页或缓存算法修复声明。
 
 ## 两阶段
 
-1. **validation**：`build_ipa=false`、`prior_validation_run=''`、`allow_unqualified_ipa=false`。执行本批全部24声明/25展开、模拟器链接检查和严格资格核验。每项失败/超时后记录并继续独立项，全部结束并收集后才统一处理。公共前置失败标blocked/not_run，不制造业务失败或通过。失败后按实际改动说明复验范围，不能自动全量重测。
-2. **delivery**：`build_ipa=true`、`prior_validation_run`为成功、attempt1、同源码的本批validation。重新核验API来源、archive摘要/大小、ZIP安全/CRC/成员、源码与工具链/依赖、原始命令、逐项log/counts/xcresult和Bool两叶；本次原生执行0，复用25。禁止自引用、递归delivery、错source/attempt、缺失/篡改/失败/跳过证据。完成实际iPhoneOS arm64 Release编译、WebKit/SDK依赖校验与IPA打包。
+1. 验证：`build_ipa=false`，`prior_validation_run=''`，新执行4、复用21。每个选定命令独立运行，完整批次结束后统一分析；公共前置失败、取消或未运行不能记作通过。
+2. 交付：`build_ipa=true`，提供成功、同源码、attempt1的本范围验证run。新执行0、复用组合25，随后实际设备Release编译与IPA检查。只允许固定历史21加同源prior4的受控来源链，不接受任意递归交付证据。
 
-历史保留xcresult进行原生解析时必须使用临时副本，避免xcresulttool生成database.sqlite3污染固定成员清单；不以忽略多余文件的方式放宽完整性。
+`allow_unqualified_ipa=false`。不以诊断包替代合格交付。编译、原生资格、IPA完整性与真机验收分别报告。
 
-## 固定配置与失败语义
+## 严格来源与完整性
 
-固定macOS15、Xcode16.4/16F6、Swift6.1.2（语言6）、XcodeGen2.46.0、GRDB7.0.0、ZIPFoundation0.9.19、最低iOS16.6。保留30秒工具链探测、480秒调用、180秒用例、120秒模拟器启动、60分钟job预算。动态选择已有arm64模拟器，不安装runtime。
+校验固定GitHub API来源、原ZIP大小/SHA、成员覆盖、源文件与受选方法、固定依赖、每项原始日志/命令/退出码/计数/xcresult和参数叶；不得重写原receipt或忽略多余成员。xcresulttool仅解析独占临时副本，避免污染原始bundle。复用Host文件只允许该未复用方法的精确诊断差异，共享helper及21项受选方法必须未变。
 
-实际退出码、调用超时、XCTest用例级超时分开记录。外层timed_out=false不推翻180秒case-timeout；重启后的空套件不是通过。未开始/未结束/无法确认数量的分支必须保留未知，不能用计划数代填。取消后不得继续调度。
+发布边界维持原19路径/3新增路径；`AppVersion.swift`动态读取Bundle且字节未变。保护用户本地文件与所有旧IPA、原始失败、资源SHA/路径/符链/类型/大小/预算、session/epoch、进度、偏好和TXT行为。4路资源校验、renderer上限3/估算96MiB不变。
 
-继续独立步骤不等于放宽发布资格。默认且本批强制`allow_unqualified_ipa=false`；未经额外显式授权不交付诊断包。原生资格、设备编译、IPA完整性及真机体验分别报告。
+## 固定环境与验收边界
 
-## 实际改动与验收重点
+macOS15、Xcode16.4/16F6、Swift6.1.2/语言6、XcodeGen2.46.0、GRDB7.0.0、ZIPFoundation0.9.19、最低iOS16.6。480秒调用、180秒用例、120秒启动、30秒工具链探测、60分钟job不变；不安装运行时、不新增凭据或费用。
 
-- 点击→load→章节ready→当前路由显示帧机会分别观测；无回执为未取得。CADisplayLink不是像素首绘，进程序号不是OS冷盘证明。
-- 提前加载与系统呈现并行；首次自动尝试一次。快速失败不能因视图挂载而静默重试，显式重试/既有后台恢复可重新尝试。
-- 短等待无大卡片；280ms小进度、1秒详细说明，ready立即撤罩，不人为增加最短加载时间。首次遮罩不干预正常后续翻章/字体重排；旧正文不提前显示，未ready不可交互。
-- 主题hint仅为合法枚举外观提示，正式数据库偏好覆盖；不缓存正文截图。已完成打开样本不能被后来后台活动追溯作废。
-- 资源计时固定4lane局部数值统计；路径、符链、类型、大小、完整SHA与取消语义不变。lane累计经过时间不能与墙钟相加或称CPU/关键路径；新增时钟读取开销待真机量化。
-
-IPA须核对实际Release编译、版本/build、arm64/iPhoneOS/minOS/unsigned、完整payload、动态依赖与Swift SDK证明、资源/图标/许可证、API archive及ZIP和交付副本SHA。不能用“编译成功”代替这些检查。
-
-## 真机边界
-
-iPhone13/iOS16.6.1用TrollStore覆盖安装，不卸载、清库、重导入或直接降级。旧书一次性Ready迁移另列，不计入普通打开P95。对比同书暖复开、A→B→A、退后台恢复和结束进程后首次点书，核对正确正文可见且立即可交互；同时检查主题、位置、图片与取消/错误恢复。
-
-已有0.2.14反馈：结束进程后545ms、同进程429ms，无迁移/解析/复制，第二次页面复用且全文档加载总数仍1，支持正常进程首次成本；该对照不是本版新呈现效果证明。常规≤300ms/P95≤500ms仍为待真机测量目标，原生/IPA合格不等于已达到。
+Windows静态检查与mock不是Swift编译/WKWebView实测。CADisplayLink显示帧机会不是像素首绘；lane累计不是墙钟或CPU；资源计时开销未在真机量化。iPhone13/iOS16.6.1仅TrollStore覆盖安装，不卸载/清库/重导入/直接降级。正确正文可见且立即可交互、常规≤300ms/P95≤500ms及RSS仍待真机测量，迁移单列。

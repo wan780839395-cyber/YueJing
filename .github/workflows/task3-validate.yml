@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB opening continuity24 / 25 executions; separate validation and same-source delivery
+        description: EPUB opening followup3 / 4 new plus 21 verified reuse; separate same-source delivery
         required: true
         type: choice
-        default: epub-opening-continuity-24
+        default: epub-opening-followup-3
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,7 +17,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-opening-continuity-24
+          - epub-opening-followup-3
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       prior_validation_run:
-        description: Delivery only - successful same-source continuity validation run; empty for new native validation
+        description: Delivery only - successful same-source followup validation run; empty for new targeted validation
         required: false
         type: string
         default: ''
@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-opening-continuity-24' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-opening-followup-3' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1145,13 +1145,14 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-opening-continuity-24' }}
+    if: ${{ inputs.validation_scope == 'epub-opening-followup-3' }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read
     env:
+      GH_TOKEN: ${{ github.token }}
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806

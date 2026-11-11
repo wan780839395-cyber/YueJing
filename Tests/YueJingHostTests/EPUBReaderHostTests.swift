@@ -89,7 +89,26 @@ struct EPUBReaderHostTests {
             })
             do {
                 try await fixture.withHostedController(host) {
-                    try await waitUntilReady(model: model, expectedToken: token)
+                    do {
+                        try await waitUntilReady(model: model, expectedToken: token)
+                    } catch {
+                        print("EPUB_OPENING_FAILURE ready=\(model.ready) loading=\(model.loading) request=\(model.navigationRequest != nil) message=\(String(describing: model.message))")
+                        if let controller = model.webView.controller {
+                            print("EPUB_OPENING_CONTROLLER active=\(controller.activeRequest != nil) loads=\(controller.documentLoadCount) window=\(controller.viewIfLoaded?.window != nil) bounds=\(controller.viewIfLoaded?.bounds ?? .zero)")
+                            if controller.activeRequest == nil { print(await controller.performanceSummary()) }
+                            let snapshot = XCTestExpectation(description: "Read-only failed opening snapshot")
+                            controller.webView.__evaluateJavaScript(
+                                "JSON.stringify({visibility:document.visibilityState,width:innerWidth,height:innerHeight,images:Array.from(document.images).map(i=>({complete:i.complete,width:i.naturalWidth})),state:window.__yjEpub ? window.__yjEpub.sampleStatus() : null,diagnostics:window.__yjEpub ? window.__yjEpub.diagnostics() : null})",
+                                inFrame: nil, in: EPUBLocationScript.world
+                            ) { value, snapshotError in
+                                print("EPUB_OPENING_JS \(String(describing: value)) error=\(String(describing: snapshotError))")
+                                snapshot.fulfill()
+                            }
+                            let snapshotResult = await XCTWaiter.fulfillment(of: [snapshot], timeout: 2)
+                            print("EPUB_OPENING_SNAPSHOT_RESULT \(snapshotResult.rawValue)")
+                        }
+                        throw error // Preserve the original failure; diagnostics cannot turn it into a pass.
+                    }
                     let deadline = ContinuousClock.now.advanced(by: .seconds(2))
                     while model.openingPresentationSummary?.contains("点击→正文揭示后的显示帧机会 未取得") != false,
                           ContinuousClock.now < deadline {
