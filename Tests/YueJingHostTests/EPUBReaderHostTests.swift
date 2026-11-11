@@ -1425,14 +1425,27 @@ struct EPUBReaderHostTests {
             let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, readingMode: .paged)
             let controller = EPUBWebViewController()
             model.webView.attach(controller)
-            controller.onLocatorEvent = { model.handleLocatorEvent($0) }
-            controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
+            controller.onLocatorEvent = { payload in
+                print("EPUB_SYNTHETIC_HORIZONTAL_EVENT kind=\(payload.kind) node=\(payload.node) restored=\(payload.restoredNode) offset=\(payload.restoredOffset) tokenMatches=\(payload.epoch == model.currentToken?.epoch) ready=\(model.ready) loading=\(model.loading)")
+                model.handleLocatorEvent(payload)
+            }
+            controller.onLoadFailure = { error, token in
+                let failure = error as NSError
+                print("EPUB_SYNTHETIC_HORIZONTAL_LOAD_FAILURE domain=\(failure.domain) code=\(failure.code) tokenMatches=\(token == model.currentToken)")
+                model.handleLoadFailure(error, token: token)
+            }
             controller.onChapterBoundary = { model.turnChapter($0, from: $1) }
             try await fixture.withHostedController(controller) {
                 await model.load()
                 let first = try #require(model.navigationRequest)
                 controller.apply(first)
-                try await waitUntilReady(model: model, expectedToken: first.token)
+                print("EPUB_SYNTHETIC_HORIZONTAL_START mode=\(first.readingMode) bounds=\(controller.webView.bounds) hosted=\(controller.webView.window != nil)")
+                do {
+                    try await waitUntilReady(model: model, expectedToken: first.token)
+                } catch {
+                    print("EPUB_SYNTHETIC_HORIZONTAL_FAILURE ready=\(model.ready) loading=\(model.loading) message=\(String(describing: model.message)) requestPresent=\(model.navigationRequest != nil) activeRequestPresent=\(controller.activeRequest != nil) loads=\(controller.documentLoadCount) chapters=\(controller.renderedChapterPaths.count) denied=\(controller.deniedNavigations.count) webLoading=\(controller.webView.isLoading) progress=\(controller.webView.estimatedProgress) bounds=\(controller.webView.bounds) contentSize=\(controller.webView.scrollView.contentSize) hidden=\(controller.webView.isHidden) hosted=\(controller.webView.window != nil)")
+                    throw error
+                }
                 try await waitForChapterWindow(controller, count: 3)
                 let scroll = controller.webView.scrollView
                 #expect(controller.documentLoadCount == 1)

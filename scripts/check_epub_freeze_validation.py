@@ -20,6 +20,22 @@ import run_epub_freeze_validation as r
 import validate_task3 as v
 
 checks = []
+CHECK_ROOT = r.ROOT
+_source_contract = r.validate_followup_sources
+
+
+def check_real_followup_sources(files=None):
+    with patch.object(r, 'ROOT', CHECK_ROOT), patch.object(v, 'ROOT', CHECK_ROOT):
+        return _source_contract(files)
+
+
+@contextlib.contextmanager
+def scratch_directory(*, prefix, dir=None):
+    # Retain every fixture, including failures, without overwriting previous runs.
+    root = os.environ.get('PI_SCRATCH_DIR') or os.environ.get('RUNNER_TEMP')
+    if not root:
+        raise ValueError('PI_SCRATCH_DIR (local) or RUNNER_TEMP (Actions) required')
+    yield tempfile.mkdtemp(prefix=prefix, dir=root)
 
 
 def rejects(label, action):
@@ -268,7 +284,7 @@ def _build_synthetic_prior_zip(work_dir, prior_id, prior_sha, destination, candi
                                hist_extracted_dir, *, failed_group=None,
                                prior_phase='validation', prior_prior='', prior_build_ipa=False,
                                prior_conclusion='success', include_event=True, include_hist=True,
-                               include_gate=True, include_linkage=True):
+                               include_gate=True, include_linkage=True, include_ui=True):
     src = work_dir / f'prior-src-{prior_id}'
     eff_path = _write_common_run_files(src, prior_sha, prior_id, candidate_files_map)
     event_obj = dict(inputs=dict(
@@ -356,13 +372,16 @@ def _build_synthetic_prior_zip(work_dir, prior_id, prior_sha, destination, candi
     if include_hist:
         import shutil
         shutil.copytree(hist_extracted_dir, src / f'reused-evidence/historical-{r.HIST_RUN}')
+        if include_ui:
+            ui_bound = hist_extracted_dir.parent / f'ui-{r.UI_RUN}'
+            shutil.copytree(ui_bound, src / f'reused-evidence/ui-{r.UI_RUN}')
     if include_gate and not failed_group:
         r.write(src / 'epub-freeze-gate.json', dict(
             **prior_scope,
             qualification=r.VALIDATION_QUALIFICATION,
             coverage='EPUB_TARGETED_NOT_FULL',
             native_tests_executed_this_run=r.EXECUTIONS,
-            reused_native_passed=r.REUSED_EXECUTIONS,
+            reused_native_passed=r.ALL_REUSED_EXECUTIONS,
             verified_passed=r.COMBINED_EXECUTIONS,
             combined_verified_passed=r.COMBINED_EXECUTIONS,
             verified_declarations=r.COMBINED_TOTAL,
@@ -388,12 +407,170 @@ def _build_synthetic_prior_zip(work_dir, prior_id, prior_sha, destination, candi
     return zip_path, run_meta, artifact_meta
 
 
-def run_offline_checks():
+_real_check_output = subprocess.check_output
+
+
+def synthetic_export(args, **kwargs):
+    if args[:4] == ['xcrun', 'xcresulttool', 'get', 'test-results']:
+        if args[4] == 'summary':
+            return json.dumps(dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0)).encode()
+        return json.dumps(dict(testNodes=[dict(name=r.UI_METHOD + '()', result='Passed')])).encode()
+    return _real_check_output(args, **kwargs)
+
+
+def manifest_digest(members):
+    return r.compat.digest_bytes(json.dumps(members, sort_keys=True, separators=(',', ':')).encode())
+
+
+def build_synthetic_ui(work, destination, candidate_map):
+    with patch.object(r, 'GROUPS', {'ui-1': r.UI_SPEC}), patch.object(r, 'SCOPE', r.UI_SCOPE), \
+         patch.object(r, 'TOTAL', 2), patch.object(r, 'EXECUTIONS', 2):
+        archive, run, artifact = _build_synthetic_prior_zip(
+            work, str(r.UI_RUN), r.UI_BASE, destination, candidate_map, None,
+            include_hist=False, include_gate=False, prior_conclusion='failure')
+    artifact['id'] = r.UI_ARTIFACT_ID
+    return archive, run, artifact
+
+
+def check_horizontal_diagnostic_contract(current):
+    base = r.git('show', r.UI_BASE + ':Tests/' + r.HOST_TEST_REL).decode('utf-8')
+    assert r.normalize_horizontal_diagnostics(base, current) == base
+    # An actual extra call or a callable interpolation must never be erased.
+    op, cl = r.extract_swift_method_span(current, r.HORIZONTAL_DECL)
+    body = current[op:cl]
+    for label, old, new in (
+        ('assertion', 'scroll.contentSize.width > scroll.bounds.width * 2', 'scroll.contentSize.width > 0'),
+        ('wait', 'waitUntilReady(model: model, expectedToken: first.token)', 'waitUntilReady(model: model, expectedToken: vertical.token)'),
+        ('action', 'controller.apply(first)', 'controller.apply(first)\n                controller.apply(first)'),
+        ('callback forwarding', 'model.handleLocatorEvent(payload)', 'model.handleLocatorEvent(payload)\n                model.handleLocatorEvent(payload)'),
+        ('rethrow', 'throw error', 'return'),
+    ):
+        if old in body:
+            altered = current[:op] + body.replace(old, new, 1) + current[cl:]
+            rejects('horizontal diagnostic normalization rejects ' + label,
+                    lambda a=altered: r.normalize_horizontal_diagnostics(base, a))
+    for statement in (
+        'print("EPUB_SYNTHETIC_HORIZONTAL_BAD value=\\(controller.turnPage(.next))")',
+        'print("EPUB_SYNTHETIC_HORIZONTAL_BAD value=\\(await model.close())")',
+        'try await Task.sleep(for: .seconds(1))',
+        'model.setReadingMode(.scroll)',
+    ):
+        altered = current[:cl] + '                ' + statement + '\n' + current[cl:]
+        rejects('helper forbids side effects: ' + statement, lambda a=altered: r.normalize_horizontal_diagnostics(base, a))
+    altered = current.replace('try await verifyHorizontalPagination()',
+                              'try await verifyHorizontalPagination()\n        try await verifyHorizontalPagination()')
+    rejects('helper rejects extra caller', lambda: r.normalize_horizontal_diagnostics(base, altered))
+    candidate = v.candidate_files()
+    for name in ('Tests/' + r.UI_TEST_REL, 'project.yml', 'Sources/ReaderDomain/EPUBReader.swift'):
+        if name not in candidate:
+            name = next(p for p in candidate if p.startswith('Sources/'))
+        altered_map = {**candidate, name: 'f' * 64}
+        with patch.object(v, 'candidate_files', return_value=altered_map):
+            rejects('UI source/product/project drift: ' + name, lambda: r.validate_followup_sources(candidate))
+    original_read = Path.read_text
+    for old, new in (('private func verifyReopenDiagnostics', 'private func verifyReopenDiagnostics_changed'),
+                     ('try await verifyPagingAndChapterBoundaryNavigation()', 'try await verifyPagingAndChapterBoundaryNavigation()\n        return')):
+        altered = current.replace(old, new, 1)
+        assert altered != current
+        def changed_read(path, *args, **kwargs):
+            return altered if path.as_posix().endswith(r.HOST_TEST_REL) else original_read(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', changed_read):
+            rejects('shared helper/target drift outside diagnostic exemption', r.validate_followup_sources)
+
+
+def check_ui_rejections(folder, run, artifact):
+    assert r.verify_ui_evidence(folder)['workflow_conclusion'] == 'failure'
+    for key, value in (('id', 1), ('head_sha', 'f' * 40), ('run_attempt', 2), ('workflow_id', 1),
+                       ('conclusion', 'success'), ('status', 'in_progress'), ('event', 'push'),
+                       ('repository', {'full_name': 'foreign/repo'})):
+        rejects('UI wrong API ' + key, lambda k=key, val=value: r.validate_ui_run_and_artifact({**run, k: val}, artifact))
+    for key, value in (('id', 1), ('expired', True), ('digest', 'sha256:' + 'f' * 64), ('size_in_bytes', 1),
+                       ('workflow_run', dict(id=1, head_sha=r.UI_BASE)), ('name', 'wrong')):
+        rejects('UI wrong artifact ' + key, lambda k=key, val=value: r.validate_ui_run_and_artifact(run, {**artifact, k: val}))
+    receipt_path = folder / 'archive-receipt.json'
+    saved_receipt = receipt_path.read_bytes()
+    saved = json.loads(saved_receipt)
+    ev = folder / 'evidence'
+    prefix = 'epub-freeze/ui-1/'
+    cases = []
+    log_rel = prefix + 'YueJingEPUBUITests.log'
+    raw = (ev / log_rel).read_bytes()
+    for label, data in (
+        ('raw failure', raw + b'Test extra failed\n'), ('skip', raw + b'Test extra skipped\n'),
+        ('duplicates', raw + raw), ('missing identity', raw.replace(r.UI_METHOD.encode(), b'foreignCase')),
+        ('timeout duration', raw.replace(b'0.1 seconds', b'181.1 seconds')),
+    ):
+        cases.append((label, log_rel, data))
+    for label, rel, key, value in (
+        ('timeout', prefix + 'execution.json', 'timed_out', True),
+        ('exit', prefix + 'execution.json', 'native_exit', 65),
+        ('identity', prefix + 'selection.json', 'source_commit', 'f' * 40),
+        ('counts', prefix + 'counts.json', 'executions', 2),
+        ('bool counts', prefix + 'counts.json', 'executions', True),
+        ('bool exit', prefix + 'execution.json', 'native_exit', False),
+    ):
+        obj = r.load(ev / rel)
+        obj[key] = value
+        cases.append((label, rel, json.dumps(obj).encode()))
+    cases.append(('missing log', log_rel, None))
+    cases.append(('missing xcresult', prefix + 'YueJingEPUBUITests.xcresult/Info.plist', None))
+    data_rel = next(p for p in saved['retained_files'] if '/Data/' in p)
+    cases.append(('missing xcresult Data', data_rel, None))
+    for label, rel, data in cases:
+        path = ev / rel
+        original = path.read_bytes()
+        try:
+            if data is None:
+                path.unlink()
+            else:
+                path.write_bytes(data)
+            rejects('UI retained ' + label, lambda: r.verify_ui_evidence(folder))
+            # Even a forged local rehash cannot bypass the pinned archive manifest.
+            forged = copy.deepcopy(saved)
+            if data is None:
+                forged['retained_files'].pop(rel)
+                forged['members'].pop(rel)
+                forged['member_count'] -= 1
+            else:
+                meta = dict(bytes=len(data), sha256=r.compat.digest_bytes(data))
+                forged['retained_files'][rel] = meta
+                forged['members'][rel] = meta
+            receipt_path.write_text(json.dumps(forged), encoding='utf-8')
+            rejects('UI rehashed manifest ' + label, lambda: r.verify_ui_evidence(folder))
+            # Synthetic-only override exercises semantic rejection behind integrity gate.
+            with patch.object(r, 'UI_MEMBERS_SHA256', manifest_digest(forged['members'])):
+                rejects('UI semantic ' + label, lambda: r.verify_ui_evidence(folder))
+        finally:
+            path.write_bytes(original)
+            receipt_path.write_bytes(saved_receipt)
+    # Exercise native xcresult JSON interpretation without running xcrun locally.
+    bundle = ev / prefix / 'YueJingEPUBUITests.xcresult'
+    good_summary = dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0)
+    good_tree = dict(testNodes=[dict(name=r.UI_METHOD + '()', result='Passed')])
+    with patch.object(r.sys, 'platform', 'darwin'):
+        for label, summary, tree in (
+            ('failed', {**good_summary, 'failedTests': 1}, good_tree),
+            ('skipped', {**good_summary, 'skippedTests': 1}, good_tree),
+            ('extra', {**good_summary, 'totalTestCount': 2}, good_tree),
+            ('missing', good_summary, {'testNodes': []}),
+            ('duplicate', good_summary, {'testNodes': good_tree['testNodes'] * 2}),
+            ('wrong identity', good_summary, {'testNodes': [dict(name='foreign()', result='Passed')]}),
+            ('failed leaf', good_summary, {'testNodes': [dict(name=r.UI_METHOD + '()', result='Failed')]}),
+        ):
+            with patch.object(r.subprocess, 'check_output', side_effect=[json.dumps(summary).encode(), json.dumps(tree).encode()]):
+                rejects('UI native export ' + label, lambda: r.verify_ui_xcresult(bundle))
+        with patch.object(r.subprocess, 'check_output', side_effect=[json.dumps(good_summary).encode(), json.dumps(good_tree).encode()]):
+            r.verify_ui_xcresult(bundle)
+    checks.append('failed Round2 workflow contributes ONLY independently proven UI1, never Host or whole-run pass')
+
+
+def run_offline_checks(*, skip_workflow_contract=False):
+    assert not skip_workflow_contract or os.environ.get('GITHUB_ACTIONS') != 'true', 'Workflow checks cannot be skipped in Actions'
     assert r.BASE == '1bf00449884f5fadf9d973a8d63220f9787b459d'
-    assert r.SCOPE == 'epub-ready-followup-2'
+    assert r.SCOPE == 'epub-ready-host-followup-1'
     assert r.VERSION == '0.2.14' and r.BUILD == '16'
-    assert r.VALIDATION_QUALIFICATION == 'EPUB_READY_FOLLOWUP_2_PLUS_REUSED_35_TARGETED_NATIVE'
-    assert r.DELIVERY_QUALIFICATION == 'EPUB_READY_FOLLOWUP_DELIVERY_REUSED_37_TARGETED_NATIVE'
+    assert r.VALIDATION_QUALIFICATION == 'EPUB_READY_HOST_FOLLOWUP_1_PLUS_REUSED_36_TARGETED_NATIVE'
+    assert r.DELIVERY_QUALIFICATION == 'EPUB_READY_HOST_FOLLOWUP_DELIVERY_REUSED_37_TARGETED_NATIVE'
     assert r.HIST_RUN == 42954931349 and r.HIST_ARTIFACT_ID == 13827937675
 
     selected = r.selection()
@@ -401,22 +578,18 @@ def run_offline_checks():
         ('YueJingHostTests/EPUBReaderHostTests.swift', [
             'epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks',
         ]),
-        ('YueJingEPUBUITests/EPUBFlowUITests.swift', [
-            'testEPUBShelfCoverAndDirectoryCrossChapterNavigation',
-        ]),
     ]
     assert list(r.SELECTED_FILES.items()) == expected_selected_files
     expected_selected = {
         'host-1': ['epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks'],
-        'ui-1': ['testEPUBShelfCoverAndDirectoryCrossChapterNavigation'],
     }
-    assert selected == expected_selected and list(selected) == ['host-1', 'ui-1']
-    assert list(r.GROUPS) == ['host-1', 'ui-1']
-    assert len(selected) == r.TOTAL == 2 and r.EXECUTIONS == 2
+    assert selected == expected_selected and list(selected) == ['host-1']
+    assert list(r.GROUPS) == ['host-1']
+    assert len(selected) == r.TOTAL == 1 and r.EXECUTIONS == 1
     assert len(r.HIST_GROUPS) == r.REUSED_DECLARATIONS == 34
     assert sum(expected_executions(g, r.HIST_GROUPS) for g in r.HIST_GROUPS) == r.REUSED_EXECUTIONS == 35
-    assert r.TOTAL + r.REUSED_DECLARATIONS == r.COMBINED_TOTAL == 36
-    assert r.EXECUTIONS + r.REUSED_EXECUTIONS == r.COMBINED_EXECUTIONS == 37
+    assert r.TOTAL + r.ALL_REUSED_DECLARATIONS == r.COMBINED_TOTAL == 36
+    assert r.EXECUTIONS + r.ALL_REUSED_EXECUTIONS == r.COMBINED_EXECUTIONS == 37
     assert not (set(r.HIST_GROUPS) & r.FORBIDDEN_HIST_GROUPS)
     assert r.HIST_GROUPS['domain-11']['cases'] == ['epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime']
     assert expected_executions('domain-11', r.HIST_GROUPS) == 2
@@ -444,7 +617,7 @@ def run_offline_checks():
     assert reviewed['selected'] == 236 and reviewed['selected_executions'] == 237
     assert reviewed['selected'] - r.COMBINED_TOTAL == 200 and reviewed['selected_executions'] - r.COMBINED_EXECUTIONS == 200
     checks.append('candidate inventory survives JSON roundtrip')
-    checks.append('exact current2 (host-1, ui-1) + historical34/35 (domain-11 Bool 2x) / inventory236 declarations, 237 expansions, 200 unselected, 13 unselected UI')
+    checks.append('exact current Host1 + historical34/35 + Round2 UI1 = 36 identities/37 expansions; 200 unselected')
 
     # Real method-level isolation check on the actual local Swift test files against BASE.
     real_host_base = r.git('show', r.BASE + ':Tests/' + r.HOST_TEST_REL).decode('utf-8')
@@ -453,7 +626,9 @@ def run_offline_checks():
     real_ui_cur = (r.ROOT / 'Tests' / r.UI_TEST_REL).read_text(encoding='utf-8')
     r.validate_test_method_isolation(real_host_base, real_host_cur, r.HOST_METHOD_DECL, kind='host')
     r.validate_test_method_isolation(real_ui_base, real_ui_cur, r.UI_METHOD_DECL, kind='ui')
-    checks.append('real Host and UI test files differ only inside the two approved target methods and retain original assertions')
+    r.validate_followup_sources()
+    check_horizontal_diagnostic_contract(real_host_cur)
+    checks.append('Host private diagnostic-only helper and pinned UI preserve fragment/assertion/wait/action contracts')
     # Swift method lexer negative/positive edge checks (comments, interpolations, multiline strings).
     swift_edge = (
         '@Test func edgeCase() {\n'
@@ -494,7 +669,7 @@ def run_offline_checks():
 
     destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
     # Test all 2 current groups AND all 34 historical groups for log parsing & command invariants.
-    for group_label, specs_map in (('current', r.GROUPS), ('historical', r.HIST_GROUPS)):
+    for group_label, specs_map in (('current', r.GROUPS), ('historical', r.HIST_GROUPS), ('round2-ui', {'ui-1': r.UI_SPEC})):
         for group, spec in specs_map.items():
             raw = fixture_for(group, spec)
             parsed = r.parse_log_for_spec(group, spec, raw, 0, False)
@@ -527,7 +702,7 @@ def run_offline_checks():
             assert cmd[cmd.index('-scheme') + 1] == ('ReaderDomain' if spec['kind'] == 'domain' else 'YueJingUI')
 
     rejects('device destination', lambda: r.command('host-1', 'generic/platform=iOS', Path('synthetic')))
-    rejects('ui device destination', lambda: r.command('ui-1', 'generic/platform=iOS', Path('synthetic')))
+    rejects('ui cannot execute in host-only scope', lambda: r.command('ui-1', destination, Path('synthetic')))
 
     # Dedicated historical Bool parameterized fixture checks (domain-11).
     param_spec = r.HIST_GROUPS[PARAM_GROUP]
@@ -571,9 +746,10 @@ def run_offline_checks():
     # Workflow routing & two-phase structure checks.
     workflow = (r.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding='utf-8')
     job = workflow.split('\n  epub_freeze:\n')[1]
-    assert 'default: ' + r.SCOPE in workflow
-    assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-    assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
+    if not skip_workflow_contract:
+        assert 'default: ' + r.SCOPE in workflow
+        assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
+        assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
     assert 'epub-recent-' not in workflow
     assert 'epub-ready-open-36' not in workflow
     assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow and 'epub-reopen-fast-10' not in workflow and 'epub-reopen-diagnostics-3' not in workflow
@@ -597,14 +773,15 @@ def run_offline_checks():
         _wf_on = _wf.get('on') or _wf.get(True)
         _wf_inputs = _wf_on['workflow_dispatch']['inputs']
         _wf_scope = _wf_inputs['validation_scope']
-        assert _wf_scope['default'] == r.SCOPE and r.SCOPE in _wf_scope['options']
-        assert _wf['jobs']['epub_freeze']['if'] == "${{ inputs.validation_scope == '" + r.SCOPE + "' }}"
+        if not skip_workflow_contract:
+            assert _wf_scope['default'] == r.SCOPE and r.SCOPE in _wf_scope['options']
+            assert _wf['jobs']['epub_freeze']['if'] == "${{ inputs.validation_scope == '" + r.SCOPE + "' }}"
         assert _wf['jobs']['epub_freeze']['timeout-minutes'] == 60
         assert _wf['jobs']['epub_freeze']['permissions'] == {'contents': 'read', 'actions': 'read'}
         assert _wf_inputs['allow_unqualified_ipa']['default'] is False
         assert _wf_inputs['build_ipa']['default'] is False
         assert _wf_inputs['prior_validation_run']['default'] == '' and _wf_inputs['prior_validation_run']['type'] == 'string'
-    checks.append('exclusive scope routing / two-phase workflow / independent reuse & device build / strict gates separated')
+    checks.append('two-phase workflow structure checked; scope routing ' + ('SKIPPED explicitly' if skip_workflow_contract else 'verified'))
 
     # Scope boundary & 6-path isolation checks.
     base_project = r.git('show', r.BASE + ':project.yml')
@@ -620,7 +797,7 @@ def run_offline_checks():
         ALLOW_UNQUALIFIED_IPA='false',
     )
 
-    with tempfile.TemporaryDirectory(prefix='epub-scope-check-', dir=os.environ.get('PI_SCRATCH_DIR')) as tmp:
+    with scratch_directory(prefix='epub-scope-check-') as tmp:
         ev_val = Path(tmp) / 'val-event.json'
         ev_val.write_text(json.dumps(dict(inputs=dict(
             validation_scope=r.SCOPE, allow_unqualified_ipa=False, build_ipa=False, prior_validation_run='',
@@ -646,12 +823,13 @@ def run_offline_checks():
             raise AssertionError(args)
 
         with patch.object(r, 'git', side_effect=fakegit), \
+             patch.object(r, 'validate_followup_sources'), \
              patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current):
             with patch.dict(os.environ, val_env):
                 val_receipt = r.scope_receipt()
                 assert val_receipt['phase'] == 'validation' and val_receipt['prior_validation_run'] == ''
-                assert val_receipt['build_ipa'] is False and val_receipt['native_tests_planned'] == 2
-                assert val_receipt['selected_declarations'] == 2 and val_receipt['reused_historical_executions'] == 35
+                assert val_receipt['build_ipa'] is False and val_receipt['native_tests_planned'] == 1
+                assert val_receipt['selected_declarations'] == 1 and val_receipt['reused_historical_executions'] == 35
                 assert val_receipt['combined_target_declarations'] == 36 and val_receipt['combined_target_executions'] == 37
                 assert val_receipt['full_inventory_declared'] == 236 and val_receipt['full_inventory_executions'] == 237
                 assert val_receipt['version'] == '0.2.14' and val_receipt['build'] == '16'
@@ -700,13 +878,24 @@ def run_offline_checks():
         blockers.append(str(error))
 
     # Synthetic historical35 reuse, validation gate, prior delivery reuse, delivery gate & IPA checks.
-    with tempfile.TemporaryDirectory(prefix='epub-followup-selfcheck-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    with scratch_directory(prefix='epub-host-followup-selfcheck-') as temp, contextlib.ExitStack() as stack:
         work = Path(temp)
         hist_zip, hist_run, hist_artifact = _build_synthetic_historical_zip(work, destination, result_tree, candidate_map)
         hist_run_json = work / 'hist-run.json'
         hist_art_json = work / 'hist-art.json'
         r.write(hist_run_json, hist_run)
         r.write(hist_art_json, dict(total_count=1, artifacts=[hist_artifact]))
+        ui_zip, ui_run, ui_artifact = build_synthetic_ui(work, destination, candidate_map)
+        ui_run_json, ui_art_json = work / 'ui-run.json', work / 'ui-art.json'
+        r.write(ui_run_json, ui_run)
+        r.write(ui_art_json, ui_artifact)
+        offline_ui = dict(zip_path=ui_zip, run_json=ui_run_json, artifact_json=ui_art_json)
+        stack.enter_context(patch.object(r, 'REUSED_STAGING', work / 'staging'))
+        stack.enter_context(patch.object(r.subprocess, 'check_output', side_effect=synthetic_export))
+        stack.enter_context(patch.object(r, 'validate_followup_sources', side_effect=check_real_followup_sources))
+        stack.enter_context(patch.object(r, 'UI_ARCHIVE_BYTES', ui_artifact['size_in_bytes']))
+        stack.enter_context(patch.object(r, 'UI_ARCHIVE_SHA256', ui_artifact['digest'].split(':')[1]))
+        stack.enter_context(patch.object(r, 'UI_MEMBERS_SHA256', manifest_digest(r.safe_zip_members(ui_zip))))
 
         out_val = work / 'out-val'
         native_val = out_val / 'epub-freeze'
@@ -732,18 +921,24 @@ def run_offline_checks():
              patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()), \
              patch.object(r.compat, 'validate_destination'), \
              patch.object(r.reading, 'validate_group_settings'), \
-             patch.object(r.paging, 'require_xcresult'), \
-             patch.object(r.subprocess, 'check_output', return_value=json.dumps(result_tree).encode()):
+             patch.object(r.paging, 'require_xcresult'):
             reused_val = r.reuse_evidence(
                 offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json),
+                offline_ui=offline_ui,
                 verify_live_bundle=False,
             )
-            assert reused_val['passed'] is True and reused_val['reused_native_passed'] == 35
+            assert reused_val['passed'] is True and reused_val['reused_native_passed'] == 36
             assert reused_val['historical']['workflow_conclusion'] == 'failure'
             assert not (out_val / 'reused-evidence/historical-42954931349/evidence/epub-freeze/host-3').exists()
             assert not (out_val / 'reused-evidence/historical-42954931349/evidence/epub-freeze/ui-1').exists()
-            assert not any((out_val / 'reused-evidence').rglob('data.0~*'))
+            assert not any((out_val / f'reused-evidence/historical-{r.HIST_RUN}').rglob('data.0~*'))
             checks.append('historical35 reuse accepts Round 1 workflow failure for 34/35 passing cases, drops heavy Data/, excludes host-3/ui-1')
+            check_ui_rejections(out_val / f'reused-evidence/ui-{r.UI_RUN}', ui_run, ui_artifact)
+            for label, bad_bytes in (('size', ui_zip.read_bytes() + b'extra'),
+                                     ('digest', b'XX' + ui_zip.read_bytes()[2:])):
+                bad_zip = work / ('ui-bad-' + label + '.zip')
+                bad_zip.write_bytes(bad_bytes)
+                rejects('UI archive ' + label, lambda z=bad_zip: r.retain_ui_evidence({**offline_ui, 'zip_path': z}))
 
             for group, spec in r.GROUPS.items():
                 folder = native_val / group
@@ -761,22 +956,22 @@ def run_offline_checks():
             qualified_gate = r.release_gate()
             assert qualified_gate['verified_passed'] == 37 and qualified_gate['combined_verified_passed'] == 37
             assert qualified_gate['verified_declarations'] == 36
-            assert qualified_gate['native_tests_executed_this_run'] == 2
-            assert qualified_gate['reused_native_passed'] == 35
-            assert qualified_gate['not_executed_this_run'] == 235
+            assert qualified_gate['native_tests_executed_this_run'] == 1
+            assert qualified_gate['reused_native_passed'] == 36
+            assert qualified_gate['not_executed_this_run'] == 236
             assert qualified_gate['qualification'] == r.VALIDATION_QUALIFICATION
             val_summary = r.summarize()
-            assert val_summary['native_tests_executed_this_run'] == 2
-            assert val_summary['reused_native_passed'] == 35
+            assert val_summary['native_tests_executed_this_run'] == 1
+            assert val_summary['reused_native_passed'] == 36
             assert val_summary['combined_verified_passed'] == 37
             assert len(val_summary['ui_inventory']) == 15
-            assert sum(x['status'] == 'passed' for x in val_summary['ui_inventory']) == 1
+            assert sum(x['status'] == 'reused_ui' for x in val_summary['ui_inventory']) == 1
             assert sum(x['status'] == 'reused_historical' for x in val_summary['ui_inventory']) == 1
             assert sum(x['status'] == 'not_selected' for x in val_summary['ui_inventory']) == 13
-            checks.append('validation phase combined2+35 gate & 15 UI inventory verified')
+            checks.append('validation phase 1new+36reused gate & 15 UI inventory verified')
 
             # Negative tests on validation phase current2 + historical35.
-            for failure_path in (native_val / 'host-1/failure.json', native_val / 'ui-1/failure.json', out_val / 'case-scheduling-error.json'):
+            for failure_path in (native_val / 'host-1/failure.json', out_val / 'case-scheduling-error.json'):
                 r.write(failure_path, dict(error='synthetic failure after passing receipt'))
                 rejects('failure record overrides green receipts: ' + failure_path.name, r.release_gate)
                 failure_path.unlink()
@@ -784,7 +979,7 @@ def run_offline_checks():
             prev_bytes = broken.read_bytes()
             broken.write_bytes(b'{invalid')
             bad_sum = r.summarize()
-            assert bad_sum['counts']['error'] == 1 and bad_sum['counts']['passed'] == 1
+            assert bad_sum['counts']['error'] == 1 and bad_sum['counts']['passed'] == 0
             assert bad_sum['native_tests_executed_this_run'] is None and bad_sum['combined_verified_passed'] is None
             assert len(bad_sum['ui_inventory']) == 15
             broken.write_bytes(prev_bytes)
@@ -795,8 +990,6 @@ def run_offline_checks():
                 ('host-1', 'execution.json', 'timed_out', True),
                 ('host-1', 'execution.json', 'run_id', '999'),
                 ('host-1', 'counts.json', 'executions', 18),
-                ('ui-1', 'execution.json', 'timed_out', True),
-                ('ui-1', 'counts.json', 'executions', 2),
             ]:
                 p = native_val / target_group / filename
                 orig = p.read_bytes()
@@ -967,7 +1160,7 @@ def run_offline_checks():
             assert del_qual['reused_historical']['run_id'] == str(r.HIST_RUN)
             del_summary = r.summarize()
             assert del_summary['native_tests_executed_this_run'] == 0 and del_summary['reused_native_passed'] == 37
-            assert sum(x['status'] == 'reused_from_prior' for x in del_summary['ui_inventory']) == 1
+            assert sum(x['status'] == 'reused_ui' for x in del_summary['ui_inventory']) == 1
             assert sum(x['status'] == 'reused_historical' for x in del_summary['ui_inventory']) == 1
             assert sum(x['status'] == 'not_selected' for x in del_summary['ui_inventory']) == 13
 
@@ -1023,7 +1216,10 @@ def run_offline_checks():
             ('prior build_ipa true', dict(prior_build_ipa=True)),
             ('prior missing dispatch-event', dict(include_event=False)),
             ('prior missing historical35', dict(include_hist=False)),
-            ('prior failed ui-1', dict(failed_group='ui-1', prior_conclusion='failure')),
+            ('prior missing bound UI1', dict(include_ui=False)),
+            ('prior missing gate', dict(include_gate=False)),
+            ('prior failed workflow despite Host pass', dict(prior_conclusion='failure')),
+            ('prior failed host-1', dict(failed_group='host-1', prior_conclusion='failure')),
         ]:
             neg_out = work / f'neg-{len(checks)}'
             neg_out.mkdir()
@@ -1056,39 +1252,17 @@ def run_offline_checks():
                  patch.object(v, 'APP', app):
                 rejects(label + ' rejected by reuse', lambda pz=p_zip, pr=p_run_j, pa=p_art_j: r.reuse_evidence(
                     offline_prior=dict(zip_path=pz, run_json=pr, artifact_json=pa)))
-                if 'failed ui-1' in label:
-                    # With allow_unqualified_ipa=False, failed ui-1 refuses delivery.
-                    with patch.object(r, 'live_scope', return_value={**del_neg_scope, 'allow_unqualified_ipa': False}):
-                        rejects('failed prior ui-1 without diagnostic opt-in refuses delivery', r.delivery_gate)
-                    # With allow_unqualified_ipa=True, emits DEVICE_DIAGNOSTIC_ONLY with truthful known/unknown counts.
-                    diag = r.delivery_gate()
-                    assert diag['qualification'] == 'DEVICE_DIAGNOSTIC_ONLY' and diag['coverage'] == 'UI_NOT_QUALIFIED'
-                    assert diag['verified_passed'] is None and diag['combined_verified_passed'] is None
-                    assert diag['native_tests_executed_this_run'] == 0 and diag['reused_native_passed'] is None
-                    assert diag['reused_historical_passed'] == 35 and diag['known_executions'] == 36
-                    assert diag['unknown_execution_groups'] == ['ui-1']
-                    checks.append('failed prior ui-1 with explicit diagnostic opt-in preserves known=36, unknown=ui-1, verified=null')
-                    # Diagnostic opt-in still cannot bypass source/device/toolchain integrity.
-                    with patch.object(r, 'live_scope', side_effect=ValueError('source mismatch')):
-                        rejects('explicit permission cannot bypass source integrity', r.delivery_gate)
-                    with patch.object(r, 'validate_linkage', side_effect=ValueError('device linkage failed')):
-                        rejects('explicit permission cannot bypass device WebKit integrity', r.delivery_gate)
-                    (neg_out / 'app-build-exit-code.txt').write_text('65')
-                    rejects('explicit permission cannot bypass failed device build', r.delivery_gate)
-                    (neg_out / 'app-build-exit-code.txt').write_text('0')
-                else:
-                    # Provenance/source/recursive errors CANNOT be bypassed even with allow_unqualified_ipa=True!
-                    rejects(label + ' cannot be bypassed by allow_unqualified_ipa', r.delivery_gate)
-                    neg_sum = r.summarize()
-                    assert neg_sum['native_tests_executed_this_run'] == 0
-                    assert neg_sum['reused_native_passed'] is None and neg_sum['combined_verified_passed'] is None
-                    ui1_row = next(x for x in neg_sum['ui_inventory'] if x['case'] == r.UI_METHOD)
-                    assert ui1_row['status'] == 'reuse_unverified' and ui1_row['current_selection'] == 'reused_from_prior'
+                rejects(label + ' cannot be bypassed by allow_unqualified_ipa', r.delivery_gate)
+                neg_sum = r.summarize()
+                assert neg_sum['native_tests_executed_this_run'] == 0
+                assert neg_sum['reused_native_passed'] is None and neg_sum['combined_verified_passed'] is None
+                ui1_row = next(x for x in neg_sum['ui_inventory'] if x['case'] == r.UI_METHOD)
+                assert ui1_row['status'] == 'reuse_unverified' and ui1_row['current_selection'] == 'reused_from_prior'
             # Reject cross-phase offline replay kwargs.
             rejects('delivery phase rejects offline_historical', lambda: r.reuse_evidence(
                 offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json)))
     # Dispatch permission & two-phase event binding tests.
-    with tempfile.TemporaryDirectory(prefix='epub-dispatch-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    with scratch_directory(prefix='epub-dispatch-') as temp:
         out = Path(temp)
         event = out / 'event.json'
         with patch.dict(os.environ, {'GITHUB_EVENT_PATH': str(event), 'ALLOW_UNQUALIFIED_IPA': 'false',
@@ -1099,8 +1273,7 @@ def run_offline_checks():
             with patch.dict(os.environ, {'ALLOW_UNQUALIFIED_IPA': 'true'}):
                 rejects('environment true cannot forge omitted dispatch permission', r.dispatch_permission)
                 event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, allow_unqualified_ipa=True))))
-                assert r.dispatch_permission() is True
-                checks.append('explicit true dispatch and environment agree')
+                rejects('even explicit diagnostic IPA opt-in is disabled', r.dispatch_permission)
             rejects('dispatch true cannot be changed to environment false', r.dispatch_permission)
             event.write_text(json.dumps(dict(inputs=dict(validation_scope='full', allow_unqualified_ipa=False))))
             rejects('diagnostic permission cannot cross scope', r.dispatch_permission)
@@ -1130,7 +1303,7 @@ def run_offline_checks():
         rejects('mixed IPA qualification', lambda: v.verify_ipa(epub_freeze=True, epub_reading=True))
 
     # Scheduler checks: first case fails -> second case still executes; preflight blocks; cancel not swallowed.
-    with tempfile.TemporaryDirectory(prefix='epub-continue-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    with scratch_directory(prefix='epub-host-scheduler-') as temp:
         root = Path(temp)
         scope = dict(scope=r.SCOPE, phase='validation', prior_validation_run='', source_commit='a' * 40, run_id='synthetic')
         for scenario in ('early_failure', 'timeout_and_fail', 'all_pass', 'preflight', 'cancelled'):
@@ -1144,7 +1317,7 @@ def run_offline_checks():
                 group = log.parent.name
                 assert len([s for s in args if s.startswith('-only-testing:')]) == 1
                 assert timeout == 480
-                if scenario == 'cancelled' and group == 'ui-1':
+                if scenario == 'cancelled' and group == 'host-1':
                     raise KeyboardInterrupt()
                 raw = fixture(group)
                 if scenario == 'early_failure' and group == 'host-1':
@@ -1182,30 +1355,30 @@ def run_offline_checks():
                         pass
                     else:
                         raise AssertionError('Cancellation swallowed')
-                    assert visited == ['host-1', 'ui-1'] and (out / 'epub-freeze/host-1/counts.json').is_file()
+                    assert visited == ['host-1'] and not (out / 'epub-freeze/host-1/counts.json').exists()
                     checks.append('cancellation stops scheduling without swallowing KeyboardInterrupt')
                 else:
                     assert r.run_all(destination) == (scenario == 'all_pass')
-                    assert visited == ['host-1', 'ui-1']
-                    checks.append(scenario + ': production scheduler attempted both selected identities')
+                    assert visited == ['host-1']
+                    checks.append(scenario + ': production scheduler only attempted complete Host identity once')
                 report = r.summarize(publish=True)
-                assert len(report['cases']) == 2 and len(report['ui_inventory']) == 15
-                assert sum(report['counts'].values()) == 2
+                assert len(report['cases']) == 1 and len(report['ui_inventory']) == 15
+                assert sum(report['counts'].values()) == 1
                 assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 13
                 if scenario == 'early_failure':
-                    assert report['counts'] == dict(passed=1, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
+                    assert report['counts'] == dict(passed=0, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
                     assert report['native_tests_executed_this_run'] is None
                     rejects('early failure cannot qualify despite later ui-1 pass', r.qualification)
                 elif scenario == 'timeout_and_fail':
-                    assert report['counts'] == dict(passed=1, failed=0, timed_out=1, error=0, blocked=0, not_run=0)
+                    assert report['counts'] == dict(passed=0, failed=0, timed_out=1, error=0, blocked=0, not_run=0)
                     rejects('timeout cannot qualify', r.qualification)
                 elif scenario == 'all_pass':
-                    assert report['counts'] == dict(passed=2, failed=0, timed_out=0, error=0, blocked=0, not_run=0)
+                    assert report['counts'] == dict(passed=1, failed=0, timed_out=0, error=0, blocked=0, not_run=0)
                     rejects('all_pass without historical reuse cannot qualify', r.qualification)
                 elif scenario == 'preflight':
-                    assert report['counts'] == dict(passed=0, failed=0, timed_out=0, error=0, blocked=2, not_run=0)
+                    assert report['counts'] == dict(passed=0, failed=0, timed_out=0, error=0, blocked=1, not_run=0)
                 else:
-                    assert report['counts'] == dict(passed=1, failed=0, timed_out=0, error=0, blocked=0, not_run=1)
+                    assert report['counts'] == dict(passed=0, failed=0, timed_out=0, error=0, blocked=0, not_run=1)
                 markdown = (out / 'case-results.md').read_text('utf-8')
                 assert all(x['case'] in markdown for x in report['ui_inventory'])
                 if scenario != 'preflight':
@@ -1262,14 +1435,15 @@ def run_offline_checks():
         offline_checks_passed=len(checks),
         checks=checks,
         native_tests_executed=0,
-        release_source_ready=not blockers,
+        release_source_ready=not blockers and not skip_workflow_contract,
         source_blockers=blockers,
+        workflow_scope_contract='skipped explicitly' if skip_workflow_contract else 'passed',
     )
 
 
-def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json):
+def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json, offline_ui):
     """Explicit offline replay against a real historical artifact ZIP (never called by default)."""
-    with tempfile.TemporaryDirectory(prefix='epub-real-hist-replay-', dir=os.environ.get('PI_SCRATCH_DIR')) as temp:
+    with scratch_directory(prefix='epub-real-reuse-replay-') as temp:
         work = Path(temp)
         out = work / 'out'
         out.mkdir()
@@ -1293,9 +1467,11 @@ def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json):
              patch.object(r, 'REUSED_OUT', out / 'reused-evidence'), \
              patch.object(r, 'REUSED_GATE_JSON', out / 'reused-evidence/reused-evidence-gate.json'), \
              patch.object(r, 'live_scope', return_value=scope), \
+             patch.object(r, 'REUSED_STAGING', work / 'staging'), \
              patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()):
             receipt = r.reuse_evidence(
                 offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json),
+                offline_ui=offline_ui,
                 check_shared_sources=True,
                 verify_live_bundle=False,
             )
@@ -1306,7 +1482,8 @@ def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json):
             assert receipt['historical']['workflow_conclusion'] == 'failure'
             assert not (out / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/host-3').exists()
             assert not (out / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/ui-1').exists()
-            assert not any((out / 'reused-evidence').rglob('data.0~*'))
+            assert not any((out / f'reused-evidence/historical-{r.HIST_RUN}').rglob('data.0~*'))
+            assert receipt['ui']['executions_passed'] == 1 and receipt['reused_native_passed'] == 36
             # Also verify delivery-phase replay carrying that real historical35 inside a synthetic prior ZIP!
             dest = 'platform=iOS Simulator,id=66571EB4-A450-4628-ABB9-3D215AFEDD58'
             hist_extracted = out / f'reused-evidence/historical-{r.HIST_RUN}'
@@ -1352,6 +1529,10 @@ def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json):
         historical_archive_sha256=r.HIST_ARCHIVE_SHA256,
         historical_reused_declarations=34,
         historical_reused_executions=35,
+        ui_run=r.UI_RUN,
+        ui_reused_executions=1,
+        xcresult_native_parse='passed' if sys.platform == 'darwin' else 'skipped: macOS xcrun required; full bundle digest/manifest checked',
+        scratch_path=str(work),
         delivery_combined_verified=37,
         retained_file_count=len(retained_files),
         retained_bytes=retained_bytes,
@@ -1364,12 +1545,19 @@ if __name__ == '__main__':
     parser.add_argument('--historical-zip', type=Path)
     parser.add_argument('--historical-run-json', type=Path)
     parser.add_argument('--historical-artifact-json', type=Path)
+    parser.add_argument('--ui-zip', type=Path)
+    parser.add_argument('--ui-run-json', type=Path)
+    parser.add_argument('--ui-artifact-json', type=Path)
+    parser.add_argument('--skip-workflow-contract', action='store_true', help='Local two-file implementation only; never use for release')
     args = parser.parse_args()
-    result = run_offline_checks()
-    if args.historical_zip or args.historical_run_json or args.historical_artifact_json:
-        if not (args.historical_zip and args.historical_run_json and args.historical_artifact_json):
-            parser.error('Offline historical replay requires --historical-zip, --historical-run-json, and --historical-artifact-json')
+    result = run_offline_checks(skip_workflow_contract=args.skip_workflow_contract)
+    if any((args.historical_zip, args.historical_run_json, args.historical_artifact_json,
+            args.ui_zip, args.ui_run_json, args.ui_artifact_json)):
+        if not all((args.historical_zip, args.historical_run_json, args.historical_artifact_json,
+                    args.ui_zip, args.ui_run_json, args.ui_artifact_json)):
+            parser.error('Real replay needs all six --historical-* and --ui-* archive/API paths')
         result['historical_replay'] = run_explicit_historical_replay(
             args.historical_zip, args.historical_run_json, args.historical_artifact_json,
+            dict(zip_path=args.ui_zip, run_json=args.ui_run_json, artifact_json=args.ui_artifact_json),
         )
     print(json.dumps(result, indent=2))
