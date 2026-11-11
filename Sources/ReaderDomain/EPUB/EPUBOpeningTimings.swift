@@ -72,14 +72,16 @@ public struct EPUBOpeningTimings: Sendable {
             "元数据复用原因：\(metadataReuseReason.rawValue)\n" +
             "chapter-ready-v1；按章元数据：\(chapterIndexedMetadata)；本次迁移/重建：\(readyPreparationOccurred)\n" +
             "内容缓存：\(contentCacheOutcome.rawValue)；资源清单 \(resourceCount) 项 / \(resourceBytes) 字节\n"
-        return cache + Phase.allCases.flatMap { phase in
+        let phaseLines: [String] = Phase.allCases.flatMap { phase in
             samples.filter { $0.phase == phase }.map {
                 phase.label + String(format: " %.3fs", $0.seconds) + ($0.succeeded ? "" : "（未成功，已回退）")
             }
-        }.joined(separator: "\n") + "\n资源细分通路：\(resourceVerificationRoute.rawValue)（进程注册状态，不代表OS磁盘冷热）\n" +
-            (resourceVerification?.summary ?? "逐资源细分：未单列（未测或未成功；不是0耗时）") +
-            "\n范围：仅Ready逐资源校验；原书SHA、manifest、节点包、复制/写入、重建不在细分内；旧磁盘恢复/串行缓存未单列。" +
-            (sessionBreakdown.samples.isEmpty ? "" : "\n\n" + sessionBreakdown.summary)
+        }
+        let route = "\n资源细分通路：\(resourceVerificationRoute.rawValue)（进程注册状态，不代表OS磁盘冷热）\n"
+        let resources = resourceVerification?.summary ?? "逐资源细分：未单列（未测或未成功；不是0耗时）"
+        let scope = "\n范围：仅Ready逐资源校验；原书SHA、manifest、节点包、复制/写入、重建不在细分内；旧磁盘恢复/串行缓存未单列。"
+        let session = sessionBreakdown.samples.isEmpty ? "" : "\n\n" + sessionBreakdown.summary
+        return [cache, phaseLines.joined(separator: "\n"), route, resources, scope, session].joined()
     }
 }
 
