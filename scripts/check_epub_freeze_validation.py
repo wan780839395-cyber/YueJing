@@ -561,6 +561,28 @@ def check_ui_rejections(folder, run, artifact):
                 rejects('UI native export ' + label, lambda: r.verify_ui_xcresult(bundle))
         with patch.object(r.subprocess, 'check_output', side_effect=[json.dumps(good_summary).encode(), json.dumps(good_tree).encode()]):
             r.verify_ui_xcresult(bundle)
+        original_bundle = {p.relative_to(bundle).as_posix(): p.read_bytes()
+                           for p in bundle.rglob('*') if p.is_file()}
+        for fail in (False, True):
+            parsed_paths = []
+            def materializing_tool(command, *, timeout):
+                parsed = Path(command[command.index('--path') + 1])
+                assert parsed != bundle and parsed.is_dir() and timeout == 120
+                assert (parsed / 'Info.plist').read_bytes() == (bundle / 'Info.plist').read_bytes()
+                parsed_paths.append(parsed)
+                (parsed / 'database.sqlite3').write_bytes(b'synthetic xcresulttool derived database')
+                if fail:
+                    raise ValueError('synthetic parser failure after materializing database')
+                return json.dumps(good_summary if 'summary' in command else good_tree).encode()
+            with patch.object(r.subprocess, 'check_output', side_effect=materializing_tool):
+                if fail:
+                    rejects('UI parser failure preserves original bundle', lambda: r.verify_ui_xcresult(bundle))
+                else:
+                    r.verify_ui_xcresult(bundle)
+            assert parsed_paths and all(not p.exists() for p in parsed_paths)
+            assert original_bundle == {p.relative_to(bundle).as_posix(): p.read_bytes()
+                                       for p in bundle.rglob('*') if p.is_file()}
+            checks.append('xcresult materialized database isolated and cleaned: failure=' + str(fail))
     checks.append('failed Round2 workflow contributes ONLY independently proven UI1, never Host or whole-run pass')
 
 

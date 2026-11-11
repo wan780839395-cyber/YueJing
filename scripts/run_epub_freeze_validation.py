@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1125,14 +1126,22 @@ def verify_ui_xcresult(bundle):
     # The full bundle bytes are bound to the pinned API digest on all platforms.
     # Native parsing is additionally mandatory on the runner, never claimed on Windows.
     if sys.platform == "darwin":
-        raw = subprocess.check_output(["xcrun", "xcresulttool", "get", "test-results", "summary",
-                                       "--path", str(bundle)], timeout=120)
+        # xcresulttool may materialize database.sqlite3 even for a read command.
+        # Parse an isolated copy so the pinned evidence remains byte-for-byte immutable.
+        temporary_root = Path(os.environ.get("PI_SCRATCH_DIR", str(REUSED_STAGING)))
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="ui-xcresult-", dir=temporary_root) as temporary:
+            working_bundle = Path(temporary) / bundle.name
+            shutil.copytree(bundle, working_bundle)
+            raw = subprocess.check_output(["xcrun", "xcresulttool", "get", "test-results", "summary",
+                                           "--path", str(working_bundle)], timeout=120)
+            tests_raw = subprocess.check_output(
+                ["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", str(working_bundle)], timeout=120)
         result = json.loads(raw)
         require(result.get("totalTestCount") == 1 and result.get("passedTests") == 1
                 and result.get("failedTests") == 0 and result.get("skippedTests") == 0,
                 "UI xcresult summary differs from one passing test")
-        tests = json.loads(subprocess.check_output(
-            ["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", str(bundle)], timeout=120))
+        tests = json.loads(tests_raw)
         matches = []
         def visit(node):
             if isinstance(node, dict):
