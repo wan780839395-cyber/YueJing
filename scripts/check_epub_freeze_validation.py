@@ -1,1585 +1,625 @@
-"""Offline, synthetic gate checks only: no build, dispatch, Swift or native acceptance."""
+"""Offline gate/parser/security checks. Synthetic native fixtures are NOT native acceptance."""
 import argparse
-import copy
 import contextlib
-import hashlib
+import copy
 import io
 import json
 import os
 from pathlib import Path
-import plistlib
-import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 from unittest.mock import patch
 import zipfile
 
 import run_epub_freeze_validation as r
-import validate_task3 as v
 
 checks = []
-CHECK_ROOT = r.ROOT
-_source_contract = r.validate_followup_sources
+DESTINATION = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
+SOURCE = 'a' * 40
+PRIOR_ID, CURRENT_ID = '900001', '900002'
 
 
-def check_real_followup_sources(files=None):
-    with patch.object(r, 'ROOT', CHECK_ROOT), patch.object(v, 'ROOT', CHECK_ROOT):
-        return _source_contract(files)
-
-
-@contextlib.contextmanager
-def scratch_directory(*, prefix, dir=None):
-    # Retain every fixture, including failures, without overwriting previous runs.
-    root = os.environ.get('PI_SCRATCH_DIR') or os.environ.get('RUNNER_TEMP')
-    if not root:
-        raise ValueError('PI_SCRATCH_DIR (local) or RUNNER_TEMP (Actions) required')
-    yield tempfile.mkdtemp(prefix=prefix, dir=root)
+def passed(label):
+    checks.append(label)
 
 
 def rejects(label, action):
     try:
         action()
-    except (ValueError, OSError, KeyError, zipfile.BadZipFile):
-        checks.append(label)
+    except (ValueError, OSError, KeyError, TypeError, zipfile.BadZipFile):
+        passed(label)
     else:
         raise AssertionError('Expected rejection: ' + label)
 
 
-def fixture_for(group, spec):
-    text = ''
-    for name in spec['cases']:
-        if spec['kind'] == 'ui':
-            text += f"Test Case '-[EPUBFlowUITests {name}]' started.\nTest Case '-[EPUBFlowUITests {name}]' passed (0.1 seconds).\n"
-        else:
-            param = r.inventory.PARAMETERIZED.get(name)
-            signature = name + (param['signature'] if param else '()')
-            text += f'◇ Test {signature} started.\n'
-            if param:
-                text += ''.join(f"◇ Passing 1 argument {param['argument']} → {value} to {signature}\n" for value in param['values'])
-            text += f'✔ Test {signature} passed after 0.1 seconds.\n'
-    if spec['kind'] == 'ui':
-        text += 'Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds\n'
-    else:
-        text += f"✔ Test run with {len(spec['cases'])} tests passed after 0.2 seconds.\n"
-    return (text + '** TEST SUCCEEDED **\n').encode('utf-8')
+def save(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2), encoding='utf-8')
 
 
 def fixture(group):
-    return fixture_for(group, r.GROUPS[group])
-
-
-def expected_executions(group, group_specs=r.GROUPS):
-    return sum(len(r.inventory.PARAMETERIZED.get(name, {}).get('values', [None]))
-               for name in group_specs[group]['cases'])
-
-
-def _make_linkage_dir(folder, source_commit, run_id, binaries_payload=None):
-    folder.mkdir(parents=True, exist_ok=True)
-    data = b'synthetic macho payload' if binaries_payload is None else binaries_payload
-    rel_ev = 'binaries/0/YueJing'
-    ev_path = folder / rel_ev
-    ev_path.parent.mkdir(parents=True, exist_ok=True)
-    ev_path.write_bytes(data)
-    (folder / 'nm-1.log').write_text('no overlay\n', encoding='utf-8')
-    rec = dict(
-        source_commit=source_commit,
-        run_id=str(run_id),
-        run_attempt='1',
-        passed=True,
-        errors=[],
-        binaries=[dict(path='YueJing', evidence=rel_ev, passed=True, nm_exit=0,
-                       bytes=len(data), sha256=hashlib.sha256(data).hexdigest())],
-    )
-    r.write(folder / 'verification.json', rec)
-    return rec
-
-
-def _make_settings_json(kind, target, group_folder, source_commit, eff_path):
-    if kind == 'domain':
-        eff = json.loads(eff_path.read_text(encoding='utf-8'))
-        receipt = dict(
-            source_commit=source_commit,
-            target='ReaderDomainTests',
-            scheme='ReaderDomain',
-            scheme_sha256='1' * 64,
-            effective_settings_sha256=r.sha(eff_path),
-            testables=['ReaderDomainTests'],
-            settings=eff['ReaderDomainTests'],
-        )
+    spec = r.GROUPS[group]
+    name = spec['cases'][0]
+    if spec['kind'] == 'ui':
+        text = (f"Test Case '-[EPUBFlowUITests {name}]' started.\n"
+                f"Test Case '-[EPUBFlowUITests {name}]' passed (0.1 seconds).\n"
+                'Executed 1 test, with 0 failures (0 unexpected) in 0.1 seconds\n')
     else:
-        app_settings = dict(
-            PRODUCT_TYPE='com.apple.product-type.application',
-            SWIFT_VERSION='6.0',
-            SWIFT_STRICT_CONCURRENCY='complete',
-            IPHONEOS_DEPLOYMENT_TARGET='16.6',
-            TEST_HOST='',
-            BUNDLE_LOADER='',
-            TEST_TARGET_NAME='',
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG',
-        )
-        if target == 'YueJingHostTests':
-            test_settings = dict(
-                PRODUCT_TYPE='com.apple.product-type.bundle.unit-test',
-                SWIFT_VERSION='6.0',
-                SWIFT_STRICT_CONCURRENCY='complete',
-                IPHONEOS_DEPLOYMENT_TARGET='16.6',
-                TEST_HOST='/synthetic/Debug-iphonesimulator/YueJing.app/YueJing',
-                BUNDLE_LOADER='/synthetic/Debug-iphonesimulator/YueJing.app/YueJing',
-                TEST_TARGET_NAME='',
-                SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG',
-            )
-        else:
-            test_settings = dict(
-                PRODUCT_TYPE='com.apple.product-type.bundle.ui-testing',
-                SWIFT_VERSION='6.0',
-                SWIFT_STRICT_CONCURRENCY='complete',
-                IPHONEOS_DEPLOYMENT_TARGET='16.6',
-                TEST_HOST='',
-                BUNDLE_LOADER='',
-                TEST_TARGET_NAME='YueJing',
-                SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG',
-            )
-        receipt = dict(
-            source_commit=source_commit,
-            targets={'YueJing': app_settings, target: test_settings},
-            scheme_sha256='2' * 64,
-            testables=['YueJingEPUBUITests', 'YueJingHostTests', 'YueJingUITests'],
-            fixture_environment='D052AE4B-7823-447E-BE63-986028A7F54C',
-        )
-    r.write(group_folder / f'{target}-settings.json', receipt)
+        param = r.inventory.PARAMETERIZED.get(name)
+        signature = name + (param['signature'] if param else '()')
+        text = f'◇ Test {signature} started.\n'
+        if param:
+            text += ''.join(f"◇ Passing 1 argument {param['argument']} → {value} to {signature}\n" for value in param['values'])
+        text += f'✔ Test {signature} passed after 0.1 seconds.\n✔ Test run with 1 tests passed after 0.2 seconds.\n'
+    return (text + '** TEST SUCCEEDED **\n').encode()
 
 
-def _synthetic_packages():
-    return {
-        'grdb.swift': {
-            'package': {
-                'identity': 'grdb.swift',
-                'kind': 'remoteSourceControl',
-                'location': 'https://github.com/groue/GRDB.swift.git',
-                'state': {'revision': '4de97e6903d29697caae1179cdef8479c64c2639', 'version': '7.0.0'},
-            },
-            'checkout_revision': '4de97e6903d29697caae1179cdef8479c64c2639',
-            'package_manifest_sha256': '8140971be34f0cc80ef71e96a2b709ff98358a5c7412fe2e2a1687a4cb21867a',
-        },
-        'zipfoundation': {
-            'package': {
-                'identity': 'zipfoundation',
-                'kind': 'remoteSourceControl',
-                'location': 'https://github.com/weichsel/ZIPFoundation.git',
-                'state': {'revision': '02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0', 'version': '0.9.19'},
-            },
-            'checkout_revision': '02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0',
-            'package_manifest_sha256': '2dd90c2f70b1f3d17a4d73bd32ac97e5fc002eecd5797586edaf170def789fff',
-        },
-    }
+def executions(spec):
+    return len(r.inventory.PARAMETERIZED.get(spec['cases'][0], {}).get('values', [None]))
 
 
-def _write_common_run_files(root, source_commit, run_id, candidate_files_map):
+def tree_for(spec):
+    name = spec['cases'][0]
+    node = dict(name=name + r.inventory.PARAMETERIZED.get(name, {}).get('signature', '()'),
+                nodeType='Test Case', result='Passed', children=[])
+    if name in r.inventory.PARAMETERIZED:
+        node['children'] = [dict(name='symlink: ' + value, nodeType='Arguments', result='Passed') for value in ('false', 'true')]
+    return dict(testNodes=[node])
+
+
+def synthetic_export(bundle, section):
+    # Explicit mock boundary. This data is never described as an xcresulttool run.
+    return (bundle / ('synthetic-' + section + '.json')).read_bytes()
+
+
+def scope_for(phase='validation'):
+    return dict(scope=r.SCOPE, phase=phase, prior_validation_run=PRIOR_ID if phase == 'delivery' else '',
+                source_commit=SOURCE, baseline_commit=r.BASE, run_id=CURRENT_ID if phase == 'delivery' else PRIOR_ID,
+                run_attempt='1', version=r.VERSION, build=r.BUILD, allow_unqualified_ipa=False, source_status='clean',
+                build_ipa=phase == 'delivery', selected=r.selection(), selected_declarations=0 if phase == 'delivery' else 24,
+                native_tests_planned=0 if phase == 'delivery' else 25, reused_native_planned=25 if phase == 'delivery' else 0,
+                combined_target_declarations=24, combined_target_executions=25, full_inventory_declared=241,
+                full_inventory_executions=242, files={'synthetic.swift': 'b' * 64}, approved_files={},
+                changed_paths=sorted(r.ALLOWED), physical_acceptance='not performed', full_regression_passed=False)
+
+
+@contextlib.contextmanager
+def sandbox(root, scope=None):
     root.mkdir(parents=True, exist_ok=True)
-    (root / 'toolchain.log').write_text(
-        f'Source: {source_commit}\narm64\nXcode 16.4\nBuild version 16F6\nApple Swift version 6.1.2\n',
-        encoding='utf-8',
-    )
-    (root / 'xcodegen.log').write_text('Version: 2.46.0\n', encoding='utf-8')
-    (root / 'Package.resolved').write_text('{"pins": []}\n', encoding='utf-8')
-    r.write(root / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-    eff_path = root / 'effective-test-settings.json'
-    r.write(eff_path, dict(ReaderDomainTests=dict(
-        PRODUCT_TYPE='com.apple.product-type.bundle.unit-test',
-        SWIFT_VERSION='6.0',
-        SWIFT_STRICT_CONCURRENCY='complete',
-        IPHONEOS_DEPLOYMENT_TARGET='16.6',
-        TEST_HOST='',
-        BUNDLE_LOADER='',
-        TEST_TARGET_NAME='',
-    )))
-    r.write(root / 'candidate-sources.json', dict(
-        source_commit=source_commit, run_id=str(run_id), run_attempt='1', files=candidate_files_map,
-    ))
-    return eff_path
+    attrs = dict(OUT=root, NATIVE_OUT=root / 'epub-freeze', SCOPE_JSON=root / 'epub-freeze-scope.json',
+                 DISPATCH_EVENT_JSON=root / 'dispatch-event.json', GATE_JSON=root / 'epub-freeze-gate.json',
+                 PACKAGE_JSON=root / 'epub-freeze-package.json', REUSED_OUT=root / 'reused-evidence',
+                 REUSED_GATE_JSON=root / 'reused-evidence/reused-evidence-gate.json', REUSED_STAGING=root / 'staging')
+    with contextlib.ExitStack() as stack:
+        for name, value in attrs.items():
+            stack.enter_context(patch.object(r, name, value))
+        stack.enter_context(patch.dict(os.environ, GITHUB_ACTIONS='false', PRIOR_VALIDATION_RUN=''))
+        if scope is not None:
+            stack.enter_context(patch.object(r, 'live_scope', return_value=scope))
+            save(r.SCOPE_JSON, scope)
+        yield
 
 
-def _zip_directory(src_dir, dest_zip):
-    with zipfile.ZipFile(dest_zip, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted(src_dir.rglob('*')):
-            if path.is_file():
-                zf.write(path, path.relative_to(src_dir).as_posix())
+def settings(kind, target, folder, source, eff):
+    common = dict(SWIFT_VERSION='6.0', SWIFT_STRICT_CONCURRENCY='complete', IPHONEOS_DEPLOYMENT_TARGET='16.6')
+    if kind == 'domain':
+        values = json.loads(eff.read_text())['ReaderDomainTests']
+        receipt = dict(source_commit=source, target=target, scheme='ReaderDomain', scheme_sha256='1' * 64,
+                       effective_settings_sha256=r.sha(eff), testables=['ReaderDomainTests'], settings=values)
+    else:
+        app = dict(**common, PRODUCT_TYPE='com.apple.product-type.application', SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG')
+        test = dict(**common, PRODUCT_TYPE='com.apple.product-type.bundle.ui-testing', TEST_TARGET_NAME='YueJing')
+        if kind == 'host':
+            test = dict(**common, PRODUCT_TYPE='com.apple.product-type.bundle.unit-test',
+                        TEST_HOST='/Debug-iphonesimulator/YueJing.app/YueJing', BUNDLE_LOADER='/Debug-iphonesimulator/YueJing.app/YueJing')
+        receipt = dict(source_commit=source, scheme_sha256='2' * 64, testables=list(r.ui.GROUPS),
+                       fixture_environment='11111111-2222-3333-4444-555555555555', targets={'YueJing': app, target: test})
+    save(folder / (target + '-settings.json'), receipt)
 
 
-def _build_synthetic_historical_zip(work_dir, destination, result_tree, candidate_files_map):
-    src = work_dir / 'hist-src'
-    eff_path = _write_common_run_files(src, r.BASE, r.HIST_RUN, candidate_files_map)
-    r.write(src / 'epub-freeze-scope.json', dict(
-        scope=r.HIST_SCOPE, source_commit=r.BASE, run_id=str(r.HIST_RUN), run_attempt='1',
-        version=r.VERSION, build=r.BUILD,
-    ))
-    udid = destination.split('id=')[1]
-    r.write(src / 'simulator-selection.json', dict(
-        device_name='iPhone SE (3rd generation)', udid=udid, runtime='iOS 18.5',
-        runtime_version='18.5', sdk='18.5', architecture='arm64', physical_device=False,
-    ))
-    r.write(src / 'simulator-boot.json', dict(
-        source_commit=r.BASE, run_id=str(r.HIST_RUN), run_attempt='1', exit_code=0, timed_out=False,
-    ))
-    _make_linkage_dir(src / 'webkit-simulator-linkage', r.BASE, r.HIST_RUN)
-    freeze = src / 'epub-freeze'
-    freeze.mkdir()
-    for group, spec in r.HIST_GROUPS.items():
-        folder = freeze / group
-        folder.mkdir()
-        target = spec['target']
-        bundle = folder / (target + '.xcresult')
-        (bundle / 'Data').mkdir(parents=True)
-        (bundle / 'Info.plist').write_bytes(b'synthetic plist')
-        (bundle / 'Data/data.0~synthetic').write_bytes(b'synthetic data')
-        bundle_arg = f'/Users/runner/work/YueJing/YueJing/artifacts/task3/epub-freeze/{group}/{target}.xcresult'
-        want_cmd = r.command_for_spec(spec, destination, bundle_arg)
-        want = dict(scope=r.HIST_SCOPE, source_commit=r.BASE, run_id=str(r.HIST_RUN), run_attempt='1',
-                    group=group, target=target, destination=destination, expected_cases=spec['cases'],
-                    command=want_cmd, timeout_seconds=spec['timeout'], case_timeout_seconds=180)
-        r.write(folder / 'selection.json', want)
-        r.write(folder / 'execution.json', dict(**want, native_exit=0, timed_out=False))
-        _make_settings_json(spec['kind'], target, folder, r.BASE, eff_path)
-        raw_log = fixture_for(group, spec)
-        (folder / (target + '.log')).write_bytes(raw_log)
-        parsed = r.parse_log_for_spec(group, spec, raw_log, 0, False)
-        if any(c in r.inventory.PARAMETERIZED for c in spec['cases']):
-            raw_xc = json.dumps(result_tree).encode('utf-8')
-            (folder / 'xcresult-tests.json').write_bytes(raw_xc)
-            parsed['parameter_xcresult'] = dict(**r.parameter_result(result_tree), raw_sha256=r.compat.digest_bytes(raw_xc))
-        else:
-            parsed['parameter_xcresult'] = None
-        r.write(folder / 'counts.json', parsed)
-    # Include the two failed Round 1 groups inside the historical ZIP (they must NOT be reused).
-    for bad_group, bad_target, bad_case in (
-        ('host-3', 'YueJingHostTests', r.HOST_METHOD),
-        ('ui-1', 'YueJingEPUBUITests', r.UI_METHOD),
-    ):
-        bad_dir = freeze / bad_group
-        bad_dir.mkdir()
-        (bad_dir / (bad_target + '.log')).write_bytes(b'failed case log\n** TEST FAILED **\n')
-        r.write(bad_dir / 'failure.json', dict(group=bad_group, error='Native failure/timeout',
-                                              source_commit=r.BASE, run_id=str(r.HIST_RUN)))
-    zip_path = work_dir / 'hist.zip'
-    _zip_directory(src, zip_path)
-    hist_bytes = zip_path.stat().st_size
-    hist_sha = r.sha(zip_path)
-    run_meta = dict(
-        id=r.HIST_RUN, head_sha=r.BASE, run_attempt=1, workflow_id=r.WORKFLOW_ID,
-        path=r.WORKFLOW_PATH, event='workflow_dispatch', head_branch='main',
-        status='completed', conclusion='failure',
-        repository=dict(full_name=r.REPO), head_repository=dict(full_name=r.REPO),
-    )
-    artifact_meta = dict(
-        id=r.HIST_ARTIFACT_ID, expired=False, name=r.HIST_ARTIFACT_NAME,
-        workflow_run=dict(id=r.HIST_RUN, head_sha=r.BASE),
-        size_in_bytes=hist_bytes, digest='sha256:' + hist_sha,
-    )
-    return zip_path, run_meta, artifact_meta
+def group_files(root, group, scope, *, exit_code=0, timed_out=False):
+    spec = r.GROUPS[group]
+    folder = root / 'epub-freeze' / group
+    folder.mkdir(parents=True, exist_ok=True)
+    target = spec['target']
+    bundle = folder / (target + '.xcresult')
+    (bundle / 'Data').mkdir(parents=True)
+    (bundle / 'Info.plist').write_bytes(b'synthetic-not-native')
+    (bundle / 'Data/data.0').write_bytes(b'synthetic-not-native')
+    save(bundle / 'synthetic-tests.json', tree_for(spec))
+    save(bundle / 'synthetic-summary.json', dict(totalTestCount=executions(spec), passedTests=executions(spec), failedTests=0, skippedTests=0))
+    want = r.provenance(group, DESTINATION, bundle, scope)
+    save(folder / 'selection.json', want)
+    save(folder / 'execution.json', dict(**want, native_exit=exit_code, timed_out=timed_out))
+    raw = fixture(group)
+    (folder / (target + '.log')).write_bytes(raw)
+    if exit_code or timed_out:
+        return
+    parsed = r.parse_log(group, raw, 0, False)
+    parsed['parameter_xcresult'] = r.parameter_evidence(group, folder, bundle, export=True)
+    save(folder / 'counts.json', parsed)
+    return parsed
 
 
-def _build_synthetic_prior_zip(work_dir, prior_id, prior_sha, destination, candidate_files_map,
-                               hist_extracted_dir, *, failed_group=None,
-                               prior_phase='validation', prior_prior='', prior_build_ipa=False,
-                               prior_conclusion='success', include_event=True, include_hist=True,
-                               include_gate=True, include_linkage=True, include_ui=True):
-    src = work_dir / f'prior-src-{prior_id}'
-    eff_path = _write_common_run_files(src, prior_sha, prior_id, candidate_files_map)
-    event_obj = dict(inputs=dict(
-        validation_scope=r.SCOPE,
-        allow_unqualified_ipa=False,
-        build_ipa=prior_build_ipa,
-        prior_validation_run=prior_prior,
-    ))
-    event_bytes = json.dumps(event_obj).encode('utf-8')
-    if include_event:
-        (src / 'dispatch-event.json').write_bytes(event_bytes)
-    prior_scope = dict(
-        scope=r.SCOPE,
-        phase=prior_phase,
-        prior_validation_run=prior_prior,
-        source_commit=prior_sha,
-        baseline_commit=r.BASE,
-        run_id=str(prior_id),
-        run_attempt='1',
-        version=r.VERSION,
-        build=r.BUILD,
-        allow_unqualified_ipa=False,
-        dispatch_event_sha256=hashlib.sha256(event_bytes).hexdigest(),
-        build_ipa=prior_build_ipa,
-        changed_paths=sorted(r.ALLOWED),
-        selected={g: list(spec['cases']) for g, spec in r.GROUPS.items()},
-        selected_declarations=r.TOTAL,
-        native_tests_planned=r.EXECUTIONS,
-        reused_historical_run_id=str(r.HIST_RUN),
-        reused_historical_artifact_id=r.HIST_ARTIFACT_ID,
-        reused_historical_declarations=r.REUSED_DECLARATIONS,
-        reused_historical_executions=r.REUSED_EXECUTIONS,
-        combined_target_declarations=r.COMBINED_TOTAL,
-        combined_target_executions=r.COMBINED_EXECUTIONS,
-        full_inventory_declared=236,
-        full_inventory_executions=237,
-        files=candidate_files_map,
-        approved_files={p: candidate_files_map.get(p, '0' * 64) for p in sorted(r.ALLOWED)},
-        physical_acceptance='not performed',
-        full_regression_passed=False,
-    )
-    r.write(src / 'epub-freeze-scope.json', prior_scope)
-    udid = destination.split('id=')[1]
-    r.write(src / 'simulator-selection.json', dict(
-        device_name='iPhone SE (3rd generation)', udid=udid, runtime='iOS 18.5',
-        runtime_version='18.5', sdk='18.5', architecture='arm64', physical_device=False,
-    ))
-    r.write(src / 'simulator-boot.json', dict(
-        source_commit=prior_sha, run_id=str(prior_id), run_attempt='1', exit_code=0, timed_out=False,
-    ))
-    if include_linkage:
-        _make_linkage_dir(src / 'webkit-simulator-linkage', prior_sha, prior_id)
-    freeze = src / 'epub-freeze'
-    freeze.mkdir()
-    groups_summary = []
+def packages():
+    return {name: dict(package=dict(identity=name, kind='remoteSourceControl', location=dep['url'],
+                                   state=dict(revision=dep['revision'], version=dep['version'])),
+                       checkout_revision=dep['revision'], package_manifest_sha256=dep['manifest'])
+            for name, dep in r.compat.epub_batch.DEPENDENCIES.items()}
+
+
+def common_files(root, scope):
+    (root / 'toolchain.log').write_text(f'Source: {SOURCE}\narm64\nXcode 16.4\nBuild version 16F6\nApple Swift version 6.1.2\n')
+    (root / 'xcodegen.log').write_text('Version: 2.46.0\n')
+    (root / 'Package.resolved').write_text('{}\n')
+    save(root / 'dependency-resolution.json', dict(packages=packages()))
+    save(root / 'candidate-sources.json', dict(source_commit=SOURCE, run_id=scope['run_id'], run_attempt='1', files=scope['files']))
+    values = dict(PRODUCT_TYPE='com.apple.product-type.bundle.unit-test', SWIFT_VERSION='6.0',
+                  SWIFT_STRICT_CONCURRENCY='complete', IPHONEOS_DEPLOYMENT_TARGET='16.6', TEST_HOST='', BUNDLE_LOADER='', TEST_TARGET_NAME='')
+    save(root / 'effective-test-settings.json', dict(ReaderDomainTests=values))
+    save(root / 'simulator-selection.json', dict(udid=DESTINATION.split('id=')[1], device_name='iPhone SE',
+                                               architecture='arm64', physical_device=False))
+    save(root / 'simulator-boot.json', dict(source_commit=SOURCE, run_id=scope['run_id'], run_attempt='1', exit_code=0, timed_out=False))
+    link = root / 'webkit-simulator-linkage'
+    link.mkdir()
+    (link / 'binary').write_bytes(b'synthetic macho')
+    (link / 'nm-1.log').write_text('synthetic nm')
+    save(link / 'verification.json', dict(source_commit=SOURCE, run_id=scope['run_id'], run_attempt='1', passed=True,
+                                         errors=[], binaries=[dict(evidence='binary', sha256=r.sha(link / 'binary'), passed=True, nm_exit=0)]))
+
+
+def zip_source(source, path):
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for file in sorted(source.rglob('*')):
+            if file.is_file():
+                archive.write(file, file.relative_to(source).as_posix())
+
+
+def api_metadata(archive):
+    run = dict(id=int(PRIOR_ID), head_sha=SOURCE, run_attempt=1, workflow_id=r.WORKFLOW_ID, path=r.WORKFLOW_PATH,
+               event='workflow_dispatch', head_branch='main', status='completed', conclusion='success',
+               repository=dict(full_name=r.REPO), head_repository=dict(full_name=r.REPO))
+    artifact = dict(id=9900001, expired=False, name=f'task3-evidence-{PRIOR_ID}-{SOURCE}',
+                    workflow_run=dict(id=int(PRIOR_ID), head_sha=SOURCE), size_in_bytes=archive.stat().st_size,
+                    digest='sha256:' + r.sha(archive))
+    return run, artifact
+
+
+def build_prior(root):
+    scope = scope_for()
+    root.mkdir()
+    common_files(root, scope)
+    event = dict(inputs=dict(validation_scope=r.SCOPE, allow_unqualified_ipa=False, build_ipa=False, prior_validation_run=''))
+    save(root / 'dispatch-event.json', event)
+    scope['dispatch_event_sha256'] = r.sha(root / 'dispatch-event.json')
+    save(root / 'epub-freeze-scope.json', scope)
+    groups = []
     for group, spec in r.GROUPS.items():
-        folder = freeze / group
-        folder.mkdir()
-        target = spec['target']
-        bundle = folder / (target + '.xcresult')
-        (bundle / 'Data').mkdir(parents=True)
-        (bundle / 'Info.plist').write_bytes(b'synthetic plist')
-        (bundle / 'Data/data.0~synthetic').write_bytes(b'synthetic data')
-        bundle_arg = f'/Users/runner/work/YueJing/YueJing/artifacts/task3/epub-freeze/{group}/{target}.xcresult'
-        want_cmd = r.command_for_spec(spec, destination, bundle_arg)
-        want = dict(scope=r.SCOPE, source_commit=prior_sha, run_id=str(prior_id), run_attempt='1',
-                    group=group, target=target, destination=destination, expected_cases=spec['cases'],
-                    command=want_cmd, timeout_seconds=spec['timeout'], case_timeout_seconds=180)
-        r.write(folder / 'selection.json', want)
-        _make_settings_json(spec['kind'], target, folder, prior_sha, eff_path)
-        if failed_group == group:
-            r.write(folder / 'execution.json', dict(**want, native_exit=65, timed_out=False))
-            (folder / (target + '.log')).write_bytes(fixture(group).replace(b'passed', b'failed').replace(b'TEST SUCCEEDED', b'TEST FAILED'))
-            r.write(folder / 'failure.json', dict(group=group, error='Native failure/timeout',
-                                                 source_commit=prior_sha, run_id=str(prior_id)))
-        else:
-            r.write(folder / 'execution.json', dict(**want, native_exit=0, timed_out=False))
-            raw_log = fixture(group)
-            (folder / (target + '.log')).write_bytes(raw_log)
-            parsed = r.parse_log_for_spec(group, spec, raw_log, 0, False)
-            parsed['parameter_xcresult'] = None
-            r.write(folder / 'counts.json', parsed)
-            groups_summary.append(parsed)
-    r.write(src / 'case-results.json', dict(scope=r.SCOPE, phase='validation'))
-    if include_hist:
-        import shutil
-        shutil.copytree(hist_extracted_dir, src / f'reused-evidence/historical-{r.HIST_RUN}')
-        if include_ui:
-            ui_bound = hist_extracted_dir.parent / f'ui-{r.UI_RUN}'
-            shutil.copytree(ui_bound, src / f'reused-evidence/ui-{r.UI_RUN}')
-    if include_gate and not failed_group:
-        r.write(src / 'epub-freeze-gate.json', dict(
-            **prior_scope,
-            qualification=r.VALIDATION_QUALIFICATION,
-            coverage='EPUB_TARGETED_NOT_FULL',
-            native_tests_executed_this_run=r.EXECUTIONS,
-            reused_native_passed=r.ALL_REUSED_EXECUTIONS,
-            verified_passed=r.COMBINED_EXECUTIONS,
-            combined_verified_passed=r.COMBINED_EXECUTIONS,
-            verified_declarations=r.COMBINED_TOTAL,
-            not_executed_this_run=237 - r.EXECUTIONS,
-            unselected_executions=237 - r.COMBINED_EXECUTIONS,
-            groups=groups_summary,
-        ))
-    zip_path = work_dir / f'prior-{prior_id}.zip'
-    _zip_directory(src, zip_path)
-    p_bytes = zip_path.stat().st_size
-    p_sha = r.sha(zip_path)
-    run_meta = dict(
-        id=int(prior_id), head_sha=prior_sha, run_attempt=1, workflow_id=r.WORKFLOW_ID,
-        path=r.WORKFLOW_PATH, event='workflow_dispatch', head_branch='main',
-        status='completed', conclusion=prior_conclusion,
-        repository=dict(full_name=r.REPO), head_repository=dict(full_name=r.REPO),
-    )
-    artifact_meta = dict(
-        id=9900001, expired=False, name=f'task3-evidence-{prior_id}-{prior_sha}',
-        workflow_run=dict(id=int(prior_id), head_sha=prior_sha),
-        size_in_bytes=p_bytes, digest='sha256:' + p_sha,
-    )
-    return zip_path, run_meta, artifact_meta
+        groups.append(group_files(root, group, scope))
+        settings(spec['kind'], spec['target'], root / 'epub-freeze' / group, SOURCE, root / 'effective-test-settings.json')
+    gate = dict(**scope, qualification=r.VALIDATION_QUALIFICATION, coverage='EPUB_TARGETED_NOT_FULL',
+                native_tests_executed_this_run=25, reused_native_passed=0, verified_passed=25,
+                combined_verified_passed=25, verified_declarations=24, unselected_executions=217,
+                not_executed_this_run=217, groups=groups)
+    save(root / 'epub-freeze-gate.json', gate)
+    return scope, gate
 
 
-_real_check_output = subprocess.check_output
+def bind_prior(source, folder):
+    folder.mkdir(parents=True)
+    archive = folder / 'archive.zip'
+    zip_source(source, archive)
+    run, artifact = api_metadata(archive)
+    save(folder / 'api-run.json', run)
+    save(folder / 'api-artifact.json', artifact)
+    members = r.safe_zip_members(archive)
+    retained = r.extract_selected_members(archive, members, r._prior_wanted_members(members), folder / 'evidence')
+    save(folder / 'archive-receipt.json', dict(run_id=PRIOR_ID, run_attempt='1', source_commit=SOURCE,
+         artifact_id=artifact['id'], archive_bytes=archive.stat().st_size, archive_sha256=r.sha(archive),
+         member_count=len(members), members=members, retained_files=retained))
+    return run, artifact
 
 
-def synthetic_export(args, **kwargs):
-    if args[:4] == ['xcrun', 'xcresulttool', 'get', 'test-results']:
-        if args[4] == 'summary':
-            return json.dumps(dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0)).encode()
-        return json.dumps(dict(testNodes=[dict(name=r.UI_METHOD + '()', result='Passed')])).encode()
-    return _real_check_output(args, **kwargs)
+def inspect_pass(folder):
+    result = r.inspect_prior_evidence(folder, scope_for('delivery'), expected_packages=packages(), check_shared_sources=False)
+    r.require(result['passed'] and result['executions_passed'] == 25 and result['declarations_passed'] == 24,
+              'Synthetic prior rejected: ' + '; '.join(result['errors']))
+    return result
 
 
-def manifest_digest(members):
-    return r.compat.digest_bytes(json.dumps(members, sort_keys=True, separators=(',', ':')).encode())
-
-
-def build_synthetic_ui(work, destination, candidate_map):
-    with patch.object(r, 'GROUPS', {'ui-1': r.UI_SPEC}), patch.object(r, 'SCOPE', r.UI_SCOPE), \
-         patch.object(r, 'TOTAL', 2), patch.object(r, 'EXECUTIONS', 2):
-        archive, run, artifact = _build_synthetic_prior_zip(
-            work, str(r.UI_RUN), r.UI_BASE, destination, candidate_map, None,
-            include_hist=False, include_gate=False, prior_conclusion='failure')
-    artifact['id'] = r.UI_ARTIFACT_ID
-    return archive, run, artifact
-
-
-def check_horizontal_diagnostic_contract(current):
-    base = r.git('show', r.UI_BASE + ':Tests/' + r.HOST_TEST_REL).decode('utf-8')
-    assert r.normalize_horizontal_diagnostics(base, current) == base
-    # An actual extra call or a callable interpolation must never be erased.
-    op, cl = r.extract_swift_method_span(current, r.HORIZONTAL_DECL)
-    body = current[op:cl]
-    for label, old, new in (
-        ('assertion', 'scroll.contentSize.width > scroll.bounds.width * 2', 'scroll.contentSize.width > 0'),
-        ('wait', 'waitUntilReady(model: model, expectedToken: first.token)', 'waitUntilReady(model: model, expectedToken: vertical.token)'),
-        ('action', 'controller.apply(first)', 'controller.apply(first)\n                controller.apply(first)'),
-        ('callback forwarding', 'model.handleLocatorEvent(payload)', 'model.handleLocatorEvent(payload)\n                model.handleLocatorEvent(payload)'),
-        ('rethrow', 'throw error', 'return'),
-    ):
-        if old in body:
-            altered = current[:op] + body.replace(old, new, 1) + current[cl:]
-            rejects('horizontal diagnostic normalization rejects ' + label,
-                    lambda a=altered: r.normalize_horizontal_diagnostics(base, a))
-    for statement in (
-        'print("EPUB_SYNTHETIC_HORIZONTAL_BAD value=\\(controller.turnPage(.next))")',
-        'print("EPUB_SYNTHETIC_HORIZONTAL_BAD value=\\(await model.close())")',
-        'try await Task.sleep(for: .seconds(1))',
-        'model.setReadingMode(.scroll)',
-    ):
-        altered = current[:cl] + '                ' + statement + '\n' + current[cl:]
-        rejects('helper forbids side effects: ' + statement, lambda a=altered: r.normalize_horizontal_diagnostics(base, a))
-    altered = current.replace('try await verifyHorizontalPagination()',
-                              'try await verifyHorizontalPagination()\n        try await verifyHorizontalPagination()')
-    rejects('helper rejects extra caller', lambda: r.normalize_horizontal_diagnostics(base, altered))
-    candidate = v.candidate_files()
-    for name in ('Tests/' + r.UI_TEST_REL, 'project.yml', 'Sources/ReaderDomain/EPUBReader.swift'):
-        if name not in candidate:
-            name = next(p for p in candidate if p.startswith('Sources/'))
-        altered_map = {**candidate, name: 'f' * 64}
-        with patch.object(v, 'candidate_files', return_value=altered_map):
-            rejects('UI source/product/project drift: ' + name, lambda: r.validate_followup_sources(candidate))
-    original_read = Path.read_text
-    for old, new in (('private func verifyReopenDiagnostics', 'private func verifyReopenDiagnostics_changed'),
-                     ('try await verifyPagingAndChapterBoundaryNavigation()', 'try await verifyPagingAndChapterBoundaryNavigation()\n        return')):
-        altered = current.replace(old, new, 1)
-        assert altered != current
-        def changed_read(path, *args, **kwargs):
-            return altered if path.as_posix().endswith(r.HOST_TEST_REL) else original_read(path, *args, **kwargs)
-        with patch.object(Path, 'read_text', changed_read):
-            rejects('shared helper/target drift outside diagnostic exemption', r.validate_followup_sources)
-
-
-def check_ui_rejections(folder, run, artifact):
-    assert r.verify_ui_evidence(folder)['workflow_conclusion'] == 'failure'
-    for key, value in (('id', 1), ('head_sha', 'f' * 40), ('run_attempt', 2), ('workflow_id', 1),
-                       ('conclusion', 'success'), ('status', 'in_progress'), ('event', 'push'),
-                       ('repository', {'full_name': 'foreign/repo'})):
-        rejects('UI wrong API ' + key, lambda k=key, val=value: r.validate_ui_run_and_artifact({**run, k: val}, artifact))
-    for key, value in (('id', 1), ('expired', True), ('digest', 'sha256:' + 'f' * 64), ('size_in_bytes', 1),
-                       ('workflow_run', dict(id=1, head_sha=r.UI_BASE)), ('name', 'wrong')):
-        rejects('UI wrong artifact ' + key, lambda k=key, val=value: r.validate_ui_run_and_artifact(run, {**artifact, k: val}))
-    receipt_path = folder / 'archive-receipt.json'
-    saved_receipt = receipt_path.read_bytes()
-    saved = json.loads(saved_receipt)
-    ev = folder / 'evidence'
-    prefix = 'epub-freeze/ui-1/'
-    cases = []
-    log_rel = prefix + 'YueJingEPUBUITests.log'
-    raw = (ev / log_rel).read_bytes()
-    for label, data in (
-        ('raw failure', raw + b'Test extra failed\n'), ('skip', raw + b'Test extra skipped\n'),
-        ('duplicates', raw + raw), ('missing identity', raw.replace(r.UI_METHOD.encode(), b'foreignCase')),
-        ('timeout duration', raw.replace(b'0.1 seconds', b'181.1 seconds')),
-    ):
-        cases.append((label, log_rel, data))
-    for label, rel, key, value in (
-        ('timeout', prefix + 'execution.json', 'timed_out', True),
-        ('exit', prefix + 'execution.json', 'native_exit', 65),
-        ('identity', prefix + 'selection.json', 'source_commit', 'f' * 40),
-        ('counts', prefix + 'counts.json', 'executions', 2),
-        ('bool counts', prefix + 'counts.json', 'executions', True),
-        ('bool exit', prefix + 'execution.json', 'native_exit', False),
-    ):
-        obj = r.load(ev / rel)
-        obj[key] = value
-        cases.append((label, rel, json.dumps(obj).encode()))
-    cases.append(('missing log', log_rel, None))
-    cases.append(('missing xcresult', prefix + 'YueJingEPUBUITests.xcresult/Info.plist', None))
-    data_rel = next(p for p in saved['retained_files'] if '/Data/' in p)
-    cases.append(('missing xcresult Data', data_rel, None))
-    for label, rel, data in cases:
-        path = ev / rel
-        original = path.read_bytes()
-        try:
-            if data is None:
-                path.unlink()
-            else:
-                path.write_bytes(data)
-            rejects('UI retained ' + label, lambda: r.verify_ui_evidence(folder))
-            # Even a forged local rehash cannot bypass the pinned archive manifest.
-            forged = copy.deepcopy(saved)
-            if data is None:
-                forged['retained_files'].pop(rel)
-                forged['members'].pop(rel)
-                forged['member_count'] -= 1
-            else:
-                meta = dict(bytes=len(data), sha256=r.compat.digest_bytes(data))
-                forged['retained_files'][rel] = meta
-                forged['members'][rel] = meta
-            receipt_path.write_text(json.dumps(forged), encoding='utf-8')
-            rejects('UI rehashed manifest ' + label, lambda: r.verify_ui_evidence(folder))
-            # Synthetic-only override exercises semantic rejection behind integrity gate.
-            with patch.object(r, 'UI_MEMBERS_SHA256', manifest_digest(forged['members'])):
-                rejects('UI semantic ' + label, lambda: r.verify_ui_evidence(folder))
-        finally:
-            path.write_bytes(original)
-            receipt_path.write_bytes(saved_receipt)
-    # Exercise native xcresult JSON interpretation without running xcrun locally.
-    bundle = ev / prefix / 'YueJingEPUBUITests.xcresult'
-    good_summary = dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0)
-    good_tree = dict(testNodes=[dict(name=r.UI_METHOD + '()', result='Passed')])
-    with patch.object(r.sys, 'platform', 'darwin'):
-        for label, summary, tree in (
-            ('failed', {**good_summary, 'failedTests': 1}, good_tree),
-            ('skipped', {**good_summary, 'skippedTests': 1}, good_tree),
-            ('extra', {**good_summary, 'totalTestCount': 2}, good_tree),
-            ('missing', good_summary, {'testNodes': []}),
-            ('duplicate', good_summary, {'testNodes': good_tree['testNodes'] * 2}),
-            ('wrong identity', good_summary, {'testNodes': [dict(name='foreign()', result='Passed')]}),
-            ('failed leaf', good_summary, {'testNodes': [dict(name=r.UI_METHOD + '()', result='Failed')]}),
-        ):
-            with patch.object(r.subprocess, 'check_output', side_effect=[json.dumps(summary).encode(), json.dumps(tree).encode()]):
-                rejects('UI native export ' + label, lambda: r.verify_ui_xcresult(bundle))
-        with patch.object(r.subprocess, 'check_output', side_effect=[json.dumps(good_summary).encode(), json.dumps(good_tree).encode()]):
-            r.verify_ui_xcresult(bundle)
-        original_bundle = {p.relative_to(bundle).as_posix(): p.read_bytes()
-                           for p in bundle.rglob('*') if p.is_file()}
-        for fail in (False, True):
-            parsed_paths = []
-            def materializing_tool(command, *, timeout):
-                parsed = Path(command[command.index('--path') + 1])
-                assert parsed != bundle and parsed.is_dir() and timeout == 120
-                assert (parsed / 'Info.plist').read_bytes() == (bundle / 'Info.plist').read_bytes()
-                parsed_paths.append(parsed)
-                (parsed / 'database.sqlite3').write_bytes(b'synthetic xcresulttool derived database')
-                if fail:
-                    raise ValueError('synthetic parser failure after materializing database')
-                return json.dumps(good_summary if 'summary' in command else good_tree).encode()
-            with patch.object(r.subprocess, 'check_output', side_effect=materializing_tool):
-                if fail:
-                    rejects('UI parser failure preserves original bundle', lambda: r.verify_ui_xcresult(bundle))
-                else:
-                    r.verify_ui_xcresult(bundle)
-            assert parsed_paths and all(not p.exists() for p in parsed_paths)
-            assert original_bundle == {p.relative_to(bundle).as_posix(): p.read_bytes()
-                                       for p in bundle.rglob('*') if p.is_file()}
-            checks.append('xcresult materialized database isolated and cleaned: failure=' + str(fail))
-    checks.append('failed Round2 workflow contributes ONLY independently proven UI1, never Host or whole-run pass')
-
-
-def run_offline_checks(*, skip_workflow_contract=False):
-    assert not skip_workflow_contract or os.environ.get('GITHUB_ACTIONS') != 'true', 'Workflow checks cannot be skipped in Actions'
-    assert r.BASE == '1bf00449884f5fadf9d973a8d63220f9787b459d'
-    assert r.SCOPE == 'epub-ready-host-followup-1'
-    assert r.VERSION == '0.2.14' and r.BUILD == '16'
-    assert r.VALIDATION_QUALIFICATION == 'EPUB_READY_HOST_FOLLOWUP_1_PLUS_REUSED_36_TARGETED_NATIVE'
-    assert r.DELIVERY_QUALIFICATION == 'EPUB_READY_HOST_FOLLOWUP_DELIVERY_REUSED_37_TARGETED_NATIVE'
-    assert r.HIST_RUN == 42954931349 and r.HIST_ARTIFACT_ID == 13827937675
-
-    selected = r.selection()
-    expected_selected_files = [
-        ('YueJingHostTests/EPUBReaderHostTests.swift', [
-            'epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks',
-        ]),
-    ]
-    assert list(r.SELECTED_FILES.items()) == expected_selected_files
-    expected_selected = {
-        'host-1': ['epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks'],
-    }
-    assert selected == expected_selected and list(selected) == ['host-1']
-    assert list(r.GROUPS) == ['host-1']
-    assert len(selected) == r.TOTAL == 1 and r.EXECUTIONS == 1
-    assert len(r.HIST_GROUPS) == r.REUSED_DECLARATIONS == 34
-    assert sum(expected_executions(g, r.HIST_GROUPS) for g in r.HIST_GROUPS) == r.REUSED_EXECUTIONS == 35
-    assert r.TOTAL + r.ALL_REUSED_DECLARATIONS == r.COMBINED_TOTAL == 36
-    assert r.EXECUTIONS + r.ALL_REUSED_EXECUTIONS == r.COMBINED_EXECUTIONS == 37
-    assert not (set(r.HIST_GROUPS) & r.FORBIDDEN_HIST_GROUPS)
-    assert r.HIST_GROUPS['domain-11']['cases'] == ['epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime']
-    assert expected_executions('domain-11', r.HIST_GROUPS) == 2
-
-    release_groups = copy.deepcopy(r.GROUPS)
-    parameter = next(iter(r.inventory.PARAMETERIZED))
-    assert parameter == 'epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime'
-    PARAM_GROUP = 'domain-11'
-
-    expected_allowed = {
-        '.github/workflows/task3-validate.yml',
-        'Tests/YueJingEPUBUITests/EPUBFlowUITests.swift',
-        'Tests/YueJingHostTests/EPUBReaderHostTests.swift',
-        'docs/EPUB_FREEZE_RELEASE.md',
-        'scripts/check_epub_freeze_validation.py',
-        'scripts/run_epub_freeze_validation.py',
-    }
-    assert len(r.ALLOWED) == 6 and r.ALLOWED == expected_allowed and r.NEW == frozenset()
-    project_text = (r.ROOT / 'project.yml').read_text(encoding='utf-8')
-    assert 'MARKETING_VERSION: "' + r.VERSION + '"' in project_text and 'CURRENT_PROJECT_VERSION: "' + r.BUILD + '"' in project_text
-    assert (r.ROOT / 'project.yml').read_bytes() == r.git('show', r.BASE + ':project.yml')
-
-    reviewed = r.inventory.validate_source()
-    assert json.loads(json.dumps(reviewed)) == reviewed
-    assert reviewed['selected'] == 236 and reviewed['selected_executions'] == 237
-    assert reviewed['selected'] - r.COMBINED_TOTAL == 200 and reviewed['selected_executions'] - r.COMBINED_EXECUTIONS == 200
-    checks.append('candidate inventory survives JSON roundtrip')
-    checks.append('exact current Host1 + historical34/35 + Round2 UI1 = 36 identities/37 expansions; 200 unselected')
-
-    # Real method-level isolation check on the actual local Swift test files against BASE.
-    real_host_base = r.git('show', r.BASE + ':Tests/' + r.HOST_TEST_REL).decode('utf-8')
-    real_host_cur = (r.ROOT / 'Tests' / r.HOST_TEST_REL).read_text(encoding='utf-8')
-    real_ui_base = r.git('show', r.BASE + ':Tests/' + r.UI_TEST_REL).decode('utf-8')
-    real_ui_cur = (r.ROOT / 'Tests' / r.UI_TEST_REL).read_text(encoding='utf-8')
-    r.validate_test_method_isolation(real_host_base, real_host_cur, r.HOST_METHOD_DECL, kind='host')
-    r.validate_test_method_isolation(real_ui_base, real_ui_cur, r.UI_METHOD_DECL, kind='ui')
-    r.validate_followup_sources()
-    check_horizontal_diagnostic_contract(real_host_cur)
-    checks.append('Host private diagnostic-only helper and pinned UI preserve fragment/assertion/wait/action contracts')
-    # Swift method lexer negative/positive edge checks (comments, interpolations, multiline strings).
-    swift_edge = (
-        '@Test func edgeCase() {\n'
-        '  /* nested /* } */ block comment */\n'
-        '  let a = "hello \\(helper("}"))"\n'
-        '  let b = """\n  { }\n  """\n'
-        '  // }\n'
-        '}\n'
-        'let trailing = 1\n'
-    )
-    eo, ec = r.extract_swift_method_span(swift_edge, '@Test func edgeCase()')
-    assert swift_edge[ec + 1:] == '\nlet trailing = 1\n' and swift_edge[eo] == '{' and swift_edge[ec] == '}'
-    checks.append('swift method lexer handles nested comments, interpolations, and multiline strings')
-    rejects('host edit before method rejected', lambda: r.validate_test_method_isolation(
-        real_host_base, real_host_cur.replace('struct EPUBReaderHostTests', 'struct EPUBReaderHostTests_edited', 1),
-        r.HOST_METHOD_DECL, kind='host'))
-    rejects('host edit after method rejected', lambda: r.validate_test_method_isolation(
-        real_host_base, real_host_cur.replace('verifyReopenDiagnostics', 'verifyReopenDiagnostics_edited', 1),
-        r.HOST_METHOD_DECL, kind='host'))
-    rejects('host weakened minimumNode rejected', lambda: r.validate_test_method_isolation(
-        real_host_base, real_host_cur.replace('minimumNode: 6', 'minimumNode: 0', 1),
-        r.HOST_METHOD_DECL, kind='host'))
-    rejects('host removed rethrow rejected', lambda: r.validate_test_method_isolation(
-        real_host_base, re.sub(r'\n\s*throw error(\n\s*\})', r'\1', real_host_cur, count=1),
-        r.HOST_METHOD_DECL, kind='host'))
-    rejects('host catch retry navigation rejected', lambda: r.validate_test_method_isolation(
-        real_host_base, real_host_cur.replace('print("EPUB_SYNTHETIC_FRAGMENT_FAILURE', 'model.go(to: ch2MidItem)\nprint("EPUB_SYNTHETIC_FRAGMENT_FAILURE'),
-        r.HOST_METHOD_DECL, kind='host'))
-    rejects('ui edit after method rejected', lambda: r.validate_test_method_isolation(
-        real_ui_base, real_ui_cur.replace('testEPUBProgressSurvivesExitAndProcessRelaunch()', 'testEPUBProgressSurvivesExitAndProcessRelaunch() /* drift */', 1),
-        r.UI_METHOD_DECL, kind='ui'))
-    rejects('ui edit before method rejected', lambda: r.validate_test_method_isolation(
-        real_ui_base, real_ui_cur.replace('continueAfterFailure = false', 'continueAfterFailure = true', 1),
-        r.UI_METHOD_DECL, kind='ui'))
-    rejects('ui weakened exit check rejected', lambda: r.validate_test_method_isolation(
-        real_ui_base, real_ui_cur.replace('!exit.exists || !exit.isHittable', '!exit.isHittable', 1),
-        r.UI_METHOD_DECL, kind='ui'))
-
-    destination = 'platform=iOS Simulator,id=11111111-2222-3333-4444-555555555555'
-    # Test all 2 current groups AND all 34 historical groups for log parsing & command invariants.
-    for group_label, specs_map in (('current', r.GROUPS), ('historical', r.HIST_GROUPS), ('round2-ui', {'ui-1': r.UI_SPEC})):
-        for group, spec in specs_map.items():
-            raw = fixture_for(group, spec)
-            parsed = r.parse_log_for_spec(group, spec, raw, 0, False)
-            assert parsed['passed'] == spec['cases']
-            assert parsed['executions'] == expected_executions(group, specs_map)
-            tag = group_label + ':' + group
-            checks.append(tag + ' valid synthetic events, not native execution')
-            rejects(tag + ' nonzero exit', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w, 65, False))
-            rejects(tag + ' bool exit', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w, False, False))
-            rejects(tag + ' timeout', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w, 0, True))
-            rejects(tag + ' missing success', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'** TEST SUCCEEDED **', b''), 0, False))
-            rejects(tag + ' late pass', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'0.1 seconds', b'181.1 seconds'), 0, False))
-            rejects(tag + ' duplicate events', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w + w, 0, False))
-            rejects(tag + ' missing case', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(s['cases'][0].encode(), b'foreignCase'), 0, False))
-            rejects(tag + ' failed despite green', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w + b'Test extra failed\n', 0, False))
-            rejects(tag + ' skipped despite green', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w + b'Test extra skipped\n', 0, False))
-            if spec['kind'] == 'ui':
-                rejects(tag + ' wrong ui class', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'EPUBFlowUITests', b'ReadingFlowUITests'), 0, False))
-                rejects(tag + ' ui executed 2 tests', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'Executed 1 test', b'Executed 2 tests'), 0, False))
-                rejects(tag + ' ui failure summary', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'0 failures', b'1 failure'), 0, False))
-                rejects(tag + ' ui skip summary', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'with 0 failures', b'1 tests skipped and with 0 failures'), 0, False))
-                rejects(tag + ' ui unexpected swift test run', lambda g=group, s=spec, w=raw: r.parse_log_for_spec(g, s, w.replace(b'** TEST SUCCEEDED **', b'Test run with 1 tests passed after 0.1 seconds.\n** TEST SUCCEEDED **'), 0, False))
-            cmd = r.command_for_spec(spec, destination, Path('synthetic.xcresult'))
-            assert len([a for a in cmd if a.startswith('-only-testing:')]) == len(spec['cases'])
-            expected_suffix = '/' + spec['cases'][0] + (
-                '' if spec['kind'] == 'ui' else
-                r.inventory.PARAMETERIZED.get(spec['cases'][0], {}).get('signature', '()'))
-            assert any(a.endswith(expected_suffix) for a in cmd if a.startswith('-only-testing:'))
-            assert cmd.count('180') == 2 and spec['timeout'] == 480
-            assert cmd[cmd.index('-scheme') + 1] == ('ReaderDomain' if spec['kind'] == 'domain' else 'YueJingUI')
-
-    rejects('device destination', lambda: r.command('host-1', 'generic/platform=iOS', Path('synthetic')))
-    rejects('ui cannot execute in host-only scope', lambda: r.command('ui-1', destination, Path('synthetic')))
-
-    # Dedicated historical Bool parameterized fixture checks (domain-11).
-    param_spec = r.HIST_GROUPS[PARAM_GROUP]
-    raw_param = fixture_for(PARAM_GROUP, param_spec)
-    arg_line = next(line for line in raw_param.splitlines(keepends=True) if b'Passing ' in line)
-    decorated = raw_param.replace(arg_line, '\u200b'.encode('utf-8') + arg_line)
-    assert r.parse_log_for_spec(PARAM_GROUP, param_spec, decorated, 0, False)['executions'] == 2
-    for label, altered in [
-        ('unknown argument decoration', raw_param.replace(arg_line, b'foreign ' + arg_line)),
-        ('missing argument', raw_param.replace(arg_line, b'')),
-        ('duplicate argument', raw_param.replace(arg_line, arg_line * 2)),
-        ('foreign argument', raw_param.replace(b'false to ', b'unknown to ')),
-        ('argument after finish', raw_param.replace(arg_line, b'') + arg_line),
-        ('expanded count pretending declarations', raw_param.replace(b'1 tests passed', b'2 tests passed')),
-    ]:
-        rejects(PARAM_GROUP + ': ' + label, lambda g=PARAM_GROUP, s=param_spec, a=altered: r.parse_log_for_spec(g, s, a, 0, False))
-    checks.append('Swift Testing line-leading zero-width decoration preserves argument identity')
-
-    assert r.GROUPS == release_groups and r.selection() == selected
-    with patch.dict(r.SELECTED_FILES, {'YueJingHostTests/EPUBReaderHostTests.swift': ['foreignCase']}):
-        rejects('selection identity drift', r.selection)
-
-    result_tree = {'testNodes': [{'name': parameter + '(symlink:)', 'result': 'Passed', 'children': [
-        {'name': 'symlink: false', 'nodeType': 'Arguments', 'result': 'Passed'},
-        {'name': 'symlink: true', 'nodeType': 'Arguments', 'result': 'Passed'}]}]}
-    assert r.parameter_result(result_tree)['passed_arguments'] == ['false', 'true']
-    checks.append('both parameter xcresult leaves required')
-    for label, mutate in [
-        ('missing parameter leaf', lambda x: x['testNodes'][0]['children'].pop()),
-        ('duplicate parameter leaf', lambda x: x['testNodes'][0]['children'].append(x['testNodes'][0]['children'][0])),
-        ('skipped parameter leaf', lambda x: x['testNodes'][0]['children'][0].update(result='Skipped')),
-        ('failed parameter leaf', lambda x: x['testNodes'][0]['children'][0].update(result='Failed')),
-        ('failed parameter parent', lambda x: x['testNodes'][0].update(result='Failed')),
-        ('substring parameter impostor', lambda x: x['testNodes'][0].update(name='foreign' + parameter + '(symlink:)')),
-        ('foreign parameter tree', lambda x: x['testNodes'][0].update(name='foreign')),
-    ]:
-        altered = copy.deepcopy(result_tree)
+def check_parsers():
+    for group, spec in r.GROUPS.items():
+        raw = fixture(group)
+        assert r.parse_log(group, raw, 0, False)['executions'] == executions(spec)
+        passed(group + ': synthetic event chain')
+        for label, altered, code, timeout in (
+            ('exit', raw, 65, False), ('bool exit', raw, False, False), ('timeout', raw, 0, True),
+            ('no success', raw.replace(b'** TEST SUCCEEDED **', b''), 0, False),
+            ('late', raw.replace(b'0.1 seconds', b'181 seconds'), 0, False), ('duplicate', raw + raw, 0, False),
+            ('missing', raw.replace(spec['cases'][0].encode(), b'foreignCase'), 0, False),
+            ('failed green', raw + b'Test foreign failed\n', 0, False), ('skipped green', raw + b'Test foreign skipped\n', 0, False)):
+            rejects(group + ': ' + label, lambda a=altered, c=code, t=timeout: r.parse_log(group, a, c, t))
+        cmd = r.command(group, DESTINATION, Path('synthetic.xcresult'))
+        assert len([a for a in cmd if a.startswith('-only-testing:')]) == 1
+        assert cmd.count('180') == 2 and spec['timeout'] == 480
+        assert cmd[cmd.index('-scheme') + 1] == ('ReaderDomain' if spec['kind'] == 'domain' else 'YueJingUI')
+    raw = fixture('domain-12')
+    line = next(line for line in raw.splitlines(keepends=True) if b'Passing ' in line)
+    for label, altered in [('missing argument', raw.replace(line, b'')), ('duplicate argument', raw.replace(line, line * 2)),
+                           ('unknown argument', raw.replace(b'false to ', b'unknown to ')), ('late argument', raw.replace(line, b'') + line)]:
+        rejects(label, lambda a=altered: r.parse_log('domain-12', a, 0, False))
+    tree = tree_for(r.GROUPS['domain-12'])
+    assert r.parameter_result(tree)['passed_arguments'] == ['false', 'true']
+    for label, mutate in [('missing leaf', lambda x: x['testNodes'][0]['children'].pop()),
+                           ('skip leaf', lambda x: x['testNodes'][0]['children'][0].update(result='Skipped')),
+                           ('failed parent', lambda x: x['testNodes'][0].update(result='Failed'))]:
+        altered = copy.deepcopy(tree)
         mutate(altered)
         rejects(label, lambda a=altered: r.parameter_result(a))
 
-    # Workflow routing & two-phase structure checks.
-    workflow = (r.ROOT / '.github/workflows/task3-validate.yml').read_text(encoding='utf-8')
-    job = workflow.split('\n  epub_freeze:\n')[1]
-    if not skip_workflow_contract:
-        assert 'default: ' + r.SCOPE in workflow
-        assert "inputs.validation_scope != '" + r.SCOPE + "'" in workflow.split('\n  epub_freeze:\n')[0]
-        assert "if: ${{ inputs.validation_scope == '" + r.SCOPE + "' }}" in job
-    assert 'epub-recent-' not in workflow
-    assert 'epub-ready-open-36' not in workflow
-    assert 'epub-freeze-diagnostic' not in workflow and 'epub-freeze-3' not in workflow and 'epub-reopen-fast-10' not in workflow and 'epub-reopen-diagnostics-3' not in workflow
-    assert 'check_epub_freeze_validation.py' in job and 'check_epub_ready_open.py' in job and 'check_epub_reopen_diagnostics.py' not in job
-    assert 'run_epub_freeze_validation.py scope' in job
-    assert 'run_epub_freeze_validation.py reuse' in job and 'GH_TOKEN: ${{ github.token }}' in job
-    assert 'PRIOR_VALIDATION_RUN: ${{ inputs.prior_validation_run }}' in job
-    assert 'timeout=120' in job and 'timeout_seconds=120' in job
-    assert 'run-all' in job and 'for group in host-1' not in job and 'run domain' not in job
-    assert 'Show every selected result and the complete UI inventory\n        if: always()' in job
-    assert 'run_epub_freeze_validation.py report' in job
-    assert job.index('run_epub_freeze_validation.py scope') < job.index('run_epub_freeze_validation.py reuse') < job.index('run-all') < job.index('run_epub_freeze_validation.py gate') < job.index('Compile actual unsigned') < job.index('package-gate-epub-freeze') < job.index('verify-ipa-epub-freeze')
-    assert job.count('!cancelled() && inputs.build_ipa &&') == 2 and "BUILD_IPA: ${{ inputs.build_ipa && 'true' || 'false' }}" in job
-    assert 'continue-on-error' not in job and 'Publish verified unsigned IPA' in job and 'if: success()' not in job
-    try:
-        import yaml as _yaml
-    except ModuleNotFoundError:
-        _yaml = None
-    if _yaml is not None:
-        _wf = _yaml.safe_load(workflow)
-        _wf_on = _wf.get('on') or _wf.get(True)
-        _wf_inputs = _wf_on['workflow_dispatch']['inputs']
-        _wf_scope = _wf_inputs['validation_scope']
-        if not skip_workflow_contract:
-            assert _wf_scope['default'] == r.SCOPE and r.SCOPE in _wf_scope['options']
-            assert _wf['jobs']['epub_freeze']['if'] == "${{ inputs.validation_scope == '" + r.SCOPE + "' }}"
-        assert _wf['jobs']['epub_freeze']['timeout-minutes'] == 60
-        assert _wf['jobs']['epub_freeze']['permissions'] == {'contents': 'read', 'actions': 'read'}
-        assert _wf_inputs['allow_unqualified_ipa']['default'] is False
-        assert _wf_inputs['build_ipa']['default'] is False
-        assert _wf_inputs['prior_validation_run']['default'] == '' and _wf_inputs['prior_validation_run']['type'] == 'string'
-    checks.append('two-phase workflow structure checked; scope routing ' + ('SKIPPED explicitly' if skip_workflow_contract else 'verified'))
 
-    # Scope boundary & 6-path isolation checks.
-    base_project = r.git('show', r.BASE + ':project.yml')
-    old = {p: ['100644', 'blob', '1' * 40] for p in r.ALLOWED}
-    old['Sources/ReaderDomain/untouched.swift'] = ['100644', 'blob', '3' * 40]
-    old['project.yml'] = ['100644', 'blob', '5' * 40]
-    current = {**old, **{p: ['100644', 'blob', '2' * 40] for p in r.ALLOWED}}
-    head = 'a' * 40
-    candidate_map = v.candidate_files()
-    base_env = dict(
-        VALIDATION_SCOPE=r.SCOPE, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main',
-        GITHUB_RUN_ATTEMPT='1', GITHUB_REPOSITORY=r.REPO, GITHUB_SHA=head, GITHUB_RUN_ID='12345',
-        ALLOW_UNQUALIFIED_IPA='false',
-    )
+def check_dispatch(root):
+    event_path = root / 'event.json'
+    def invoke(build=False, prior='', allowed=False):
+        save(event_path, dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=build, prior_validation_run=prior, allow_unqualified_ipa=allowed)))
+        with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event_path), GITHUB_RUN_ID=CURRENT_ID,
+                        BUILD_IPA=str(build).lower(), PRIOR_VALIDATION_RUN=prior, ALLOW_UNQUALIFIED_IPA=str(allowed).lower()):
+            return r.dispatch_context()
+    assert invoke()['phase'] == 'validation'
+    assert invoke(True, PRIOR_ID)['phase'] == 'delivery'
+    for label, args in [('diagnostic', (False, '', True)), ('delivery no prior', (True, '')),
+                         ('prior without build', (False, PRIOR_ID)), ('self prior', (True, CURRENT_ID)), ('invalid prior', (True, '../1'))]:
+        rejects(label, lambda a=args: invoke(*a))
+    passed('two-phase dispatch boundaries')
 
-    with scratch_directory(prefix='epub-scope-check-') as tmp:
-        ev_val = Path(tmp) / 'val-event.json'
-        ev_val.write_text(json.dumps(dict(inputs=dict(
-            validation_scope=r.SCOPE, allow_unqualified_ipa=False, build_ipa=False, prior_validation_run='',
-        ))), encoding='utf-8')
-        ev_del = Path(tmp) / 'del-event.json'
-        ev_del.write_text(json.dumps(dict(inputs=dict(
-            validation_scope=r.SCOPE, allow_unqualified_ipa=False, build_ipa=True, prior_validation_run='987654',
-        ))), encoding='utf-8')
-        val_env = {**base_env, 'GITHUB_EVENT_PATH': str(ev_val), 'BUILD_IPA': 'false', 'PRIOR_VALIDATION_RUN': ''}
-        del_env = {**base_env, 'GITHUB_EVENT_PATH': str(ev_del), 'BUILD_IPA': 'true', 'PRIOR_VALIDATION_RUN': '987654'}
 
-        def fakegit(*args):
-            if args == ('rev-parse', 'HEAD'):
-                return head.encode()
-            if args[0] in ('merge-base', 'status'):
-                return b''
-            if args == ('show', r.BASE + ':project.yml'):
-                return base_project
-            if args == ('show', r.BASE + ':Tests/' + r.HOST_TEST_REL):
-                return real_host_base.encode('utf-8')
-            if args == ('show', r.BASE + ':Tests/' + r.UI_TEST_REL):
-                return real_ui_base.encode('utf-8')
-            raise AssertionError(args)
+def check_scheduler(root):
+    for mode in ('individual', 'blocked', 'common', 'cancel'):
+        called = []
+        scope = scope_for()
+        with sandbox(root / mode, scope), patch.object(r, 'xcresult_export', side_effect=synthetic_export), \
+                patch.object(r.compat, 'validate_toolchain_and_dependencies') as tools, \
+                patch.object(r.compat, 'validate_destination'), patch.object(r, 'run_group') as run:
+            def execute(group, destination, checked_scope=None):
+                called.append(group)
+                if mode == 'cancel':
+                    raise KeyboardInterrupt('synthetic cancellation')
+                if mode == 'blocked' and group == 'domain-1':
+                    raise r.GroupPrerequisiteError('synthetic shared settings failure')
+                if mode == 'individual' and group == 'host-5':
+                    group_files(r.OUT, group, scope, exit_code=65)
+                    raise ValueError('synthetic assertion failure')
+                group_files(r.OUT, group, scope)
+            run.side_effect = execute
+            if mode == 'common':
+                tools.side_effect = ValueError('synthetic toolchain failure')
+                rejects('shared prerequisite stops all', lambda: r.run_all(DESTINATION))
+            elif mode == 'cancel':
+                try:
+                    r.run_all(DESTINATION)
+                except KeyboardInterrupt:
+                    passed('cancel stops scheduling')
+                else:
+                    raise AssertionError('Cancellation swallowed')
+            else:
+                assert r.run_all(DESTINATION) is False
+            report = r.summarize()
+            assert len(report['ui_inventory']) == 15
+            assert sum(row['current_selection'] == 'selected' for row in report['ui_inventory']) == 3
+            assert report['unselected_executions'] == 217
+            if mode == 'individual':
+                assert called == list(r.GROUPS) and report['counts']['passed'] == 23 and report['counts']['failed'] == 1
+            elif mode == 'blocked':
+                assert len(called) == 11 and report['counts']['blocked'] == 14 and report['counts']['passed'] == 10
+            else:
+                assert len(called) == (1 if mode == 'cancel' else 0) and report['counts']['blocked'] == 24
+            passed(mode + ': independent scheduling / truthful blocked accounting')
+    with sandbox(root / 'validation-no-reuse', scope_for()), patch.object(r, 'github_api_json') as api:
+        assert r.reuse_evidence()['reused_native_passed'] == 0
+        api.assert_not_called()
+        assert not r.REUSED_OUT.exists()
+        passed('validation performs zero downloads and zero reuse')
+    with sandbox(root / 'delivery-no-native', scope_for('delivery')), patch.object(r, 'stream_case') as stream:
+        rejects('delivery forbids run-group', lambda: r.run_group('host-1', DESTINATION))
+        rejects('delivery forbids run-all', lambda: r.run_all(DESTINATION))
+        stream.assert_not_called()
 
-        with patch.object(r, 'git', side_effect=fakegit), \
-             patch.object(r, 'validate_followup_sources'), \
-             patch.object(r, 'tree', side_effect=lambda rev: old if rev == r.BASE else current):
-            with patch.dict(os.environ, val_env):
-                val_receipt = r.scope_receipt()
-                assert val_receipt['phase'] == 'validation' and val_receipt['prior_validation_run'] == ''
-                assert val_receipt['build_ipa'] is False and val_receipt['native_tests_planned'] == 1
-                assert val_receipt['selected_declarations'] == 1 and val_receipt['reused_historical_executions'] == 35
-                assert val_receipt['combined_target_declarations'] == 36 and val_receipt['combined_target_executions'] == 37
-                assert val_receipt['full_inventory_declared'] == 236 and val_receipt['full_inventory_executions'] == 237
-                assert val_receipt['version'] == '0.2.14' and val_receipt['build'] == '16'
-                assert val_receipt['baseline_commit'] == r.BASE
-                assert 'verified_passed' not in val_receipt
-                checks.append('validation scope binds exact6 paths, empty NEW, byte-identical project.yml, and makes no pass claim')
-            with patch.dict(os.environ, del_env):
-                receipt = r.scope_receipt()
-                assert receipt['phase'] == 'delivery' and receipt['prior_validation_run'] == '987654'
-                assert receipt['build_ipa'] is True and receipt['native_tests_planned'] == 0
-                checks.append('delivery scope binds prior_validation_run, build_ipa=true, and plans 0 native executions')
-            with patch.dict(os.environ, val_env):
-                for key, value in [
-                    ('VALIDATION_SCOPE', 'full'), ('VALIDATION_SCOPE', r.DIAGNOSTIC_SCOPE),
-                    ('GITHUB_SHA', 'b' * 40), ('GITHUB_RUN_ATTEMPT', '2'),
-                    ('GITHUB_REPOSITORY', 'foreign/repo'), ('GITHUB_REF', 'refs/heads/other'),
-                    ('PRIOR_VALIDATION_RUN', '987654'),
-                ]:
-                    with patch.dict(os.environ, {key: value}):
-                        rejects('foreign ' + key + '=' + value, r.scope_receipt)
-                current['foreign.swift'] = ['100644', 'blob', '2' * 40]
-                rejects('unapproved added path', r.scope_receipt)
-                del current['foreign.swift']
-                current['Sources/ReaderDomain/untouched.swift'] = ['100644', 'blob', '4' * 40]
-                rejects('unapproved product drift', r.scope_receipt)
-                current['Sources/ReaderDomain/untouched.swift'] = old['Sources/ReaderDomain/untouched.swift']
-                current['project.yml'] = ['100644', 'blob', '6' * 40]
-                rejects('project.yml drift rejected', r.scope_receipt)
-                current['project.yml'] = old['project.yml']
-                current['docs/EPUB_FREEZE_RELEASE.md'] = old['docs/EPUB_FREEZE_RELEASE.md']
-                rejects('missing required path change', r.scope_receipt)
-                current['docs/EPUB_FREEZE_RELEASE.md'] = ['120000', 'blob', '2' * 40]
-                rejects('symlink candidate', r.scope_receipt)
-                current['docs/EPUB_FREEZE_RELEASE.md'] = ['100644', 'blob', '2' * 40]
-                with patch.object(r, 'git', side_effect=lambda *a: b'changed: true\n' if a == ('show', r.BASE + ':project.yml') else fakegit(*a)):
-                    rejects('project.yml byte mismatch rejected', r.scope_receipt)
 
-    ui_fixture = 'func testEPUBShelfCoverAndDirectoryCrossChapterNavigation() { exitReader(app, x); openEPUB(x) } func testEPUBProgressSurvivesExitAndProcessRelaunch()'
-    r.ui_reopen_contract(ui_fixture)
-    rejects('UI coverage cannot silently omit reopen', lambda: r.ui_reopen_contract(ui_fixture.replace('openEPUB(x)', '')))
-    rejects('process relaunch cannot substitute warm reopen', lambda: r.ui_reopen_contract(ui_fixture.replace('openEPUB(x)', 'app.terminate(); openEPUB(x)')))
-    blockers = []
-    try:
-        r.ui_reopen_contract(real_ui_cur)
-    except ValueError as error:
-        blockers.append(str(error))
+def check_archive_security(root):
+    for index, name in enumerate(('../escape', '/absolute', 'C:/drive', 'a\\escape', 'a/../escape')):
+        path = root / f'unsafe-{index}.zip'
+        with zipfile.ZipFile(path, 'w') as archive:
+            info = zipfile.ZipInfo(name)
+            info.filename = name  # Defeat Windows ZipInfo separator normalization in this hostile fixture.
+            archive.writestr(info, b'bad')
+        rejects('unsafe ZIP ' + name, lambda p=path: r.safe_zip_members(p))
+    for mode in ('symlink', 'duplicate', 'compression'):
+        path = root / (mode + '.zip')
+        with zipfile.ZipFile(path, 'w') as archive:
+            if mode == 'symlink':
+                info = zipfile.ZipInfo('link')
+                info.create_system = 3
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(info, 'target')
+            elif mode == 'duplicate':
+                archive.writestr('same', b'one')
+                archive.writestr('same', b'two')
+            else:
+                archive.writestr('member', b'data', compress_type=zipfile.ZIP_BZIP2)
+        rejects('ZIP ' + mode, lambda p=path: r.safe_zip_members(p))
+    path = root / 'download.zip'
+    def download(args, **kwargs):
+        assert kwargs['timeout'] == 600 and kwargs['check'] is True
+        assert args[:4] == ['gh', 'api', '--method', 'GET']
+        kwargs['stdout'].write(b'synthetic-download')
+    with patch.object(r.subprocess, 'run', side_effect=download):
+        r.github_download_artifact_zip(99, path)
+        rejects('download refuses overwrite', lambda: r.github_download_artifact_zip(99, path))
+    assert path.read_bytes() == b'synthetic-download'
+    passed('download bytes streamed to exclusive file with bounded invocation')
 
-    # Synthetic historical35 reuse, validation gate, prior delivery reuse, delivery gate & IPA checks.
-    with scratch_directory(prefix='epub-host-followup-selfcheck-') as temp, contextlib.ExitStack() as stack:
-        work = Path(temp)
-        hist_zip, hist_run, hist_artifact = _build_synthetic_historical_zip(work, destination, result_tree, candidate_map)
-        hist_run_json = work / 'hist-run.json'
-        hist_art_json = work / 'hist-art.json'
-        r.write(hist_run_json, hist_run)
-        r.write(hist_art_json, dict(total_count=1, artifacts=[hist_artifact]))
-        ui_zip, ui_run, ui_artifact = build_synthetic_ui(work, destination, candidate_map)
-        ui_run_json, ui_art_json = work / 'ui-run.json', work / 'ui-art.json'
-        r.write(ui_run_json, ui_run)
-        r.write(ui_art_json, ui_artifact)
-        offline_ui = dict(zip_path=ui_zip, run_json=ui_run_json, artifact_json=ui_art_json)
-        stack.enter_context(patch.object(r, 'REUSED_STAGING', work / 'staging'))
-        stack.enter_context(patch.object(r.subprocess, 'check_output', side_effect=synthetic_export))
-        stack.enter_context(patch.object(r, 'validate_followup_sources', side_effect=check_real_followup_sources))
-        stack.enter_context(patch.object(r, 'UI_ARCHIVE_BYTES', ui_artifact['size_in_bytes']))
-        stack.enter_context(patch.object(r, 'UI_ARCHIVE_SHA256', ui_artifact['digest'].split(':')[1]))
-        stack.enter_context(patch.object(r, 'UI_MEMBERS_SHA256', manifest_digest(r.safe_zip_members(ui_zip))))
 
-        out_val = work / 'out-val'
-        native_val = out_val / 'epub-freeze'
-        out_val.mkdir()
-        native_val.mkdir()
-        r.write(out_val / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-        (out_val / 'simulator-selection.json').write_text(json.dumps(dict(
-            udid=destination.split('id=')[1], physical_device=False, architecture='arm64', device_name='iPhone SE (3rd generation)',
-        )), encoding='utf-8')
-        sim_app = work / 'build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app'
-        sim_app.mkdir(parents=True)
-        (sim_app / 'YueJing').write_bytes(b'synthetic macho payload')
-        _make_linkage_dir(out_val / 'webkit-simulator-linkage', head, val_receipt['run_id'])
-        r.write(out_val / 'epub-freeze-scope.json', val_receipt)
-        with patch.object(r, 'ROOT', work), patch.object(r, 'OUT', out_val), patch.object(r, 'NATIVE_OUT', native_val), \
-             patch.object(r, 'SCOPE_JSON', out_val / 'epub-freeze-scope.json'), \
-             patch.object(r, 'REUSED_OUT', out_val / 'reused-evidence'), \
-             patch.object(r, 'REUSED_GATE_JSON', out_val / 'reused-evidence/reused-evidence-gate.json'), \
-             patch.object(r, 'GATE_JSON', out_val / 'gate.json'), \
-             patch.object(r, 'live_scope', return_value=val_receipt), \
-             patch.object(r, 'HIST_ARCHIVE_BYTES', hist_artifact['size_in_bytes']), \
-             patch.object(r, 'HIST_ARCHIVE_SHA256', hist_artifact['digest'].split(':', 1)[1]), \
-             patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()), \
-             patch.object(r.compat, 'validate_destination'), \
-             patch.object(r.reading, 'validate_group_settings'), \
-             patch.object(r.paging, 'require_xcresult'):
-            reused_val = r.reuse_evidence(
-                offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json),
-                offline_ui=offline_ui,
-                verify_live_bundle=False,
-            )
-            assert reused_val['passed'] is True and reused_val['reused_native_passed'] == 36
-            assert reused_val['historical']['workflow_conclusion'] == 'failure'
-            assert not (out_val / 'reused-evidence/historical-42954931349/evidence/epub-freeze/host-3').exists()
-            assert not (out_val / 'reused-evidence/historical-42954931349/evidence/epub-freeze/ui-1').exists()
-            assert not any((out_val / f'reused-evidence/historical-{r.HIST_RUN}').rglob('data.0~*'))
-            checks.append('historical35 reuse accepts Round 1 workflow failure for 34/35 passing cases, drops heavy Data/, excludes host-3/ui-1')
-            check_ui_rejections(out_val / f'reused-evidence/ui-{r.UI_RUN}', ui_run, ui_artifact)
-            for label, bad_bytes in (('size', ui_zip.read_bytes() + b'extra'),
-                                     ('digest', b'XX' + ui_zip.read_bytes()[2:])):
-                bad_zip = work / ('ui-bad-' + label + '.zip')
-                bad_zip.write_bytes(bad_bytes)
-                rejects('UI archive ' + label, lambda z=bad_zip: r.retain_ui_evidence({**offline_ui, 'zip_path': z}))
-
+def check_prior(root):
+    source = root / 'prior-source'
+    with patch.object(r, 'xcresult_export', side_effect=synthetic_export):
+        scope, gate = build_prior(source)
+        folder = root / 'valid-prior'
+        run, artifact = bind_prior(source, folder)
+        assert inspect_pass(folder)['executions_passed'] == 25
+        passed('complete same-source initial prior: 24 identities / 25 synthetic executions')
+        def timeout_one(bundle, section):
+            if bundle.parent.name == 'host-1':
+                raise subprocess.TimeoutExpired('synthetic xcresulttool', 60)
+            return synthetic_export(bundle, section)
+        with patch.object(r, 'xcresult_export', side_effect=timeout_one):
+            report = r.inspect_prior_evidence(folder, scope_for('delivery'), check_shared_sources=False)
+            assert report['passed'] is False and len(report['case_rows']) == 24 and len(report['groups']) == 23
+            passed('xcresult parser timeout rejects prior without hiding other 23 independent results')
+        for field, value in [('status', 'in_progress'), ('conclusion', 'failure'), ('conclusion', 'cancelled'),
+                             ('run_attempt', 2), ('head_sha', 'c' * 40), ('workflow_id', 1), ('event', 'push'), ('head_branch', 'other')]:
+            altered = dict(run, **{field: value})
+            rejects('prior API ' + field + '=' + str(value), lambda a=altered: r.validate_prior_run_and_artifact(PRIOR_ID, a, artifact, SOURCE, CURRENT_ID))
+        rejects('API self reference', lambda: r.validate_prior_run_and_artifact(PRIOR_ID, run, artifact, SOURCE, PRIOR_ID))
+        for field, value in [('expired', True), ('digest', None), ('size_in_bytes', 0), ('name', 'wrong')]:
+            altered = dict(artifact, **{field: value})
+            rejects('artifact API ' + field, lambda a=altered: r.validate_prior_run_and_artifact(PRIOR_ID, run, a, SOURCE, CURRENT_ID))
+        mutations = [
+            ('recursive', 'epub-freeze-scope.json', lambda x: x.update(phase='delivery', prior_validation_run='123', build_ipa=True)),
+            ('wrong scope', 'epub-freeze-scope.json', lambda x: x.update(scope='old-scope')),
+            ('wrong source', 'candidate-sources.json', lambda x: x.update(source_commit='b' * 40)),
+            ('wrong count', 'epub-freeze-gate.json', lambda x: x.update(verified_passed=24)),
+            ('old reused count', 'epub-freeze-gate.json', lambda x: x.update(reused_native_passed=36)),
+            ('diagnostic gate', 'epub-freeze-gate.json', lambda x: x.update(allow_unqualified_ipa=True)),
+            ('missing gate field', 'epub-freeze-gate.json', lambda x: x.pop('qualification')),
+            ('command drift', 'epub-freeze/host-1/selection.json', lambda x: x['command'].append('-skip-testing:foreign')),
+            ('failed native', 'epub-freeze/host-1/execution.json', lambda x: x.update(native_exit=65)),
+            ('timeout native', 'epub-freeze/ui-1/execution.json', lambda x: x.update(timed_out=True)),
+            ('skip xcresult', 'epub-freeze/ui-1/YueJingEPUBUITests.xcresult/synthetic-tests.json', lambda x: x['testNodes'][0].update(result='Skipped')),
+            ('missing parameter', 'epub-freeze/domain-12/xcresult-tests.json', lambda x: x['testNodes'][0]['children'].pop()),
+            ('deps drift', 'dependency-resolution.json', lambda x: x['packages']['grdb.swift'].update(checkout_revision='0' * 40)),
+            ('linkage failure', 'webkit-simulator-linkage/verification.json', lambda x: x.update(passed=False)),
+        ]
+        for index, (label, rel, mutate) in enumerate(mutations):
+            altered_source = root / f'bad-source-{index}'
+            shutil.copytree(source, altered_source)
+            path = altered_source / rel
+            value = json.loads(path.read_text())
+            mutate(value)
+            save(path, value)
+            bad = root / f'bad-prior-{index}'
+            bind_prior(altered_source, bad)
+            rejects(label, lambda p=bad: inspect_pass(p))
+        for index, rel in enumerate(('epub-freeze-gate.json', 'epub-freeze/ui-3/counts.json',
+                                     'epub-freeze/domain-12/ReaderDomainTests.xcresult/Data/data.0')):
+            altered_source = root / f'missing-source-{index}'
+            shutil.copytree(source, altered_source)
+            (altered_source / rel).unlink()
+            bad = root / f'missing-prior-{index}'
+            bind_prior(altered_source, bad)
+            rejects('missing ' + rel, lambda p=bad: inspect_pass(p))
+        tampered = root / 'tampered-prior'
+        shutil.copytree(folder, tampered)
+        log = tampered / 'evidence/epub-freeze/host-1/YueJingHostTests.log'
+        log.write_bytes(log.read_bytes() + b'tampered')
+        rejects('retained log tampering', lambda: inspect_pass(tampered))
+        receipt = json.loads((tampered / 'archive-receipt.json').read_text())
+        rel = log.relative_to(tampered / 'evidence').as_posix()
+        receipt['members'][rel] = receipt['retained_files'][rel] = dict(bytes=log.stat().st_size, sha256=r.sha(log))
+        save(tampered / 'archive-receipt.json', receipt)
+        rejects('forged retained manifest still bound to original archive', lambda: inspect_pass(tampered))
+        with sandbox(root / 'delivery', scope_for('delivery')):
+            offline = dict(zip_path=folder / 'archive.zip', run_json=folder / 'api-run.json', artifact_json=folder / 'api-artifact.json')
+            reused = r.reuse_evidence(require_dependencies=False, offline_prior=offline, check_shared_sources=False)
+            assert reused['reused_native_passed'] == 25 and reused['reused_declarations'] == 24
+            assert not r.NATIVE_OUT.exists() and not (r.OUT / 'simulator-boot.json').exists()
+            passed('delivery downloads/binds only initial same-source prior; zero new native evidence')
+            inspect = r.inspect_prior_evidence
+            def synthetic_inspect(path, scope, **kwargs):
+                return inspect(path, scope, expected_packages=kwargs.get('expected_packages'), check_shared_sources=False)
+            with patch.object(r, 'inspect_prior_evidence', side_effect=synthetic_inspect), \
+                    patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=packages()):
+                delivery = r.qualification()
+                assert delivery['native_tests_executed_this_run'] == 0 and delivery['reused_native_passed'] == 25
+                save(r.GATE_JSON, delivery)
+                assert r.release_gate()['verified_passed'] == 25
+                save(r.OUT / 'simulator-selection.json', {})
+                rejects('delivery rejects current simulator evidence', r.qualification)
+                (r.OUT / 'simulator-selection.json').unlink()
+                altered = dict(reused, reused_native_passed=24)
+                save(r.REUSED_GATE_JSON, altered)
+                rejects('delivery reused gate count tampering', r.qualification)
+                passed('real delivery qualification logic enforces 0/25 with synthetic native parser boundary')
+        # Fresh gate runs its real parser, commands, counts and xcresult verification;
+        # only platform tool/settings/linkage calls and live source are mocked.
+        with sandbox(root / 'fresh-gate', scope), patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=packages()), \
+                patch.object(r.compat, 'validate_destination'), patch.object(r, 'validate_linkage', return_value='d' * 64), \
+                patch.object(r.reading, 'validate_group_settings'):
+            shutil.copytree(source / 'epub-freeze', r.NATIVE_OUT)
+            shutil.copyfile(source / 'simulator-selection.json', r.OUT / 'simulator-selection.json')
+            shutil.copyfile(source / 'simulator-boot.json', r.OUT / 'simulator-boot.json')
+            # Rewrite only the synthetic absolute result path for the new local fixture root.
             for group, spec in r.GROUPS.items():
-                folder = native_val / group
-                folder.mkdir()
-                bundle = folder / (spec['target'] + '.xcresult')
-                want = r.provenance(group, destination, bundle, val_receipt)
-                r.write(folder / 'selection.json', want)
-                r.write(folder / 'execution.json', dict(**want, native_exit=0, timed_out=False))
-                (folder / (spec['target'] + '.log')).write_bytes(fixture(group))
-                parsed = r.parse_log(group, fixture(group), 0, False)
-                parsed['parameter_xcresult'] = r.parameter_evidence(group, folder, bundle, export=True)
-                r.write(folder / 'counts.json', parsed)
-            qualified = r.qualification()
-            r.write(out_val / 'gate.json', qualified)
-            qualified_gate = r.release_gate()
-            assert qualified_gate['verified_passed'] == 37 and qualified_gate['combined_verified_passed'] == 37
-            assert qualified_gate['verified_declarations'] == 36
-            assert qualified_gate['native_tests_executed_this_run'] == 1
-            assert qualified_gate['reused_native_passed'] == 36
-            assert qualified_gate['not_executed_this_run'] == 236
-            assert qualified_gate['qualification'] == r.VALIDATION_QUALIFICATION
-            val_summary = r.summarize()
-            assert val_summary['native_tests_executed_this_run'] == 1
-            assert val_summary['reused_native_passed'] == 36
-            assert val_summary['combined_verified_passed'] == 37
-            assert len(val_summary['ui_inventory']) == 15
-            assert sum(x['status'] == 'reused_ui' for x in val_summary['ui_inventory']) == 1
-            assert sum(x['status'] == 'reused_historical' for x in val_summary['ui_inventory']) == 1
-            assert sum(x['status'] == 'not_selected' for x in val_summary['ui_inventory']) == 13
-            checks.append('validation phase 1new+36reused gate & 15 UI inventory verified')
-
-            # Negative tests on validation phase current2 + historical35.
-            for failure_path in (native_val / 'host-1/failure.json', out_val / 'case-scheduling-error.json'):
-                r.write(failure_path, dict(error='synthetic failure after passing receipt'))
-                rejects('failure record overrides green receipts: ' + failure_path.name, r.release_gate)
-                failure_path.unlink()
-            broken = native_val / 'host-1/counts.json'
-            prev_bytes = broken.read_bytes()
-            broken.write_bytes(b'{invalid')
-            bad_sum = r.summarize()
-            assert bad_sum['counts']['error'] == 1 and bad_sum['counts']['passed'] == 0
-            assert bad_sum['native_tests_executed_this_run'] is None and bad_sum['combined_verified_passed'] is None
-            assert len(bad_sum['ui_inventory']) == 15
-            broken.write_bytes(prev_bytes)
-            checks.append('corrupt current result yields null counts without hiding remaining UI cases')
-
-            for target_group, filename, field, value in [
-                ('host-1', 'selection.json', 'source_commit', 'b' * 40),
-                ('host-1', 'execution.json', 'timed_out', True),
-                ('host-1', 'execution.json', 'run_id', '999'),
-                ('host-1', 'counts.json', 'executions', 18),
-            ]:
-                p = native_val / target_group / filename
-                orig = p.read_bytes()
-                data = json.loads(orig)
-                data[field] = value
-                p.write_text(json.dumps(data), encoding='utf-8')
-                rejects('current drift ' + target_group + '/' + filename + ':' + field, r.release_gate)
-                p.write_bytes(orig)
-
-            # Tampered retained historical file / domain-11 xcresult leaf / forbidden host-3/ui-1 / shared source drift.
-            hist_dom11_xc = out_val / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/domain-11/xcresult-tests.json'
-            orig_dom11 = hist_dom11_xc.read_bytes()
-            tampered_dom11 = json.loads(orig_dom11)
-            tampered_dom11['testNodes'][0]['children'].pop()
-            hist_dom11_xc.write_text(json.dumps(tampered_dom11), encoding='utf-8')
-            rejects('historical domain-11 missing Bool leaf rejected', r.release_gate)
-            hist_dom11_xc.write_bytes(orig_dom11)
-
-            hist_log = out_val / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/domain-1/ReaderDomainTests.log'
-            orig_log = hist_log.read_bytes()
-            hist_log.write_bytes(orig_log + b'\n')
-            rejects('tampered historical log rejected', r.release_gate)
-            hist_log.write_bytes(orig_log)
-
-            bad_hist_group = out_val / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/host-3'
-            bad_hist_group.mkdir()
-            rejects('reused forbidden host-3 rejected', r.release_gate)
-            bad_hist_group.rmdir()
-
-            cs_path = out_val / f'reused-evidence/historical-{r.HIST_RUN}/evidence/candidate-sources.json'
-            orig_cs = cs_path.read_bytes()
-            cs_data = json.loads(orig_cs)
-            shared_key = next(k for k in cs_data['files'] if k not in r.ALLOWED)
-            cs_data['files'][shared_key] = 'f' * 64
-            cs_path.write_text(json.dumps(cs_data), encoding='utf-8')
-            rejects('shared source drift vs historical baseline rejected', lambda: r.verify_historical_evidence(out_val / f'reused-evidence/historical-{r.HIST_RUN}'))
-            cs_path.write_bytes(orig_cs)
-
-            with patch.object(r.paging, 'require_xcresult', side_effect=ValueError('missing bundle')):
-                rejects('missing xcresult bundle', r.release_gate)
-            (native_val / 'extra').mkdir()
-            rejects('extra native group', r.release_gate)
-            (native_val / 'extra').rmdir()
-            bin_ev = out_val / 'webkit-simulator-linkage/binaries/0/YueJing'
-            orig_bin = bin_ev.read_bytes()
-            bin_ev.write_bytes(b'drift')
-            rejects('tampered simulator linkage rejected', r.release_gate)
-            bin_ev.write_bytes(orig_bin)
-            (sim_app / 'YueJing').write_bytes(b'changed sim app')
-            rejects('tampered simulator app rejected', r.release_gate)
-            (sim_app / 'YueJing').write_bytes(orig_bin)
-            checks.append('strict validation gate rejects missing/tampered current2, historical35, Bool leaf, shared source, and linkage')
-
-        # Historical API & ZIP negative tests.
-        for field, val in [
-            ('id', 1), ('head_sha', 'f' * 40), ('run_attempt', 2), ('workflow_id', 1),
-            ('path', '.github/workflows/other.yml'), ('event', 'push'), ('head_branch', 'other'),
-            ('status', 'in_progress'), ('conclusion', 'cancelled'),
-            ('repository', {'full_name': 'foreign/repo'}),
-        ]:
-            rejects('historical run ' + field, lambda f=field, v_=val: r.validate_historical_run_and_artifact({**hist_run, f: v_}, hist_artifact))
-        for field, val in [
-            ('id', 1), ('expired', True), ('name', 'wrong'), ('size_in_bytes', 1),
-            ('digest', 'sha256:' + '0' * 64), ('workflow_run', dict(id=1, head_sha=r.BASE)),
-        ]:
-            rejects('historical artifact ' + field, lambda f=field, v_=val: r.validate_historical_run_and_artifact(hist_run, {**hist_artifact, f: v_}))
-
-        hostile_seq = [0]
-        def build_hostile_zip(names, mode=0o100644, *, encrypt=False, corrupt_crc=False, spoof_size=False):
-            hostile_seq[0] += 1
-            zpath = work / f'hostile-{hostile_seq[0]}.zip'
-            with zipfile.ZipFile(zpath, 'w') as zf:
-                for n in names:
-                    info = zipfile.ZipInfo(n)
-                    info.filename = n
-                    info.external_attr = mode << 16
-                    zf.writestr(info, b'evidence')
-            raw_z = bytearray(zpath.read_bytes())
-            if corrupt_crc:
-                cd = raw_z.find(b'PK\x01\x02')
-                raw_z[cd + 16] ^= 0xFF
-            if encrypt:
-                lfh = raw_z.find(b'PK\x03\x04')
-                cd = raw_z.find(b'PK\x01\x02')
-                raw_z[lfh + 6] |= 1
-                raw_z[cd + 8] |= 1
-            if spoof_size:
-                cd = raw_z.find(b'PK\x01\x02')
-                raw_z[cd + 24] ^= 1
-            zpath.write_bytes(bytes(raw_z))
-            return zpath
-
-        for bad_names in (['../escape'], ['/abs'], ['a\\b'], ['C:/x'], ['a/./b'], ['a//b'], ['a', 'A']):
-            rejects('unsafe ZIP member ' + repr(bad_names), lambda bn=bad_names: r.safe_zip_members(build_hostile_zip(bn)))
-        rejects('ZIP symlink entry', lambda: r.safe_zip_members(build_hostile_zip(['link'], stat.S_IFLNK | 0o777)))
-        rejects('ZIP encrypted entry', lambda: r.safe_zip_members(build_hostile_zip(['enc.txt'], encrypt=True)))
-        rejects('ZIP CRC corruption', lambda: r.safe_zip_members(build_hostile_zip(['crc.txt'], corrupt_crc=True)))
-        rejects('ZIP spoofed size', lambda: r.safe_zip_members(build_hostile_zip(['sz.txt'], spoof_size=True)))
-        checks.append('historical API provenance and ZIP security/CRC/NFC/symlink/size checks enforced')
-
-        # Build delivery phase tests reusing the historical evidence extracted above.
-        hist_extracted = out_val / f'reused-evidence/historical-{r.HIST_RUN}'
-        prior_id = '987654'
-        prior_zip, prior_run, prior_artifact = _build_synthetic_prior_zip(
-            work, prior_id, head, destination, candidate_map, hist_extracted,
-        )
-        prior_run_json = work / 'prior-run.json'
-        prior_art_json = work / 'prior-art.json'
-        r.write(prior_run_json, prior_run)
-        r.write(prior_art_json, dict(total_count=1, artifacts=[prior_artifact]))
-
-        out_del = work / 'out-del'
-        out_del.mkdir()
-        r.write(out_del / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-        (out_del / 'toolchain.log').write_text('Xcode 16.4\n', encoding='utf-8')
-        (out_del / 'xcodegen.log').write_text('Version: 2.46.0\n', encoding='utf-8')
-        (out_del / 'app-build.log').write_text('BUILD SUCCEEDED\n', encoding='utf-8')
-        (out_del / 'app-build-exit-code.txt').write_text('0\n', encoding='utf-8')
-        r.write(out_del / 'epub-freeze-scope.json', receipt)
-        app = work / 'YueJing.app'
-        app.mkdir()
-        (app / 'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString=r.VERSION, CFBundleVersion=r.BUILD)))
-        (app / 'Assets.car').write_bytes(b'synthetic icon')
-        (app / 'YueJing').write_bytes(b'synthetic device image')
-        _make_linkage_dir(out_del / 'webkit-device-linkage', head, receipt['run_id'], binaries_payload=b'synthetic device image')
-        r.write(out_del / 'app-dependency-gate.json', dict(
-            source_commit=head, run_id=receipt['run_id'], run_attempt='1', signing='unsigned',
-            actual_images=[dict(binary='YueJing', sha256=r.sha(app / 'YueJing'))],
-        ))
-        artifacts = work / 'artifacts'
-        artifacts.mkdir()
-        ipa = artifacts / f'YueJing-{r.VERSION}.ipa'
-
-        def package(tamper=False):
-            with zipfile.ZipFile(ipa, 'w') as archive:
-                for path in app.iterdir():
-                    archive.writestr('Payload/YueJing.app/' + path.name,
-                                     b'tampered' if tamper and path.name == 'Assets.car' else path.read_bytes())
-            manifest = dict(version=r.VERSION, build=r.BUILD, ipa_file=ipa.name, source_commit=head, signing='unsigned',
-                            ipa_bytes=ipa.stat().st_size, ipa_sha256=hashlib.sha256(ipa.read_bytes()).hexdigest(),
-                            app_icon_files=['Assets.car'])
-            (artifacts / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
-
-        package()
-        with patch.object(r, 'OUT', out_del), patch.object(r, 'NATIVE_OUT', out_del / 'epub-freeze'), \
-             patch.object(r, 'SCOPE_JSON', out_del / 'epub-freeze-scope.json'), \
-             patch.object(r, 'REUSED_OUT', out_del / 'reused-evidence'), \
-             patch.object(r, 'REUSED_GATE_JSON', out_del / 'reused-evidence/reused-evidence-gate.json'), \
-             patch.object(r, 'GATE_JSON', out_del / 'gate.json'), \
-             patch.object(r, 'PACKAGE_JSON', out_del / 'package.json'), \
-             patch.object(r, 'live_scope', return_value=receipt), \
-             patch.object(r, 'HIST_ARCHIVE_BYTES', hist_artifact['size_in_bytes']), \
-             patch.object(r, 'HIST_ARCHIVE_SHA256', hist_artifact['digest'].split(':', 1)[1]), \
-             patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()), \
-             patch.object(v, 'APP', app), patch.object(v, 'report'):
-            reused_del = r.reuse_evidence(
-                offline_prior=dict(zip_path=prior_zip, run_json=prior_run_json, artifact_json=prior_art_json),
-            )
-            assert reused_del['passed'] is True and reused_del['reused_native_passed'] == 37
-            del_qual = r.qualification()
-            r.write(out_del / 'gate.json', del_qual)
-            assert del_qual['qualification'] == r.DELIVERY_QUALIFICATION
-            assert del_qual['native_tests_executed_this_run'] == 0
-            assert del_qual['reused_native_passed'] == 37
-            assert del_qual['verified_passed'] == 37 and del_qual['combined_verified_passed'] == 37
-            assert del_qual['simulator'] is None and del_qual['groups'] == []
-            assert del_qual['reused_prior']['run_id'] == prior_id
-            assert del_qual['reused_historical']['run_id'] == str(r.HIST_RUN)
-            del_summary = r.summarize()
-            assert del_summary['native_tests_executed_this_run'] == 0 and del_summary['reused_native_passed'] == 37
-            assert sum(x['status'] == 'reused_ui' for x in del_summary['ui_inventory']) == 1
-            assert sum(x['status'] == 'reused_historical' for x in del_summary['ui_inventory']) == 1
-            assert sum(x['status'] == 'not_selected' for x in del_summary['ui_inventory']) == 13
-
-            formal_del = r.delivery_gate()
-            assert formal_del['strict_native_qualification'] == 'passed'
-            assert formal_del['native_tests_executed_this_run'] == 0 and formal_del['reused_native_passed'] == 37
-            assert formal_del['verified_passed'] == 37 and formal_del['combined_verified_passed'] == 37
-            with patch.object(v, 'ROOT', work), patch.object(v, 'candidate_files', return_value=candidate_map), \
-                 patch.dict(os.environ, {'GITHUB_SHA': head}):
-                v.verify_ipa(epub_freeze=True)
-            saved_pkg = r.load(out_del / 'package.json')
-            assert saved_pkg['ipa_integrity'] == 'passed' and saved_pkg['qualification'] == r.DELIVERY_QUALIFICATION
-            assert saved_pkg['native_tests_executed_this_run'] == 0 and saved_pkg['verified_passed'] == 37
-            (out_del / 'package.json').unlink()
-            checks.append('delivery phase reuses prior2+historical35 (native=0, reused=37) and verifies device + IPA')
-
-            # Reject validation phase calling delivery_gate.
-            with patch.object(r, 'live_scope', return_value=val_receipt):
-                rejects('validation phase cannot enter delivery_gate', r.delivery_gate)
-            # Reject delivery phase with leftover simulator/native evidence.
-            (out_del / 'simulator-selection.json').write_text('{}', encoding='utf-8')
-            rejects('delivery phase rejects leftover simulator-selection.json', r.release_gate)
-            (out_del / 'simulator-selection.json').unlink()
-
-            # Reject corrupted IPA payload and changed device image even after formal qualification.
-            package(tamper=True)
-            with patch.object(v, 'ROOT', work), patch.object(v, 'candidate_files', return_value=candidate_map), \
-                 patch.dict(os.environ, {'GITHUB_SHA': head}):
-                rejects('IPA bytes differ even with matching manifest digest', lambda: v.verify_ipa(epub_freeze=True))
-                package()
-                with patch.dict(os.environ, {'GITHUB_SHA': 'b' * 40}):
-                    rejects('IPA foreign SHA', lambda: v.verify_ipa(epub_freeze=True))
-                (app / 'YueJing').write_bytes(b'changed image')
-                package()
-                rejects('matching ZIP cannot conceal changed device image', lambda: v.verify_ipa(epub_freeze=True))
-                (app / 'YueJing').write_bytes(b'synthetic device image')
-                package()
-
-            # Reject wrong qualification / counts in release_gate.
-            for field, val in [
-                ('scope', r.DIAGNOSTIC_SCOPE), ('qualification', 'DEVICE_DIAGNOSTIC_ONLY'),
-                ('verified_passed', 36), ('combined_verified_passed', 35), ('native_tests_executed_this_run', 2),
-                ('reused_native_passed', 35), ('verified_declarations', 37),
-                ('version', '0.2.13'), ('build', '15'), ('full_regression_passed', True),
-            ]:
-                with patch.object(r, 'validate_saved', return_value={**del_qual, field: val}):
-                    rejects('formal release rejects ' + field + '=' + str(val), r.release_gate)
-
-        # Negative prior validation run checks: recursive prior, wrong source, missing event, failed current2, diagnostic opt-in.
-        for label, kwargs in [
-            ('recursive prior_validation_run', dict(prior_phase='delivery', prior_prior='111111', prior_build_ipa=True)),
-            ('prior wrong source_commit', dict(prior_sha='b' * 40)),
-            ('prior build_ipa true', dict(prior_build_ipa=True)),
-            ('prior missing dispatch-event', dict(include_event=False)),
-            ('prior missing historical35', dict(include_hist=False)),
-            ('prior missing bound UI1', dict(include_ui=False)),
-            ('prior missing gate', dict(include_gate=False)),
-            ('prior failed workflow despite Host pass', dict(prior_conclusion='failure')),
-            ('prior failed host-1', dict(failed_group='host-1', prior_conclusion='failure')),
-        ]:
-            neg_out = work / f'neg-{len(checks)}'
-            neg_out.mkdir()
-            p_zip, p_run, p_art = _build_synthetic_prior_zip(
-                work, '777' + str(len(checks)), kwargs.pop('prior_sha', head), destination,
-                candidate_map, hist_extracted, **kwargs,
-            )
-            p_run_j = neg_out / 'prun.json'
-            p_art_j = neg_out / 'part.json'
-            r.write(p_run_j, p_run)
-            r.write(p_art_j, dict(total_count=1, artifacts=[p_art]))
-            del_neg_scope = {**receipt, 'prior_validation_run': str(p_run['id']), 'allow_unqualified_ipa': True}
-            r.write(neg_out / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-            (neg_out / 'toolchain.log').write_text('Xcode 16.4\n', encoding='utf-8')
-            (neg_out / 'xcodegen.log').write_text('Version: 2.46.0\n', encoding='utf-8')
-            (neg_out / 'app-build.log').write_text('BUILD SUCCEEDED\n', encoding='utf-8')
-            (neg_out / 'app-build-exit-code.txt').write_text('0\n', encoding='utf-8')
-            r.write(neg_out / 'epub-freeze-scope.json', del_neg_scope)
-            _make_linkage_dir(neg_out / 'webkit-device-linkage', head, del_neg_scope['run_id'], binaries_payload=b'synthetic device image')
-            with patch.object(r, 'OUT', neg_out), patch.object(r, 'NATIVE_OUT', neg_out / 'epub-freeze'), \
-                 patch.object(r, 'SCOPE_JSON', neg_out / 'epub-freeze-scope.json'), \
-                 patch.object(r, 'REUSED_OUT', neg_out / 'reused-evidence'), \
-                 patch.object(r, 'REUSED_GATE_JSON', neg_out / 'reused-evidence/reused-evidence-gate.json'), \
-                 patch.object(r, 'GATE_JSON', neg_out / 'gate.json'), \
-                 patch.object(r, 'PACKAGE_JSON', neg_out / 'package.json'), \
-                 patch.object(r, 'live_scope', return_value=del_neg_scope), \
-                 patch.object(r, 'HIST_ARCHIVE_BYTES', hist_artifact['size_in_bytes']), \
-                 patch.object(r, 'HIST_ARCHIVE_SHA256', hist_artifact['digest'].split(':', 1)[1]), \
-                 patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()), \
-                 patch.object(v, 'APP', app):
-                rejects(label + ' rejected by reuse', lambda pz=p_zip, pr=p_run_j, pa=p_art_j: r.reuse_evidence(
-                    offline_prior=dict(zip_path=pz, run_json=pr, artifact_json=pa)))
-                rejects(label + ' cannot be bypassed by allow_unqualified_ipa', r.delivery_gate)
-                neg_sum = r.summarize()
-                assert neg_sum['native_tests_executed_this_run'] == 0
-                assert neg_sum['reused_native_passed'] is None and neg_sum['combined_verified_passed'] is None
-                ui1_row = next(x for x in neg_sum['ui_inventory'] if x['case'] == r.UI_METHOD)
-                assert ui1_row['status'] == 'reuse_unverified' and ui1_row['current_selection'] == 'reused_from_prior'
-            # Reject cross-phase offline replay kwargs.
-            rejects('delivery phase rejects offline_historical', lambda: r.reuse_evidence(
-                offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json)))
-    # Dispatch permission & two-phase event binding tests.
-    with scratch_directory(prefix='epub-dispatch-') as temp:
-        out = Path(temp)
-        event = out / 'event.json'
-        with patch.dict(os.environ, {'GITHUB_EVENT_PATH': str(event), 'ALLOW_UNQUALIFIED_IPA': 'false',
-                                     'BUILD_IPA': 'false', 'PRIOR_VALIDATION_RUN': '', 'GITHUB_RUN_ID': '12345'}):
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE))))
-            assert r.dispatch_permission() is False
-            checks.append('missing explicit dispatch permission defaults false')
-            with patch.dict(os.environ, {'ALLOW_UNQUALIFIED_IPA': 'true'}):
-                rejects('environment true cannot forge omitted dispatch permission', r.dispatch_permission)
-                event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, allow_unqualified_ipa=True))))
-                rejects('even explicit diagnostic IPA opt-in is disabled', r.dispatch_permission)
-            rejects('dispatch true cannot be changed to environment false', r.dispatch_permission)
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope='full', allow_unqualified_ipa=False))))
-            rejects('diagnostic permission cannot cross scope', r.dispatch_permission)
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=True, prior_validation_run='987654'))))
-            rejects('build environment cannot differ from dispatch stage', r.dispatch_permission)
-            with patch.dict(os.environ, {'BUILD_IPA': 'true', 'PRIOR_VALIDATION_RUN': '987654'}):
-                assert r.dispatch_context()['phase'] == 'delivery'
-                checks.append('explicit delivery phase bound to dispatch event')
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=True, prior_validation_run=''))))
-            with patch.dict(os.environ, {'BUILD_IPA': 'true', 'PRIOR_VALIDATION_RUN': ''}):
-                rejects('validation phase with build_ipa=true rejected', r.dispatch_context)
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=False, prior_validation_run='987654'))))
-            with patch.dict(os.environ, {'BUILD_IPA': 'false', 'PRIOR_VALIDATION_RUN': '987654'}):
-                rejects('delivery phase with build_ipa=false rejected', r.dispatch_context)
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=True, prior_validation_run='12345'))))
-            with patch.dict(os.environ, {'BUILD_IPA': 'true', 'PRIOR_VALIDATION_RUN': '12345'}):
-                rejects('self-referential prior_validation_run rejected', r.dispatch_context)
-            event.write_text(json.dumps(dict(inputs=dict(validation_scope=r.SCOPE, build_ipa=True, prior_validation_run=str(r.HIST_RUN)))))
-            with patch.dict(os.environ, {'BUILD_IPA': 'true', 'PRIOR_VALIDATION_RUN': str(r.HIST_RUN)}):
-                rejects('historical Round 1 run rejected as prior_validation_run', r.dispatch_context)
-
-    # Package gate entrypoints cannot bypass delivery_gate or mix modes.
-    with patch.object(v.sys, 'platform', 'darwin'), patch.object(r, 'delivery_gate', side_effect=ValueError('not qualified')):
-        rejects('device package cannot bypass explicit delivery gate', lambda: v.package_gate(epub_freeze=True))
-    with patch.object(v.sys, 'platform', 'darwin'):
-        rejects('mixed device package qualification', lambda: v.package_gate(epub_freeze=True, diagnostic=True))
-        rejects('mixed IPA qualification', lambda: v.verify_ipa(epub_freeze=True, epub_reading=True))
-
-    # Scheduler checks: first case fails -> second case still executes; preflight blocks; cancel not swallowed.
-    with scratch_directory(prefix='epub-host-scheduler-') as temp:
-        root = Path(temp)
-        scope = dict(scope=r.SCOPE, phase='validation', prior_validation_run='', source_commit='a' * 40, run_id='synthetic')
-        for scenario in ('early_failure', 'timeout_and_fail', 'all_pass', 'preflight', 'cancelled'):
-            out = root / scenario
-            visited = []
-
-            def prepare(kind, folder, source_commit, **kwargs):
-                visited.append(folder.name)
-
-            def stream(args, log, timeout):
-                group = log.parent.name
-                assert len([s for s in args if s.startswith('-only-testing:')]) == 1
-                assert timeout == 480
-                if scenario == 'cancelled' and group == 'host-1':
-                    raise KeyboardInterrupt()
-                raw = fixture(group)
-                if scenario == 'early_failure' and group == 'host-1':
-                    log.write_bytes(raw.replace(b'passed', b'failed').replace(b'TEST SUCCEEDED', b'TEST FAILED'))
-                    return 65, False
-                if scenario == 'timeout_and_fail' and group == 'host-1':
-                    log.write_bytes(b'synthetic timeout')
-                    return -9, True
-                log.write_bytes(raw)
-                return 0, False
-
-            def preflight(*args, **kwargs):
-                if scenario == 'preflight':
-                    raise ValueError('synthetic common toolchain unavailable')
-
-            with patch.object(r, 'OUT', out), patch.object(r, 'NATIVE_OUT', out / 'epub-freeze'), \
-                 patch.object(r, 'REUSED_OUT', out / 'reused-evidence'), \
-                 patch.object(r, 'REUSED_GATE_JSON', out / 'reused-evidence/reused-evidence-gate.json'), \
-                 patch.object(r, 'SCOPE_JSON', out / 'epub-freeze-scope.json'), \
-                 patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(out / 'synthetic-step-summary.md'), 'PRIOR_VALIDATION_RUN': ''}), \
-                 patch.object(r, 'live_scope', return_value=scope), \
-                 patch.object(r.compat, 'validate_toolchain_and_dependencies', side_effect=preflight), \
-                 patch.object(r.compat, 'validate_destination'), \
-                 patch.object(r.reading, 'prepare_group_settings', side_effect=prepare), \
-                 patch.object(r, 'stream_case', side_effect=stream), \
-                 patch.object(r.paging, 'require_xcresult'), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                if scenario == 'preflight':
-                    rejects('common prerequisite fails once without running tests', lambda: r.run_all(destination))
-                    assert not visited
-                elif scenario == 'cancelled':
-                    try:
-                        r.run_all(destination)
-                    except KeyboardInterrupt:
-                        pass
-                    else:
-                        raise AssertionError('Cancellation swallowed')
-                    assert visited == ['host-1'] and not (out / 'epub-freeze/host-1/counts.json').exists()
-                    checks.append('cancellation stops scheduling without swallowing KeyboardInterrupt')
-                else:
-                    assert r.run_all(destination) == (scenario == 'all_pass')
-                    assert visited == ['host-1']
-                    checks.append(scenario + ': production scheduler only attempted complete Host identity once')
-                report = r.summarize(publish=True)
-                assert len(report['cases']) == 1 and len(report['ui_inventory']) == 15
-                assert sum(report['counts'].values()) == 1
-                assert sum(x['status'] == 'not_selected' for x in report['ui_inventory']) == 13
-                if scenario == 'early_failure':
-                    assert report['counts'] == dict(passed=0, failed=1, timed_out=0, error=0, blocked=0, not_run=0)
-                    assert report['native_tests_executed_this_run'] is None
-                    rejects('early failure cannot qualify despite later ui-1 pass', r.qualification)
-                elif scenario == 'timeout_and_fail':
-                    assert report['counts'] == dict(passed=0, failed=0, timed_out=1, error=0, blocked=0, not_run=0)
-                    rejects('timeout cannot qualify', r.qualification)
-                elif scenario == 'all_pass':
-                    assert report['counts'] == dict(passed=1, failed=0, timed_out=0, error=0, blocked=0, not_run=0)
-                    rejects('all_pass without historical reuse cannot qualify', r.qualification)
-                elif scenario == 'preflight':
-                    assert report['counts'] == dict(passed=0, failed=0, timed_out=0, error=0, blocked=1, not_run=0)
-                else:
-                    assert report['counts'] == dict(passed=0, failed=0, timed_out=0, error=0, blocked=0, not_run=1)
-                markdown = (out / 'case-results.md').read_text('utf-8')
-                assert all(x['case'] in markdown for x in report['ui_inventory'])
-                if scenario != 'preflight':
-                    rejects('existing case evidence cannot be overwritten/retried', lambda: r.run_all(destination))
-
-        # Real local child success/nonzero/timeout followed by next process (Python processes, NOT Swift).
-        assert r.stream_case([sys.executable, '-c', 'print("ok")'], root / 'success.log', 10) == (0, False)
-        assert r.stream_case([sys.executable, '-c', 'raise SystemExit(7)'], root / 'failure.log', 10) == (7, False)
-        code, expired = r.stream_case([sys.executable, '-c', 'import time; time.sleep(20)'], root / 'timeout.log', 0.2)
-        assert expired and code != 0
-        assert r.stream_case([sys.executable, '-c', 'print("after timeout")'], root / 'after.log', 10) == (0, False)
-        checks.append('real local child success/nonzero/timeout followed by next process; no pipe hang')
-
-    # Workflow step admission evaluation across both phases.
-    blocks = {re.search(r'\n        id: (\w+)', block)[1]: block for block in job.split('      - name: ')
-              if re.search(r'\n        id: (\w+)', block)}
-
-    def admitted(step, outcomes, cancelled=False, build_ipa=False, prior=''):
-        expression = re.search(r'\n        if: \$\{\{ (.+) \}\}', blocks[step])[1]
-        expression = expression.replace('!cancelled()', str(not cancelled)).replace('&&', ' and ')
-        expression = expression.replace('inputs.build_ipa', str(build_ipa))
-        expression = expression.replace('inputs.prior_validation_run', repr(prior))
-        expression = re.sub(r"steps\.(\w+)\.outcome", lambda m: repr(outcomes.get(m[1], 'skipped')), expression)
-        return eval(expression, {'__builtins__': {}}, {})
-
-    val_ok = dict(scope='success', toolchain='success', dependencies='success', reuse='failure',
-                  simulator='success', boot='success', tests='failure', native_gate='failure')
-    assert admitted('simulator', val_ok, build_ipa=False, prior='') and admitted('tests', val_ok, build_ipa=False, prior='')
-    assert admitted('simulator_linkage', val_ok, build_ipa=False, prior='')
-    assert not admitted('device', val_ok, build_ipa=False, prior='') and not admitted('package', val_ok, build_ipa=False, prior='')
-    del_ok = dict(scope='success', toolchain='success', dependencies='success', reuse='success',
-                  simulator='skipped', boot='skipped', tests='skipped', device='success')
-    assert admitted('reuse', del_ok, build_ipa=True, prior='987654')
-    assert not admitted('simulator', del_ok, build_ipa=True, prior='987654')
-    assert not admitted('boot', del_ok, build_ipa=True, prior='987654')
-    assert not admitted('tests', del_ok, build_ipa=True, prior='987654')
-    assert not admitted('simulator_linkage', del_ok, build_ipa=True, prior='987654')
-    assert admitted('device', del_ok, build_ipa=True, prior='987654') and admitted('package', del_ok, build_ipa=True, prior='987654')
-    for prereq in ('scope', 'toolchain', 'dependencies'):
-        assert not admitted('reuse', {**del_ok, prereq: 'failure'}, build_ipa=True, prior='987654')
-        assert not admitted('device', {**del_ok, prereq: 'failure'}, build_ipa=True, prior='987654')
-        assert not admitted('package', {**del_ok, prereq: 'failure'}, build_ipa=True, prior='987654')
-    assert not admitted('package', del_ok, cancelled=True, build_ipa=True, prior='987654')
-    assert "!cancelled() && steps.package.outcome == 'success'" in job
-    checks.append('workflow conditions verified for validation phase, delivery phase, reuse independence, and shared prerequisite blocking')
-
-    ui_source = (r.ROOT / 'Tests/YueJingEPUBUITests/EPUBFlowUITests.swift').read_text('utf-8')
-    assert 'waitFor { abs(Double(coordinate("scrollX") - initialX) - Double(initialFrame.width)) <= 2 }' in ui_source
-    assert 'XCTAssertEqual(Double(nextX - initialX), Double(view.frame.width), accuracy: 2)' in ui_source
-    assert 348 > 0 and not abs(348 - 375) <= 2 and abs(375 - 375) <= 2
-    checks.append('existing exact paging completion wait and final assertion preserved')
-
-    return dict(
-        offline_checks_passed=len(checks),
-        checks=checks,
-        native_tests_executed=0,
-        release_source_ready=not blockers and not skip_workflow_contract,
-        source_blockers=blockers,
-        workflow_scope_contract='skipped explicitly' if skip_workflow_contract else 'passed',
-    )
+                f = r.NATIVE_OUT / group
+                want = r.provenance(group, DESTINATION, f / (spec['target'] + '.xcresult'), scope)
+                save(f / 'selection.json', want)
+                save(f / 'execution.json', dict(**want, native_exit=0, timed_out=False))
+            fresh = r.qualification()
+            assert fresh['native_tests_executed_this_run'] == 25 and fresh['reused_native_passed'] == 0
+            save(r.GATE_JSON, fresh)
+            assert r.release_gate()['verified_passed'] == 25
+            altered = dict(fresh, verified_passed=24)
+            save(r.GATE_JSON, altered)
+            rejects('saved gate tampering', r.release_gate)
+            save(r.NATIVE_OUT / 'host-1/failure.json', dict(error='failed'))
+            rejects('failure receipt overrides green counts', r.qualification)
+            passed('fresh native gate enforces 25/0, exact receipts, no stale qualification')
 
 
-def run_explicit_historical_replay(hist_zip, hist_run_json, hist_art_json, offline_ui):
-    """Explicit offline replay against a real historical artifact ZIP (never called by default)."""
-    with scratch_directory(prefix='epub-real-reuse-replay-') as temp:
-        work = Path(temp)
-        out = work / 'out'
-        out.mkdir()
-        head = r.git('rev-parse', 'HEAD').decode().strip()
-        ev = work / 'val-event.json'
-        ev.write_text(json.dumps(dict(inputs=dict(
-            validation_scope=r.SCOPE, allow_unqualified_ipa=False, build_ipa=False, prior_validation_run='',
-        ))), encoding='utf-8')
-        scope = dict(
-            scope=r.SCOPE, phase='validation', prior_validation_run='',
-            source_commit=head, baseline_commit=r.BASE, run_id='888001', run_attempt='1',
-            version=r.VERSION, build=r.BUILD, allow_unqualified_ipa=False,
-            dispatch_event_sha256=r.sha(ev), build_ipa=False,
-        )
-        r.write(out / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-        (out / 'toolchain.log').write_text(
-            f'Source: {head}\narm64\nXcode 16.4\nBuild version 16F6\nApple Swift version 6.1.2\n', encoding='utf-8',
-        )
-        (out / 'xcodegen.log').write_text('Version: 2.46.0\n', encoding='utf-8')
-        with patch.object(r, 'OUT', out), patch.object(r, 'NATIVE_OUT', out / 'epub-freeze'), \
-             patch.object(r, 'REUSED_OUT', out / 'reused-evidence'), \
-             patch.object(r, 'REUSED_GATE_JSON', out / 'reused-evidence/reused-evidence-gate.json'), \
-             patch.object(r, 'live_scope', return_value=scope), \
-             patch.object(r, 'REUSED_STAGING', work / 'staging'), \
-             patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()):
-            receipt = r.reuse_evidence(
-                offline_historical=dict(zip_path=hist_zip, run_json=hist_run_json, artifact_json=hist_art_json),
-                offline_ui=offline_ui,
-                check_shared_sources=True,
-                verify_live_bundle=False,
-            )
-            assert receipt['passed'] is True
-            assert receipt['reused_historical_passed'] == 35
-            assert receipt['historical']['declarations_passed'] == 34
-            assert receipt['historical']['executions_passed'] == 35
-            assert receipt['historical']['workflow_conclusion'] == 'failure'
-            assert not (out / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/host-3').exists()
-            assert not (out / f'reused-evidence/historical-{r.HIST_RUN}/evidence/epub-freeze/ui-1').exists()
-            assert not any((out / f'reused-evidence/historical-{r.HIST_RUN}').rglob('data.0~*'))
-            assert receipt['ui']['executions_passed'] == 1 and receipt['reused_native_passed'] == 36
-            # Also verify delivery-phase replay carrying that real historical35 inside a synthetic prior ZIP!
-            dest = 'platform=iOS Simulator,id=66571EB4-A450-4628-ABB9-3D215AFEDD58'
-            hist_extracted = out / f'reused-evidence/historical-{r.HIST_RUN}'
-            cand = v.candidate_files()
-            p_zip, p_run, p_art = _build_synthetic_prior_zip(
-                work, '888001', head, dest, cand, hist_extracted,
-            )
-            p_run_j = work / 'p-run.json'
-            p_art_j = work / 'p-art.json'
-            r.write(p_run_j, p_run)
-            r.write(p_art_j, dict(total_count=1, artifacts=[p_art]))
-            out_del = work / 'out-del'
-            out_del.mkdir()
-            r.write(out_del / 'dependency-resolution.json', dict(packages=_synthetic_packages()))
-            (out_del / 'toolchain.log').write_text('Xcode 16.4\n', encoding='utf-8')
-            (out_del / 'xcodegen.log').write_text('Version: 2.46.0\n', encoding='utf-8')
-            del_scope = {**scope, 'phase': 'delivery', 'prior_validation_run': '888001', 'build_ipa': True, 'run_id': '888002'}
-            r.write(out_del / 'epub-freeze-scope.json', del_scope)
-            with patch.object(r, 'OUT', out_del), patch.object(r, 'NATIVE_OUT', out_del / 'epub-freeze'), \
-                 patch.object(r, 'SCOPE_JSON', out_del / 'epub-freeze-scope.json'), \
-                 patch.object(r, 'REUSED_OUT', out_del / 'reused-evidence'), \
-                 patch.object(r, 'REUSED_GATE_JSON', out_del / 'reused-evidence/reused-evidence-gate.json'), \
-                 patch.object(r, 'GATE_JSON', out_del / 'gate.json'), \
-                 patch.object(r, 'live_scope', return_value=del_scope), \
-                 patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=_synthetic_packages()):
-                del_reuse = r.reuse_evidence(
-                    offline_prior=dict(zip_path=p_zip, run_json=p_run_j, artifact_json=p_art_j),
-                    check_shared_sources=True,
-                )
-                assert del_reuse['passed'] is True and del_reuse['reused_native_passed'] == 37
-                del_qual = r.qualification()
-                assert del_qual['native_tests_executed_this_run'] == 0
-                assert del_qual['reused_native_passed'] == 37
-                assert del_qual['verified_passed'] == 37
-                del_sum = r.summarize()
-                assert del_sum['native_tests_executed_this_run'] == 0 and del_sum['reused_native_passed'] == 37
-        retained_files = [p for p in (out / 'reused-evidence').rglob('*') if p.is_file()]
-        retained_bytes = sum(p.stat().st_size for p in retained_files)
-    return dict(
-        historical_replay_passed=True,
-        historical_run=r.HIST_RUN,
-        historical_artifact_id=r.HIST_ARTIFACT_ID,
-        historical_archive_sha256=r.HIST_ARCHIVE_SHA256,
-        historical_reused_declarations=34,
-        historical_reused_executions=35,
-        ui_run=r.UI_RUN,
-        ui_reused_executions=1,
-        xcresult_native_parse='passed' if sys.platform == 'darwin' else 'skipped: macOS xcrun required; full bundle digest/manifest checked',
-        scratch_path=str(work),
-        delivery_combined_verified=37,
-        retained_file_count=len(retained_files),
-        retained_bytes=retained_bytes,
-        native_tests_executed=0,
-    )
+def check_native_copy(root):
+    bundle = root / 'immutable.xcresult'
+    bundle.mkdir()
+    (bundle / 'Info.plist').write_bytes(b'immutable')
+    seen = []
+    def export(args, **kwargs):
+        working = Path(args[-1])
+        assert working != bundle and kwargs['timeout'] == 60
+        assert (working / 'Info.plist').read_bytes() == b'immutable'
+        (working / 'database.sqlite3').write_bytes(b'materialized')
+        seen.append(str(working))
+        return b'{}'
+    with patch.object(r.sys, 'platform', 'darwin'), patch.object(r.subprocess, 'check_output', side_effect=export):
+        r.xcresult_export(bundle, 'tests')
+    assert seen and not (bundle / 'database.sqlite3').exists()
+    passed('mocked xcresulttool materialization confined to temporary copy; not native verification')
+
+
+def check_package(root):
+    scope = scope_for('delivery')
+    qualified = dict(**scope, qualification=r.DELIVERY_QUALIFICATION, verified_passed=25,
+                     combined_verified_passed=25, verified_declarations=24, native_tests_executed_this_run=0,
+                     reused_native_passed=25)
+    with patch.object(r, 'validate_saved', return_value=qualified):
+        assert r.release_gate() == qualified
+    for field, value in [('allow_unqualified_ipa', True), ('verified_passed', 24), ('reused_native_passed', 24),
+                         ('native_tests_executed_this_run', 1), ('version', '0.2.14'), ('build', '16'), ('qualification', 'DIAGNOSTIC')]:
+        with patch.object(r, 'validate_saved', return_value=dict(qualified, **{field: value})):
+            rejects('release strict field ' + field, r.release_gate)
+    with sandbox(root / 'package', scope), patch.object(r.compat, 'validate_toolchain_and_dependencies', return_value=packages()):
+        (r.OUT / 'app-build-exit-code.txt').write_text('65')
+        rejects('actual device build failure blocks package', r.delivery_gate)
+        (r.OUT / 'app-build-exit-code.txt').write_text('0')
+        rejects('missing actual device linkage blocks package', r.delivery_gate)
+        with patch.object(r, 'delivery_gate', return_value=qualified), patch.object(r.v, 'APP', root / 'app'):
+            r.v.APP.mkdir()
+            (r.v.APP / 'YueJing').write_bytes(b'synthetic device image')
+            dep = dict(source_commit=SOURCE, run_id=CURRENT_ID, run_attempt='1', signing='unsigned',
+                       actual_images=[dict(binary='YueJing', sha256=r.sha(r.v.APP / 'YueJing'))])
+            manifest = dict(source_commit=SOURCE, version=r.VERSION, build=r.BUILD, ipa_sha256='f' * 64)
+            save(r.OUT / 'app-dependency-gate.json', dict(dep, run_id='wrong'))
+            rejects('device dependency source/run binding', lambda: r.complete_delivery(manifest, 1))
+            save(r.OUT / 'app-dependency-gate.json', dep)
+            rejects('IPA actual version binding', lambda: r.complete_delivery(dict(manifest, version='0.2.14'), 1))
+            (r.v.APP / 'YueJing').write_bytes(b'tampered')
+            rejects('actual device image hash binding', lambda: r.complete_delivery(manifest, 1))
+
+
+def workflow_contract():
+    text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding='utf-8')
+    job = text.split('  epub_freeze:', 1)[1]
+    for token in (r.SCOPE, 'timeout-minutes: 60', 'timeout=120', 'run_epub_freeze_validation.py run-all',
+                  'run_epub_freeze_validation.py gate', 'run_epub_freeze_validation.py reuse',
+                  "inputs.prior_validation_run == ''", 'if: always()', 'check_webkit_linkage.py',
+                  'package-gate-epub-freeze', 'verify-ipa-epub-freeze', 'actions: read', 'persist-credentials: false'):
+        assert token in job, 'Missing workflow contract: ' + token
+    assert 'epub-ready-host-followup-1' not in job
+    # The 30-second live tool probes live in the unchanged shared helper.
+    helper = (r.ROOT / 'scripts/run_epub_compat_validation.py').read_text(encoding='utf-8')
+    assert 'timeout=30' in helper
+    passed('workflow directed routing / 60min job / 120s boot / 30s tool probe contracts')
+
+
+def check_source_boundaries():
+    original_git = r.git
+    with patch.dict(os.environ, GITHUB_ACTIONS='true'):
+        rejects('cloud cannot use pending source', lambda: r.validate_followup_sources(pending=True))
+    with patch.object(r, 'git', side_effect=lambda *args: b' M Package.swift\0' if args[0] == 'status' else original_git(*args)):
+        rejects('pending cannot change dependency manifest', lambda: r.validate_followup_sources(pending=True))
+    candidate = r.v.candidate_files()
+    with patch.object(r.v, 'candidate_files', return_value={**candidate, 'Sources/unapproved.swift': '0' * 64}):
+        rejects('pending cannot add arbitrary source', lambda: r.validate_followup_sources(pending=True))
+    original_sha = r.sha
+    protected = 'Tests/YueJingHostTests/EPUBReaderHostTests.swift'
+    with patch.object(r, 'sha', side_effect=lambda p: '0' * 64 if p == r.ROOT / protected else original_sha(p)):
+        rejects('approved path cannot weaken existing assertions', lambda: r.validate_followup_sources(pending=True))
+    original_read = Path.read_bytes
+    def altered_project(path):
+        data = original_read(path)
+        return data + b'\n# unapproved configuration change\n' if path == r.ROOT / 'project.yml' else data
+    with patch.object(Path, 'read_bytes', altered_project):
+        rejects('project version-only boundary', r.validate_version_boundary)
+
+
+def check_processes(root):
+    assert r.stream_case([sys.executable, '-c', 'print("ok")'], root / 'process-ok.log', 10) == (0, False)
+    assert r.stream_case([sys.executable, '-c', 'raise SystemExit(7)'], root / 'process-fail.log', 10) == (7, False)
+    code, expired = r.stream_case([sys.executable, '-c', 'import time; time.sleep(20)'], root / 'process-timeout.log', 0.2)
+    assert expired and code != 0
+    assert r.stream_case([sys.executable, '-c', 'print("after timeout")'], root / 'process-after.log', 10) == (0, False)
+    passed('real local Python child success/failure/timeout/next process; NOT Swift/native execution')
+
+
+def run_checks(root, skip_workflow_contract=False):
+    assert not skip_workflow_contract or os.environ.get('GITHUB_ACTIONS') != 'true'
+    assert r.BASE == 'd5fde953ca544deaecace0434a45b014ebd630b0'
+    assert (r.SCOPE, r.VERSION, r.BUILD, r.TOTAL, r.EXECUTIONS) == ('epub-opening-continuity-24', '0.2.15', '17', 24, 25)
+    assert len(r.ALLOWED) == 19 and len(r.NEW) == 3 and len(r.CANDIDATE_SHA256) == 13
+    reviewed = r.reviewed_inventory()
+    assert reviewed['selected'] == 241 and reviewed['selected_executions'] == 242
+    assert [sum(s['kind'] == kind for s in r.GROUPS.values()) for kind in ('domain', 'host', 'ui')] == [14, 7, 3]
+    assert len(r.selection()) == 24 and sum(executions(s) for s in r.GROUPS.values()) == 25
+    source = r.validate_followup_sources(pending=os.environ.get('GITHUB_ACTIONS') != 'true')
+    passed('exact approved candidate/source boundary: ' + source['source_status'])
+    passed('actual source inventory 241 declarations / 242 expansions; selected 24/25; unselected 217')
+    if not skip_workflow_contract:
+        workflow_contract()
+    # Even on Actions these checks must never contact an API or execute native tests.
+    with patch.dict(os.environ, GITHUB_ACTIONS='false'), \
+            patch.object(r, 'github_api_json', side_effect=AssertionError('Self-check cannot contact GitHub')):
+        check_source_boundaries()
+        check_parsers()
+        check_dispatch(root)
+        check_scheduler(root)
+        check_archive_security(root)
+        check_prior(root)
+        check_native_copy(root)
+        check_package(root)
+        check_processes(root)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--historical-zip', type=Path)
-    parser.add_argument('--historical-run-json', type=Path)
-    parser.add_argument('--historical-artifact-json', type=Path)
-    parser.add_argument('--ui-zip', type=Path)
-    parser.add_argument('--ui-run-json', type=Path)
-    parser.add_argument('--ui-artifact-json', type=Path)
-    parser.add_argument('--skip-workflow-contract', action='store_true', help='Local two-file implementation only; never use for release')
+    parser.add_argument('--skip-workflow-contract', action='store_true', help='Local integration only; forbidden in Actions')
     args = parser.parse_args()
-    result = run_offline_checks(skip_workflow_contract=args.skip_workflow_contract)
-    if any((args.historical_zip, args.historical_run_json, args.historical_artifact_json,
-            args.ui_zip, args.ui_run_json, args.ui_artifact_json)):
-        if not all((args.historical_zip, args.historical_run_json, args.historical_artifact_json,
-                    args.ui_zip, args.ui_run_json, args.ui_artifact_json)):
-            parser.error('Real replay needs all six --historical-* and --ui-* archive/API paths')
-        result['historical_replay'] = run_explicit_historical_replay(
-            args.historical_zip, args.historical_run_json, args.historical_artifact_json,
-            dict(zip_path=args.ui_zip, run_json=args.ui_run_json, artifact_json=args.ui_artifact_json),
-        )
-    print(json.dumps(result, indent=2))
+    scratch = os.environ.get('PI_SCRATCH_DIR') or os.environ.get('RUNNER_TEMP')
+    if not scratch:
+        raise SystemExit('PI_SCRATCH_DIR (local) or RUNNER_TEMP (Actions) is required')
+    root = Path(tempfile.mkdtemp(prefix='opening-freeze-check-', dir=scratch))
+    print('Retained checks/fixtures: ' + str(root), flush=True)
+    try:
+        with (root / 'checks.log').open('w', encoding='utf-8') as log, contextlib.redirect_stdout(log):
+            run_checks(root, args.skip_workflow_contract)
+        report = dict(passed=True, checks=len(checks), labels=checks, native_executions=0,
+                      evidence_kind='SYNTHETIC_GATE_CHECKS_NOT_NATIVE_ACCEPTANCE', scope=r.SCOPE,
+                      selected_declarations=24, selected_executions=25, inventory_declarations=241,
+                      inventory_executions=242, unselected_executions=217,
+                      workflow_check='skipped' if args.skip_workflow_contract else 'passed')
+        save(root / 'checks.json', report)
+        print(json.dumps({k: v for k, v in report.items() if k != 'labels'}, indent=2))
+    except BaseException:
+        (root / 'failure.txt').write_text(traceback.format_exc(), encoding='utf-8')
+        save(root / 'checks.json', dict(passed=False, checks=len(checks), labels=checks, native_executions=0))
+        raise

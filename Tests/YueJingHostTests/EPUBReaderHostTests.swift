@@ -10,6 +10,122 @@ import XCTest
 @MainActor
 @Suite(.serialized)
 struct EPUBReaderHostTests {
+    @Test func epubOpeningObservationRejectsStaleFramesAndLabelsColdAdmission() throws {
+        let start = ContinuousClock.now
+        let token = EPUBNavigationToken(sessionID: "synthetic-opening", path: "OEBPS/ch1.xhtml")
+        let stale = EPUBNavigationToken(sessionID: "synthetic-opening", path: "OEBPS/ch1.xhtml")
+        var observation = EPUBOpeningObservation(intentAt: start, processOpenOrdinal: 1, rendererTaken: false)
+        #expect(observation.summary.contains("本进程首次 EPUB 开书"))
+        #expect(observation.summary.contains("未取得"))
+        #expect(!observation.observedFrame(token, at: start))
+        observation.beganLoading(at: start.advanced(by: .milliseconds(2)))
+        observation.becameReady(token, at: start.advanced(by: .milliseconds(362)))
+        #expect(!observation.observedFrame(stale, at: start.advanced(by: .milliseconds(380))))
+        #expect(!observation.observedFrame(token, at: start.advanced(by: .milliseconds(300))))
+        #expect(observation.observedFrame(token, at: start.advanced(by: .milliseconds(395))))
+        #expect(!observation.observedFrame(token, at: start.advanced(by: .milliseconds(400))))
+        #expect(observation.summary.contains("0.395s") && observation.summary.contains("0.033s"))
+        #expect(!observation.summary.contains(token.sessionID) && !observation.summary.contains(token.path))
+        #expect(observation.summary.contains("不是像素首绘"))
+        let completedSummary = observation.summary
+        observation.interrupt(.background)
+        observation.interrupt(.retry)
+        #expect(observation.summary == completedSummary && observation.interruption == nil)
+        for reason in [EPUBOpeningObservation.Interruption.retry, .background] {
+            var interrupted = EPUBOpeningObservation(intentAt: start, processOpenOrdinal: 2, rendererTaken: true)
+            interrupted.beganLoading(at: start)
+            interrupted.becameReady(token, at: start)
+            interrupted.interrupt(reason)
+            #expect(!interrupted.observedFrame(token, at: start))
+            #expect(interrupted.summary.contains("不纳入正常开书耗时样本"))
+        }
+        let unknown = EPUBOpeningObservation(intentAt: nil, processOpenOrdinal: nil, rendererTaken: nil)
+        #expect(unknown.summary.contains("未配置页面缓存") && !unknown.summary.contains("0.000s"))
+        #expect(EPUBOpeningFeedback.phase(elapsedSeconds: 0.279) == .quiet)
+        #expect(EPUBOpeningFeedback.phase(elapsedSeconds: 0.280) == .compact)
+        #expect(EPUBOpeningFeedback.phase(elapsedSeconds: 0.999) == .compact)
+        #expect(EPUBOpeningFeedback.phase(elapsedSeconds: 1) == .detailed)
+        #expect(EPUBOpeningFeedback.compactDelay == .milliseconds(280))
+        #expect(EPUBOpeningFeedback.detailedDelay == .seconds(1))
+        let suite = "YueJing-opening-hint-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("invalid-theme", forKey: EPUBPresentationThemeHint.key)
+        #expect(EPUBPresentationThemeHint.read(from: defaults) == .paper)
+        EPUBPresentationThemeHint.remember(.dark, in: defaults)
+        #expect(EPUBPresentationThemeHint.read(from: defaults) == .dark)
+    }
+
+    @Test func epubOpeningRouteStartsOnceAndObservesMountedPresentation() async throws {
+        let savedHint = UserDefaults.standard.object(forKey: EPUBPresentationThemeHint.key)
+        defer {
+            if let savedHint { UserDefaults.standard.set(savedHint, forKey: EPUBPresentationThemeHint.key) }
+            else { UserDefaults.standard.removeObject(forKey: EPUBPresentationThemeHint.key) }
+        }
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("Opening.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Opening Synthetic")
+            let receipt = try await fixture.install(archive)
+            let routes = BookReadingRouteOwner()
+            routes.open(book: receipt.book, service: fixture.service)
+            let route = try #require(routes.presentation)
+            guard case .epub(let model) = route.content else { throw EPUBError.invalidPackage }
+            #expect(model.title == receipt.book.title && model.presentationToken == nil)
+            let admissionDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while model.currentToken == nil && model.loading, ContinuousClock.now < admissionDeadline {
+                try await Task.sleep(for: .milliseconds(10)) // Let the route task, not this test, start first.
+            }
+            #expect(model.openingAttemptCount == 1)
+            await model.load() // The later view entry must not open a second session.
+            let token = try #require(model.currentToken)
+            let host = UIHostingController(rootView: EPUBReaderScreen(model: model, routeID: route.id) {
+                routes.finishExit(route.id)
+            })
+            do {
+                try await fixture.withHostedController(host) {
+                    try await waitUntilReady(model: model, expectedToken: token)
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                    while model.openingPresentationSummary?.contains("点击→正文揭示后的显示帧机会 未取得") != false,
+                          ContinuousClock.now < deadline {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    #expect(model.openingPresentationSummary?.contains("点击→正文揭示后的显示帧机会 未取得") == false)
+                    #expect(model.presentationToken == token)
+                    #expect(model.webView.controller?.documentLoadCount == 1)
+                    let summary = model.openingPresentationSummary
+                    model.recordPresentationFrame(EPUBNavigationToken(sessionID: token.sessionID, path: token.path))
+                    #expect(model.openingPresentationSummary == summary)
+                    await model.load()
+                    #expect(model.currentToken == token)
+                    #expect(model.webView.controller?.documentLoadCount == 1)
+                    #expect(await model.close())
+                    #expect(model.presentationToken == nil)
+                    routes.finishExit(route.id)
+                    #expect(routes.presentation == nil)
+                }
+            } catch {
+                _ = await model.close()
+                throw error
+            }
+            routes.open(bookID: "missing-synthetic-book", format: .epub, service: fixture.service)
+            let failedRoute = try #require(routes.presentation)
+            guard case .epub(let failed) = failedRoute.content else { throw EPUBError.invalidPackage }
+            let failureDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while failed.loading, ContinuousClock.now < failureDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(!failed.loading && failed.message != nil)
+            #expect(failed.openingAttemptCount == 1)
+            let originalError = failed.message
+            await failed.load() // Mounting after an early failure must not silently retry.
+            #expect(failed.openingAttemptCount == 1 && failed.message == originalError && !failed.loading)
+            await failed.retry()
+            #expect(failed.openingAttemptCount == 2 && !failed.ready && !failed.loading)
+            #expect(await failed.close())
+            routes.finishExit(failedRoute.id)
+        }
+    }
+
     @Test func epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position() async throws {
         verifyLargeDirectorySelection()
         var trace = EPUBRuntimeTrace()

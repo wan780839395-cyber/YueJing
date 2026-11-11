@@ -8,12 +8,13 @@ final class BookReadingRouteOwner: ObservableObject {
     @Published private(set) var presentation: BookReadingRoute?
     private let txtRoutes = ReaderRouteOwner()
     private let epubRenderers = EPUBWarmRendererCache()
+    private static var epubOpenSerial = 0 // Process-local, no book identities or persistence.
 
     func open(book: LibraryBook, service: LibraryService) {
-        open(bookID: book.id, format: book.format, service: service)
+        open(bookID: book.id, format: book.format, service: service, title: book.title)
     }
 
-    func open(bookID: String, format: LibraryBookFormat = .txt, service: LibraryService) {
+    func open(bookID: String, format: LibraryBookFormat = .txt, service: LibraryService, title: String? = nil) {
         guard presentation == nil else { return }
         switch format {
         case .txt:
@@ -23,8 +24,13 @@ final class BookReadingRouteOwner: ObservableObject {
             guard let txtPresentation = txtRoutes.presentation else { return }
             presentation = BookReadingRoute(txt: txtPresentation, bookID: bookID)
         case .epub:
-            let model = EPUBReaderViewModel(bookID: bookID, service: service, rendererCache: epubRenderers)
+            let intent = ContinuousClock.now
+            Self.epubOpenSerial += 1
+            let model = EPUBReaderViewModel(bookID: bookID, service: service, rendererCache: epubRenderers,
+                                            openingIntent: intent, processOpenOrdinal: Self.epubOpenSerial,
+                                            openingTitle: title)
             presentation = BookReadingRoute(epub: model, bookID: bookID)
+            model.startOpeningFromRoute()
         }
     }
 

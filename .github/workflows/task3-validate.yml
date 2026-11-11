@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB Ready Host followup1 with verified historical35 and UI1; separate validation and delivery
+        description: EPUB opening continuity24 / 25 executions; separate validation and same-source delivery
         required: true
         type: choice
-        default: epub-ready-host-followup-1
+        default: epub-opening-continuity-24
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,7 +17,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-ready-host-followup-1
+          - epub-opening-continuity-24
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       prior_validation_run:
-        description: Ready delivery only - completed same-source validation run; empty for new native validation
+        description: Delivery only - successful same-source continuity validation run; empty for new native validation
         required: false
         type: string
         default: ''
@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-ready-host-followup-1' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-opening-continuity-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1145,7 +1145,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-ready-host-followup-1' }}
+    if: ${{ inputs.validation_scope == 'epub-opening-continuity-24' }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -1163,7 +1163,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out the approved Ready followup candidate
+      - name: Check out the approved opening continuity candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1175,7 +1175,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/task3
           python3 -B scripts/check_epub_freeze_validation.py 2>&1 | tee artifacts/task3/epub-freeze-self-check.log
-          python3 -B scripts/check_epub_ready_open.py 2>&1 | tee artifacts/task3/epub-ready-source-check.log
+          python3 -B scripts/check_epub_opening_presentation.py 2>&1 | tee artifacts/task3/epub-opening-source-check.log
           python3 -B scripts/run_epub_freeze_validation.py scope
 
       - name: Verify pinned toolchain and generate project

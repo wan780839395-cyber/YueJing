@@ -191,6 +191,103 @@ struct EPUBReadyTests {
         #expect(try Data(contentsOf: outside) == original)
     }
 
+    @Test func resourceVerificationTimingsAreBoundedAndIdentityFree() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let folder = f.root.appendingPathComponent("synthetic-private-resource-root")
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        let payload = Data("synthetic-private-payload-😀".utf8)
+        let hash = EPUBResourceStore.digest(payload)
+        let resources = try (0..<9).map { index in
+            let path = "nested/private-\(index).xhtml"
+            try payload.write(to: folder.appendingPathComponent(path))
+            return EPUBResource(path: path, mediaType: "application/xhtml+xml", sha256: hash, byteCount: payload.count)
+        }
+        let package = EPUBPackage(sourceSHA256: String(repeating: "a", count: 64), title: "synthetic-private-title",
+            spine: resources.map(\.path), navigation: [], resources: resources, textNodes: [:], coverPath: nil)
+        let publication = EPUBPublication(package: package, resourceRoot: folder)
+        try EPUBPublicationCache.verifyResources(publication)
+        let measured = try await EPUBPublicationCache.verifyResourcesConcurrentlyMeasured(publication)
+        #expect(measured.lanes.map(\.index) == [0, 1, 2, 3])
+        #expect(measured.lanes.map(\.resourceCount) == [3, 2, 2, 2])
+        #expect(measured.resourceCount == 9 && measured.resourceBytes == 9 * payload.count)
+        #expect(measured.preflightSeconds.isFinite && measured.preflightSeconds >= 0)
+        #expect(measured.wallSeconds.isFinite && measured.wallSeconds >= measured.preflightSeconds)
+        for lane in measured.lanes {
+            #expect(lane.resourceBytes == lane.resourceCount * payload.count)
+            let stages = [lane.pathPolicySeconds, lane.directorySeconds, lane.leafMetadataSeconds,
+                          lane.openReadCloseSeconds, lane.fullSHASeconds]
+            #expect(stages.allSatisfy { $0.isFinite && $0 >= 0 })
+            // Only one lane's nonoverlapping stages fit within wall time; never assert SUM(lanes) <= wall.
+            #expect(stages.reduce(0, +) <= measured.wallSeconds)
+        }
+        for resource in resources {
+            #expect(try EPUBResourceStore.data(path: resource.path, publication: publication) == payload)
+        }
+        var opening = EPUBOpeningTimings()
+        #expect(opening.resourceVerification == nil)
+        #expect(opening.summary.contains("未单列"))
+        #expect(!opening.summary.contains("并行墙钟"))
+        opening.resourceVerification = measured
+        opening.resourceVerificationRoute = .readyRegistered
+        let summary = opening.summary
+        #expect(summary.contains("并行墙钟") && summary.contains("非CPU、非关键路径"))
+        #expect(summary.contains("readyRegistered") && summary.contains("完整SHA/比较"))
+        for identity in [folder.path, package.title, package.sourceSHA256, hash, String(decoding: payload, as: UTF8.self)] + resources.map(\.path) {
+            #expect(!summary.contains(identity))
+        }
+    }
+
+    @Test func measuredResourceVerificationMatchesSerialFailuresAndCancellation() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let folder = f.root.appendingPathComponent("measured-verification")
+        let package = try EPUBPackageParser.parse(archiveURL: f.archive(), destination: folder)
+        let publication = EPUBPublication(package: package, resourceRoot: folder)
+        let path = folder.appendingPathComponent(package.spine.last!)
+        let original = try Data(contentsOf: path)
+        var damaged = original; damaged[0] ^= 1
+        for data in [damaged, original + Data([0])] {
+            try data.write(to: path)
+            #expect(throws: EPUBError.corruptResource) { try EPUBPublicationCache.verifyResources(publication) }
+            await #expect(throws: EPUBError.corruptResource) {
+                _ = try await EPUBPublicationCache.verifyResourcesConcurrentlyMeasured(publication)
+            }
+        }
+        try original.write(to: path)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await EPUBPublicationCache.verifyResourcesConcurrentlyMeasured(publication)
+        }
+        await #expect(throws: CancellationError.self) { _ = try await cancelled.value }
+        try EPUBPublicationCache.verifyResources(publication)
+        let valid = try await EPUBPublicationCache.verifyResourcesConcurrentlyMeasured(publication)
+        #expect(valid.resourceCount == package.resources.count)
+    }
+
+    @Test func readyResourceTimingsDistinguishDiskRegistrationFromVerifiedReuse() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let snapshot = try await f.store.storedEPUBSnapshot(bookID: receipt.book.id)
+        let source = try await f.store.epubFileURL(bookID: receipt.book.id)
+        let root = await f.store.epubReadyURL()
+        let pool = EPUBContentPool() // No registered entries; uses the actual generated Ready disk artifact.
+        let cold = try await pool.acquireReady(archive: source, snapshot: snapshot, root: root)
+        #expect(cold.timings.resourceVerificationRoute == .readyDisk)
+        #expect(cold.timings.contentCacheOutcome == .verifiedVersion)
+        let coldMeasurement = try #require(cold.timings.resourceVerification)
+        #expect(coldMeasurement.resourceCount == snapshot.package.resources.count)
+        let warm = try await pool.acquireReady(archive: source, snapshot: snapshot, root: root)
+        #expect(warm.timings.resourceVerificationRoute == .readyRegistered)
+        #expect(warm.timings.contentCacheOutcome == .verifiedVersion)
+        let warmMeasurement = try #require(warm.timings.resourceVerification)
+        #expect(warmMeasurement.resourceCount == coldMeasurement.resourceCount)
+        #expect(warmMeasurement.resourceBytes == coldMeasurement.resourceBytes)
+        #expect(warm.lease.publication.resourceRoot == cold.lease.publication.resourceRoot)
+        #expect(!warm.timings.summary.contains(receipt.book.id))
+        #expect(!warm.timings.summary.contains(source.path))
+        await cold.lease.release()
+        await warm.lease.release()
+    }
+
     private func installLegacy(_ f: EPUBLibraryFixture) async throws -> ImportReceipt {
         let source = try f.archive(), ticket = UUID()
         try await f.store.beginImport(ticket)

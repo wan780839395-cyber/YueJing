@@ -94,6 +94,7 @@ final class EPUBFlowUITests: XCTestCase {
     @MainActor func testEPUBProgressSurvivesExitAndProcessRelaunch() {
         withEPUBFixture { app in
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open", app)
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
             selectReadingMode("上下滚动", rawValue: "scroll", app)
             openDirectory(app)
             let chapter2 = app.buttons["reader.chapter.1"]
@@ -145,6 +146,7 @@ final class EPUBFlowUITests: XCTestCase {
             app.launch()
 
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_A_C2_P", stage: "after-relaunch", app)
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
             let restored = Self.parseCanvasValue(canvas.value as? String ?? "")
             XCTAssertEqual(restored["path"], "OEBPS/text/ch2.xhtml")
             XCTAssertEqual(Int(restored["node"] ?? "-1"), scrolledNode)

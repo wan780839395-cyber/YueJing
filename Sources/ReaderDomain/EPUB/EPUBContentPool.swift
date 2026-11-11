@@ -159,6 +159,7 @@ actor EPUBContentPool {
             do {
                 guard entry.record.packageDigest == digest, entry.record.bytes == bytes else { throw EPUBError.corruptResource }
                 let publication = EPUBPublication(package: expected, resourceRoot: entry.folder.appendingPathComponent("resources"))
+                timings.resourceVerificationRoute = .legacyCache // Serial legacy path has no lane breakdown.
                 try timings.measure(.warmResourceVerification) { try EPUBPublicationCache.verifyResources(publication) }
                 try Task.checkCancellation()
                 let lease = grant(publication, folder: entry.folder, decoded: snapshot?.decoded)
@@ -370,6 +371,8 @@ extension EPUBContentPool {
         try EPUBReadyArtifact.verifyManifest(folder: folder, expectedSHA256: fingerprint.digest)
         let publication = EPUBPublication(package: package, resourceRoot: folder.appendingPathComponent("resources"))
         let bytes = try Self.size(package)
+        // Registration is a process-local fact, not a claim about OS page-cache/disk temperature.
+        timings.resourceVerificationRoute = entries[folder] == nil ? .readyDisk : .readyRegistered
         if entries[folder] == nil {
             entries[folder] = Entry(root: root, folder: folder,
                 record: Record(key: package.sourceSHA256, packageDigest: snapshot.metadataSHA256,
@@ -381,7 +384,7 @@ extension EPUBContentPool {
         do {
             let started = ContinuousClock.now
             try EPUBReadyArtifact.verifyNodes(package: package, folder: folder)
-            try await EPUBPublicationCache.verifyResourcesConcurrently(publication)
+            timings.resourceVerification = try await EPUBPublicationCache.verifyResourcesConcurrentlyMeasured(publication)
             timings.record(.warmResourceVerification, since: started)
             try Task.checkCancellation()
             guard entries[folder]?.retired == false else { throw EPUBError.corruptResource }

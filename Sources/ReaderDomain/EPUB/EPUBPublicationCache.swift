@@ -68,6 +68,13 @@ enum EPUBPublicationCache {
     /// At most four actual resource reads at once (<=64 MiB raw buffers with existing per-file limits).
     /// Preflight is serial; every leaf still uses the same path/type/size/full-SHA verifier.
     static func verifyResourcesConcurrently(_ publication: EPUBPublication) async throws {
+        _ = try await verifyResourcesConcurrentlyMeasured(publication)
+    }
+
+    /// Same four lanes and verification order. Each task returns one bounded numeric aggregate.
+    /// Failures/cancellation throw unchanged; no partial measurements are published as success.
+    static func verifyResourcesConcurrentlyMeasured(_ publication: EPUBPublication) async throws -> EPUBResourceVerificationTimings {
+        let started = ContinuousClock.now
         guard publication.package.parserVersion == EPUBFormat.parserVersion,
               !publication.package.spine.isEmpty,
               publication.package.resources.count <= EPUBLimits().entries else { throw EPUBError.corruptResource }
@@ -82,18 +89,38 @@ enum EPUBPublicationCache {
             total += resource.byteCount
         }
         let resources = publication.package.resources
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        let preflightSeconds = EPUBResourceVerificationTimings.seconds(since: started)
+        let lanes = try await withThrowingTaskGroup(of: EPUBResourceVerificationTimings.Lane.self) { group in
             for lane in 0..<min(4, resources.count) {
                 group.addTask {
+                    var timings: EPUBResourceVerificationTimings.Lane? = .init(index: lane)
                     for index in stride(from: lane, to: resources.count, by: 4) {
                         try Task.checkCancellation()
-                        _ = try EPUBResourceStore.data(resource: resources[index], root: publication.resourceRoot)
+                        _ = try EPUBResourceStore.data(resource: resources[index], root: publication.resourceRoot, timings: &timings)
+                        timings?.resourceCount += 1
+                        timings?.resourceBytes += resources[index].byteCount
                     }
+                    return timings! // Created above; data never clears the lane-owned accumulator.
                 }
             }
-            try await group.waitForAll()
+            var results: [EPUBResourceVerificationTimings.Lane] = []
+            results.reserveCapacity(4)
+            var firstError: (any Error)?
+            // Like waitForAll(), drain ALL children before rethrowing the first error.
+            // A simple throwing `for try await` would cancel siblings earlier than the original API.
+            while !group.isEmpty {
+                do {
+                    while let result = try await group.next() { results.append(result) }
+                } catch {
+                    if firstError == nil { firstError = error }
+                }
+            }
+            if let firstError { throw firstError }
+            return results.sorted { $0.index < $1.index }
         }
         try Task.checkCancellation()
+        return EPUBResourceVerificationTimings(preflightSeconds: preflightSeconds,
+            wallSeconds: EPUBResourceVerificationTimings.seconds(since: started), lanes: lanes)
     }
 
     static func copyVerified(_ publication: EPUBPublication, to destination: URL) throws {

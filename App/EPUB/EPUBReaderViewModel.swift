@@ -19,6 +19,7 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var exitSaveFailed = false
     @Published var message: String?
     @Published private(set) var openingPerformanceSummary: String?
+    @Published private(set) var openingPresentationSummary: String?
     @Published private(set) var loadingStage = "正在校验并准备书籍…"
 
     let webView: EPUBWebViewHandle
@@ -44,9 +45,23 @@ final class EPUBReaderViewModel: ObservableObject {
     private var promotionTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
     private var openingResourcesReady: ContinuousClock.Instant?
+    private var openingObservation: EPUBOpeningObservation
+    private var openingAttempted = false
+    private(set) var openingAttemptCount = 0
+    var loadingFeedbackStart: ContinuousClock.Instant? { openingStarted }
+
+    var presentationToken: EPUBNavigationToken? {
+        ready && !loading && !closing && !suspended && !exitSaveFailed ? currentToken : nil
+    }
+
+    var diagnosticOpeningSummary: String? {
+        let parts = [openingPerformanceSummary, openingPresentationSummary].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
 
     init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil,
-         rendererCache: EPUBWarmRendererCache? = nil) {
+         rendererCache: EPUBWarmRendererCache? = nil, openingIntent: ContinuousClock.Instant? = nil,
+         processOpenOrdinal: Int? = nil, openingTitle: String? = nil) {
         self.bookID = bookID
         self.service = service
         self.rendererCache = rendererCache
@@ -56,6 +71,20 @@ final class EPUBReaderViewModel: ObservableObject {
         self.readingMode = readingMode ?? EPUBReadingMode(
             rawValue: UserDefaults.standard.string(forKey: EPUBReadingMode.defaultsKey) ?? ""
         ) ?? .scroll
+        openingObservation = EPUBOpeningObservation(intentAt: openingIntent, processOpenOrdinal: processOpenOrdinal,
+                                                    rendererTaken: rendererCache.map { _ in retained?.controller != nil })
+        preferences = ReaderPreferences(theme: EPUBPresentationThemeHint.read())
+        if let openingTitle { title = openingTitle }
+    }
+
+    /// Start alongside the system presentation; load() still admits only one active opening.
+    func startOpeningFromRoute() {
+        Task { @MainActor [weak self] in await self?.load() }
+    }
+
+    func recordPresentationFrame(_ token: EPUBNavigationToken) {
+        guard presentationToken == token, openingObservation.observedFrame(token) else { return }
+        openingPresentationSummary = openingObservation.summary
     }
 
     private func recordReopenReason(_ reason: EPUBReopenDiagnostics.Reason) {
@@ -76,11 +105,16 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func load() async {
         guard reader == nil, openTask == nil, !closing, !suspended else { return }
+        guard !openingAttempted else { return }
+        openingAttempted = true
+        openingAttemptCount += 1
         lifecycle = UUID()
         let request = lifecycle
         loading = true
         ready = false
         openingStarted = ContinuousClock.now
+        openingObservation.beganLoading()
+        openingPresentationSummary = openingObservation.summary
         openingResourcesReady = nil
         loadingStage = "正在校验并准备书籍…"
         openingPerformanceSummary = nil
@@ -107,6 +141,7 @@ final class EPUBReaderViewModel: ObservableObject {
             openingResourcesReady = ContinuousClock.now
             title = opened.book.title
             preferences = opened.preferences.validated
+            EPUBPresentationThemeHint.remember(preferences.theme)
             let package = opened.publication.package
             spine = package.spine
             if package.navigation.isEmpty {
@@ -167,7 +202,10 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func retry() async {
         guard !closing, !exitSaveFailed else { return }
+        openingObservation.interrupt(.retry)
+        openingPresentationSummary = openingObservation.summary
         if reader == nil {
+            openingAttempted = false // Explicit user retry, not the view's fallback load entry.
             await load()
         } else if let path = currentPath ?? reader?.publication.package.spine.first {
             loading = true
@@ -411,6 +449,8 @@ final class EPUBReaderViewModel: ObservableObject {
                     self.ready = true
                     self.loading = false
                     if let started = self.openingStarted {
+                        self.openingObservation.becameReady(expectedToken)
+                        self.openingPresentationSummary = self.openingObservation.summary
                         self.openingStarted = nil
                         let elapsed = started.duration(to: ContinuousClock.now).components
                         let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
@@ -612,6 +652,8 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func suspend() async {
         guard !closing, !suspended else { return }
+        openingObservation.interrupt(.background)
+        openingPresentationSummary = openingObservation.summary
         await settleVisibleChapter()
         suspended = true
         lifecycle = UUID()
@@ -643,6 +685,7 @@ final class EPUBReaderViewModel: ObservableObject {
         suspended = false
         lifecycle = UUID()
         if reader == nil {
+            openingAttempted = false // Preserve existing resume of a suspended opening.
             await load()
         } else if let path = currentPath ?? reader?.publication.package.spine.first {
             await beginChapterNavigation(
@@ -723,6 +766,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     token: finalToken,
                     preferences: preferences.validated
                 )
+                EPUBPresentationThemeHint.remember(preferences.theme)
             }
             if let controller = webView.controller {
                 if wasReady, let rendererCache, let rendererLease,

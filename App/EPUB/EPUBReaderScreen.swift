@@ -10,6 +10,7 @@ struct EPUBReaderScreen: View {
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
     @State private var selectedDetent: PresentationDetent = .large
+    @State private var loadingFeedback = EPUBOpeningFeedback.quiet
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -46,25 +47,47 @@ struct EPUBReaderScreen: View {
                     onToolsInteraction: handleToolsInteraction
                 )
                 .ignoresSafeArea(.container, edges: .bottom)
-                .allowsHitTesting(!model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
-                .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
+                .allowsHitTesting(model.ready && !model.loading && !model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
+                .accessibilityHidden(!model.ready || model.loading || tools.panel != nil || tools.exitRequest != nil)
                 .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
                 .accessibilityAction(named: Text("退出阅读")) { exitReader() }
                 .accessibilityAction(named: Text("下一屏")) { _ = model.webView.controller?.turnPage(.next) }
                 .accessibilityAction(named: Text("上一屏")) { _ = model.webView.controller?.turnPage(.previous) }
+                .overlay {
+                    if model.openingPerformanceSummary == nil && (!model.ready || model.loading) {
+                        Color(uiColor: model.preferences.theme.background)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                            .transition(.identity)
+                    }
+                }
 
                 if model.loading && tools.exitRequest == nil && tools.valid {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ProgressView(model.loadingStage)
-                        Text("正在校验 EPUB 资源并恢复阅读位置。可返回书架停止本次打开，已保存记录保留。")
-                            .font(.footnote)
-                            .fixedSize(horizontal: false, vertical: true)
+                    VStack(spacing: 12) {
+                        Text(model.title).font(.headline).multilineTextAlignment(.center)
+                        Group {
+                            if loadingFeedback == .quiet {
+                                Text("正在打开").font(.subheadline)
+                            } else {
+                                ProgressView(loadingFeedback == .detailed ? model.loadingStage : "正在打开")
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                        .frame(minHeight: 24)
+                        if loadingFeedback == .detailed {
+                            Text("正在校验书籍并恢复阅读位置。可返回书架停止，已保存记录保留。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    .padding()
-                    .background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
-                    .padding()
+                    .padding(.horizontal, 32)
                     .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("epub.opening.feedback")
                     .accessibilityHidden(tools.panel != nil)
+                    .transaction { $0.animation = nil }
                 }
 
                 if !model.loading && !model.ready && model.navigationRequest == nil && tools.exitRequest == nil && tools.valid {
@@ -105,12 +128,34 @@ struct EPUBReaderScreen: View {
             .tint(appearance.accent)
         }
         .background(Color(uiColor: model.preferences.theme.background).ignoresSafeArea())
+        .background {
+            EPUBPresentationProbe(
+                token: tools.valid && tools.canInteract && tools.panel == nil && tools.exitRequest == nil
+                    ? model.presentationToken : nil,
+                observed: model.recordPresentationFrame
+            )
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
         .environment(\.colorScheme, model.preferences.theme == .dark ? .dark : .light)
         .sheet(item: panelPresentation) { session in
             panelHost(session: session)
         }
         .task(id: routeID) {
             await model.load()
+        }
+        .task(id: model.loading) {
+            loadingFeedback = .quiet
+            guard model.loading else { return }
+            let started = model.loadingFeedbackStart ?? ContinuousClock.now
+            do {
+                try await Task.sleep(until: started.advanced(by: EPUBOpeningFeedback.compactDelay), clock: .continuous)
+                guard !Task.isCancelled, model.loading else { return }
+                loadingFeedback = .compact
+                try await Task.sleep(until: started.advanced(by: EPUBOpeningFeedback.detailedDelay), clock: .continuous)
+                guard !Task.isCancelled, model.loading else { return }
+                loadingFeedback = .detailed
+            } catch { return } // Cancellation removes feedback; it never retries or delays navigation.
         }
         .task(id: tools.intent) {
             let intent = tools.intent
@@ -183,7 +228,7 @@ struct EPUBReaderScreen: View {
                             model.settingsChanged()
                         }
                     },
-                    openingSummary: model.openingPerformanceSummary,
+                    openingSummary: model.diagnosticOpeningSummary,
                     runtimeDiagnostics: {
                         await model.webView.controller?.performanceSummary() ?? "阅读器已释放。"
                     },
