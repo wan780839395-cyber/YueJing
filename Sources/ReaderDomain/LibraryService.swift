@@ -596,6 +596,7 @@ extension LibraryService {
             let publication = prepared.lease.publication
             var timings = prepared.timings
             timings.metadataDecodeReused = snapshot.decodeReused
+            timings.metadataReuseReason = snapshot.reuseReason
             timings.record(.catalog, since: catalogStarted, until: catalogFinished)
             // The pool, not this service/reader, owns the stable version directory.
             try Task.checkCancellation()

@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB reopen optimization10; independent cases and verified device package
+        description: EPUB reopen diagnostics3; independent cases and verified device package
         required: true
         type: choice
-        default: epub-reopen-fast-10
+        default: epub-reopen-diagnostics-3
         options:
           - full
           - host-natural-root-5c88543-exact3
@@ -17,7 +17,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-e8112fb
-          - epub-reopen-fast-10
+          - epub-reopen-diagnostics-3
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-fast-10' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-reopen-diagnostics-3' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1140,7 +1140,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
-    if: ${{ inputs.validation_scope == 'epub-reopen-fast-10' }}
+    if: ${{ inputs.validation_scope == 'epub-reopen-diagnostics-3' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1154,7 +1154,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out the approved leased metadata reopen candidate
+      - name: Check out the approved reopen reason diagnostics candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1169,6 +1169,7 @@ jobs:
           python3 -B scripts/check_epub_metadata_reopen.py 2>&1 | tee artifacts/task3/epub-metadata-source-check.log
           python3 -B scripts/check_epub_session_profile.py 2>&1 | tee artifacts/task3/epub-session-source-check.log
           python3 -B scripts/check_epub_reopen_fast.py 2>&1 | tee artifacts/task3/epub-reopen-source-check.log
+          python3 -B scripts/check_epub_reopen_diagnostics.py 2>&1 | tee artifacts/task3/epub-reopen-diagnostics-source-check.log
           python3 -B scripts/run_epub_freeze_validation.py scope
 
       - name: Verify pinned toolchain and generate project

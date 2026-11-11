@@ -58,6 +58,15 @@ final class EPUBReaderViewModel: ObservableObject {
         ) ?? .scroll
     }
 
+    private func recordReopenReason(_ reason: EPUBReopenDiagnostics.Reason) {
+        var trace = EPUBReopenDiagnostics(); trace.record(reason)
+        recordReopenTrace(trace)
+    }
+
+    private func recordReopenTrace(_ trace: EPUBReopenDiagnostics) {
+        rendererCache?.recordClose(trace, bookID: bookID, service: service, generation: rendererGeneration)
+    }
+
     func setReadingMode(_ mode: EPUBReadingMode) {
         guard mode != readingMode, ready, !closing, !suspended, !exitSaveFailed else { return }
         readingMode = mode
@@ -414,6 +423,8 @@ final class EPUBReaderViewModel: ObservableObject {
                             ? "\n多本版本内容命中：本次整书解析0、资源复制0；原书和逐资源SHA仍完整校验。"
                             : "\n本次重新构建资源缓存。")
                             + "\n" + activeReader.openingTimings.summary
+                            + "\n" + (self.rendererCache?.diagnostics(bookID: self.bookID, service: self.service).summary
+                                       ?? "复用原因：reopen-reasons-v1；未配置页面缓存")
                             + "\n细分项未覆盖全部等待/调度，不与上方总耗时重复相加。"
                     }
                     if persist {
@@ -671,6 +682,8 @@ final class EPUBReaderViewModel: ObservableObject {
         saveTask?.cancel()
         settingsTask?.cancel()
         let wasReady = ready
+        recordReopenReason(.closeStarted)
+        if !wasReady { recordReopenReason(.closeNotReady) }
         let activeToken = currentToken
         if wasReady, let reader, let token = activeToken, let sampled = await webView.sampleNow(),
            sampled.sessionID == reader.reading.session.id,
@@ -701,6 +714,7 @@ final class EPUBReaderViewModel: ObservableObject {
         var rendererLease: EPUBContentLease?
         var retainedRenderer = false
         if wasReady, rendererCache != nil, let old { rendererLease = try? await old.leaseForRenderer() }
+        if wasReady, rendererCache != nil, rendererLease == nil { recordReopenReason(.leaseUnavailable) }
         do {
             if let old {
                 try await old.close(
@@ -713,11 +727,15 @@ final class EPUBReaderViewModel: ObservableObject {
             if let controller = webView.controller {
                 if wasReady, let rendererCache, let rendererLease,
                    await controller.parkForReopen(lease: rendererLease) {
+                    recordReopenTrace(controller.parkDiagnostics)
                     webView.releaseParkedController(controller)
                     retainedRenderer = rendererCache.retain(controller, bookID: bookID, service: service, generation: rendererGeneration)
                 } else {
+                    recordReopenTrace(controller.parkDiagnostics)
                     webView.detach(controller)
                 }
+            } else {
+                recordReopenReason(.controllerMissing)
             }
             webView.detachAll() // Includes an unmounted prepared controller; transferred handles are already empty.
             if !retainedRenderer { await rendererLease?.release() }
@@ -728,6 +746,7 @@ final class EPUBReaderViewModel: ObservableObject {
             ready = false
             return true
         } catch {
+            recordReopenReason(.saveFailed)
             await rendererLease?.release()
             rendererCache?.finish(rendererGeneration)
             closing = false
@@ -738,6 +757,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func leaveKeepingSavedPosition() async {
+        recordReopenReason(.abandoned)
         closing = true
         lifecycle = UUID()
         generation = UUID()

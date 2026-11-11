@@ -10,6 +10,10 @@ public struct EPUBOpeningTimings: Sendable {
     public internal(set) var resourceBytes = 0
     public internal(set) var packageFingerprintReused = false
     public internal(set) var metadataDecodeReused = false
+    public enum MetadataReuseReason: String, Sendable {
+        case notChecked, reused, noLeaseProof, metadataChanged
+    }
+    public internal(set) var metadataReuseReason: MetadataReuseReason = .notChecked
     public internal(set) var sessionBreakdown = EPUBSessionBreakdown()
     public enum Phase: String, CaseIterable, Sendable {
         case catalog, sourceVerification, packageFingerprint, warmResourceVerification, diskRestore, rebuild, cacheWrite, session
@@ -57,6 +61,7 @@ public struct EPUBOpeningTimings: Sendable {
     public var summary: String {
         let cache = "准备链：metadata-snapshot-v1；规范指纹命中：\(packageFingerprintReused)\n" +
             "leased-metadata-v1；元数据解码复用：\(metadataDecodeReused)\n" +
+            "元数据复用原因：\(metadataReuseReason.rawValue)\n" +
             "内容缓存：\(contentCacheOutcome.rawValue)；资源清单 \(resourceCount) 项 / \(resourceBytes) 字节\n"
         return cache + Phase.allCases.flatMap { phase in
             samples.filter { $0.phase == phase }.map {

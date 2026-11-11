@@ -10,11 +10,13 @@ struct EPUBParkState: Decodable, Sendable {
 final class EPUBParkReply {
     private var continuation: CheckedContinuation<EPUBParkState?, Never>?
     private var deadline: Task<Void, Never>?
-    init(_ continuation: CheckedContinuation<EPUBParkState?, Never>) {
+    init(_ continuation: CheckedContinuation<EPUBParkState?, Never>, onTimeout: @escaping @MainActor () -> Void = {}) {
         self.continuation = continuation
         deadline = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            self?.finish(nil)
+            guard let self, self.continuation != nil else { return }
+            onTimeout()
+            self.finish(nil)
         }
     }
     func finish(_ value: EPUBParkState?) {

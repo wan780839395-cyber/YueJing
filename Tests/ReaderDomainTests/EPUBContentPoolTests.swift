@@ -286,6 +286,7 @@ private extension EPUBContentPoolTests {
         let package = try EPUBPackageParser.parse(archiveURL: archive, destination: f.root.appendingPathComponent("parsed"))
         let bytes = try JSONEncoder().encode(package)
         let original = try EPUBMetadataSnapshot(metadata: bytes)
+        #expect(original.reuseReason == .noLeaseProof)
         let pool = EPUBContentPool(), root = f.root.appendingPathComponent("Pool")
         let before = await pool.reusableMetadata(bookID: package.sourceSHA256, root: root)
         #expect(before == nil)
@@ -295,6 +296,7 @@ private extension EPUBContentPoolTests {
         let borrowed = try #require(await pool.reusableMetadata(bookID: package.sourceSHA256, root: root))
         let same = try EPUBMetadataSnapshot(metadata: bytes, reusing: borrowed)
         #expect(same.decodeReused && same.decoded === original.decoded)
+        #expect(same.reuseReason == .reused)
         #expect(same.matches(bytes) && same.package == package)
         let foreignRoot = await pool.reusableMetadata(bookID: package.sourceSHA256, root: f.root)
         let foreignBook = await pool.reusableMetadata(bookID: "foreign", root: root)
@@ -302,6 +304,7 @@ private extension EPUBContentPoolTests {
         let changed = Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "Decoded A", with: "Decoded B").utf8)
         let changedSnapshot = try EPUBMetadataSnapshot(metadata: changed, reusing: borrowed)
         #expect(changed.count == bytes.count && changedSnapshot.decodeReused == false)
+        #expect(changedSnapshot.reuseReason == .metadataChanged)
         #expect(changedSnapshot.package.versionID == package.versionID && changedSnapshot.package.title == "Decoded B")
         #expect(changedSnapshot.decoded !== original.decoded && !same.matches(changed))
         #expect(throws: (any Error).self) { try EPUBMetadataSnapshot(metadata: Data("invalid".utf8), reusing: borrowed) }
@@ -315,6 +318,7 @@ private extension EPUBContentPoolTests {
         #expect(afterRelease == nil) // Retained disk receipt does not retain a decoded tree.
         let coldAgain = try EPUBMetadataSnapshot(metadata: bytes, reusing: afterRelease)
         #expect(!coldAgain.decodeReused)
+        #expect(coldAgain.reuseReason == .noLeaseProof)
         await pool.discardUnused(root: root)
     }
 

@@ -16,6 +16,7 @@ struct EPUBMetadataSnapshot: Sendable {
     var package: EPUBPackage { decoded.package }
     let metadataSHA256: String
     let decodeReused: Bool
+    let reuseReason: EPUBOpeningTimings.MetadataReuseReason
 
     init(metadata: Data, reusing: Decoded? = nil) throws {
         self.metadata = metadata
@@ -23,10 +24,12 @@ struct EPUBMetadataSnapshot: Sendable {
         if let reusing, reusing.metadataSHA256 == metadataSHA256 {
             decoded = reusing
             decodeReused = true
+            reuseReason = .reused
         } else {
             decoded = Decoded(package: try JSONDecoder().decode(EPUBPackage.self, from: metadata),
                               metadataSHA256: metadataSHA256)
             decodeReused = false
+            reuseReason = reusing == nil ? .noLeaseProof : .metadataChanged
         }
     }
 

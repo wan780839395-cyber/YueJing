@@ -654,12 +654,18 @@ struct EPUBReaderHostTests {
                     await model.load()
                     let token = try #require(model.currentToken)
                     try await waitUntilReady(model: model, expectedToken: token)
+                    #expect(model.openingPerformanceSummary?.contains("reopen-reasons-v1") == true)
+                    if expected != nil {
+                        #expect(model.reader?.openingTimings.metadataReuseReason == .reused)
+                        #expect(cache.diagnostics(bookID: id, service: fixture.service).samples.last?.reason == .takeHit)
+                    }
                     try await waitForChapterWindow(controller, count: 3)
                     actualRoot = model.reader?.publication.resourceRoot
                     if let root { #expect(actualRoot == root) }
                     #expect(controller.documentLoadCount == loads + (expected == nil ? 1 : 0))
                     #expect(await model.close())
                     #expect(controller.hasParkedDocument)
+                    #expect(cache.diagnostics(bookID: id, service: fixture.service).samples.last?.reason == .retained)
                 }
                 #expect(cache.idleCount <= 3)
                 return (controller, try #require(actualRoot))
@@ -674,6 +680,7 @@ struct EPUBReaderHostTests {
             #expect(a.0.closedDocumentReuseCount == 1)
             _ = try await openAndClose(ids[3])
             #expect(!b.0.hasParkedDocument && cache.evictions >= 1)
+            #expect(cache.diagnostics(bookID: ids[1], service: fixture.service).samples.contains { $0.reason == .evictedCount })
             let bAgain = try await openAndClose(ids[1], root: b.1)
             #expect(bAgain.0 !== b.0) // Warm disk recovery after renderer eviction, same resource root.
             let opening = EPUBReaderViewModel(bookID: ids[1], service: fixture.service,
@@ -683,6 +690,7 @@ struct EPUBReaderHostTests {
             duringOpen.onLocatorEvent = { opening.handleLocatorEvent($0) }
             duringOpen.onLoadFailure = { opening.handleLoadFailure($0, token: $1) }
             cache.discard() // Between take/mount and apply: keep the new route's business callbacks.
+            #expect(cache.diagnostics(bookID: ids[1], service: fixture.service).samples.last?.reason == .explicitDiscard)
             #expect(duringOpen.onLocatorEvent != nil && duringOpen.onLoadFailure != nil)
             try await fixture.withHostedController(duringOpen) {
                 await opening.load()
@@ -693,10 +701,110 @@ struct EPUBReaderHostTests {
             }
             #expect(cache.idleCount == 0)
             #expect(FileManager.default.fileExists(atPath: b.1.path))
+            try await verifyReopenDiagnostics(fixture: fixture, bookID: ids[0])
         }
     }
 
     // MARK: - Helpers
+
+    private func verifyReopenDiagnostics(fixture: HostFixture, bookID: String) async throws {
+        let mib = 1024 * 1024
+        let syntheticChapterBytes = Array(repeating: 24 * 1024, count: 1633)
+        let longBookCost = EPUBRendererCost(xhtmlBytes: syntheticChapterBytes.reduce(0, +), imageBytes: 12 * mib)
+        #expect(longBookCost.total == 16 * mib + 12 * mib + syntheticChapterBytes.reduce(0) { $0 + $1 * 2 })
+        #expect(longBookCost.total > EPUBWarmRendererCache.Limits().idleEstimatedBytes)
+        #expect(EPUBRendererCost(xhtmlBytes: 40 * mib, imageBytes: 0).total == 96 * mib)
+        var bounded = EPUBReopenDiagnostics()
+        for _ in 0..<100 { bounded.record(.takeMiss) }
+        #expect(bounded.samples.count == 16)
+        let ledger = EPUBWarmRendererCache()
+        let old = ledger.take(bookID: "synthetic-private-id", service: fixture.service)
+        let current = ledger.take(bookID: "synthetic-private-id", service: fixture.service)
+        var failed = EPUBReopenDiagnostics(); failed.record(.saveFailed)
+        ledger.recordClose(failed, bookID: "synthetic-private-id", service: fixture.service, generation: old.generation)
+        #expect(!ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.contains { $0.reason == .saveFailed })
+        ledger.recordClose(failed, bookID: "synthetic-private-id", service: fixture.service, generation: current.generation)
+        #expect(ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.last?.reason == .saveFailed)
+        ledger.discard(reason: .memoryWarning)
+        #expect(ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.last?.reason == .memoryWarning)
+        ledger.finish(current.generation)
+        var abandoned = EPUBReopenDiagnostics(); abandoned.record(.abandoned)
+        ledger.recordClose(abandoned, bookID: "synthetic-private-id", service: fixture.service, generation: current.generation)
+        #expect(ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.last?.reason == .abandoned)
+        #expect(!ledger.retain(EPUBWebViewController(), bookID: "synthetic-private-id", service: fixture.service, generation: current.generation))
+        #expect(ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.last?.reason == .rejectInactiveRoute)
+        #expect(!ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).summary.contains("synthetic-private-id"))
+        #expect(ledger.diagnostics(bookID: "foreign", service: fixture.service).samples.isEmpty)
+        for index in 0..<80 { _ = ledger.take(bookID: "synthetic-\(index)", service: fixture.service) }
+        #expect(ledger.diagnosticCount == 64)
+        #expect(ledger.diagnostics(bookID: "synthetic-private-id", service: fixture.service).samples.isEmpty)
+        ledger.discard()
+
+        var timeoutCount = 0
+        var pendingReply: EPUBParkReply?
+        let timedOut: EPUBParkState? = await withCheckedContinuation { continuation in
+            pendingReply = EPUBParkReply(continuation) { timeoutCount += 1 }
+        }
+        #expect(timedOut == nil && timeoutCount == 1)
+        pendingReply?.finish(EPUBParkState(paths: [], imageBytes: 0)) // Late reply must not complete twice.
+        #expect(timeoutCount == 1)
+
+        // Exercise real park/admission and next-open reason propagation, without a private book.
+        for scenario in ["budget", "invalid-state", "process-terminated"] {
+            var limits = EPUBWarmRendererCache.Limits()
+            if scenario == "budget" { limits.idleEstimatedBytes = 1 }
+            let cache = EPUBWarmRendererCache(limits: limits)
+            let model = EPUBReaderViewModel(bookID: bookID, service: fixture.service, readingMode: .scroll, rendererCache: cache)
+            let controller = model.webView.makeController()
+            controller.onLocatorEvent = { model.handleLocatorEvent($0) }
+            controller.onLoadFailure = { model.handleLoadFailure($0, token: $1) }
+            try await fixture.withHostedController(controller, preservingParked: true) {
+                await model.load()
+                let token = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: token)
+                try await waitForChapterWindow(controller, count: 3)
+                if scenario == "invalid-state" {
+                    _ = try await controller.evaluateLocatorJavaScriptForTesting(
+                        "window.__yjEpub.parkForReopen = function() { return {paths: [], imageBytes: 0}; }; true;")
+                }
+                #expect(await model.close())
+                let close = cache.diagnostics(bookID: bookID, service: fixture.service)
+                if scenario == "budget" {
+                    let rejected = try #require(close.samples.last)
+                    #expect(rejected.reason == .rejectBudget && rejected.limitBytes == 1)
+                    #expect(rejected.estimatedBytes == 16 * mib + rejected.imageBytes + rejected.xhtmlBytes * 2)
+                    #expect(!controller.hasParkedDocument && cache.idleCount == 0)
+                } else if scenario == "invalid-state" {
+                    #expect(close.samples.contains { $0.reason == .parkInvalidState })
+                    #expect(!controller.hasParkedDocument && cache.idleCount == 0)
+                } else {
+                    #expect(controller.hasParkedDocument)
+                    controller.webViewWebContentProcessDidTerminate(controller.webView)
+                    #expect(!controller.hasParkedDocument)
+                }
+                if scenario == "process-terminated" {
+                    let source = try await fixture.service.openEPUB(id: bookID)
+                    let lease = try await source.leaseForRenderer()
+                    #expect(await controller.parkForReopen(lease: lease) == false)
+                    #expect(controller.parkDiagnostics.samples.contains { $0.reason == .processTerminated })
+                    #expect(controller.parkDiagnostics.samples.last?.reason == .parkNotReady)
+                    await lease.release()
+                    try await source.abandon()
+                }
+            }
+            let again = cache.take(bookID: bookID, service: fixture.service)
+            #expect(again.controller == nil)
+            let next = cache.diagnostics(bookID: bookID, service: fixture.service)
+            #expect(next.samples.last?.reason == (scenario == "process-terminated" ? .takeInvalid : .takeMiss))
+            if scenario == "process-terminated" {
+                #expect(next.samples.filter { $0.reason == .parked }.count == 1)
+                #expect(next.samples.filter { $0.reason == .processTerminated }.count == 1)
+            }
+            if scenario == "process-terminated" { #expect(next.samples.contains { $0.reason == .processTerminated }) }
+            cache.finish(again.generation)
+            cache.discard()
+        }
+    }
 
     private struct HostFixture {
         let root: URL
