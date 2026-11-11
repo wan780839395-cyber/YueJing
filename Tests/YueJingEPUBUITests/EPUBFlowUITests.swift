@@ -38,10 +38,11 @@ final class EPUBFlowUITests: XCTestCase {
             // One stationary tap in the old excluded bottom band must reveal tools.
             // First explicitly hide the initial tools; never retry center taps to mask failure.
             let bottom = viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.94))
-            if app.buttons["reader.exit"].isHittable {
+            let exit = app.buttons["reader.exit"]
+            if exit.exists && exit.isHittable {
                 viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
                 let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                    !app.buttons["reader.exit"].isHittable
+                    !exit.exists || !exit.isHittable
                 }, object: nil)
                 XCTAssertEqual(waitForPredicates([hidden], timeout: 5), .completed)
             }

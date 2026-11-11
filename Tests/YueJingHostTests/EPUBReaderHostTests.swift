@@ -344,6 +344,10 @@ struct EPUBReaderHostTests {
                 model.go(to: ch2MidItem)
                 try await waitForNewToken(model: model, previous: reflowToken)
                 let ch2Request = try #require(model.navigationRequest)
+                #expect(ch2Request.fragment == "sec-mid")
+                #expect(ch2Request.targetPosition == nil)
+                #expect(!ch2Request.preserveViewport)
+                print("EPUB_SYNTHETIC_FRAGMENT_REQUEST mode=\(ch2Request.readingMode.rawValue) fragment=\(ch2Request.fragment ?? "none") loads=\(controller.documentLoadCount)")
                 model.handleLocatorEvent(
                     EPUBLocatorPayload(
                         kind: .scroll,
@@ -362,7 +366,33 @@ struct EPUBReaderHostTests {
                     )
                 )
                 controller.apply(ch2Request)
-                try await waitUntilReady(model: model, expectedToken: ch2Request.token, minimumNode: 6)
+                do {
+                    try await waitUntilReady(model: model, expectedToken: ch2Request.token, minimumNode: 6)
+                } catch {
+                    if error is CancellationError || Task.isCancelled { throw error }
+                    // Read-only synthetic-fixture evidence after the original assertion fails.
+                    // Do not navigate again, extend its deadline, or substitute this sample for readiness.
+                    let geometry = try? await controller.evaluateLocatorJavaScriptForTesting("""
+                    (function() {
+                        var chapter = document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]');
+                        var target = chapter && chapter.querySelector('[data-yj-original-id="sec-mid"], [id="sec-mid"]');
+                        function rects(element) {
+                            return element ? Array.from(element.getClientRects(), function(r) {
+                                return {x:r.x, y:r.y, width:r.width, height:r.height};
+                            }) : [];
+                        }
+                        var sample = window.__yjEpub && window.__yjEpub.sampleNow();
+                        return JSON.stringify({readyState:document.readyState, chapterFound:!!chapter,
+                            targetFound:!!target, targetRects:rects(target), chapterRects:rects(chapter),
+                            scrollX:window.scrollX, scrollY:window.scrollY,
+                            viewportWidth:window.innerWidth, viewportHeight:window.innerHeight,
+                            sampleNode:sample ? sample.node : null,
+                            sampleOffset:sample ? sample.utf16Offset : null});
+                    })()
+                    """)
+                    print("EPUB_SYNTHETIC_FRAGMENT_FAILURE geometry=\(geometry as? String ?? "unavailable") nativeOffset=\(controller.webView.scrollView.contentOffset) nativeSize=\(controller.webView.scrollView.contentSize)")
+                    throw error
+                }
                 #expect(model.currentPosition?.path == "OEBPS/text/ch2.xhtml")
                 #expect((model.currentPosition?.node ?? 0) > 5)
 
