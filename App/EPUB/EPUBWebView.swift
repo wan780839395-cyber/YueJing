@@ -216,6 +216,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     func setupWebViewIfNeeded() {
         guard webView == nil else { return }
+        resourceHandler.onFontResourceFailure = { [weak self] error, token in
+            self?.failReadiness(for: token, error: error, revokeReady: true)
+        }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         let pagePrefs = WKWebpagePreferences()
@@ -424,8 +427,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         failReadiness(for: token, error: URLError(.timedOut))
     }
 
-    private func failReadiness(for token: EPUBNavigationToken, error: Error) {
-        guard activeRequest?.token == token, readyToken != token else { return }
+    private func failReadiness(for token: EPUBNavigationToken, error: Error, revokeReady: Bool = false) {
+        guard activeRequest?.token == token, revokeReady || readyToken != token else { return }
         readinessTask?.cancel()
         readinessTask = nil
         loadTask?.cancel()
@@ -941,11 +944,21 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             clearAccessibilityCanvas()
             return
         }
+        canvasAccessibilityView.isAccessibilityElement = true
+        canvasAccessibilityView.accessibilityLabel = text
+        // Locator diagnostics are an explicit UI-test protocol, not spoken content.
+        #if DEBUG
+        let diagnosticsRequested = EPUBUITestFixture.isRequested
+        #else
+        let diagnosticsRequested = false
+        #endif
+        guard diagnosticsRequested else {
+            canvasAccessibilityView.accessibilityValue = nil
+            return
+        }
         let validated = preferences.validated
         let node = payload.kind == .ready ? payload.restoredNode : payload.node
         let offset = payload.kind == .ready ? payload.restoredOffset : payload.utf16Offset
-        canvasAccessibilityView.isAccessibilityElement = true
-        canvasAccessibilityView.accessibilityLabel = text
         canvasAccessibilityView.accessibilityValue =
             "path=\(payload.path)|node=\(node)|offset=\(offset)|scrollY=\(Int(payload.scrollY.rounded()))|" +
             "font=\(Int(validated.fontSize.rounded()))|spacing=\(Int(validated.lineSpacing.rounded()))|" +

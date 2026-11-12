@@ -10,6 +10,67 @@ import XCTest
 @MainActor
 @Suite(.serialized)
 struct EPUBReaderHostTests {
+    @Test func epubCompatibilityLayoutKeepsOriginalPreferenceAndClassifiesStyleLimits() throws {
+        let suite = "YueJing-style-fallback-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(EPUBLayoutMode.original.rawValue, forKey: EPUBLayoutMode.defaultsKey)
+        let preferred = EPUBLayoutMode.restored(from: defaults)
+        let fallback = EPUBStyleCompatibility(issues: [.styleComplexity], usesReaderLayout: true)
+        #expect(preferred.effective(for: fallback) == .reader)
+        #expect(EPUBLayoutMode.restored(from: defaults) == .original)
+        #expect(preferred.effective(for: .init(issues: [.fontUnavailable])) == .original)
+        #expect(EPUBLayoutMode.reader.effective(for: nil) == .reader)
+        #expect(EPUBReaderViewModel.safeFailureMessage(EPUBStyleProcessingError.complexityExceeded).contains("复杂度"))
+        #expect(!EPUBReaderViewModel.safeFailureMessage(EPUBStyleProcessingError.complexityExceeded).contains("体积"))
+        #expect(EPUBReaderViewModel.safeFailureMessage(EPUBError.limitExceeded).contains("体积"))
+        var message: [String: Any] = ["kind": "ready", "sessionID": "synthetic",
+            "epoch": UUID().uuidString, "path": "OPS/c1.xhtml"]
+        #expect(EPUBLocationScript.parseMessage(message)?.authorStyleFallback == false)
+        for value in [true, false] {
+            message["authorStyleFallback"] = value
+            #expect(EPUBLocationScript.parseMessage(message)?.authorStyleFallback == value)
+        }
+        let invalidValues: [Any] = [1, 0, "true", NSNull(), [true]]
+        for invalid in invalidValues {
+            message["authorStyleFallback"] = invalid
+            #expect(EPUBLocationScript.parseMessage(message) == nil)
+        }
+    }
+
+    @Test func epubFontIntegrityFailureRevokesReadyAndRejectsStaleFailureSignals() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("Integrity.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Synthetic Integrity")
+            let receipt = try await fixture.install(archive)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service)
+            let controller = EPUBWebViewController()
+            model.webView.attach(controller)
+            controller.onLocatorEvent = { [weak model] in model?.handleLocatorEvent($0) }
+            controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
+            try await fixture.withHostedController(controller) {
+                await model.load()
+                let token = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: token)
+                let sample = try #require(await controller.sampleVisibleNow())
+                if !EPUBUITestFixture.isRequested {
+                    let canvas = try #require(controller.view.subviews.first { $0.accessibilityIdentifier == "reader.text.canvas" })
+                    #expect(canvas.accessibilityLabel?.isEmpty == false)
+                    #expect(canvas.accessibilityValue == nil)
+                }
+                let stale = EPUBNavigationToken(sessionID: token.sessionID, path: token.path)
+                controller.resourceHandler.onFontResourceFailure?(EPUBError.corruptResource, stale)
+                #expect(model.ready && controller.activeRequest?.token == token)
+                controller.resourceHandler.onFontResourceFailure?(EPUBError.corruptResource, token)
+                #expect(!model.ready && model.currentToken == nil && controller.activeRequest == nil)
+                model.handleLocatorEvent(sample)
+                #expect(!model.ready && model.currentToken == nil)
+                #expect(model.message?.contains("校验不匹配") == true)
+                _ = await model.close()
+            }
+        }
+    }
+
     @Test func epubOpeningObservationRejectsStaleFramesAndLabelsColdAdmission() throws {
         let start = ContinuousClock.now
         let token = EPUBNavigationToken(sessionID: "synthetic-opening", path: "OEBPS/ch1.xhtml")
@@ -1823,11 +1884,14 @@ struct EPUBReaderHostTests {
             </html>
             """
             let ch1CSS = """
+            @media only screen {
             p.verse {
                 font-size: 26px;
                 line-height: 42px;
                 text-indent: 32px;
             }
+            }
+            @media not screen { p.verse { font-size: 70px; } }
             #chapter-lead {
                 color: rgb(80, 20, 40);
             }
@@ -1836,10 +1900,12 @@ struct EPUBReaderHostTests {
             p.verse.inline-probe { font-size: 60px; }
             """
             let ch2CSS = """
+            @media not print {
             p.verse {
                 font-size: 34px;
                 line-height: 48px;
                 text-indent: 16px;
+            }
             }
             #chapter-lead {
                 color: rgb(20, 80, 40);
@@ -2200,6 +2266,8 @@ struct EPUBReaderHostTests {
             let token = try await reader.beginNavigation(path: ch1Path)
 
             let handler = EPUBResourceHandler()
+            var fontFailures: [EPUBNavigationToken] = []
+            handler.onFontResourceFailure = { _, token in fontFailures.append(token) }
             // Transport is tested through the real handler's scheme-task callbacks.
             let config = WKWebViewConfiguration()
             config.websiteDataStore = .nonPersistent()
@@ -2266,6 +2334,7 @@ struct EPUBReaderHostTests {
                     #expect(handler.rejectedURLs.contains(url.absoluteString))
                 }
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+                #expect(fontFailures.isEmpty, "Rejected stale/foreign requests must not revoke the current reader")
 
                 // Type and size rejections in handler guard before reading disk.
                 let typeToken = EPUBNavigationToken(sessionID: "type-check-session", path: ch1Path)
@@ -2294,6 +2363,7 @@ struct EPUBReaderHostTests {
                     #expect(handler.rejectedURLs.contains(url.absoluteString))
                 }
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+                #expect(fontFailures == [typeToken])
 
                 // Hash mismatch on disk must fail while untouched sibling OTF still succeeds.
                 let freshToken = EPUBNavigationToken(sessionID: token.sessionID, path: ch1Path)
@@ -2314,6 +2384,7 @@ struct EPUBReaderHostTests {
                 #expect(tamperedResult.response == nil && tamperedResult.error != nil)
                 #expect(handler.rejectedURLs.contains(tamperedTTFURL.absoluteString))
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+                #expect(fontFailures == [typeToken, freshToken])
 
                 let freshOTFURL = try #require(EPUBResourceCapability.url(for: freshToken, path: "OEBPS/Fonts/book.otf"))
                 let freshOTFResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)

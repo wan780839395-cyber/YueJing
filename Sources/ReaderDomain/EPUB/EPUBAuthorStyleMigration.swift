@@ -4,7 +4,7 @@ import Foundation
 /// Prove every old chapter's text and all non-XHTML resources before publishing.
 enum EPUBAuthorStyleMigration {
     static func validate(previous: EPUBPackage, replacement: EPUBPackage) throws {
-        guard previous.authorStyleRevision == nil,
+        guard previous.needsAuthorStyleUpgrade,
               replacement.authorStyleRevision == EPUBFormat.authorStyleRevision,
               previous.sourceSHA256 == replacement.sourceSHA256,
               previous.parserVersion == replacement.parserVersion,

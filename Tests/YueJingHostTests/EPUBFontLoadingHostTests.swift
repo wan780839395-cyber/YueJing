@@ -108,13 +108,13 @@ struct EPUBFontLoadingHostTests {
                     return
                 }
                 #expect(readyCount1 == 1)
+                #expect(!payload1.authorStyleFallback)
                 #expect(payload1.sessionID == reader1.reading.session.id)
                 #expect(payload1.epoch == token1.epoch)
                 #expect(payload1.path == chapterPath)
                 #expect(servedAtReady1.contains(chapterPath))
                 #expect(servedAtReady1.contains(fontPath))
                 #expect(rejectedAtReady1.isEmpty)
-                #expect(try await reader1.markReady(token1))
 
                 let snapshot1 = try await inspectLoadedFontsAndMetrics(in: controller1)
                 try verifyLoadedFontAndMetrics(
@@ -157,12 +157,12 @@ struct EPUBFontLoadingHostTests {
                     return
                 }
                 #expect(readyCount2 == 1)
+                #expect(!payload2.authorStyleFallback)
                 #expect(payload2.sessionID == reader2.reading.session.id)
                 #expect(payload2.epoch == token2.epoch)
                 #expect(servedAtReady2.contains(chapterPath))
                 #expect(servedAtReady2.contains(fontPath))
                 #expect(rejectedAtReady2.isEmpty)
-                #expect(try await reader2.markReady(token2))
 
                 let snapshot2 = try await inspectLoadedFontsAndMetrics(in: controller2)
                 try verifyLoadedFontAndMetrics(
@@ -178,9 +178,11 @@ struct EPUBFontLoadingHostTests {
 
     @Test func epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs() async throws {
         try await withHostFixture { fixture in
-            // 1. A structural-only SFNT stub passes EPUBAuthorStyles.verifyFontData and is served by
-            //    EPUBResourceHandler, but fails real WebKit FontFace decoding -> must emit font-not-ready
-            //    and never become ready.
+            // 1. A structural-only SFNT stub passes EPUBAuthorStyles.verifyFontData and SHA checks
+            //    in EPUBResourceHandler, but fails real WebKit FontFace decoding -> must remove the
+            //    unusable @font-face rule, settle layout with fallback glyph metrics, preserve the
+            //    requested anchor, emit ready with authorStyleFallback=true, keep failed rules
+            //    absent on epoch promotion, and reject stale epoch callbacks.
             let stubFont = Self.makeStructuralOnlySFNTStub()
             #expect(try EPUBAuthorStyles.verifyFontData(stubFont, declaredMediaType: "font/ttf") == "font/ttf")
 
@@ -196,6 +198,14 @@ struct EPUBFontLoadingHostTests {
             let brokenReceipt = try await fixture.install(brokenArchiveURL)
             let brokenReader = try await fixture.service.openEPUB(id: brokenReceipt.book.id)
             let brokenToken = try await brokenReader.beginNavigation(path: chapterPath)
+            let expectedAnchor = try EPUBLocationScript.makeValidatedPosition(
+                bookID: brokenReader.book.id,
+                package: brokenReader.publication.package,
+                path: chapterPath,
+                node: 1,
+                rawUTF16Offset: 2,
+                viewportOffset: 24
+            )
             let brokenController = EPUBWebViewController()
             try await fixture.withHostedController(brokenController) {
                 let outcome = try await loadAndAwaitOutcome(
@@ -204,42 +214,123 @@ struct EPUBFontLoadingHostTests {
                         id: UUID(),
                         token: brokenToken,
                         publication: brokenReader.publication,
-                        targetPosition: nil,
+                        targetPosition: expectedAnchor,
                         fragment: nil,
                         preferences: brokenReader.preferences,
-                        preserveTargetAnchor: false,
+                        preserveTargetAnchor: true,
                         reloadDocument: true,
                         layoutMode: .original
                     )
                 )
-                guard case .locatorError(let payload, let readyCount) = outcome else {
-                    Issue.record("Expected font-not-ready locator error for structural-only SFNT stub, got: \(outcome)")
+                guard case .ready(let payload, let readyCount, let servedAtReady, let rejectedAtReady) = outcome else {
+                    Issue.record("Expected fallback ready outcome for structural-only SFNT stub, got: \(outcome)")
                     return
                 }
-                #expect(readyCount == 0)
-                #expect(payload.kind == .error)
+                #expect(readyCount == 1)
+                #expect(payload.kind == .ready)
+                #expect(payload.sessionID == brokenReader.reading.session.id)
                 #expect(payload.epoch == brokenToken.epoch)
-                #expect(payload.reason == "font-not-ready")
-                #expect(brokenController.resourceHandler.servedPaths.contains(brokenFontPath))
-                #expect(await brokenController.sampleVisibleNow() == nil)
-                let brokenSnapshot = try await brokenController.evaluateLocatorJavaScriptForTesting(
+                #expect(payload.path == chapterPath)
+                #expect(payload.authorStyleFallback == true)
+                #expect(payload.restoredNode == expectedAnchor.node)
+                #expect(payload.restoredOffset == expectedAnchor.utf16Offset)
+                #expect(servedAtReady.contains(chapterPath))
+                #expect(servedAtReady.contains(brokenFontPath))
+                #expect(rejectedAtReady.isEmpty)
+                #expect(try await brokenReader.markReady(brokenToken))
+
+                let sampled = try #require(await brokenController.sampleVisibleNow())
+                #expect(sampled.epoch == brokenToken.epoch)
+                #expect(sampled.authorStyleFallback == true)
+                #expect(sampled.node == expectedAnchor.node)
+                #expect(sampled.utf16Offset == expectedAnchor.utf16Offset)
+
+                let brokenSnapshot = try await inspectLoadedFontsAndMetrics(in: brokenController)
+                #expect(brokenSnapshot["layout"] as? String == "original")
+                #expect(brokenSnapshot["fontSetStatus"] as? String == "loaded")
+                #expect((brokenSnapshot["fontSetSize"] as? NSNumber)?.intValue == 0)
+                let brokenRules = try #require(brokenSnapshot["fontFaceRules"] as? [[String: Any]])
+                #expect(brokenRules.isEmpty)
+                let brokenStyleTexts = brokenSnapshot["authorStyleTexts"] as? [String] ?? []
+                #expect(!brokenStyleTexts.isEmpty)
+                #expect(brokenStyleTexts.allSatisfy { !$0.contains("@font-face") && !$0.contains(brokenFontPath) })
+                #expect(brokenStyleTexts.contains { $0.contains("24px") })
+
+                let customAAAA = try #require(brokenSnapshot["customAAAA"] as? [String: Any])
+                let fallbackAAAA = try #require(brokenSnapshot["fallbackAAAA"] as? [String: Any])
+                #expect(customAAAA["text"] as? String == "AAAA")
+                #expect(customAAAA["fontSize"] as? String == "24px")
+                #expect((customAAAA["clientRectCount"] as? NSNumber)?.intValue == 1)
+                let widthCustomAAAA = try #require((customAAAA["rangeWidth"] as? NSNumber)?.doubleValue)
+                let widthFallbackAAAA = try #require((fallbackAAAA["rangeWidth"] as? NSNumber)?.doubleValue)
+                #expect(widthCustomAAAA > 20.0 && widthCustomAAAA < 110.0)
+                #expect(abs(widthCustomAAAA - widthFallbackAAAA) <= 2.0)
+
+                // Promoting / rebinding capability on the degraded document must not resurrect the
+                // failed @font-face rule or re-request the broken font, and old epoch callbacks are rejected.
+                let servedBrokenBeforePromo = brokenController.resourceHandler.servedPaths.filter { $0 == brokenFontPath }.count
+                let brokenEpoch2 = try await brokenReader.beginNavigation(path: chapterPath)
+                let promoOutcome = try await loadAndAwaitOutcome(
+                    controller: brokenController,
+                    request: EPUBNavigationRequest(
+                        id: UUID(),
+                        token: brokenEpoch2,
+                        publication: brokenReader.publication,
+                        targetPosition: nil,
+                        fragment: nil,
+                        preferences: brokenReader.preferences,
+                        preserveTargetAnchor: false,
+                        reloadDocument: false,
+                        preserveViewport: true,
+                        layoutMode: .original
+                    )
+                )
+                guard case .ready(let promoPayload, let promoReadyCount, let promoServed, let promoRejected) = promoOutcome else {
+                    Issue.record("Expected fallback ready on degraded promotion, got: \(promoOutcome)")
+                    return
+                }
+                #expect(promoReadyCount == 1)
+                #expect(promoPayload.epoch == brokenEpoch2.epoch)
+                #expect(promoPayload.authorStyleFallback == true)
+                #expect(promoRejected.isEmpty)
+                #expect(brokenController.documentLoadCount == 1)
+                #expect(promoServed.filter { $0 == brokenFontPath }.count == servedBrokenBeforePromo)
+
+                var leakedOldEpoch = false
+                brokenController.onLocatorEvent = { incoming in
+                    if incoming.epoch == brokenToken.epoch {
+                        leakedOldEpoch = true
+                    }
+                }
+                defer { brokenController.onLocatorEvent = nil }
+                _ = try await brokenController.evaluateLocatorJavaScriptForTesting(
                     """
                     (function() {
-                        var statuses = [];
-                        document.fonts.forEach(function(face) { statuses.push(String(face.status || '')); });
-                        return {
-                            ready: window.__yjEpub ? window.__yjEpub.sampleStatus().ready : null,
-                            statuses: statuses
-                        };
+                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.yjepubLocator) {
+                            window.webkit.messageHandlers.yjepubLocator.postMessage({
+                                kind: "ready",
+                                sessionID: "\(brokenToken.sessionID)",
+                                epoch: "\(brokenToken.epoch.uuidString)",
+                                path: "\(chapterPath)",
+                                node: 0,
+                                utf16Offset: 0,
+                                restoredNode: 0,
+                                restoredOffset: 0,
+                                scrollY: 0,
+                                viewportHeight: 760,
+                                contentHeight: 760,
+                                visibleText: "stale"
+                            });
+                        }
+                        return true;
                     })();
                     """
-                ) as? [String: Any]
-                #expect(brokenSnapshot?["ready"] as? Bool == false)
-                let brokenStatuses = brokenSnapshot?["statuses"] as? [String] ?? []
-                #expect(!brokenStatuses.contains("loaded"))
+                )
+                await Task.yield()
+                #expect(!leakedOldEpoch)
+                #expect((await brokenController.sampleVisibleNow())?.epoch == brokenEpoch2.epoch)
             }
             try await brokenReader.close(position: nil, sequence: 1, token: nil, preferences: brokenReader.preferences)
-
             // 2. With a real decodable font, minting a new epoch on the same controller rebinds @font-face
             //    to the new capability URL, serves the font under the new capability, and keeps metrics.
             let fontData = try Self.makeSyntheticGeometricFontData()
@@ -273,16 +364,16 @@ struct EPUBFontLoadingHostTests {
                         layoutMode: .original
                     )
                 )
-                guard case .ready(_, let readyCount1, let served1, let rejected1) = firstOutcome else {
+                guard case .ready(let payload1, let readyCount1, let served1, let rejected1) = firstOutcome else {
                     Issue.record("Expected initial ready for epoch1, got: \(firstOutcome)")
                     return
                 }
                 #expect(readyCount1 == 1)
+                #expect(!payload1.authorStyleFallback)
                 #expect(rejected1.isEmpty)
                 let servedFontCount1 = served1.filter { $0 == validFontPath }.count
                 #expect(servedFontCount1 >= 1)
                 #expect(controller.documentLoadCount == 1)
-
                 let epoch2 = try await reader.beginNavigation(path: chapterPath)
                 #expect(epoch2.epoch != epoch1.epoch)
                 let secondOutcome = try await loadAndAwaitOutcome(
@@ -304,6 +395,7 @@ struct EPUBFontLoadingHostTests {
                     return
                 }
                 #expect(readyCount2 == 1)
+                #expect(!payload2.authorStyleFallback)
                 #expect(payload2.epoch == epoch2.epoch)
                 #expect(controller.documentLoadCount == 1)
                 #expect(rejected2.isEmpty)
@@ -318,10 +410,44 @@ struct EPUBFontLoadingHostTests {
                     fontPath: validFontPath
                 )
             }
+
+            // 3. Corrupted SHA transport on disk must trigger native failReadiness (loadFailure),
+            //    never masquerading as decode fallback ready.
+            let diskFontURL = reader.publication.resourceRoot.appendingPathComponent(validFontPath)
+            let originalDiskFontData = try Data(contentsOf: diskFontURL)
+            var corruptedDiskFontData = originalDiskFontData
+            corruptedDiskFontData[corruptedDiskFontData.count - 1] ^= 0xFF
+            try corruptedDiskFontData.write(to: diskFontURL)
+            defer { try? originalDiskFontData.write(to: diskFontURL) }
+
+            let tamperedToken = try await reader.beginNavigation(path: chapterPath)
+            let tamperedController = EPUBWebViewController()
+            try await fixture.withHostedController(tamperedController) {
+                let tamperedOutcome = try await loadAndAwaitOutcome(
+                    controller: tamperedController,
+                    request: EPUBNavigationRequest(
+                        id: UUID(),
+                        token: tamperedToken,
+                        publication: reader.publication,
+                        targetPosition: nil,
+                        fragment: nil,
+                        preferences: reader.preferences,
+                        preserveTargetAnchor: false,
+                        reloadDocument: true,
+                        layoutMode: .original
+                    )
+                )
+                guard case .loadFailure(_, let tamperedReadyCount) = tamperedOutcome else {
+                    Issue.record("Expected native loadFailure for corrupted SHA font transport, got: \(tamperedOutcome)")
+                    return
+                }
+                #expect(tamperedReadyCount == 0)
+                #expect(tamperedController.resourceHandler.rejectedURLs.contains { $0.contains(validFontPath) })
+                #expect(await tamperedController.sampleVisibleNow() == nil)
+            }
             try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
         }
     }
-
     // MARK: - Helpers
 
     private enum LocatorOutcome: CustomStringConvertible {

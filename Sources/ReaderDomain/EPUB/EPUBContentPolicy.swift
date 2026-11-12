@@ -19,6 +19,7 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
     public let referencedLinks: [EPUBResolvedLink]
     public let imageMediaTypes: [String: String]
     public let referencedFonts: [String: String]
+    public let styleCompatibility: EPUBStyleCompatibility
 
     public init(
         path: String,
@@ -28,7 +29,8 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         referencedImages: Set<String>,
         referencedLinks: [EPUBResolvedLink],
         imageMediaTypes: [String: String] = [:],
-        referencedFonts: [String: String] = [:]
+        referencedFonts: [String: String] = [:],
+        styleCompatibility: EPUBStyleCompatibility = .init()
     ) {
         self.path = path
         self.xhtmlData = xhtmlData
@@ -38,6 +40,7 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         self.referencedLinks = referencedLinks
         self.imageMediaTypes = imageMediaTypes
         self.referencedFonts = referencedFonts
+        self.styleCompatibility = styleCompatibility
     }
 }
 
@@ -83,7 +86,8 @@ public enum EPUBContentPolicy {
             spineSet: spineSet,
             destination: destination,
             limits: limits,
-            styleCache: nil
+            styleCache: nil,
+            extractedEntries: nil
         )
     }
 
@@ -94,7 +98,8 @@ public enum EPUBContentPolicy {
         spineSet: Set<String>,
         destination: URL,
         limits: EPUBLimits = EPUBLimits(),
-        styleCache: EPUBAuthorStyles.ValidationCache?
+        styleCache: EPUBAuthorStyles.ValidationCache?,
+        extractedEntries: [String: Int]? = nil
     ) throws -> EPUBSanitizedDocument {
         try Task.checkCancellation()
         let canonicalPath = try EPUBResourcePath.canonical(path)
@@ -105,9 +110,9 @@ public enum EPUBContentPolicy {
             scopeID: scopeID,
             manifestByPath: manifestByPath,
             destination: destination,
-            cache: styleCache
+            cache: styleCache,
+            extractedEntries: extractedEntries
         )
-
         let delegate = XHTMLBuilderDelegate(
             documentPath: canonicalPath,
             manifestByPath: manifestByPath,
@@ -147,9 +152,10 @@ public enum EPUBContentPolicy {
         let cleanTitle = delegate.titleText.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveTitle = cleanTitle.isEmpty ? "Chapter" : cleanTitle
         let bodyAttributes = bodyRoot.attributes.map { " \($0.0)=\"\(escapeXMLAttribute($0.1))\"" }.joined()
+        let fallbackAttribute = styleCollector.wholeChapterStripped ? " data-yj-style-fallback=\"true\"" : ""
         let xhtml = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <html xmlns="\(xhtmlNamespace)"><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)"/><title>\(escapeXMLText(effectiveTitle))</title>\(styleTag)</head><body\(bodyAttributes)>\(bodyMarkup)</body></html>
+        <html xmlns="\(xhtmlNamespace)"\(fallbackAttribute)><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)"/><title>\(escapeXMLText(effectiveTitle))</title>\(styleTag)</head><body\(bodyAttributes)>\(bodyMarkup)</body></html>
         """
         let outputData = Data(xhtml.utf8)
         guard outputData.count <= limits.xhtmlBytes else {
@@ -164,7 +170,8 @@ public enum EPUBContentPolicy {
             referencedImages: delegate.referencedImages,
             referencedLinks: delegate.referencedLinks,
             imageMediaTypes: delegate.imageMediaTypes,
-            referencedFonts: styleCollector.referencedFonts
+            referencedFonts: styleCollector.referencedFonts,
+            styleCompatibility: styleCollector.styleCompatibility
         )
     }
     public static func verifyImageData(_ data: Data, mediaType: String) throws {
@@ -418,7 +425,11 @@ public enum EPUBContentPolicy {
                     inTitle = true
                 } else if lowerLocal == "style" {
                     try validateStyleElementAttributes(attributes)
-                    currentStyleEmitRules = isScreenMedia(attributeValue(attributes, named: "media"))
+                    let mediaEval = EPUBAuthorStyles.evaluateMediaCondition(attributeValue(attributes, named: "media"))
+                    if mediaEval.hasUnsupportedCondition {
+                        styleCollector.recordIssue(.unsupportedStyleCondition)
+                    }
+                    currentStyleEmitRules = mediaEval.emitRules
                     ignoredStyleDepth += 1
                     currentStyleText = ""
                 } else if lowerLocal == "meta" {
@@ -479,7 +490,11 @@ public enum EPUBContentPolicy {
 
             if lowerLocal == "style" {
                 try validateStyleElementAttributes(attributes)
-                currentStyleEmitRules = isScreenMedia(attributeValue(attributes, named: "media"))
+                let mediaEval = EPUBAuthorStyles.evaluateMediaCondition(attributeValue(attributes, named: "media"))
+                if mediaEval.hasUnsupportedCondition {
+                    styleCollector.recordIssue(.unsupportedStyleCondition)
+                }
+                currentStyleEmitRules = mediaEval.emitRules
                 ignoredStyleDepth = 1
                 currentStyleText = ""
                 return
@@ -652,14 +667,6 @@ public enum EPUBContentPolicy {
             }
         }
 
-        private func isScreenMedia(_ rawMedia: String?) -> Bool {
-            guard let rawMedia else { return true }
-            let trimmed = rawMedia.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if trimmed.isEmpty { return true }
-            let parts = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            return parts.contains { $0 == "all" || $0 == "screen" }
-        }
-
         private func handleHeadLink(_ attributes: [String: String]) throws {
             let relRaw = (attributeValue(attributes, named: "rel") ?? "").lowercased()
             let typeRaw = (attributeValue(attributes, named: "type") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -685,8 +692,11 @@ public enum EPUBContentPolicy {
                         throw EPUBError.unsupportedContent
                     }
                 }
-                let emitRules = isScreenMedia(attributeValue(attributes, named: "media"))
-                try styleCollector.addExternalStylesheet(href: hrefRaw, emitRules: emitRules)
+                let mediaEval = EPUBAuthorStyles.evaluateMediaCondition(attributeValue(attributes, named: "media"))
+                if mediaEval.hasUnsupportedCondition {
+                    styleCollector.recordIssue(.unsupportedStyleCondition)
+                }
+                try styleCollector.addExternalStylesheet(href: hrefRaw, emitRules: mediaEval.emitRules)
             }
         }
 

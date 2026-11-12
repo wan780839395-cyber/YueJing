@@ -59,6 +59,8 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
     private var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private(set) var servedPaths: [String] = []
     private(set) var rejectedURLs: [String] = []
+    // A verified font resource failing transport/integrity is NOT a decoder fallback.
+    var onFontResourceFailure: (@MainActor (Error, EPUBNavigationToken) -> Void)?
     #if DEBUG
     var rawXHTMLOverrideForTesting: [String: Data] = [:]
     #endif
@@ -129,6 +131,9 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
               resource.byteCount >= 0, resource.byteCount <= maxBytes else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.limitExceeded)
+            if EPUBAuthorStyles.allowedFontMediaTypes.contains(resource.mediaType) {
+                onFontResourceFailure?(EPUBError.limitExceeded, capability.token)
+            }
             return
         }
 
@@ -184,6 +189,9 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
                 ) else {
                     self.rejectedURLs.append(url.absoluteString)
                     urlSchemeTask.didFailWithError(EPUBError.corruptResource)
+                    if EPUBAuthorStyles.allowedFontMediaTypes.contains(resource.mediaType) {
+                        self.onFontResourceFailure?(EPUBError.corruptResource, expectedToken)
+                    }
                     return
                 }
                 self.servedPaths.append(canonical)
@@ -197,6 +205,10 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
                 }
                 self.rejectedURLs.append(url.absoluteString)
                 urlSchemeTask.didFailWithError(error)
+                if self.capability?.token == expectedToken, !(error is CancellationError),
+                   EPUBAuthorStyles.allowedFontMediaTypes.contains(resource.mediaType) {
+                    self.onFontResourceFailure?(error, expectedToken)
+                }
             }
         }
         activeTasks[taskID] = task

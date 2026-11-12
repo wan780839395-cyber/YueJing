@@ -117,6 +117,10 @@ public enum EPUBPackageParser {
             var validatedImageMediaTypes: [String: String] = [:]
             var validatedFontMediaTypes: [String: String] = [:]
             let styleCache = EPUBAuthorStyles.ValidationCache()
+            let extractedEntrySizes = extraction.entries.mapValues(\.byteCount)
+            var aggregatedStyleIssues: [EPUBStyleIssue] = []
+            var aggregatedUsesReaderLayout = false
+            var retainedSanitizedBytes = 0
 
             for spinePath in spinePaths {
                 try Task.checkCancellation()
@@ -134,8 +138,19 @@ public enum EPUBPackageParser {
                     spineSet: spineSet,
                     destination: destination,
                     limits: limits,
-                    styleCache: styleCache
+                    styleCache: styleCache,
+                    extractedEntries: extractedEntrySizes
                 )
+                // Shared styles are expanded per chapter. Enforce the existing output
+                // budget before retaining the next result, not after collecting the book.
+                guard sanitized.xhtmlData.count <= limits.expandedBytes - retainedSanitizedBytes else {
+                    throw EPUBError.limitExceeded
+                }
+                retainedSanitizedBytes += sanitized.xhtmlData.count
+                aggregatedStyleIssues.append(contentsOf: sanitized.styleCompatibility.issues)
+                if sanitized.styleCompatibility.usesReaderLayout {
+                    aggregatedUsesReaderLayout = true
+                }
                 sanitizedByPath[spinePath] = sanitized
                 fragmentIDsByPath[spinePath] = sanitized.fragmentIDs
                 textNodesByPath[spinePath] = sanitized.textNodes
@@ -155,6 +170,7 @@ public enum EPUBPackageParser {
             }
 
             for spinePath in spinePaths {
+                try Task.checkCancellation()
                 guard let sanitized = sanitizedByPath[spinePath] else {
                     throw EPUBError.invalidPackage
                 }
@@ -250,6 +266,8 @@ public enum EPUBPackageParser {
                         guard data.count == coverEntry.byteCount else { throw EPUBError.corruptResource }
                         try EPUBContentPolicy.verifyImageData(data, mediaType: candidate.mediaType)
                         resolvedCoverPath = candidate.path
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         resolvedCoverPath = nil
                     }
@@ -265,6 +283,7 @@ public enum EPUBPackageParser {
             var totalServedBytes = 0
 
             for spinePath in spinePaths {
+                try Task.checkCancellation()
                 guard let sanitized = sanitizedByPath[spinePath] else {
                     throw EPUBError.invalidPackage
                 }
@@ -343,6 +362,11 @@ public enum EPUBPackageParser {
                 try? FileManager.default.removeItem(at: url)
             }
 
+            let styleCompatibility = EPUBStyleCompatibility(
+                issues: aggregatedStyleIssues,
+                usesReaderLayout: aggregatedUsesReaderLayout
+            )
+
             return EPUBPackage(
                 sourceSHA256: extraction.sourceSHA256,
                 parserVersion: EPUBFormat.parserVersion,
@@ -351,7 +375,8 @@ public enum EPUBPackageParser {
                 navigation: navigation,
                 resources: servedResources,
                 textNodes: textNodesByPath,
-                coverPath: resolvedCoverPath
+                coverPath: resolvedCoverPath,
+                styleCompatibility: styleCompatibility
             )
         } catch {
             try? FileManager.default.removeItem(at: destination)

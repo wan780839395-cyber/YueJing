@@ -3,7 +3,11 @@ import Foundation
 public enum EPUBFormat {
     public static let parserVersion = "epub-dom-v1"
     public static let positionUnit = "epub-text-node-utf16-v1"
-    public static let authorStyleRevision = 1
+    public static let authorStyleRevision = 2
+
+    public static func supportsAuthorStyleRevision(_ revision: Int?) -> Bool {
+        revision == nil || revision == 1 || revision == authorStyleRevision
+    }
 }
 
 public struct EPUBResource: Codable, Sendable, Equatable {
@@ -39,20 +43,26 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
     public let coverPath: String?
     public let ready: EPUBReadyReference?
     public let authorStyleRevision: Int?
+    public let styleCompatibility: EPUBStyleCompatibility?
+    public var needsAuthorStyleUpgrade: Bool {
+        EPUBFormat.supportsAuthorStyleRevision(authorStyleRevision) && authorStyleRevision != EPUBFormat.authorStyleRevision
+    }
     private var chapterNodes: EPUBChapterNodes? = nil
     private enum CodingKeys: String, CodingKey {
         case sourceSHA256, parserVersion, title, spine, navigation, resources, textNodes, coverPath, ready
-        case authorStyleRevision
+        case authorStyleRevision, styleCompatibility
     }
     public init(sourceSHA256: String, parserVersion: String = EPUBFormat.parserVersion, title: String,
                 spine: [String], navigation: [EPUBNavigationItem], resources: [EPUBResource],
                 textNodes: [String: [String]], coverPath: String?, ready: EPUBReadyReference? = nil,
-                authorStyleRevision: Int? = EPUBFormat.authorStyleRevision) {
+                authorStyleRevision: Int? = EPUBFormat.authorStyleRevision,
+                styleCompatibility: EPUBStyleCompatibility? = nil) {
         self.sourceSHA256 = sourceSHA256; self.parserVersion = parserVersion; self.title = title
         self.spine = spine; self.navigation = navigation; self.resources = resources
         self.textNodes = textNodes; self.coverPath = coverPath
         self.ready = ready
         self.authorStyleRevision = authorStyleRevision
+        self.styleCompatibility = styleCompatibility
     }
     public var versionID: String { sourceSHA256 + ":" + parserVersion }
     public func resource(at path: String) -> EPUBResource? { resources.first { $0.path == path } }
@@ -66,7 +76,8 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
     func withReady(_ reference: EPUBReadyReference) -> EPUBPackage {
         EPUBPackage(sourceSHA256: sourceSHA256, parserVersion: parserVersion, title: title,
                     spine: spine, navigation: navigation, resources: resources,
-                    textNodes: [:], coverPath: coverPath, ready: reference, authorStyleRevision: authorStyleRevision)
+                    textNodes: [:], coverPath: coverPath, ready: reference, authorStyleRevision: authorStyleRevision,
+                    styleCompatibility: styleCompatibility)
     }
 
     func attachingNodes(folder: URL) throws -> EPUBPackage {
@@ -81,7 +92,8 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
         lhs.sourceSHA256 == rhs.sourceSHA256 && lhs.parserVersion == rhs.parserVersion &&
         lhs.title == rhs.title && lhs.spine == rhs.spine && lhs.navigation == rhs.navigation &&
         lhs.resources == rhs.resources && lhs.textNodes == rhs.textNodes &&
-        lhs.coverPath == rhs.coverPath && lhs.ready == rhs.ready && lhs.authorStyleRevision == rhs.authorStyleRevision
+        lhs.coverPath == rhs.coverPath && lhs.ready == rhs.ready && lhs.authorStyleRevision == rhs.authorStyleRevision &&
+        lhs.styleCompatibility == rhs.styleCompatibility
     }
 }
 

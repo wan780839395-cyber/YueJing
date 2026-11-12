@@ -306,7 +306,7 @@ struct EPUBAuthorStylesTests {
             #"p { background: url("java\9 script:alert(1)"); }"#,
             #"p { background: url("data:text/css,body{}"); }"#,
             #"p { background: url("yjepub://other/pic.png"); }"#,
-            #"@\69 mport "good.css";"#,
+            #"@\69 mport "https://evil.invalid/a.css";"#,
             #"@import url("https://evil.invalid/a.css");"#,
             #"p { \62 ehavior: url(good.css); }"#,
             #"p { -moz-binding: url(good.css); }"#,
@@ -316,10 +316,6 @@ struct EPUBAuthorStylesTests {
             #"@font-face { }"#,
             #"@font-face { font-family: Custom; }"#,
             #"@font-face { src: url(../Fonts/valid.ttf); }"#,
-            #"@font-face { font-family: Custom; src: local("PingFang SC"); }"#,
-            #"@font-face { font-family: Custom; src: url(f.woff); }"#,
-            #"@font-face { font-family: Custom; src: url(f.woff2) format("woff2"); }"#,
-            #"@font-face { font-family: Custom; \73 rc: url(f.woff); }"#
         ]
         for payload in unsupportedCSSPayloads {
             #expect(throws: EPUBError.unsupportedContent, "Must reject CSS: \(payload)") {
@@ -331,6 +327,20 @@ struct EPUBAuthorStylesTests {
                     destination: root
                 )
             }
+        }
+
+        for payload in [
+            #"@font-face { font-family: Custom; src: url(f.woff); }"#,
+            #"@font-face { font-family: Custom; src: url(f.woff2) format("woff2"); }"#,
+            #"@font-face { font-family: Custom; \73 rc: url(f.woff); }"#
+        ] {
+            let result = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+                payload + " p { color: #123456; }", sourcePath: "OPS/Styles/good.css",
+                documentPath: "OPS/Text/ch1.xhtml", manifestByPath: manifest, destination: root
+            )
+            #expect(result.referencedFonts.isEmpty && !result.css.contains("@font-face"))
+            #expect(result.css.contains("#123456"))
+            #expect(result.styleCompatibility.issues.contains(.fontUnavailable))
         }
 
         // CSS \t escapes the literal letter t, not a tab: the unknown scheme is still rejected.
@@ -355,32 +365,74 @@ struct EPUBAuthorStylesTests {
             )
         }
 
-        // 3. Unknown local resource in CSS url() -> invalidPackage
-        for unknownPayload in [
-            #"@font-face { font-family: Missing; src: url(../Fonts/missing.ttf); }"#,
-            #"p { background: url(../Images/unknown.png); }"#
-        ] {
-            #expect(throws: EPUBError.invalidPackage, "Must reject unknown resource: \(unknownPayload)") {
-                _ = try EPUBAuthorStyles.sanitizeStylesheet(
-                    unknownPayload,
-                    sourcePath: "OPS/Styles/good.css",
-                    documentPath: "OPS/Text/ch1.xhtml",
-                    manifestByPath: manifest,
-                    destination: root
-                )
-            }
+        // 2b. Escaped @import traversal -> unsafePath
+        #expect(throws: EPUBError.unsafePath) {
+            _ = try EPUBAuthorStyles.sanitizeStylesheet(
+                #"@\69 mport "../../../outside.css";"#,
+                sourcePath: "OPS/Styles/good.css",
+                documentPath: "OPS/Text/ch1.xhtml",
+                manifestByPath: manifest,
+                destination: root
+            )
         }
+
+        // 3. Benign compatibility degradation (local-only font, missing optional font/CSS/background, self-import cycle)
+        let localOnlyResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            #"@font-face { font-family: Custom; src: local("PingFang SC"); } p { color: #223344; }"#,
+            sourcePath: "OPS/Styles/good.css",
+            documentPath: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            destination: root
+        )
+        #expect(localOnlyResult.referencedFonts.isEmpty)
+        #expect(!localOnlyResult.css.contains("@font-face"))
+        #expect(localOnlyResult.css.contains("color: #223344"))
+        #expect(localOnlyResult.styleCompatibility == EPUBStyleCompatibility(issues: [.fontUnavailable], usesReaderLayout: false))
+
+        let selfCycleResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            #"@\69 mport "good.css"; p { color: #334455; }"#,
+            sourcePath: "OPS/Styles/good.css",
+            documentPath: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            destination: root
+        )
+        #expect(selfCycleResult.referencedFonts.isEmpty)
+        #expect(selfCycleResult.css.contains("color: #334455"))
+        #expect(selfCycleResult.styleCompatibility == EPUBStyleCompatibility(issues: [.localImportCycle], usesReaderLayout: false))
+
+        let missingFontResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            #"@font-face { font-family: Missing; src: url(../Fonts/missing.ttf); } p { color: #445566; }"#,
+            sourcePath: "OPS/Styles/good.css",
+            documentPath: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            destination: root
+        )
+        #expect(missingFontResult.referencedFonts.isEmpty)
+        #expect(!missingFontResult.css.contains("@font-face"))
+        #expect(missingFontResult.css.contains("color: #445566"))
+        #expect(missingFontResult.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable], usesReaderLayout: false))
+
+        let missingBgResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            #"p { background: url(../Images/unknown.png); color: #556677; }"#,
+            sourcePath: "OPS/Styles/good.css",
+            documentPath: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            destination: root
+        )
+        #expect(missingBgResult.referencedFonts.isEmpty)
+        #expect(!missingBgResult.css.contains("unknown.png"))
+        #expect(!missingBgResult.css.contains("background"))
+        #expect(missingBgResult.css.contains("color: #556677"))
+        #expect(missingBgResult.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing], usesReaderLayout: false))
 
         // 4. Inline style attributes and <link> attacks in sanitizeXHTML
         let badXHTMLPayloads: [String] = [
             #"<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="https://evil.invalid/a.css"/></head><body><p>T</p></body></html>"#,
             #"<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="//evil.invalid/a.css"/></head><body><p>T</p></body></html>"#,
-            #"<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="../Styles/missing.css"/></head><body><p>T</p></body></html>"#,
             #"<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="../../../outside.css"/></head><body><p>T</p></body></html>"#,
             #"<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="../Fonts/valid.ttf"/></head><body><p>T</p></body></html>"#,
             #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p style="background: \75 rl(https://evil.invalid/a.png);">T</p></body></html>"#,
-            #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p style="width: \65 xpression(1);">T</p></body></html>"#,
-            #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p style="background: url(../Images/unknown.png);">T</p></body></html>"#
+            #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p style="width: \65 xpression(1);">T</p></body></html>"#
         ]
         for xhtml in badXHTMLPayloads {
             #expect(throws: (any Error).self) {
@@ -394,6 +446,34 @@ struct EPUBAuthorStylesTests {
             }
         }
 
+        // Missing optional <link> stylesheet and missing inline background image degrade safely with unchanged textNodes.
+        let missingLinkXHTML = #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title><link rel="stylesheet" href="../Styles/missing.css"/></head><body><p>T</p></body></html>"#
+        let missingLinkDoc = try EPUBContentPolicy.sanitizeXHTML(
+            data: Data(missingLinkXHTML.utf8),
+            path: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            spineSet: ["OPS/Text/ch1.xhtml"],
+            destination: root
+        )
+        #expect(missingLinkDoc.textNodes == ["T"])
+        #expect(missingLinkDoc.referencedFonts.isEmpty)
+        #expect(missingLinkDoc.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing], usesReaderLayout: false))
+        #expect(!String(decoding: missingLinkDoc.xhtmlData, as: UTF8.self).contains("data-yj-style-fallback"))
+
+        let missingInlineBgXHTML = #"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body><p style="background: url(../Images/unknown.png); color: #123456;">T</p></body></html>"#
+        let missingInlineBgDoc = try EPUBContentPolicy.sanitizeXHTML(
+            data: Data(missingInlineBgXHTML.utf8),
+            path: "OPS/Text/ch1.xhtml",
+            manifestByPath: manifest,
+            spineSet: ["OPS/Text/ch1.xhtml"],
+            destination: root
+        )
+        let missingInlineText = String(decoding: missingInlineBgDoc.xhtmlData, as: UTF8.self)
+        #expect(missingInlineBgDoc.textNodes == ["T"])
+        #expect(missingInlineText.contains("color: #123456"))
+        #expect(!missingInlineText.contains("unknown.png"))
+        #expect(!missingInlineText.contains("data-yj-style-fallback"))
+        #expect(missingInlineBgDoc.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing], usesReaderLayout: false))
         // 5. External CSS exceeding 1 MiB budget -> limitExceeded
         try FileManager.default.createDirectory(at: root.appendingPathComponent("OPS/Styles"), withIntermediateDirectories: true)
         let bigCSS = Data(repeating: 0x20, count: EPUBAuthorStyles.maxExternalCSSBytes + 1)

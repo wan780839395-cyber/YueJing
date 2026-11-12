@@ -19,6 +19,7 @@ struct EncodingChoiceView: View {
                             Text(card.title).font(.headline)
                             Text(card.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                             Button("使用这份文字") { select(card.encoding) }.buttonStyle(.borderedProminent)
+                                .accessibilityLabel("使用\(card.title)编码的文字")
                         }
                         .padding().background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                     }

@@ -15,6 +15,23 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published var preferences = ReaderPreferences()
     @Published private(set) var readingMode: EPUBReadingMode
     @Published private(set) var layoutMode: EPUBLayoutMode
+    @Published private(set) var styleCompatibility: EPUBStyleCompatibility?
+    @Published private(set) var runtimeFontFallback = false
+    @Published private var compatibilityNoticeDismissed = false
+
+    var effectiveLayoutMode: EPUBLayoutMode { layoutMode.effective(for: styleCompatibility) }
+    var compatibilitySummary: String? {
+        guard runtimeFontFallback || styleCompatibility?.issues.isEmpty == false else { return nil }
+        if effectiveLayoutMode == .reader {
+            return "部分作者样式不可用，当前使用阅读器兼容排版；已保留你的排版偏好。"
+        }
+        if runtimeFontFallback || styleCompatibility?.issues.contains(.fontUnavailable) == true {
+            return "部分作者字体不可用，已使用替代字体；其余安全样式保留。"
+        }
+        return "部分作者样式不可用，已安全简化；正文和阅读位置保留。"
+    }
+    var compatibilityNotice: String? { compatibilityNoticeDismissed ? nil : compatibilitySummary }
+    func dismissCompatibilityNotice() { compatibilityNoticeDismissed = true }
     @Published private(set) var loading = true
     @Published private(set) var ready = false
     @Published private(set) var exitSaveFailed = false
@@ -152,6 +169,7 @@ final class EPUBReaderViewModel: ObservableObject {
             preferences = opened.preferences.validated
             EPUBPresentationThemeHint.remember(preferences.theme)
             let package = opened.publication.package
+            styleCompatibility = package.styleCompatibility
             spine = package.spine
             if package.navigation.isEmpty {
                 navigationItems = package.spine.enumerated().map { index, path in
@@ -388,7 +406,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 preserveTargetAnchor: preserveTargetAnchor,
                 reloadDocument: reloadDocument,
                 startAtEnd: startAtEnd,
-                readingMode: readingMode, layoutMode: layoutMode
+                readingMode: readingMode, layoutMode: effectiveLayoutMode
             )
             // Do not wait for SwiftUI reconciliation to revoke the old viewport epoch.
             if let request = navigationRequest { webView.controller?.apply(request) }
@@ -427,6 +445,7 @@ final class EPUBReaderViewModel: ObservableObject {
             if navigationRequest?.preserveViewport == true {
                 ready = true
                 loading = false
+                runtimeFontFallback = runtimeFontFallback || payload.authorStyleFallback
                 return
             }
             let node = payload.restoredNode
@@ -473,6 +492,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     self.currentPosition = position
                     self.ready = true
                     self.loading = false
+                    self.runtimeFontFallback = self.runtimeFontFallback || payload.authorStyleFallback
                     if let started = self.openingStarted {
                         self.openingObservation.becameReady(expectedToken)
                         self.openingPresentationSummary = self.openingObservation.summary
@@ -517,6 +537,7 @@ final class EPUBReaderViewModel: ObservableObject {
             ) else {
                 return
             }
+            runtimeFontFallback = runtimeFontFallback || payload.authorStyleFallback
             currentPosition = position
             hasUserPosition = true
             sequence += 1
@@ -583,7 +604,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     id: UUID(), token: token, publication: reader.publication,
                     targetPosition: nil, fragment: nil, preferences: self.preferences.validated,
                     preserveTargetAnchor: false, reloadDocument: false,
-                    readingMode: self.readingMode, preserveViewport: true, layoutMode: self.layoutMode
+                    readingMode: self.readingMode, preserveViewport: true, layoutMode: self.effectiveLayoutMode
                 )
                 // Apply immediately: SwiftUI updates may arrive after the user exits the page.
                 if let request = self.navigationRequest { self.webView.controller?.apply(request) }
@@ -866,6 +887,9 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     static func safeFailureMessage(_ error: Error) -> String {
+        if error is EPUBStyleProcessingError {
+            return "作者样式复杂度超过安全处理范围，暂无法安全完成排版；原书和进度已保留。"
+        }
         if let libError = error as? LibraryError {
             return libError.errorDescription ?? "读取未完成，原书和已保存位置已保留。"
         }

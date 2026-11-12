@@ -14,6 +14,8 @@ struct EPUBSettingsView: View {
     @Binding var layoutMode: EPUBLayoutMode
     let changed: @MainActor () -> Void
     var openingSummary: String?
+    var effectiveLayoutMode: EPUBLayoutMode?
+    var compatibilitySummary: String?
     let runtimeDiagnostics: (@MainActor () async -> String)?
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
@@ -33,6 +35,8 @@ struct EPUBSettingsView: View {
         layoutMode: Binding<EPUBLayoutMode>,
         changed: @escaping @MainActor () -> Void,
         openingSummary: String? = nil,
+        effectiveLayoutMode: EPUBLayoutMode? = nil,
+        compatibilitySummary: String? = nil,
         runtimeDiagnostics: (@MainActor () async -> String)? = nil,
         isActive: @escaping @MainActor () -> Bool,
         close: @escaping @MainActor () -> Void,
@@ -43,6 +47,8 @@ struct EPUBSettingsView: View {
         _layoutMode = layoutMode
         self.changed = changed
         self.openingSummary = openingSummary
+        self.effectiveLayoutMode = effectiveLayoutMode
+        self.compatibilitySummary = compatibilitySummary
         self.runtimeDiagnostics = runtimeDiagnostics
         self.isActive = isActive
         self.close = close
@@ -82,6 +88,11 @@ struct EPUBSettingsView: View {
                         .accessibilityIdentifier("epub.layoutMode")
                         Text("原始排版保留安全支持的作者样式与未混淆字体；夜间背景优先保障可读性。复杂版式可能简化。")
                             .font(.caption).foregroundStyle(appearance.foreground.opacity(0.78))
+                        if let compatibilitySummary {
+                            Text(compatibilitySummary)
+                                .font(.caption).foregroundStyle(appearance.foreground)
+                                .accessibilityIdentifier("epub.compatibility.summary")
+                        }
                     }
                     ReaderSettingsSection(title: "阅读方式", detail: "切换后保留当前文本位置", appearance: appearance) {
                         Picker("阅读方式", selection: $readingMode) {
@@ -93,9 +104,9 @@ struct EPUBSettingsView: View {
                         .disabled(!isActive())
                         .accessibilityIdentifier("epub.readingMode")
                     }
-                    typographySection.disabled(layoutMode == .original)
+                    typographySection.disabled((effectiveLayoutMode ?? layoutMode) == .original)
                     themeSection
-                    presetsSection.disabled(layoutMode == .original)
+                    presetsSection.disabled((effectiveLayoutMode ?? layoutMode) == .original)
                     epubScopeSection
                     moreSection
                     Text("当前版本：\(AppVersion.current.displayText)")

@@ -3313,7 +3313,7 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "cb749e62b4b468d7077cceaaba7bcd626294a269",
+        "dc2a687b3bd72c5609fbc15858fd01491e436631",
         "0.2.16",
         "18",
     )
@@ -3324,6 +3324,13 @@ def run_checks(root):
         src = r.verify_source(pending=os.environ.get("GITHUB_ACTIONS") != "true", prior_validation_run=os.environ.get("PRIOR_VALIDATION_RUN", ""))
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
+        selection = src["selected_summary"]
+        assert selection["selected_declarations"] == 98 and selection["planned_executions"] == 99
+        assert selection["kind_declarations"] == {"domain": 78, "host": 17, "ui": 3}
+        assert len(selection["selected_files"]) == 13
+        for rel, cases in selection["selected_files"].items():
+            assert cases == r.inventory.FILES[rel].split(), "Frozen file group is incomplete: " + rel
+        passed("frozen P2 exact full-file selection: 98 declarations / 99 executions")
 
     wf_status = "skipped_workflow_not_wired_yet"
     wf_text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding="utf-8")

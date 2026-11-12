@@ -106,6 +106,21 @@ struct EPUBReaderScreen: View {
 
                 VStack(spacing: 0) {
                     titleBar(metrics: metrics, appearance: appearance)
+                    if model.ready && !model.loading && tools.valid && tools.panel == nil,
+                       let notice = model.compatibilityNotice {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(notice).font(.footnote).fixedSize(horizontal: false, vertical: true)
+                            Button(action: model.dismissCompatibilityNotice) {
+                                Image(systemName: "xmark").frame(width: 44, height: 44)
+                            }
+                            .accessibilityLabel("关闭兼容排版提示")
+                        }
+                        .padding(.leading, 12)
+                        .background(appearance.surface, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal, 12)
+                        .padding(.top, 6)
+                        .accessibilityIdentifier("epub.compatibility.notice")
+                    }
                     Spacer(minLength: 0)
                 }
             }
@@ -236,6 +251,8 @@ struct EPUBReaderScreen: View {
                         }
                     },
                     openingSummary: model.diagnosticOpeningSummary,
+                    effectiveLayoutMode: model.effectiveLayoutMode,
+                    compatibilitySummary: model.compatibilitySummary,
                     runtimeDiagnostics: {
                         await model.webView.controller?.performanceSummary() ?? "阅读器已释放。"
                     },

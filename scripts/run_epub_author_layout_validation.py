@@ -39,12 +39,14 @@ _DEFAULT_OUT = OUT
 SCOPE_CONFIG_JSON = SCRIPT_DIR / "epub_author_layout_scope.json"
 
 SCOPE = "epub-author-layout"
-BASE = "cb749e62b4b468d7077cceaaba7bcd626294a269"
+BASE = "dc2a687b3bd72c5609fbc15858fd01491e436631"
 VERSION, BUILD = "0.2.16", "18"
 REPO = "wan780839395-cyber/YueJing"
 WORKFLOW_ID = 398234793
 WORKFLOW_PATH = ".github/workflows/task3-validate.yml"
 
+# Historical reuse constants below describe their original 83/84 selection only.
+# The current frozen selection is read from scope JSON; old baselines fail source validation.
 PRIOR_RUN_ID = "43153993787"
 PRIOR_SOURCE_COMMIT = "bc7c904ad5648268e451ba9635c7bdbf9dc9a23b"
 PRIOR_ARTIFACT_ID = 13915617831

@@ -536,7 +536,7 @@ extension LibraryStore {
         guard let ready = package.ready, package.sourceSHA256 == bookID,
               package.versionID == previous.package.versionID else { throw EPUBError.corruptResource }
         try EPUBReadyArtifact.validate(ready, package: package)
-        if previous.package.authorStyleRevision == nil {
+        if previous.package.needsAuthorStyleUpgrade {
             try EPUBAuthorStyleMigration.validate(previous: previous.package, replacement: package)
         } else {
             guard package == previous.package.withReady(ready) else { throw EPUBError.corruptResource }

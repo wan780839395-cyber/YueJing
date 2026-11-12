@@ -418,7 +418,9 @@ extension EPUBContentPool {
             guard package.sourceSHA256 == expected.sourceSHA256, package.parserVersion == expected.parserVersion,
                   package.title == expected.title, package.spine == expected.spine,
                   package.navigation == expected.navigation, package.resources == expected.resources,
-                  package.coverPath == expected.coverPath else { throw EPUBError.corruptResource }
+                  package.coverPath == expected.coverPath,
+                  package.authorStyleRevision == expected.authorStyleRevision,
+                  package.styleCompatibility == expected.styleCompatibility else { throw EPUBError.corruptResource }
             for path in package.spine {
                 guard let nodes = package.textNodes[path], let chapter = reference.chapters[path],
                       EPUBResourceStore.digest(try JSONEncoder().encode(nodes)) == chapter.sha256 else { throw EPUBError.corruptResource }
