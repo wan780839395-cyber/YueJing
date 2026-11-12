@@ -1395,7 +1395,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Bind this source and exact targeted inventory without historical qualification
+      - name: Bind this source and exact targeted inventory with optional pinned prior
         id: scope
         run: |
           set -euo pipefail
@@ -1432,9 +1432,18 @@ jobs:
             -clonedSourcePackagesDirPath build/SourcePackages 2>&1 | tee artifacts/task3/dependency-resolution.log
           python3 -B scripts/validate_task3.py resolved
 
+      - name: Verify and preserve immutable prior evidence when requested
+        id: reuse
+        if: ${{ !cancelled() && inputs.prior_validation_run != '' && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/run_epub_author_layout_validation.py reuse 2>&1 | tee artifacts/task3/reuse-evidence-check.log
+
       - name: Select installed arm64 simulator and verify test settings
         id: simulator
-        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' && (inputs.prior_validation_run == '' || steps.reuse.outcome == 'success') }}
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > artifacts/task3/devices.json
@@ -1469,9 +1478,9 @@ jobs:
           assert code == 0 and not timed_out, 'Selected simulator did not become ready'
           PY
 
-      - name: Run all selected groups and retain independent failures
+      - name: Run selected fresh groups and retain independent failures
         id: tests
-        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' && (inputs.prior_validation_run == '' || steps.reuse.outcome == 'success') }}
         run: |
           set -euo pipefail
           python3 -u -B scripts/run_epub_author_layout_validation.py run-all \
@@ -1483,16 +1492,16 @@ jobs:
 
       - name: Verify actual simulator WebKit linkage
         id: simulator_linkage
-        if: ${{ !cancelled() && steps.boot.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.boot.outcome == 'success' && (inputs.prior_validation_run == '' || steps.reuse.outcome == 'success') }}
         run: |
           set -euo pipefail
           python3 -B scripts/check_webkit_linkage.py \
             --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
             --output artifacts/task3/webkit-simulator-linkage
 
-      - name: Require fresh strict native qualification
+      - name: Require strict native qualification across fresh and any reused groups
         id: native_gate
-        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.dependencies.outcome == 'success' && (inputs.prior_validation_run == '' || steps.reuse.outcome == 'success') }}
         run: python3 -B scripts/run_epub_author_layout_validation.py gate
 
       - name: Compile actual unsigned iPhoneOS arm64 Release independently
@@ -1538,10 +1547,23 @@ jobs:
           out.mkdir(parents=True, exist_ok=True)
           outcomes = {key: value['outcome'] for key, value in json.loads(os.environ['STEP_RESULTS']).items()}
           receipt = out / 'author-layout-package.json'
+          gate_path = out / 'author-layout-gate.json'
           package = json.loads(receipt.read_text()) if outcomes.get('package') == 'success' and receipt.is_file() else None
-          result = dict(source_commit=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
-                        run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], steps=outcomes,
-                        package_qualification=package['qualification'] if package else 'NOT_DELIVERABLE')
+          gate = json.loads(gate_path.read_text()) if gate_path.is_file() else None
+          result = dict(
+              source_commit=os.environ['GITHUB_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'],
+              run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+              prior_validation_run=os.environ.get('PRIOR_VALIDATION_RUN', ''),
+              steps=outcomes,
+              fresh_native_executed=(gate or {}).get('native_tests_executed_this_run'),
+              reused_declarations=(gate or {}).get('reused_declarations'),
+              reused_native_passed=(gate or {}).get('reused_native_passed'),
+              verified_declarations=(gate or {}).get('verified_declarations'),
+              verified_passed=(gate or {}).get('verified_passed'),
+              prior_reuse_proof_sha256=(gate or {}).get('prior_reuse_proof_sha256'),
+              package_qualification=package['qualification'] if package else 'NOT_DELIVERABLE',
+          )
           (out / 'delivery-summary.json').write_text(json.dumps(result, indent=2))
           with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as stream:
               stream.write('\n## Author layout outcomes\n\n```json\n' + json.dumps(result, indent=2) + '\n```\n')
@@ -1568,6 +1590,7 @@ jobs:
             artifacts/task3/app-dependency-gate.json
             artifacts/task3/ipa-verification.json
             artifacts/task3/author-layout-package.json
+            artifacts/task3/author-layout-gate.json
             artifacts/task3/author-layout-scope.json
             artifacts/task3/case-results.json
             artifacts/task3/delivery-summary.json

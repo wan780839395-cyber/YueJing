@@ -96,7 +96,7 @@ struct EPUBAuthorStylesTests {
         #expect(sanitizedText.contains("<body data-yj-author-scope=\"\(expectedScope)\""))
         #expect(sanitizedText.contains("class=\"book-body yj-i-0\""))
         #expect(!sanitizedText.contains("yj-spoof"))
-        #expect(!sanitizedText.contains("style=\""))
+        #expect(!sanitizedText.contains(" style=\""))
         #expect(!sanitizedText.contains("<link"))
         #expect(sanitizedText.contains("<span id=\"yj-t0\">Title &amp; Heading</span>"))
         #expect(sanitizedText.contains("<span id=\"yj-t1\">First line.</span>"))
@@ -219,7 +219,7 @@ struct EPUBAuthorStylesTests {
         #expect(style1.contains("url(\"/OPS/Fonts/Book%20A.ttf\") format(\"truetype\")"))
         #expect(style1.contains("font-family: \"yjfont-\(scope1)-0\""))
         #expect(style1.contains("font: italic 1.1em/1.5 \"yjfont-\(scope1)-0\", \"Georgia\", serif"))
-        #expect(style1.contains(".yj-i-0 { font-family: \"yjfont-\(scope1)-0\", serif; }"))
+        #expect(style1.contains(".yj-i-0:not(#yj-inline-a#yj-inline-b) { font-family: \"yjfont-\(scope1)-0\", serif; }"))
         #expect(!style1.contains("SharedBookFont"))
         #expect(!style1.contains(scope2))
 
@@ -303,7 +303,7 @@ struct EPUBAuthorStylesTests {
             #"p { background: \75rl("http://evil.invalid/track.png"); }"#,
             #"p { width: \65 xpression(alert(1)); }"#,
             #"p { background: url("\6a avascript:alert(1)"); }"#,
-            #"p { background: url("java\tscript:alert(1)"); }"#,
+            #"p { background: url("java\9 script:alert(1)"); }"#,
             #"p { background: url("data:text/css,body{}"); }"#,
             #"p { background: url("yjepub://other/pic.png"); }"#,
             #"@\69 mport "good.css";"#,
@@ -331,6 +331,17 @@ struct EPUBAuthorStylesTests {
                     destination: root
                 )
             }
+        }
+
+        // CSS \t escapes the literal letter t, not a tab: the unknown scheme is still rejected.
+        #expect(throws: EPUBError.unsafePath) {
+            _ = try EPUBAuthorStyles.sanitizeStylesheet(
+                #"p { background: url("java\tscript:alert(1)"); }"#,
+                sourcePath: "OPS/Styles/good.css",
+                documentPath: "OPS/Text/ch1.xhtml",
+                manifestByPath: manifest,
+                destination: root
+            )
         }
 
         // 2. Path traversal in CSS URL -> unsafePath
@@ -738,6 +749,8 @@ struct EPUBAuthorStylesTests {
                 qualifiedName qName: String?,
                 attributes attributeDict: [String: String] = [:]
             ) {
+                // Check the parsed attribute name, not a substring of the trusted style marker.
+                #expect(attributeDict["style"] == nil)
                 if elementName.lowercased() == "style", attributeDict["data-yj-author-style"] == "true" {
                     capturing = true
                     current = ""

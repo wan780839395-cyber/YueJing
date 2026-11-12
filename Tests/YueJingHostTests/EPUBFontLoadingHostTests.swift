@@ -359,7 +359,7 @@ struct EPUBFontLoadingHostTests {
             return receipt
         }
 
-        func withHostedController(
+        @MainActor func withHostedController(
             _ controller: EPUBWebViewController,
             _ body: @MainActor () async throws -> Void
         ) async throws {

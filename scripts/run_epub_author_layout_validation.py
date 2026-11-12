@@ -5,23 +5,25 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import signal
 import subprocess
 import sys
-
+import tempfile
+import zipfile
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import audit_native_case_events as audit
 import package_ipa
+import reuse_native_evidence as rne
 import run_epub_compat_validation as compat
 import run_epub_freeze_validation as freeze
 import run_epub_paging_validation as paging
 import run_epub_reading_validation as reading
 import task3_test_inventory as inventory
 import validate_task3 as v
-
 require = compat.require
 load = compat.load_json
 write = compat.write_new
@@ -31,6 +33,7 @@ digest_bytes = compat.digest_bytes
 git_blob_sha1 = compat.git_blob_sha1
 
 ROOT = v.ROOT
+_DEFAULT_ROOT = ROOT
 OUT = v.OUT
 _DEFAULT_OUT = OUT
 SCOPE_CONFIG_JSON = SCRIPT_DIR / "epub_author_layout_scope.json"
@@ -41,6 +44,41 @@ VERSION, BUILD = "0.2.16", "18"
 REPO = "wan780839395-cyber/YueJing"
 WORKFLOW_ID = 398234793
 WORKFLOW_PATH = ".github/workflows/task3-validate.yml"
+
+PRIOR_RUN_ID = "43153993787"
+PRIOR_SOURCE_COMMIT = "bc7c904ad5648268e451ba9635c7bdbf9dc9a23b"
+PRIOR_ARTIFACT_ID = 13915617831
+PRIOR_ARTIFACT_NAME = f"task3-evidence-{PRIOR_RUN_ID}-{PRIOR_SOURCE_COMMIT}"
+PRIOR_ARTIFACT_SHA256 = "7e634f5140f1a088b93b68a542b8d4cedfd369dbf1ad5d5c29987961eb503cad"
+
+ELIGIBLE_PRIOR_REUSE_GROUPS = frozenset({
+    "domain-1",
+    "domain-3",
+    "domain-4",
+    "domain-5",
+    "domain-6",
+    "domain-7",
+    "domain-8",
+})
+PRIOR_REUSED_DECLARATIONS = 55
+PRIOR_REUSED_EXECUTIONS = 56
+FRESH_WITH_PRIOR_DECLARATIONS = 28
+FRESH_WITH_PRIOR_EXECUTIONS = 28
+TOTAL_TARGET_DECLARATIONS = 83
+TOTAL_TARGET_EXECUTIONS = 84
+
+PRIOR_REUSE_CHANGED_TEST_PINS = frozenset({
+    "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift",
+    "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift",
+})
+PRIOR_REUSE_ALLOWED_DIFF_PATHS = frozenset({
+    "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift",
+    "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift",
+    "scripts/run_epub_author_layout_validation.py",
+    "scripts/check_epub_author_layout_validation.py",
+    ".github/workflows/task3-validate.yml",
+    "scripts/epub_author_layout_scope.json",
+})
 
 QUALIFICATION = "EPUB_AUTHOR_LAYOUT_TARGETED_NATIVE"
 COVERAGE = "EPUB_AUTHOR_LAYOUT_TARGETED_NOT_FULL"
@@ -53,7 +91,9 @@ PACKAGE_JSON = OUT / "author-layout-package.json"
 REPORT_JSON = OUT / "case-results.json"
 REPORT_MD = OUT / "case-results.md"
 NATIVE_OUT = OUT / "epub-author-layout"
-
+REUSED_OUT = OUT / "reused-evidence"
+REUSED_GATE_JSON = REUSED_OUT / "reused-prior-gate.json"
+REUSED_STAGING = ROOT / "build/reused-downloads"
 INVOCATION_TIMEOUT_SECONDS = 480
 CASE_TIMEOUT_SECONDS = 180
 BOOT_TIMEOUT_SECONDS = 120
@@ -80,6 +120,19 @@ def _out_path(current, rel):
     return current if current != _DEFAULT_OUT / rel else OUT / rel
 
 
+def _reused_out():
+    return _out_path(REUSED_OUT, "reused-evidence")
+
+
+def _reused_gate_json():
+    default_gate = _DEFAULT_OUT / "reused-evidence/reused-prior-gate.json"
+    if REUSED_GATE_JSON != default_gate:
+        return REUSED_GATE_JSON
+    return _reused_out() / "reused-prior-gate.json"
+
+
+def _reused_staging():
+    return REUSED_STAGING if REUSED_STAGING != _DEFAULT_ROOT / "build/reused-downloads" else ROOT / "build/reused-downloads"
 def _safe_rel_path(value, label="path"):
     require(isinstance(value, str) and bool(value), f"Empty or non-string {label}")
     require(not value.startswith("/") and "\\" not in value and ":" not in value, f"Unsafe {label}: {value!r}")
@@ -102,9 +155,8 @@ def _candidate_files(root=ROOT):
     return {p.relative_to(root).as_posix(): sha(p) for p in sorted(paths)}
 
 
-def load_scope_config(path=None):
-    cfg_path = Path(path) if path is not None else SCOPE_CONFIG_JSON
-    cfg = load(cfg_path)
+def normalize_scope_config(cfg):
+    require(isinstance(cfg, dict), "Scope config must be a JSON object")
     required_keys = {"baseline", "scope", "version", "build", "allowed_paths", "candidate_sha256", "selected_files"}
     require(required_keys <= set(cfg), "Missing required fields in scope config")
     require(cfg["baseline"] == BASE, f"Scope baseline mismatch: {cfg.get('baseline')!r}")
@@ -162,6 +214,10 @@ def load_scope_config(path=None):
     }
 
 
+def load_scope_config(path=None):
+    cfg_path = Path(path) if path is not None else SCOPE_CONFIG_JSON
+    return normalize_scope_config(load(cfg_path))
+
 def build_groups(config):
     """Group by non-UI file; UI is always one case per group."""
     groups = {}
@@ -205,6 +261,39 @@ def build_groups(config):
             }
     require(groups, "No execution groups constructed")
     return groups
+def _planned_group_executions(spec):
+    return sum(len(inventory.PARAMETERIZED.get(case, {}).get("values", [None])) for case in spec["cases"])
+
+
+def partition_groups(groups, prior_validation_run=""):
+    if not prior_validation_run:
+        return list(groups), []
+    require(prior_validation_run == PRIOR_RUN_ID,
+            f"Only prior validation run {PRIOR_RUN_ID} is authorized for bounded reuse")
+    require(ELIGIBLE_PRIOR_REUSE_GROUPS <= set(groups),
+            "Selected scope groups missing eligible prior reuse groups")
+    reused_ids = [g for g in groups if g in ELIGIBLE_PRIOR_REUSE_GROUPS]
+    fresh_ids = [g for g in groups if g not in ELIGIBLE_PRIOR_REUSE_GROUPS]
+    require(len(reused_ids) == len(ELIGIBLE_PRIOR_REUSE_GROUPS) == 7 and len(fresh_ids) == 7,
+            f"Unexpected fresh/reused group partition: {len(fresh_ids)}/{len(reused_ids)}")
+    for g in reused_ids:
+        spec = groups[g]
+        require(spec["kind"] == "domain" and ("Tests/" + spec["file"]) not in PRIOR_REUSE_CHANGED_TEST_PINS,
+                f"Changed or non-domain group cannot be reused: {g}")
+    reused_decl = sum(len(groups[g]["cases"]) for g in reused_ids)
+    reused_exec = sum(_planned_group_executions(groups[g]) for g in reused_ids)
+    fresh_decl = sum(len(groups[g]["cases"]) for g in fresh_ids)
+    fresh_exec = sum(_planned_group_executions(groups[g]) for g in fresh_ids)
+    require(
+        reused_decl == PRIOR_REUSED_DECLARATIONS
+        and reused_exec == PRIOR_REUSED_EXECUTIONS
+        and fresh_decl == FRESH_WITH_PRIOR_DECLARATIONS
+        and fresh_exec == FRESH_WITH_PRIOR_EXECUTIONS
+        and reused_decl + fresh_decl == TOTAL_TARGET_DECLARATIONS
+        and reused_exec + fresh_exec == TOTAL_TARGET_EXECUTIONS,
+        f"Bounded reuse partition counts mismatch: fresh={fresh_decl}/{fresh_exec}, reused={reused_decl}/{reused_exec}",
+    )
+    return fresh_ids, reused_ids
 
 
 def validate_selected_cases(config, root=ROOT):
@@ -254,6 +343,29 @@ def _git_is_ancestor(base, head, root=ROOT):
     ).returncode == 0
 
 
+def _parse_git_status(status_bytes, *, pending, allowed_paths):
+    raw_status = status_bytes.decode("utf-8") if isinstance(status_bytes, (bytes, bytearray)) else str(status_bytes)
+    working_allowed = set()
+    for entry in raw_status.split("\0"):
+        if not entry:
+            continue
+        require(len(entry) > 3 and entry[2] == " ", "Malformed git status entry")
+        xy, path_str = entry[:2], entry[3:]
+        if "R" in xy or "C" in xy:
+            raise ValueError("Renamed/copied path is not approved: " + path_str)
+        if "D" in xy:
+            raise ValueError("Deleted path is not approved: " + path_str)
+        if not pending:
+            raise ValueError("Clean committed source required; dirty/untracked path: " + path_str)
+        if path_str in PROTECTED_LOCAL_UNRELATED:
+            continue
+        if xy == "??" and path_str in PRIVATE_LOCAL_UNTRACKED:
+            continue
+        require(path_str in allowed_paths, "Unapproved working-tree or untracked change: " + path_str)
+        working_allowed.add(path_str)
+    return working_allowed
+
+
 def validate_scope_boundaries(
     previous,
     current,
@@ -288,25 +400,7 @@ def validate_scope_boundaries(
     require(committed_changed <= allowed,
             "Committed changes outside allowed_paths: " + repr(sorted(committed_changed - allowed)))
 
-    raw_status = status_bytes.decode("utf-8") if isinstance(status_bytes, (bytes, bytearray)) else str(status_bytes)
-    working_allowed = set()
-    for entry in raw_status.split("\0"):
-        if not entry:
-            continue
-        require(len(entry) > 3 and entry[2] == " ", "Malformed git status entry")
-        xy, path_str = entry[:2], entry[3:]
-        if "R" in xy or "C" in xy:
-            raise ValueError("Renamed/copied path is not approved: " + path_str)
-        if "D" in xy:
-            raise ValueError("Deleted path is not approved: " + path_str)
-        if not pending:
-            raise ValueError("Clean committed source required; dirty/untracked path: " + path_str)
-        if path_str in PROTECTED_LOCAL_UNRELATED:
-            continue
-        if xy == "??" and path_str in PRIVATE_LOCAL_UNTRACKED:
-            continue
-        require(path_str in allowed, "Unapproved working-tree or untracked change: " + path_str)
-        working_allowed.add(path_str)
+    working_allowed = _parse_git_status(status_bytes, pending=pending, allowed_paths=allowed)
 
     if not pending:
         require(head != BASE, "HEAD must advance beyond BASE")
@@ -369,7 +463,99 @@ def validate_scope_boundaries(
     }
 
 
-def verify_source(*, pending=False, root=ROOT):
+def validate_prior_source_compatibility(
+    prior_tree,
+    current_tree,
+    prior_config,
+    current_config,
+    *,
+    head,
+    is_prior_ancestor,
+    status_bytes=b"",
+    pending=False,
+    prior_candidate_files=None,
+    current_candidate_files=None,
+    prior_inventory=None,
+    current_inventory=None,
+):
+    require(not pending or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud cannot use pending source")
+    require(isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)), "Invalid HEAD commit")
+    require(is_prior_ancestor is True, f"Prior source commit {PRIOR_SOURCE_COMMIT} is not an ancestor of HEAD")
+    if not pending:
+        require(head != PRIOR_SOURCE_COMMIT, "HEAD must advance beyond prior source commit for reuse")
+    require(isinstance(prior_tree, dict) and isinstance(current_tree, dict) and prior_tree and current_tree,
+            "Invalid prior/current git tree")
+    require(
+        all(
+            isinstance(meta, list)
+            and len(meta) >= 3
+            and meta[:2] == ["100644", "blob"]
+            and re.fullmatch(r"[0-9a-f]{40}", meta[2])
+            for meta in current_tree.values()
+        ),
+        "Nonregular tracked input in HEAD",
+    )
+    deleted = set(prior_tree) - set(current_tree)
+    require(not deleted, "Tracked files deleted since prior run: " + repr(sorted(deleted)))
+    added = set(current_tree) - set(prior_tree)
+    require(not added, "Unexpected new files added since prior run: " + repr(sorted(added)))
+
+    committed_changed = {p for p in set(prior_tree) | set(current_tree) if prior_tree.get(p) != current_tree.get(p)}
+    require(
+        committed_changed <= PRIOR_REUSE_ALLOWED_DIFF_PATHS,
+        "Committed changes from prior source outside allowed repair boundary: "
+        + repr(sorted(committed_changed - PRIOR_REUSE_ALLOWED_DIFF_PATHS)),
+    )
+
+    working_allowed = _parse_git_status(status_bytes, pending=pending, allowed_paths=PRIOR_REUSE_ALLOWED_DIFF_PATHS)
+    if not pending:
+        require(committed_changed, "No committed changes relative to prior source commit")
+        changed = committed_changed
+    else:
+        changed = committed_changed | working_allowed
+        require(changed <= PRIOR_REUSE_ALLOWED_DIFF_PATHS,
+                "Pending changes outside prior reuse diff boundary: "
+                + repr(sorted(changed - PRIOR_REUSE_ALLOWED_DIFF_PATHS)))
+
+    for field in ("baseline", "scope", "version", "build", "allowed_paths", "selected_files"):
+        require(prior_config[field] == current_config[field],
+                f"Scope config {field} changed since prior run")
+    require(set(prior_config["candidate_sha256"]) == set(current_config["candidate_sha256"]),
+            "Scope candidate_sha256 keys changed since prior run")
+    changed_pins = {
+        path_str for path_str in current_config["candidate_sha256"]
+        if current_config["candidate_sha256"][path_str] != prior_config["candidate_sha256"][path_str]
+    }
+    require(
+        changed_pins <= PRIOR_REUSE_CHANGED_TEST_PINS,
+        "Changed candidate_sha256 outside repaired test files: "
+        + repr(sorted(changed_pins - PRIOR_REUSE_CHANGED_TEST_PINS)),
+    )
+
+    if prior_candidate_files is not None and current_candidate_files is not None:
+        require(set(prior_candidate_files) == set(current_candidate_files),
+                "Candidate file inventory changed since prior run")
+        changed_cand = {
+            path_str for path_str in current_candidate_files
+            if current_candidate_files[path_str] != prior_candidate_files[path_str]
+        }
+        require(
+            changed_cand <= PRIOR_REUSE_ALLOWED_DIFF_PATHS,
+            "Production/build/helper/reused-test candidate bytes changed since prior run: "
+            + repr(sorted(changed_cand - PRIOR_REUSE_ALLOWED_DIFF_PATHS)),
+        )
+
+    if prior_inventory is not None and current_inventory is not None:
+        require(prior_inventory == current_inventory, "Reviewed inventory changed since prior run")
+
+    return {
+        "prior_source_commit": PRIOR_SOURCE_COMMIT,
+        "changed_from_prior": sorted(changed),
+        "changed_test_pins": sorted(changed_pins),
+    }
+
+
+def verify_source(*, pending=False, root=ROOT, prior_validation_run=""):
     root = Path(root)
     require(not pending or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud cannot use pending source")
     cfg_path = SCOPE_CONFIG_JSON if root == ROOT else root / "scripts/epub_author_layout_scope.json"
@@ -393,7 +579,7 @@ def verify_source(*, pending=False, root=ROOT):
         pending=pending,
         root=root,
     )
-    return {
+    result = {
         "scope": SCOPE,
         "baseline_commit": BASE,
         "version": VERSION,
@@ -403,6 +589,24 @@ def verify_source(*, pending=False, root=ROOT):
         "candidate_sha256": dict(config["candidate_sha256"]),
         "scope_config_sha256": sha(cfg_path),
     }
+    if prior_validation_run:
+        require(prior_validation_run == PRIOR_RUN_ID,
+                f"Only prior validation run {PRIOR_RUN_ID} is authorized for bounded reuse")
+        is_prior_ancestor = _git_is_ancestor(PRIOR_SOURCE_COMMIT, head, root=root)
+        prior_tree = compat.git_tree(PRIOR_SOURCE_COMMIT, root=root)
+        prior_cfg_raw = compat.git("show", f"{PRIOR_SOURCE_COMMIT}:scripts/epub_author_layout_scope.json", root=root)
+        prior_config = normalize_scope_config(json.loads(prior_cfg_raw.decode("utf-8")))
+        result["prior_source_compat"] = validate_prior_source_compatibility(
+            prior_tree,
+            current,
+            prior_config,
+            config,
+            head=head,
+            is_prior_ancestor=is_prior_ancestor,
+            status_bytes=status_bytes,
+            pending=pending,
+        )
+    return result
 
 
 def dispatch_context():
@@ -446,8 +650,13 @@ def dispatch_context():
 
     raw_prior = inputs.get("prior_validation_run", "")
     prior = "" if raw_prior is None else raw_prior
-    require(isinstance(prior, str) and prior == "", "prior_validation_run must be empty (no initial reuse)")
-    require(env.get("PRIOR_VALIDATION_RUN", "") == "", "PRIOR_VALIDATION_RUN must be empty")
+    require(
+        isinstance(prior, str) and prior in ("", PRIOR_RUN_ID),
+        f"prior_validation_run must be empty or pinned {PRIOR_RUN_ID}",
+    )
+    require(env.get("PRIOR_VALIDATION_RUN", "") == prior, "PRIOR_VALIDATION_RUN differs from dispatch")
+    if prior:
+        require(prior != env.get("GITHUB_RUN_ID"), "Self-referential prior_validation_run rejected")
 
     raw_build = inputs.get("build_ipa", False)
     require(type(raw_build) is bool or raw_build in ("true", "false"), "Invalid build_ipa input")
@@ -456,7 +665,7 @@ def dispatch_context():
 
     return {
         "allow_unqualified_ipa": False,
-        "prior_validation_run": "",
+        "prior_validation_run": prior,
         "build_ipa": build_ipa,
         "dispatch_event_sha256": sha(event_path),
     }
@@ -464,15 +673,22 @@ def dispatch_context():
 
 def scope_receipt(root=ROOT):
     root = Path(root)
-    source = verify_source(pending=False, root=root)
     dispatch = dispatch_context()
+    prior = dispatch["prior_validation_run"]
+    source = verify_source(pending=False, root=root, prior_validation_run=prior)
     head = source["source_commit"]
     require(head == os.environ.get("GITHUB_SHA"), "HEAD differs from GITHUB_SHA")
 
     config = load_scope_config(SCOPE_CONFIG_JSON if root == ROOT else root / "scripts/epub_author_layout_scope.json")
     groups = build_groups(config)
+    fresh_ids, reused_ids = partition_groups(groups, prior)
     reviewed = inventory.validate_source(root)
     selected_summary = source["selected_summary"]
+
+    fresh_decl = sum(len(groups[g]["cases"]) for g in fresh_ids)
+    fresh_exec = sum(_planned_group_executions(groups[g]) for g in fresh_ids)
+    reused_decl = sum(len(groups[g]["cases"]) for g in reused_ids)
+    reused_exec = sum(_planned_group_executions(groups[g]) for g in reused_ids)
 
     approved_files = {}
     root_resolved = root.resolve()
@@ -488,7 +704,10 @@ def scope_receipt(root=ROOT):
     return {
         "scope": SCOPE,
         "phase": "validation",
-        "prior_validation_run": "",
+        "prior_validation_run": prior,
+        "prior_source_commit": PRIOR_SOURCE_COMMIT if prior else "",
+        "prior_artifact_id": PRIOR_ARTIFACT_ID if prior else None,
+        "prior_artifact_sha256": PRIOR_ARTIFACT_SHA256 if prior else "",
         "source_commit": head,
         "source_status": "clean",
         "baseline_commit": BASE,
@@ -512,14 +731,21 @@ def scope_receipt(root=ROOT):
         "files": source["candidate_files"],
         "selected_files": selected_summary["selected_files"],
         "selected": {g: list(spec["cases"]) for g, spec in groups.items()},
+        "fresh_groups": fresh_ids,
+        "reused_groups": reused_ids,
+        "fresh_selected": {g: list(groups[g]["cases"]) for g in fresh_ids},
+        "reused_selected": {g: list(groups[g]["cases"]) for g in reused_ids},
         "selected_declarations": selected_summary["selected_declarations"],
         "native_tests_planned": selected_summary["planned_executions"],
+        "fresh_declarations_planned": fresh_decl,
+        "fresh_executions_planned": fresh_exec,
+        "reused_declarations_planned": reused_decl,
+        "reused_executions_planned": reused_exec,
         "full_inventory_declared": reviewed["selected"],
         "full_inventory_executions": reviewed["selected_executions"],
         "physical_acceptance": "not performed",
         "full_regression_passed": False,
     }
-
 
 def write_scope(root=ROOT):
     receipt = scope_receipt(root=root)
@@ -674,7 +900,9 @@ def parameter_result(document, name=None):
     return {"name": name, "passed_arguments": sorted(found)}
 
 
-def parameter_evidence(group, folder, bundle, *, export=False, group_specs=None):
+def parameter_evidence(group, folder, bundle, *, export=False, group_specs=None, verify_native=True):
+    require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true",
+            "Cloud requires live xcresult parameter verification")
     if group_specs is None:
         group_specs = build_groups(load_scope_config())
     param_names = [n for n in group_specs[group]["cases"] if n in inventory.PARAMETERIZED]
@@ -688,7 +916,7 @@ def parameter_evidence(group, folder, bundle, *, export=False, group_specs=None)
             stream.write(raw)
     require(path.is_file() and not path.is_symlink(), "Missing regular xcresult export")
     raw = path.read_bytes()
-    if not export:
+    if not export and verify_native:
         live = xcresult_export(bundle, "tests")
         require(json.loads(live) == json.loads(raw), "xcresult argument export drift")
     doc = json.loads(raw)
@@ -735,7 +963,7 @@ def verify_group_xcresult(spec, bundle, *, exported_folder=None):
 
     def visit(node):
         require(isinstance(node, dict), "Invalid xcresult node")
-        if node.get("nodeType") in ("Test Case", "Arguments"):
+        if node.get("nodeType") in ("Test Case", "Arguments", "Test Suite", "Unit test bundle", "Test Plan"):
             require(node.get("result") == "Passed", "Failed/skipped/incomplete xcresult case")
         labels = [str(node.get(k, "")) for k in ("name", "nodeIdentifier")]
         matched_names = [
@@ -759,8 +987,6 @@ def verify_group_xcresult(spec, bundle, *, exported_folder=None):
         if name in inventory.PARAMETERIZED:
             parameter_result(tests, name)
     return tests
-
-
 def parse_log_for_spec(group, spec, raw, code, timed_out):
     return freeze.parse_log_for_spec(group, spec, raw, code, timed_out)
 
@@ -769,12 +995,858 @@ def parse_log(group, raw, code, timed_out, *, groups=None):
     active_groups = groups if groups is not None else build_groups(load_scope_config())
     require(group in active_groups, "Unknown group: " + str(group))
     return parse_log_for_spec(group, active_groups[group], raw, code, timed_out)
+def github_api_json(suffix):
+    raw = subprocess.check_output(
+        ["gh", "api", "--method", "GET", f"repos/{REPO}{suffix}"],
+        cwd=ROOT,
+        timeout=180,
+    )
+    value = json.loads(raw)
+    require(isinstance(value, dict), "Unexpected GitHub API JSON payload")
+    return value
+
+
+def github_download_artifact_zip(artifact_id, dest_path):
+    require(not dest_path.exists() and not dest_path.is_symlink(), "Existing staging archive; never overwrite")
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with dest_path.open("xb") as target:
+        subprocess.run(
+            ["gh", "api", "--method", "GET", f"repos/{REPO}/actions/artifacts/{artifact_id}/zip"],
+            cwd=ROOT,
+            stdout=target,
+            check=True,
+            timeout=600,
+        )
+
+
+def _select_artifact_from_payload(payload, expected_name, expected_id=None):
+    if isinstance(payload, dict) and isinstance(payload.get("artifacts"), list):
+        candidates = [
+            a for a in payload["artifacts"]
+            if isinstance(a, dict)
+            and (expected_id is None or a.get("id") == expected_id)
+            and a.get("name") == expected_name
+        ]
+        require(len(candidates) == 1, "Expected exactly one matching artifact: " + expected_name)
+        return candidates[0]
+    require(
+        isinstance(payload, dict)
+        and payload.get("name") == expected_name
+        and (expected_id is None or payload.get("id") == expected_id),
+        "Unexpected artifact metadata object",
+    )
+    return payload
+
+
+def safe_zip_members(archive_path):
+    with zipfile.ZipFile(archive_path) as source:
+        infos = source.infolist()
+        require(len(infos) <= 50000, "Evidence archive entry count exceeds bound")
+        for info in infos:
+            require(info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+                    "Unsupported ZIP compression method")
+    members = rne.zip_members(archive_path)
+    with zipfile.ZipFile(archive_path) as source:
+        for info in source.infolist():
+            if not info.is_dir():
+                require(members[info.filename]["bytes"] == info.file_size,
+                        "ZIP header file_size mismatch: " + info.filename)
+    return members
+
+
+def extract_selected_members(zip_path, members, wanted_names, dest_root):
+    dest_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = dest_root.resolve()
+    retained = {}
+    with zipfile.ZipFile(zip_path) as source:
+        for name in sorted(wanted_names):
+            require(name in members, "Missing required archive member: " + name)
+            target = (dest_root / name).resolve()
+            require(target.is_relative_to(resolved_root), "Escaping archive destination: " + name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            data = source.read(name)
+            actual_meta = {"bytes": len(data), "sha256": digest_bytes(data)}
+            require(actual_meta == members[name], "Archive member metadata mismatch: " + name)
+            with target.open("xb") as out_stream:
+                out_stream.write(data)
+            retained[name] = actual_meta
+    return retained
+
+
+def _repo_matches(run, key):
+    repo_obj = run.get(key)
+    require(isinstance(repo_obj, dict) and repo_obj.get("full_name") == REPO,
+            f"Run {key} differs from {REPO}")
+
+
+def validate_prior_run_and_artifact(prior_id, run, artifact, expected_sha, current_run_id):
+    require(isinstance(run, dict) and isinstance(artifact, dict), "Invalid prior API metadata")
+    require(re.fullmatch(r"[1-9][0-9]*", str(prior_id)), "Invalid prior run ID")
+    require(str(prior_id) == PRIOR_RUN_ID, f"Prior run {prior_id} is not pinned {PRIOR_RUN_ID}")
+    require(expected_sha == PRIOR_SOURCE_COMMIT, "Prior source commit differs from pinned commit")
+    require(str(prior_id) != str(current_run_id), "Self-referential prior run rejected")
+    require(
+        run.get("id") == int(PRIOR_RUN_ID)
+        and run.get("head_sha") == PRIOR_SOURCE_COMMIT
+        and run.get("run_attempt") == 1
+        and run.get("workflow_id") == WORKFLOW_ID
+        and run.get("path") == WORKFLOW_PATH
+        and run.get("event") == "workflow_dispatch"
+        and run.get("head_branch") == "main"
+        and run.get("status") == "completed"
+        and run.get("conclusion") in ("failure", "success"),
+        "Unexpected prior validation run identity/state",
+    )
+    _repo_matches(run, "repository")
+    _repo_matches(run, "head_repository")
+    wf_run = artifact.get("workflow_run")
+    digest_value = artifact.get("digest")
+    size_value = artifact.get("size_in_bytes")
+    require(
+        isinstance(wf_run, dict)
+        and artifact.get("id") == PRIOR_ARTIFACT_ID
+        and artifact.get("expired") is False
+        and artifact.get("name") == PRIOR_ARTIFACT_NAME
+        and wf_run.get("id") == int(PRIOR_RUN_ID)
+        and wf_run.get("head_sha") == PRIOR_SOURCE_COMMIT
+        and type(size_value) is int and 0 < size_value < 4 * 1024**3
+        and isinstance(digest_value, str)
+        and digest_value == "sha256:" + PRIOR_ARTIFACT_SHA256,
+        "Prior artifact provenance/digest mismatch",
+    )
+
+
+def _verify_archive_receipt(folder, *, check_live_api=False, current_run_id=None):
+    require(folder.is_dir() and not folder.is_symlink(), "Missing prior evidence folder: " + str(folder))
+    require(
+        {p.name for p in folder.iterdir()} == {"api-run.json", "api-artifact.json", "archive-receipt.json", "archive.zip", "evidence"},
+        "Unexpected files in retained prior folder: " + str(folder),
+    )
+    for name in ("api-run.json", "api-artifact.json", "archive-receipt.json", "archive.zip"):
+        p = folder / name
+        require(p.is_file() and not p.is_symlink(), "Invalid retained prior file: " + name)
+    run = load(folder / "api-run.json")
+    artifact = load(folder / "api-artifact.json")
+    receipt = load(folder / "archive-receipt.json")
+    validate_prior_run_and_artifact(PRIOR_RUN_ID, run, artifact, PRIOR_SOURCE_COMMIT, current_run_id)
+    require(
+        str(receipt.get("run_id")) == PRIOR_RUN_ID
+        and str(receipt.get("run_attempt")) == "1"
+        and receipt.get("source_commit") == PRIOR_SOURCE_COMMIT
+        and receipt.get("artifact_id") == PRIOR_ARTIFACT_ID
+        and receipt.get("artifact_name") == PRIOR_ARTIFACT_NAME
+        and receipt.get("archive_bytes") == artifact.get("size_in_bytes")
+        and receipt.get("archive_sha256") == PRIOR_ARTIFACT_SHA256,
+        "Archive receipt metadata mismatch",
+    )
+    members = receipt.get("members")
+    retained = receipt.get("retained_files")
+    require(
+        isinstance(members, dict)
+        and isinstance(retained, dict)
+        and receipt.get("member_count") == len(members)
+        and members == retained,
+        "Malformed or incomplete retained archive member table",
+    )
+    archive = folder / "archive.zip"
+    require(
+        archive.stat().st_size == receipt["archive_bytes"] and sha(archive) == PRIOR_ARTIFACT_SHA256,
+        "Retained authenticated archive drift",
+    )
+    require(safe_zip_members(archive) == members, "Archive manifest differs from authenticated ZIP bytes")
+    if check_live_api:
+        live_run = github_api_json(f"/actions/runs/{PRIOR_RUN_ID}")
+        live_artifact = github_api_json(f"/actions/artifacts/{PRIOR_ARTIFACT_ID}")
+        validate_prior_run_and_artifact(PRIOR_RUN_ID, live_run, live_artifact, PRIOR_SOURCE_COMMIT, current_run_id)
+        require(
+            live_artifact["digest"] == artifact["digest"]
+            and live_artifact["size_in_bytes"] == artifact["size_in_bytes"],
+            "Live API artifact identity/digest drift",
+        )
+    ev_dir = folder / "evidence"
+    require(ev_dir.is_dir() and not ev_dir.is_symlink(), "Missing retained evidence directory")
+    ev_resolved = ev_dir.resolve()
+    actual_disk = {}
+    for p in sorted(ev_dir.rglob("*")):
+        require(not p.is_symlink() and p.resolve().is_relative_to(ev_resolved), "Unsafe retained path")
+        if p.is_file():
+            rel = p.relative_to(ev_dir).as_posix()
+            actual_disk[rel] = {"bytes": p.stat().st_size, "sha256": sha(p)}
+    require(actual_disk == retained, "Retained evidence files drifted on disk")
+    return run, artifact, receipt
+
+
+def _verify_prior_toolchain_and_deps(ev_dir, expected_packages=None):
+    tool_path = ev_dir / "toolchain.log"
+    gen_path = ev_dir / "xcodegen.log"
+    dep_path = ev_dir / "dependency-resolution.json"
+    require(
+        all(p.is_file() and not p.is_symlink() for p in (tool_path, gen_path, dep_path)),
+        "Missing prior toolchain/xcodegen/dependency receipt",
+    )
+    tool = tool_path.read_text(encoding="utf-8")
+    require(
+        ("Source: " + PRIOR_SOURCE_COMMIT) in tool
+        and all(t in tool for t in ("Xcode 16.4", "Build version 16F6", "Apple Swift version 6.1.2", "arm64")),
+        "Prior toolchain log mismatch",
+    )
+    require(gen_path.read_text(encoding="utf-8").strip() == "Version: 2.46.0", "Prior xcodegen log mismatch")
+    dep = load(dep_path)
+    packages = dep.get("packages")
+    require(isinstance(packages, dict) and set(packages) == {"grdb.swift", "zipfoundation"},
+            "Prior dependency closure mismatch")
+    for identity, expected_dep in compat.epub_batch.DEPENDENCIES.items():
+        pkg = packages.get(identity, {})
+        pkg_meta = pkg.get("package", {})
+        state = pkg_meta.get("state", {})
+        require(
+            pkg_meta.get("location") == expected_dep["url"]
+            and pkg.get("checkout_revision") == expected_dep["revision"]
+            and state.get("revision") == expected_dep["revision"]
+            and state.get("version") == expected_dep["version"]
+            and pkg.get("package_manifest_sha256") == expected_dep["manifest"],
+            "Prior dependency pin/manifest mismatch: " + identity,
+        )
+    resolved_path = ev_dir / "Package.resolved"
+    if resolved_path.exists() or resolved_path.is_symlink():
+        resolved_doc = load(resolved_path)
+        compat.epub_batch.validate_pins(resolved_doc.get("pins"))
+    if expected_packages is not None:
+        require(packages == expected_packages, "Prior dependencies differ from current run")
+    return packages
+
+
+def _verify_prior_simulator_and_linkage(ev_dir, members):
+    sim = load(ev_dir / "simulator-selection.json")
+    udid = sim.get("udid")
+    require(
+        sim.get("physical_device") is False
+        and sim.get("architecture") == "arm64"
+        and isinstance(udid, str)
+        and bool(re.fullmatch(r"[0-9a-fA-F-]{36}", udid))
+        and isinstance(sim.get("device_name"), str)
+        and sim["device_name"].startswith("iPhone"),
+        "Invalid prior simulator selection",
+    )
+    boot = load(ev_dir / "simulator-boot.json")
+    require(
+        boot.get("source_commit") == PRIOR_SOURCE_COMMIT
+        and str(boot.get("run_id")) == PRIOR_RUN_ID
+        and str(boot.get("run_attempt")) == "1"
+        and boot.get("exit_code") == 0
+        and boot.get("timed_out") is False
+        and boot.get("timeout_seconds", BOOT_TIMEOUT_SECONDS) == BOOT_TIMEOUT_SECONDS,
+        "Invalid prior simulator boot receipt",
+    )
+    link_path = ev_dir / "webkit-simulator-linkage/verification.json"
+    record = load(link_path)
+    require(
+        record.get("source_commit") == PRIOR_SOURCE_COMMIT
+        and str(record.get("run_id")) == PRIOR_RUN_ID
+        and str(record.get("run_attempt")) == "1"
+        and record.get("passed") is True
+        and not record.get("errors")
+        and isinstance(record.get("binaries"), list)
+        and bool(record["binaries"]),
+        "Invalid prior simulator WebKit linkage receipt",
+    )
+    for binary in record["binaries"]:
+        ev_rel = "webkit-simulator-linkage/" + str(binary.get("evidence", ""))
+        require(
+            binary.get("passed") is True
+            and binary.get("nm_exit") == 0
+            and members.get(ev_rel, {}).get("sha256") == binary.get("sha256"),
+            "Prior simulator WebKit binary digest mismatch: " + ev_rel,
+        )
+    return sim, sha(link_path)
+
+
+def _verify_reused_domain_settings(folder, ev_dir, current_effective_domain=None):
+    receipt = load(folder / "ReaderDomainTests-settings.json")
+    require(receipt.get("source_commit") == PRIOR_SOURCE_COMMIT, "Reused settings source_commit mismatch")
+    require(bool(re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("scheme_sha256", "")))), "Missing scheme sha256")
+    eff_path = ev_dir / "effective-test-settings.json"
+    eff = load(eff_path)
+    values = eff.get("ReaderDomainTests")
+    compat._validate_domain_effective_settings(values)
+    require(
+        receipt.get("target") == "ReaderDomainTests"
+        and receipt.get("scheme") == "ReaderDomain"
+        and receipt.get("effective_settings_sha256") == sha(eff_path)
+        and receipt.get("testables") == ["ReaderDomainTests"]
+        and receipt.get("settings") == values,
+        "Reused Domain settings receipt mismatch",
+    )
+    if current_effective_domain is not None:
+        require(values == current_effective_domain, "Prior ReaderDomainTests settings differ from current run")
+    return receipt
+
+
+def _verify_reused_domain_group(
+    group,
+    spec,
+    ev_dir,
+    members,
+    prior_destination,
+    *,
+    verify_native=True,
+    current_effective_domain=None,
+):
+    require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true",
+            "Cloud requires live native xcresult verification for reused group")
+    require(
+        group in ELIGIBLE_PRIOR_REUSE_GROUPS
+        and spec["kind"] == "domain"
+        and spec["target"] == "ReaderDomainTests"
+        and ("Tests/" + spec["file"]) not in PRIOR_REUSE_CHANGED_TEST_PINS,
+        "Ineligible group cannot be reused: " + group,
+    )
+    folder = ev_dir / "epub-author-layout" / group
+    require(folder.is_dir() and not folder.is_symlink(), "Missing reused group directory: " + group)
+    require(
+        not (folder / "failure.json").exists() and not (folder / "failure.json").is_symlink(),
+        "Failed prior group cannot qualify for reuse: " + group,
+    )
+    target = spec["target"]
+    bundle = folder / f"{target}.xcresult"
+    bundle_rel = f"epub-author-layout/{group}/{target}.xcresult"
+    require(
+        (bundle / "Info.plist").is_file()
+        and not (bundle / "Info.plist").is_symlink()
+        and (bundle_rel + "/Info.plist") in members
+        and any(m.startswith(bundle_rel + "/Data/") and members[m]["bytes"] > 0 for m in members),
+        "Missing original xcresult bundle proof in prior archive: " + group,
+    )
+
+    selection_rec = load(folder / "selection.json")
+    execution_rec = load(folder / "execution.json")
+    cmd = selection_rec.get("command")
+    require(isinstance(cmd, list) and "-resultBundlePath" in cmd, "Malformed reused selection command: " + group)
+    bundle_arg_idx = cmd.index("-resultBundlePath") + 1
+    require(bundle_arg_idx < len(cmd), "Missing resultBundlePath argument: " + group)
+    bundle_arg = cmd[bundle_arg_idx]
+    arg_parts = PurePosixPath(bundle_arg.replace("\\", "/")).parts
+    require(
+        len(arg_parts) >= 3 and arg_parts[-3:] == ("epub-author-layout", group, f"{target}.xcresult"),
+        "Unexpected resultBundlePath in reused selection: " + group,
+    )
+    want_cmd = command_for_spec(spec, prior_destination, bundle_arg)
+    want = {
+        "scope": SCOPE,
+        "source_commit": PRIOR_SOURCE_COMMIT,
+        "run_id": PRIOR_RUN_ID,
+        "run_attempt": "1",
+        "group": group,
+        "target": target,
+        "file": spec["file"],
+        "destination": prior_destination,
+        "expected_cases": list(spec["cases"]),
+        "command": want_cmd,
+        "timeout_seconds": spec["timeout"],
+        "case_timeout_seconds": spec["case_timeout"],
+    }
+    require(selection_rec == want, "Reused selection provenance mismatch: " + group)
+    require(
+        execution_rec == {**want, "native_exit": 0, "timed_out": False},
+        "Reused execution provenance mismatch: " + group,
+    )
+    _verify_reused_domain_settings(folder, ev_dir, current_effective_domain=current_effective_domain)
+
+    log_path = folder / f"{target}.log"
+    require(log_path.is_file() and not log_path.is_symlink(), "Missing prior raw log: " + group)
+    parsed = parse_log_for_spec(group, spec, log_path.read_bytes(), 0, False)
+
+    saved_tests = verify_group_xcresult(spec, bundle, exported_folder=folder)
+    saved_summary = load(folder / "xcresult-summary.json")
+    if verify_native:
+        live_tests = verify_group_xcresult(spec, bundle, exported_folder=None)
+        require(live_tests == saved_tests, "Prior live xcresult tests differ from saved export: " + group)
+        live_summary = json.loads(xcresult_export(bundle, "summary"))
+        require(live_summary == saved_summary, "Prior live xcresult summary differs from saved export: " + group)
+
+    parsed["parameter_xcresult"] = parameter_evidence(
+        group, folder, bundle, group_specs={group: spec}, verify_native=verify_native
+    )
+    require(
+        json.dumps(load(folder / "counts.json"), sort_keys=True) == json.dumps(parsed, sort_keys=True),
+        "Prior counts receipt differs from raw log events: " + group,
+    )
+    return {
+        "group": group,
+        "target": target,
+        "file": spec["file"],
+        "source_commit": PRIOR_SOURCE_COMMIT,
+        "run_id": PRIOR_RUN_ID,
+        "run_attempt": "1",
+        "declarations_passed": parsed["declarations_passed"],
+        "executions": parsed["executions"],
+        "passed": list(parsed["passed"]),
+        "log_sha256": parsed["log_sha256"],
+        "selection_sha256": sha(folder / "selection.json"),
+        "execution_sha256": sha(folder / "execution.json"),
+        "counts_sha256": sha(folder / "counts.json"),
+        "settings_sha256": sha(folder / "ReaderDomainTests-settings.json"),
+        "xcresult_tests_sha256": sha(folder / "xcresult-tests.json"),
+        "xcresult_summary_sha256": sha(folder / "xcresult-summary.json"),
+        "parameter_xcresult": parsed["parameter_xcresult"],
+    }
+
+
+def _compute_prior_proof_digest(payload):
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return digest_bytes(canonical)
+
+
+def inspect_prior_evidence(
+    prior_root,
+    scope,
+    *,
+    root=ROOT,
+    expected_packages=None,
+    current_effective_domain=None,
+    check_shared_sources=True,
+    verify_native=True,
+    check_live_api=False,
+):
+    """Strictly requalify the seven eligible passing Domain groups from pinned prior run 43153993787."""
+    require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true",
+            "Cloud requires live xcresult bundle parsing for prior reuse")
+    require(check_shared_sources or os.environ.get("GITHUB_ACTIONS") != "true",
+            "Cloud requires prior source compatibility verification")
+    root = Path(root)
+    prior_root = Path(prior_root)
+    run, artifact, receipt = _verify_archive_receipt(
+        prior_root,
+        check_live_api=check_live_api,
+        current_run_id=scope.get("run_id"),
+    )
+    members = receipt["members"]
+    ev_dir = prior_root / "evidence"
+
+    require(not any(p.startswith("reused-evidence/") for p in members), "Recursive prior reuse chain is forbidden")
+    forbidden_prior_gates = set(MIXED_QUALIFICATION_FILES) | {
+        "author-layout-gate.json",
+        "author-layout-package.json",
+    }
+    require(not (forbidden_prior_gates & set(members)), "Mixed or pre-existing gate/package in prior archive")
+    require(
+        not (ev_dir / "case-scheduling-error.json").exists()
+        and not (ev_dir / "case-scheduling-error.json").is_symlink(),
+        "Prior scheduling error prevents reuse",
+    )
+
+    cfg_path = SCOPE_CONFIG_JSON if root == ROOT else root / "scripts/epub_author_layout_scope.json"
+    current_cfg = load_scope_config(cfg_path)
+    groups = build_groups(current_cfg)
+    fresh_ids, reused_ids = partition_groups(groups, PRIOR_RUN_ID)
+    current_inventory = inventory.validate_source(root)
+
+    prior_scope = load(ev_dir / "author-layout-scope.json")
+    expected_prior_scope = {
+        "scope": SCOPE,
+        "phase": "validation",
+        "prior_validation_run": "",
+        "source_commit": PRIOR_SOURCE_COMMIT,
+        "source_status": "clean",
+        "baseline_commit": BASE,
+        "run_id": PRIOR_RUN_ID,
+        "run_attempt": "1",
+        "repository": REPO,
+        "ref": "refs/heads/main",
+        "workflow_id": WORKFLOW_ID,
+        "workflow_path": WORKFLOW_PATH,
+        "version": VERSION,
+        "build": BUILD,
+        "allow_unqualified_ipa": False,
+        "allowed_paths": current_cfg["allowed_paths"],
+        "selected_files": current_cfg["selected_files"],
+        "selected": {g: list(spec["cases"]) for g, spec in groups.items()},
+        "selected_declarations": TOTAL_TARGET_DECLARATIONS,
+        "native_tests_planned": TOTAL_TARGET_EXECUTIONS,
+        "full_inventory_declared": current_inventory["selected"],
+        "full_inventory_executions": current_inventory["selected_executions"],
+    }
+    for key, val in expected_prior_scope.items():
+        require(
+            key in prior_scope and json.dumps(prior_scope[key], sort_keys=True) == json.dumps(val, sort_keys=True),
+            f"Prior scope field mismatch: {key}",
+        )
+    require(type(prior_scope.get("build_ipa")) is bool, "Prior scope missing valid build_ipa flag")
+
+    raw_event_path = ev_dir / "dispatch-event.json"
+    require(raw_event_path.is_file() and not raw_event_path.is_symlink(), "Prior run missing raw dispatch-event.json")
+    require(sha(raw_event_path) == prior_scope.get("dispatch_event_sha256"), "Prior dispatch-event hash mismatch")
+    raw_event = load(raw_event_path)
+    if "ref" in raw_event:
+        require(raw_event["ref"] == "refs/heads/main", "Prior raw dispatch ref mismatch")
+    if "repository" in raw_event:
+        require(isinstance(raw_event["repository"], dict) and raw_event["repository"].get("full_name") == REPO,
+                "Prior raw dispatch repository mismatch")
+    raw_inputs = raw_event.get("inputs")
+    require(
+        isinstance(raw_inputs, dict)
+        and raw_inputs.get("validation_scope") == SCOPE
+        and raw_inputs.get("allow_unqualified_ipa", False) in (False, "false")
+        and raw_inputs.get("prior_validation_run", "") in ("", None),
+        "Prior raw dispatch inputs incompatible",
+    )
+
+    prior_sources = load(ev_dir / "candidate-sources.json")
+    require(
+        prior_sources.get("source_commit") == PRIOR_SOURCE_COMMIT
+        and str(prior_sources.get("run_id")) == PRIOR_RUN_ID
+        and str(prior_sources.get("run_attempt")) == "1"
+        and prior_sources.get("files") == prior_scope.get("files")
+        and prior_sources.get("inventory") == current_inventory,
+        "Prior candidate-sources/inventory provenance mismatch",
+    )
+
+    prior_cfg_from_scope = normalize_scope_config({
+        "baseline": prior_scope["baseline_commit"],
+        "scope": prior_scope["scope"],
+        "version": prior_scope["version"],
+        "build": prior_scope["build"],
+        "allowed_paths": prior_scope["allowed_paths"],
+        "candidate_sha256": prior_scope["candidate_sha256"],
+        "selected_files": prior_scope["selected_files"],
+    })
+    if check_shared_sources:
+        head = compat.git("rev-parse", "HEAD", root=root).decode("utf-8").strip()
+        is_prior_ancestor = _git_is_ancestor(PRIOR_SOURCE_COMMIT, head, root=root)
+        prior_tree = compat.git_tree(PRIOR_SOURCE_COMMIT, root=root)
+        current_tree = compat.git_tree("HEAD", root=root)
+        status_bytes = compat.git("status", "--porcelain=v1", "-z", "--untracked-files=all", root=root)
+        prior_cfg_raw = compat.git("show", f"{PRIOR_SOURCE_COMMIT}:scripts/epub_author_layout_scope.json", root=root)
+        prior_cfg_git = normalize_scope_config(json.loads(prior_cfg_raw.decode("utf-8")))
+        require(digest_bytes(prior_cfg_raw) == prior_scope.get("scope_config_sha256"),
+                "Prior scope_config_sha256 differs from committed prior config")
+        require(prior_cfg_git == prior_cfg_from_scope,
+                "Prior scope receipt pins differ from committed prior scope config")
+        validate_prior_source_compatibility(
+            prior_tree,
+            current_tree,
+            prior_cfg_git,
+            current_cfg,
+            head=head,
+            is_prior_ancestor=is_prior_ancestor,
+            status_bytes=status_bytes,
+            pending=False,
+            prior_candidate_files=prior_sources.get("files"),
+            current_candidate_files=scope.get("files"),
+            prior_inventory=prior_sources.get("inventory"),
+            current_inventory=current_inventory,
+        )
+    else:
+        validate_prior_source_compatibility(
+            {"stub.swift": ["100644", "blob", "a" * 40]},
+            {"stub.swift": ["100644", "blob", "a" * 40]},
+            prior_cfg_from_scope,
+            current_cfg,
+            head=scope.get("source_commit", "b" * 40),
+            is_prior_ancestor=True,
+            status_bytes=b"",
+            pending=True,
+            prior_candidate_files=prior_sources.get("files"),
+            current_candidate_files=scope.get("files"),
+            prior_inventory=prior_sources.get("inventory"),
+            current_inventory=current_inventory,
+        )
+
+    packages = _verify_prior_toolchain_and_deps(ev_dir, expected_packages=expected_packages)
+    sim, sim_linkage_sha = _verify_prior_simulator_and_linkage(ev_dir, members)
+    prior_destination = "platform=iOS Simulator,id=" + sim["udid"]
+
+    native_prior_dir = ev_dir / "epub-author-layout"
+    require(
+        native_prior_dir.is_dir()
+        and not native_prior_dir.is_symlink()
+        and {p.name for p in native_prior_dir.iterdir()} == set(groups),
+        "Prior archive group inventory mismatch",
+    )
+    for excluded in fresh_ids:
+        ex_dir = native_prior_dir / excluded
+        require(
+            (ex_dir / "failure.json").is_file()
+            and not (ex_dir / "failure.json").is_symlink()
+            and not (ex_dir / "counts.json").exists()
+            and not (ex_dir / "counts.json").is_symlink(),
+            "Excluded failed/blocked prior group has unexpected passing receipt: " + excluded,
+        )
+
+    errors = []
+    reused_group_proofs = []
+    for group in reused_ids:
+        spec = groups[group]
+        try:
+            proof = _verify_reused_domain_group(
+                group,
+                spec,
+                ev_dir,
+                members,
+                prior_destination,
+                verify_native=verify_native,
+                current_effective_domain=current_effective_domain,
+            )
+            reused_group_proofs.append(proof)
+        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            errors.append(f"{group}: {error}")
+
+    reused_passed = [n for g in reused_group_proofs for n in g["passed"]]
+    expected_reused = [n for g in reused_ids for n in groups[g]["cases"]]
+    total_reused_exec = sum(g["executions"] for g in reused_group_proofs)
+    if not errors:
+        if (
+            len(reused_passed) != len(set(reused_passed))
+            or len(reused_passed) != PRIOR_REUSED_DECLARATIONS
+            or set(reused_passed) != set(expected_reused)
+        ):
+            errors.append("Reused declaration identity/count mismatch")
+        if total_reused_exec != PRIOR_REUSED_EXECUTIONS:
+            errors.append("Reused execution count mismatch")
+
+    passed = not errors and len(reused_group_proofs) == len(ELIGIBLE_PRIOR_REUSE_GROUPS)
+    sim_boot_sha = sha(ev_dir / "simulator-boot.json")
+    scope_sha = sha(ev_dir / "author-layout-scope.json")
+    cand_sha = sha(ev_dir / "candidate-sources.json")
+    dep_sha = sha(ev_dir / "dependency-resolution.json")
+    proof_sha = None
+    if passed:
+        proof_sha = _compute_prior_proof_digest({
+            "prior_run_id": PRIOR_RUN_ID,
+            "prior_source_commit": PRIOR_SOURCE_COMMIT,
+            "artifact_id": PRIOR_ARTIFACT_ID,
+            "archive_sha256": PRIOR_ARTIFACT_SHA256,
+            "archive_bytes": receipt["archive_bytes"],
+            "reused_groups": reused_group_proofs,
+            "simulator_linkage_sha256": sim_linkage_sha,
+            "simulator_boot_sha256": sim_boot_sha,
+            "scope_sha256": scope_sha,
+            "candidate_sources_sha256": cand_sha,
+            "dependency_resolution_sha256": dep_sha,
+        })
+
+    return {
+        "run_id": PRIOR_RUN_ID,
+        "run_attempt": "1",
+        "source_commit": PRIOR_SOURCE_COMMIT,
+        "scope": SCOPE,
+        "artifact_id": PRIOR_ARTIFACT_ID,
+        "artifact_name": PRIOR_ARTIFACT_NAME,
+        "archive_bytes": receipt["archive_bytes"],
+        "archive_sha256": PRIOR_ARTIFACT_SHA256,
+        "workflow_conclusion": run.get("conclusion"),
+        "excluded_groups": fresh_ids,
+        "reused_groups": reused_ids,
+        "declarations_passed": len(reused_passed) if passed else None,
+        "executions_passed": total_reused_exec if passed else None,
+        "groups": reused_group_proofs,
+        "packages": packages,
+        "simulator": sim,
+        "simulator_boot_sha256": sim_boot_sha,
+        "simulator_linkage_sha256": sim_linkage_sha,
+        "proof_sha256": proof_sha,
+        "native_bundle_parse": "passed" if (passed and verify_native) else (
+            "failed" if verify_native else "not_executed_local_structural_replay"
+        ),
+        "qualified": passed and verify_native,
+        "passed": passed,
+        "errors": errors,
+    }
+
+
+def _load_offline_run_and_artifact(run_json_path, artifact_json_path, expected_name, expected_id=None):
+    run = load(Path(run_json_path))
+    artifact_payload = load(Path(artifact_json_path))
+    artifact = _select_artifact_from_payload(artifact_payload, expected_name, expected_id=expected_id)
+    return run, artifact
+
+
+def reuse_evidence(*, require_dependencies=True, offline_prior=None, check_shared_sources=True, root=ROOT):
+    """Download/bind immutable run 43153993787 archive, qualify only the 7 passing Domain groups."""
+    require(
+        os.environ.get("GITHUB_ACTIONS") != "true"
+        or (require_dependencies and offline_prior is None and check_shared_sources),
+        "Cloud offline replay/bypass forbidden",
+    )
+    root = Path(root)
+    scope = live_scope(root=root)
+    require(scope["prior_validation_run"] == PRIOR_RUN_ID,
+            f"reuse requires prior_validation_run == {PRIOR_RUN_ID}")
+    expected_packages = (
+        compat.validate_toolchain_and_dependencies(root, OUT, check_live_tools=False)
+        if require_dependencies
+        else None
+    )
+    reused_out = _reused_out()
+    require(not reused_out.exists() and not reused_out.is_symlink(),
+            "Existing reused evidence; use a fresh dispatch")
+
+    if offline_prior is not None:
+        prior_zip = Path(offline_prior["zip_path"])
+        prior_run, prior_artifact = _load_offline_run_and_artifact(
+            offline_prior["run_json"],
+            offline_prior["artifact_json"],
+            PRIOR_ARTIFACT_NAME,
+            expected_id=PRIOR_ARTIFACT_ID,
+        )
+        validate_prior_run_and_artifact(
+            PRIOR_RUN_ID, prior_run, prior_artifact, PRIOR_SOURCE_COMMIT, scope["run_id"]
+        )
+    else:
+        prior_run = github_api_json(f"/actions/runs/{PRIOR_RUN_ID}")
+        prior_art_payload = github_api_json(f"/actions/artifacts/{PRIOR_ARTIFACT_ID}")
+        prior_artifact = _select_artifact_from_payload(
+            prior_art_payload, PRIOR_ARTIFACT_NAME, expected_id=PRIOR_ARTIFACT_ID
+        )
+        validate_prior_run_and_artifact(
+            PRIOR_RUN_ID, prior_run, prior_artifact, PRIOR_SOURCE_COMMIT, scope["run_id"]
+        )
+        prior_zip = _reused_staging() / f"prior-{PRIOR_RUN_ID}.zip"
+        github_download_artifact_zip(PRIOR_ARTIFACT_ID, prior_zip)
+
+    require(
+        prior_zip.is_file()
+        and not prior_zip.is_symlink()
+        and prior_zip.stat().st_size == prior_artifact["size_in_bytes"]
+        and sha(prior_zip) == PRIOR_ARTIFACT_SHA256,
+        "Prior archive size/SHA256 mismatch",
+    )
+    prior_members = safe_zip_members(prior_zip)
+
+    reused_out.mkdir(parents=True)
+    prior_dir = reused_out / f"prior-{PRIOR_RUN_ID}"
+    prior_dir.mkdir()
+    with (prior_dir / "archive.zip").open("xb") as dst, prior_zip.open("rb") as src:
+        shutil.copyfileobj(src, dst)
+    write(prior_dir / "api-run.json", prior_run)
+    write(prior_dir / "api-artifact.json", prior_artifact)
+    retained_prior = extract_selected_members(prior_zip, prior_members, set(prior_members), prior_dir / "evidence")
+    write(
+        prior_dir / "archive-receipt.json",
+        {
+            "run_id": PRIOR_RUN_ID,
+            "run_attempt": "1",
+            "source_commit": PRIOR_SOURCE_COMMIT,
+            "artifact_id": PRIOR_ARTIFACT_ID,
+            "artifact_name": PRIOR_ARTIFACT_NAME,
+            "archive_bytes": prior_artifact["size_in_bytes"],
+            "archive_sha256": PRIOR_ARTIFACT_SHA256,
+            "member_count": len(prior_members),
+            "members": prior_members,
+            "retained_files": retained_prior,
+        },
+    )
+
+    current_eff_path = OUT / "effective-test-settings.json"
+    current_effective_domain = (
+        load(current_eff_path).get("ReaderDomainTests") if current_eff_path.is_file() else None
+    )
+    prior_summary = inspect_prior_evidence(
+        prior_dir,
+        scope,
+        root=root,
+        expected_packages=expected_packages,
+        current_effective_domain=current_effective_domain,
+        check_shared_sources=check_shared_sources,
+        verify_native=True,
+        check_live_api=os.environ.get("GITHUB_ACTIONS") == "true",
+    )
+    gate_receipt = {
+        "scope": SCOPE,
+        "phase": "validation",
+        "source_commit": scope["source_commit"],
+        "run_id": scope["run_id"],
+        "run_attempt": "1",
+        "prior_validation_run": PRIOR_RUN_ID,
+        "prior_source_commit": PRIOR_SOURCE_COMMIT,
+        "prior_artifact_id": PRIOR_ARTIFACT_ID,
+        "prior_artifact_sha256": PRIOR_ARTIFACT_SHA256,
+        "provenance_valid": True,
+        "passed": prior_summary["passed"],
+        "qualified": prior_summary["qualified"],
+        "reused_declarations": PRIOR_REUSED_DECLARATIONS if prior_summary["passed"] else None,
+        "reused_executions": PRIOR_REUSED_EXECUTIONS if prior_summary["passed"] else None,
+        "reused_native_passed": PRIOR_REUSED_EXECUTIONS if prior_summary["passed"] else None,
+        "proof_sha256": prior_summary["proof_sha256"],
+        "errors": prior_summary["errors"],
+        "prior": prior_summary,
+    }
+    write(_reused_gate_json(), gate_receipt)
+    require(
+        prior_summary["passed"] and prior_summary["qualified"],
+        "Prior validation run reuse verification failed: " + "; ".join(prior_summary["errors"]),
+    )
+    return gate_receipt
+
+
+def verify_prior_reuse_saved(
+    scope,
+    packages,
+    *,
+    current_effective_domain=None,
+    root=ROOT,
+    check_shared_sources=True,
+    check_live_api=None,
+):
+    reused_out = _reused_out()
+    reused_gate_path = _reused_gate_json()
+    prior_dir = reused_out / f"prior-{PRIOR_RUN_ID}"
+    require(
+        reused_out.is_dir()
+        and not reused_out.is_symlink()
+        and {p.name for p in reused_out.iterdir()} == {prior_dir.name, reused_gate_path.name},
+        "Missing or extra entries in reused-evidence directory",
+    )
+    require(reused_gate_path.is_file() and not reused_gate_path.is_symlink(),
+            "Missing reused-prior-gate.json")
+    saved = load(reused_gate_path)
+    live_api = (os.environ.get("GITHUB_ACTIONS") == "true") if check_live_api is None else check_live_api
+    prior_summary = inspect_prior_evidence(
+        prior_dir,
+        scope,
+        root=root,
+        expected_packages=packages,
+        current_effective_domain=current_effective_domain,
+        check_shared_sources=check_shared_sources,
+        verify_native=True,
+        check_live_api=live_api,
+    )
+    expected_gate = {
+        "scope": SCOPE,
+        "phase": "validation",
+        "source_commit": scope["source_commit"],
+        "run_id": scope["run_id"],
+        "run_attempt": "1",
+        "prior_validation_run": PRIOR_RUN_ID,
+        "prior_source_commit": PRIOR_SOURCE_COMMIT,
+        "prior_artifact_id": PRIOR_ARTIFACT_ID,
+        "prior_artifact_sha256": PRIOR_ARTIFACT_SHA256,
+        "provenance_valid": True,
+        "passed": True,
+        "qualified": True,
+        "reused_declarations": PRIOR_REUSED_DECLARATIONS,
+        "reused_executions": PRIOR_REUSED_EXECUTIONS,
+        "reused_native_passed": PRIOR_REUSED_EXECUTIONS,
+        "proof_sha256": prior_summary["proof_sha256"],
+        "errors": [],
+        "prior": prior_summary,
+    }
+    require(prior_summary["passed"] and prior_summary["qualified"],
+            "Prior evidence failed strict requalification: " + "; ".join(prior_summary["errors"]))
+    require(json.dumps(saved, sort_keys=True) == json.dumps(expected_gate, sort_keys=True),
+            "Reused prior gate receipt drift")
+    return expected_gate
 
 
 def run_group(group, destination, *, checked_scope=None, groups=None):
     scope = checked_scope if checked_scope is not None else live_scope()
     active_groups = groups if groups is not None else build_groups(load_scope_config())
     require(group in active_groups, "Unknown group: " + str(group))
+    if scope.get("prior_validation_run"):
+        require(
+            group in scope.get("fresh_groups", []),
+            f"Group {group} is reused from prior run {scope['prior_validation_run']} and cannot execute freshly",
+        )
     spec = active_groups[group]
     if checked_scope is None:
         compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
@@ -818,7 +1890,7 @@ def run_group(group, destination, *, checked_scope=None, groups=None):
 
 
 def run_all(destination):
-    """Execute independent groups, isolate shared compile blocks per kind, and never retry."""
+    """Execute fresh selected groups independently, isolate shared compile blocks per kind, and never retry."""
     native_out = _out_path(NATIVE_OUT, "epub-author-layout")
     require(not native_out.exists() and not native_out.is_symlink(),
             "Existing native evidence; do not retry/overwrite cases")
@@ -831,13 +1903,21 @@ def run_all(destination):
     signal.signal(signal.SIGTERM, cancelled)
     try:
         scope = live_scope()
-        compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
+        packages = compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=True)
         compat.validate_destination(destination, OUT)
         groups = build_groups(load_scope_config())
+        fresh_ids, _ = partition_groups(groups, scope.get("prior_validation_run", ""))
+        if scope.get("prior_validation_run"):
+            eff_path = OUT / "effective-test-settings.json"
+            require(eff_path.is_file() and not eff_path.is_symlink(), "Missing effective-test-settings.json")
+            current_eff = load(eff_path).get("ReaderDomainTests")
+            compat._validate_domain_effective_settings(current_eff)
+            verify_prior_reuse_saved(scope, packages, current_effective_domain=current_eff, root=ROOT)
         native_out.mkdir()
         summarize()
         blocked = {}
-        for group, spec in groups.items():
+        for group in fresh_ids:
+            spec = groups[group]
             if spec["kind"] in blocked:
                 folder = native_out / group
                 folder.mkdir()
@@ -879,7 +1959,13 @@ def run_all(destination):
             finally:
                 summarize()
         result = summarize()
-        return all(row["status"] == "passed" for row in result["cases"])
+        fresh_rows = [row for row in result["cases"] if row.get("execution_origin", "fresh") == "fresh"]
+        fresh_ok = bool(fresh_rows) and all(row["status"] == "passed" for row in fresh_rows)
+        reused_ok = not scope.get("prior_validation_run") or (
+            result.get("reused_native_passed") == PRIOR_REUSED_EXECUTIONS
+            and (result.get("prior_reuse") or {}).get("status") == "passed"
+        )
+        return fresh_ok and reused_ok
     except (Exception, KeyboardInterrupt) as error:
         sched_path = OUT / "case-scheduling-error.json"
         if not sched_path.exists():
@@ -926,6 +2012,97 @@ def _inspect_group_raw_events(spec, raw_bytes):
         return {n: "ambiguous" for n in names}, arg_rows
 
 
+def _summarize_prior_reuse(prior_id, scope):
+    if not prior_id:
+        return None
+    if prior_id != PRIOR_RUN_ID:
+        return {
+            "status": "failed",
+            "run_id": prior_id,
+            "source_commit": None,
+            "artifact_id": None,
+            "archive_sha256": None,
+            "proof_sha256": None,
+            "declarations_passed": None,
+            "executions_passed": None,
+            "verified_groups": [],
+            "error": f"Unsupported prior_validation_run: {prior_id!r}",
+        }
+    reused_gate_path = _reused_gate_json()
+    prior_dir = _reused_out() / f"prior-{PRIOR_RUN_ID}"
+    if not reused_gate_path.exists() and not prior_dir.exists():
+        return {
+            "status": "not_verified",
+            "run_id": PRIOR_RUN_ID,
+            "source_commit": PRIOR_SOURCE_COMMIT,
+            "artifact_id": PRIOR_ARTIFACT_ID,
+            "archive_sha256": PRIOR_ARTIFACT_SHA256,
+            "proof_sha256": None,
+            "declarations_passed": None,
+            "executions_passed": None,
+            "verified_groups": [],
+            "error": "尚未核验前置 run 43153993787 证据",
+        }
+    try:
+        reused_gate = _optional_json(reused_gate_path)
+        require(reused_gate is not None, "Missing reused-prior-gate.json")
+        require(
+            reused_gate.get("scope") == SCOPE
+            and reused_gate.get("prior_validation_run") == PRIOR_RUN_ID
+            and reused_gate.get("prior_source_commit") == PRIOR_SOURCE_COMMIT
+            and reused_gate.get("prior_artifact_id") == PRIOR_ARTIFACT_ID
+            and reused_gate.get("prior_artifact_sha256") == PRIOR_ARTIFACT_SHA256
+            and reused_gate.get("passed") is True
+            and reused_gate.get("qualified") is True,
+            "Reused prior gate receipt did not qualify",
+        )
+        if scope:
+            require(
+                reused_gate.get("source_commit") == scope.get("source_commit")
+                and str(reused_gate.get("run_id")) == str(scope.get("run_id")),
+                "Reused gate source/run identity mismatch",
+            )
+        summary = inspect_prior_evidence(
+            prior_dir,
+            scope or {"run_id": os.environ.get("GITHUB_RUN_ID", ""), "source_commit": os.environ.get("GITHUB_SHA", "")},
+            root=ROOT,
+            expected_packages=None,
+            current_effective_domain=None,
+            check_shared_sources=False,
+            verify_native=(sys.platform == "darwin"),
+            check_live_api=False,
+        )
+        require(summary["passed"], "; ".join(summary["errors"]) or "Prior inspection failed")
+        require(reused_gate.get("proof_sha256") == summary["proof_sha256"], "Prior proof digest drift")
+        require((reused_gate.get("prior") or {}).get("native_bundle_parse") == "passed",
+                "Prior native xcresult bundle parse not verified")
+        return {
+            "status": "passed",
+            "run_id": PRIOR_RUN_ID,
+            "source_commit": PRIOR_SOURCE_COMMIT,
+            "artifact_id": PRIOR_ARTIFACT_ID,
+            "archive_sha256": PRIOR_ARTIFACT_SHA256,
+            "proof_sha256": summary["proof_sha256"],
+            "declarations_passed": summary["declarations_passed"],
+            "executions_passed": summary["executions_passed"],
+            "verified_groups": [g["group"] for g in summary["groups"]],
+            "error": None,
+        }
+    except (ValueError, OSError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
+        return {
+            "status": "failed",
+            "run_id": PRIOR_RUN_ID,
+            "source_commit": PRIOR_SOURCE_COMMIT,
+            "artifact_id": PRIOR_ARTIFACT_ID,
+            "archive_sha256": PRIOR_ARTIFACT_SHA256,
+            "proof_sha256": None,
+            "declarations_passed": None,
+            "executions_passed": None,
+            "verified_groups": [],
+            "error": str(error),
+        }
+
+
 def summarize(*, publish=False):
     """Diagnostic per-case & inventory summary; qualification() independently validates everything."""
     config = load_scope_config()
@@ -936,6 +2113,23 @@ def summarize(*, publish=False):
         scope = _optional_json(_out_path(SCOPE_JSON, "author-layout-scope.json"))
     except (ValueError, OSError):
         scope = None
+
+    prior_id = (scope or {}).get("prior_validation_run")
+    if prior_id is None:
+        prior_id = os.environ.get("PRIOR_VALIDATION_RUN", "")
+    if prior_id:
+        if prior_id == PRIOR_RUN_ID and ELIGIBLE_PRIOR_REUSE_GROUPS <= set(groups):
+            try:
+                fresh_ids, reused_ids = partition_groups(groups, PRIOR_RUN_ID)
+            except ValueError:
+                fresh_ids = [g for g in groups if g not in ELIGIBLE_PRIOR_REUSE_GROUPS]
+                reused_ids = [g for g in groups if g in ELIGIBLE_PRIOR_REUSE_GROUPS]
+        else:
+            fresh_ids = [g for g in groups if g not in ELIGIBLE_PRIOR_REUSE_GROUPS]
+            reused_ids = [g for g in groups if g in ELIGIBLE_PRIOR_REUSE_GROUPS]
+    else:
+        fresh_ids, reused_ids = list(groups), []
+    reused_set = set(reused_ids)
 
     reviewed = None
     try:
@@ -949,13 +2143,65 @@ def summarize(*, publish=False):
     except (ValueError, OSError) as error:
         scheduling = {"error": str(error)}
 
+    prior_reuse_summary = _summarize_prior_reuse(prior_id, scope)
+    reused_ok = bool(prior_reuse_summary and prior_reuse_summary["status"] == "passed")
+
     case_rows = []
     group_rows = []
     for group, spec in groups.items():
-        folder = native_out / group
         target = spec["target"]
         cases = list(spec["cases"])
         planned_exec = sum(len(inventory.PARAMETERIZED.get(c, {}).get("values", [None])) for c in cases)
+
+        if group in reused_set:
+            reused_group_ok = reused_ok and group in prior_reuse_summary["verified_groups"]
+            if reused_group_ok:
+                st = "reused"
+                raw_st = "reused_passed"
+                rsn = f"严格复用自前置运行 {PRIOR_RUN_ID}（提交 {PRIOR_SOURCE_COMMIT[:7]}）；未在本轮重跑"
+            elif prior_reuse_summary and prior_reuse_summary["status"] == "failed":
+                st = "error"
+                raw_st = "reused_failed"
+                rsn = "前置复用核验失败：" + (prior_reuse_summary.get("error") or "未知错误")
+            else:
+                st = "not_verified"
+                raw_st = "not_verified"
+                rsn = (prior_reuse_summary or {}).get("error") or "尚未核验前置复用证据"
+            for case in cases:
+                case_exec = len(inventory.PARAMETERIZED.get(case, {}).get("values", [None]))
+                case_rows.append({
+                    "group": group,
+                    "target": target,
+                    "file": spec["file"],
+                    "case": case,
+                    "kind": spec["kind"],
+                    "execution_origin": "reused_prior",
+                    "source_commit": PRIOR_SOURCE_COMMIT,
+                    "run_id": prior_id,
+                    "planned_executions": case_exec,
+                    "raw_event_status": raw_st,
+                    "native_exit": 0 if reused_group_ok else None,
+                    "timed_out": False if reused_group_ok else None,
+                    "status": st,
+                    "reason": rsn,
+                })
+            group_rows.append({
+                "group": group,
+                "target": target,
+                "file": spec["file"],
+                "kind": spec["kind"],
+                "execution_origin": "reused_prior",
+                "source_commit": PRIOR_SOURCE_COMMIT,
+                "run_id": prior_id,
+                "declared": len(cases),
+                "planned_executions": planned_exec,
+                "native_exit": 0 if reused_group_ok else None,
+                "timed_out": False if reused_group_ok else None,
+                "status": st,
+            })
+            continue
+
+        folder = native_out / group
         execution = failure = counts_doc = None
         raw_bytes = None
         read_error = None
@@ -1017,6 +2263,9 @@ def summarize(*, publish=False):
                 "file": spec["file"],
                 "case": case,
                 "kind": spec["kind"],
+                "execution_origin": "fresh",
+                "source_commit": (scope or {}).get("source_commit") or os.environ.get("GITHUB_SHA"),
+                "run_id": (scope or {}).get("run_id") or os.environ.get("GITHUB_RUN_ID"),
                 "planned_executions": case_exec,
                 "raw_event_status": raw_status,
                 "native_exit": execution.get("native_exit") if execution else None,
@@ -1079,6 +2328,9 @@ def summarize(*, publish=False):
             "target": target,
             "file": spec["file"],
             "kind": spec["kind"],
+            "execution_origin": "fresh",
+            "source_commit": (scope or {}).get("source_commit") or os.environ.get("GITHUB_SHA"),
+            "run_id": (scope or {}).get("run_id") or os.environ.get("GITHUB_RUN_ID"),
             "declared": len(cases),
             "planned_executions": planned_exec,
             "native_exit": execution.get("native_exit") if execution else None,
@@ -1096,12 +2348,29 @@ def summarize(*, publish=False):
             if row["status"] == "not_run":
                 row.update(status="blocked", reason=scheduling["error"])
 
-    status_keys = ("passed", "failed", "skipped", "timed_out", "unfinished", "ambiguous", "unexecuted", "blocked", "error", "not_run")
+    status_keys = (
+        "passed", "reused", "failed", "skipped", "timed_out",
+        "unfinished", "ambiguous", "unexecuted", "blocked", "error",
+        "not_run", "not_verified",
+    )
     counts = {k: sum(r["status"] == k for r in case_rows) for k in status_keys}
     selected_set = {r["case"] for r in case_rows}
     selected_decl = len(case_rows)
     planned_exec_total = sum(r["planned_executions"] for r in case_rows)
-    all_passed = counts["passed"] == selected_decl and selected_decl > 0
+    fresh_rows = [r for r in case_rows if r["execution_origin"] == "fresh"]
+    reused_rows = [r for r in case_rows if r["execution_origin"] == "reused_prior"]
+    fresh_decl_total = len(fresh_rows)
+    fresh_exec_total = sum(r["planned_executions"] for r in fresh_rows)
+    reused_decl_total = len(reused_rows)
+    reused_exec_total = sum(r["planned_executions"] for r in reused_rows)
+
+    all_fresh_passed = counts["passed"] == fresh_decl_total and fresh_decl_total > 0
+    all_reused_verified = (not prior_id) or (reused_ok and counts["reused"] == reused_decl_total)
+    fresh_exec_passed = fresh_exec_total if all_fresh_passed else None
+    reused_exec_passed = reused_exec_total if (prior_id and all_reused_verified) else (0 if not prior_id else None)
+    reused_decl_passed = reused_decl_total if (prior_id and all_reused_verified) else (0 if not prior_id else None)
+    verified_exec_total = (fresh_exec_total + reused_exec_total) if (all_fresh_passed and all_reused_verified) else None
+    verified_decl_total = (fresh_decl_total + reused_decl_total) if (all_fresh_passed and all_reused_verified) else None
 
     inventory_targets = []
     if reviewed is not None:
@@ -1126,15 +2395,28 @@ def summarize(*, publish=False):
     report = {
         "scope": SCOPE,
         "phase": "validation",
+        "prior_validation_run": prior_id,
+        "prior_source_commit": PRIOR_SOURCE_COMMIT if prior_id else "",
+        "prior_artifact_id": PRIOR_ARTIFACT_ID if prior_id else None,
+        "prior_artifact_sha256": PRIOR_ARTIFACT_SHA256 if prior_id else "",
+        "prior_reuse_proof_sha256": prior_reuse_summary.get("proof_sha256") if reused_ok else None,
         "source_commit": (scope or {}).get("source_commit") or os.environ.get("GITHUB_SHA"),
         "run_id": (scope or {}).get("run_id") or os.environ.get("GITHUB_RUN_ID"),
         "selected_declarations": selected_decl,
         "planned_executions": planned_exec_total,
-        "native_tests_executed_this_run": planned_exec_total if all_passed else None,
-        "verified_passed": planned_exec_total if all_passed else None,
+        "fresh_declarations_planned": fresh_decl_total,
+        "fresh_executions_planned": fresh_exec_total,
+        "reused_declarations_planned": reused_decl_total,
+        "reused_executions_planned": reused_exec_total,
+        "native_tests_executed_this_run": fresh_exec_passed,
+        "reused_native_passed": reused_exec_passed,
+        "reused_declarations": reused_decl_passed,
+        "verified_passed": verified_exec_total,
+        "verified_declarations": verified_decl_total,
         "counts": counts,
         "groups": group_rows,
         "cases": case_rows,
+        "prior_reuse": prior_reuse_summary,
         "inventory_targets": inventory_targets,
         "full_inventory_declared": full_decl,
         "full_inventory_executions": full_exec,
@@ -1148,17 +2430,30 @@ def summarize(*, publish=False):
     def cell(val):
         return str(val).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "&#124;").replace("\n", " ").replace("\r", " ")
 
+    if prior_id:
+        proof_label = (prior_reuse_summary or {}).get("proof_sha256") or "unverified"
+        summary_line = (
+            f"Selected: {selected_decl} declarations ({planned_exec_total} planned executions): "
+            f"fresh this run {fresh_decl_total} declarations ({fresh_exec_total} executions); "
+            f"reused from run {prior_id} (source {PRIOR_SOURCE_COMMIT}, artifact {PRIOR_ARTIFACT_ID}, "
+            f"proof {proof_label}) {reused_decl_total} declarations ({reused_exec_total} executions). "
+            "Not full regression."
+        )
+    else:
+        summary_line = f"Selected: {selected_decl} declarations ({planned_exec_total} planned executions). Not full regression."
+
     lines = [
         f"## EPUB author layout targeted validation ({SCOPE})",
         "",
-        f"Selected: {selected_decl} declarations ({planned_exec_total} planned executions). Not full regression.",
+        summary_line,
         "",
-        "| Group | Case | Status | Raw Event | Reason |",
-        "|---|---|---|---|---|",
+        "| Group | Origin | Case | Status | Raw Event | Reason |",
+        "|---|---|---|---|---|---|",
     ]
     for row in case_rows:
+        origin = f"reused:{row['run_id']}" if row["execution_origin"] == "reused_prior" else "fresh"
         lines.append(
-            f"| {cell(row['group'])} | {cell(row['case'])} | {cell(row['status'])} | "
+            f"| {cell(row['group'])} | {cell(origin)} | {cell(row['case'])} | {cell(row['status'])} | "
             f"{cell(row['raw_event_status'])} | {cell(row['reason'])} |"
         )
     if inventory_targets:
@@ -1218,8 +2513,12 @@ def validate_linkage(kind, scope):
 
 def qualification():
     scope = live_scope()
-    require(scope["scope"] == SCOPE and scope["allow_unqualified_ipa"] is False and scope["prior_validation_run"] == "",
-            "Scope/diagnostic/reuse invariant violation")
+    require(
+        scope["scope"] == SCOPE
+        and scope["allow_unqualified_ipa"] is False
+        and scope["prior_validation_run"] in ("", PRIOR_RUN_ID),
+        "Scope/diagnostic/reuse invariant violation",
+    )
     require(not any((OUT / name).exists() or (OUT / name).is_symlink() for name in MIXED_QUALIFICATION_FILES),
             "Mixed qualification receipts forbidden")
     packages = compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
@@ -1231,8 +2530,13 @@ def qualification():
 
     config = load_scope_config()
     groups = build_groups(config)
-    require({p.name for p in native_out.iterdir()} == set(groups), "Missing/extra native group folders")
-    require(not any((native_out / g / "failure.json").exists() or (native_out / g / "failure.json").is_symlink() for g in groups),
+    fresh_ids, reused_ids = partition_groups(groups, scope["prior_validation_run"])
+    require(
+        fresh_ids == scope["fresh_groups"] and reused_ids == scope["reused_groups"],
+        "Scope fresh/reused group partition drift",
+    )
+    require({p.name for p in native_out.iterdir()} == set(fresh_ids), "Missing/extra fresh native group folders")
+    require(not any((native_out / g / "failure.json").exists() or (native_out / g / "failure.json").is_symlink() for g in fresh_ids),
             "Failed/blocked/skipped cases cannot qualify")
 
     sim = load(OUT / "simulator-selection.json")
@@ -1249,8 +2553,9 @@ def qualification():
     )
     sim_linkage_sha = validate_linkage("simulator", scope)
 
-    parsed_groups = []
-    for group, spec in groups.items():
+    fresh_parsed_groups = []
+    for group in fresh_ids:
+        spec = groups[group]
         folder = native_out / group
         require(folder.is_dir() and not folder.is_symlink(), "Invalid group directory: " + group)
         bundle = folder / f"{spec['target']}.xcresult"
@@ -1273,13 +2578,59 @@ def qualification():
         parsed["parameter_xcresult"] = parameter_evidence(group, folder, bundle, group_specs=groups)
         require(json.dumps(load(folder / "counts.json"), sort_keys=True) == json.dumps(parsed, sort_keys=True),
                 "Raw events differ from saved counts: " + group)
-        parsed_groups.append(parsed)
+        fresh_parsed_groups.append(parsed)
 
-    all_passed = [n for g in parsed_groups for n in g["passed"]]
+    fresh_passed = [n for g in fresh_parsed_groups for n in g["passed"]]
+    expected_fresh = [n for g in fresh_ids for n in groups[g]["cases"]]
+    require(
+        len(fresh_passed) == len(set(fresh_passed)) == len(expected_fresh) == scope["fresh_declarations_planned"]
+        and set(fresh_passed) == set(expected_fresh),
+        "Fresh passed declaration identities differ",
+    )
+    fresh_exec = sum(g["executions"] for g in fresh_parsed_groups)
+    require(fresh_exec == scope["fresh_executions_planned"], "Fresh execution count differs")
+
+    if scope["prior_validation_run"]:
+        eff_doc = load(OUT / "effective-test-settings.json")
+        current_eff_domain = eff_doc.get("ReaderDomainTests")
+        compat._validate_domain_effective_settings(current_eff_domain)
+        reused_gate = verify_prior_reuse_saved(
+            scope,
+            packages,
+            current_effective_domain=current_eff_domain,
+            root=ROOT,
+        )
+        prior_summary = reused_gate["prior"]
+        reused_passed = [n for g in prior_summary["groups"] for n in g["passed"]]
+        reused_exec = prior_summary["executions_passed"]
+        reused_decl = prior_summary["declarations_passed"]
+        reused_gate_sha = sha(_reused_gate_json())
+        proof_sha = reused_gate["proof_sha256"]
+        require(
+            reused_decl == PRIOR_REUSED_DECLARATIONS == scope["reused_declarations_planned"]
+            and reused_exec == PRIOR_REUSED_EXECUTIONS == scope["reused_executions_planned"],
+            "Reused prior declaration/execution count mismatch",
+        )
+    else:
+        reused_out = _reused_out()
+        require(not reused_out.exists() and not reused_out.is_symlink(),
+                "Unexpected reused-evidence directory without prior_validation_run")
+        prior_summary = None
+        reused_passed = []
+        reused_exec = 0
+        reused_decl = 0
+        reused_gate_sha = None
+        proof_sha = None
+
+    require(not (set(fresh_passed) & set(reused_passed)), "Fresh and reused declaration sets overlap")
+    all_passed = fresh_passed + reused_passed
     expected_all = [n for spec in groups.values() for n in spec["cases"]]
-    require(len(all_passed) == len(set(all_passed)) == len(expected_all) == scope["selected_declarations"]
-            and set(all_passed) == set(expected_all), "Combined passed declaration identities differ")
-    total_exec = sum(g["executions"] for g in parsed_groups)
+    require(
+        len(all_passed) == len(set(all_passed)) == len(expected_all) == scope["selected_declarations"]
+        and set(all_passed) == set(expected_all),
+        "Combined passed declaration identities differ",
+    )
+    total_exec = fresh_exec + reused_exec
     require(total_exec == scope["native_tests_planned"], "Combined execution count differs")
     require(live_scope() == scope, "Source/run changed during qualification")
 
@@ -1288,7 +2639,10 @@ def qualification():
         "qualification": QUALIFICATION,
         "coverage": COVERAGE,
         "passed": True,
-        "native_tests_executed_this_run": total_exec,
+        "native_tests_executed_this_run": fresh_exec,
+        "fresh_declarations_passed": len(fresh_passed),
+        "reused_native_passed": reused_exec,
+        "reused_declarations": reused_decl,
         "verified_passed": total_exec,
         "verified_declarations": len(expected_all),
         "failed": 0,
@@ -1296,8 +2650,12 @@ def qualification():
         "unexecuted": 0,
         "unfinished": 0,
         "ambiguous": 0,
-        "not_executed_this_run": scope["full_inventory_executions"] - total_exec,
-        "groups": parsed_groups,
+        "not_executed_this_run": scope["full_inventory_executions"] - fresh_exec,
+        "unselected_executions": scope["full_inventory_executions"] - total_exec,
+        "groups": fresh_parsed_groups,
+        "prior_reuse_proof_sha256": proof_sha,
+        "reused_evidence_gate_sha256": reused_gate_sha,
+        "reused_prior": prior_summary,
         "simulator": sim,
         "simulator_boot_sha256": sha(OUT / "simulator-boot.json"),
         "simulator_linkage_sha256": sim_linkage_sha,
@@ -1318,8 +2676,10 @@ def validate_saved():
 def delivery_gate():
     scope = live_scope()
     require(scope.get("allow_unqualified_ipa") is False, "Diagnostic IPA permission disabled")
-    require(scope.get("build_ipa") is True and scope.get("prior_validation_run") == "",
-            "Delivery requires build_ipa=true and same-run qualification (no prior reuse)")
+    require(
+        scope.get("build_ipa") is True and scope.get("prior_validation_run") in ("", PRIOR_RUN_ID),
+        "Delivery requires build_ipa=true and either initial full-targeted or pinned prior reuse qualification",
+    )
     packages = compat.validate_toolchain_and_dependencies(ROOT, OUT, check_live_tools=False)
     qual = validate_saved()
     require(
@@ -1329,12 +2689,27 @@ def delivery_gate():
         and qual.get("passed") is True
         and qual.get("allow_unqualified_ipa") is False
         and qual.get("build_ipa") is True
-        and qual.get("prior_validation_run") == ""
+        and qual.get("prior_validation_run") == scope["prior_validation_run"]
         and qual.get("full_regression_passed") is False
-        and qual.get("native_tests_executed_this_run") == qual.get("verified_passed") == scope["native_tests_planned"] > 0
+        and qual.get("native_tests_executed_this_run") == scope["fresh_executions_planned"] > 0
+        and qual.get("fresh_declarations_passed") == scope["fresh_declarations_planned"] > 0
+        and qual.get("reused_native_passed") == scope["reused_executions_planned"]
+        and qual.get("reused_declarations") == scope["reused_declarations_planned"]
+        and qual.get("verified_passed") == scope["native_tests_planned"] > 0
         and qual.get("verified_declarations") == scope["selected_declarations"] > 0,
-        "Same-run strict qualification mismatch",
+        "Strict qualification mismatch",
     )
+    if scope["prior_validation_run"]:
+        require(
+            qual.get("prior_source_commit") == PRIOR_SOURCE_COMMIT
+            and qual.get("prior_artifact_id") == PRIOR_ARTIFACT_ID
+            and qual.get("prior_artifact_sha256") == PRIOR_ARTIFACT_SHA256
+            and isinstance(qual.get("prior_reuse_proof_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", qual["prior_reuse_proof_sha256"]))
+            and isinstance(qual.get("reused_prior"), dict)
+            and qual["reused_prior"].get("proof_sha256") == qual["prior_reuse_proof_sha256"],
+            "Prior reuse proof digest mismatch in delivery gate",
+        )
 
     build_exit = OUT / "app-build-exit-code.txt"
     require(build_exit.is_file() and not build_exit.is_symlink()
@@ -1367,6 +2742,18 @@ def delivery_gate():
         path = _out_path(attr, rel)
         require(path.is_file() and not path.is_symlink(), "Missing required receipt: " + rel)
         evidence[rel] = sha(path)
+    if scope["prior_validation_run"]:
+        reused_out = _reused_out()
+        prior_dir = reused_out / f"prior-{PRIOR_RUN_ID}"
+        for path, rel in (
+            (_reused_gate_json(), "reused-evidence/reused-prior-gate.json"),
+            (prior_dir / "api-run.json", f"reused-evidence/prior-{PRIOR_RUN_ID}/api-run.json"),
+            (prior_dir / "api-artifact.json", f"reused-evidence/prior-{PRIOR_RUN_ID}/api-artifact.json"),
+            (prior_dir / "archive-receipt.json", f"reused-evidence/prior-{PRIOR_RUN_ID}/archive-receipt.json"),
+            (prior_dir / "archive.zip", f"reused-evidence/prior-{PRIOR_RUN_ID}/archive.zip"),
+        ):
+            require(path.is_file() and not path.is_symlink(), "Missing reused prior evidence: " + rel)
+            evidence[rel] = sha(path)
 
     require(live_scope() == scope, "Source/run changed while collecting package evidence")
     return {
@@ -1375,9 +2762,16 @@ def delivery_gate():
         "coverage": qual["coverage"],
         "strict_native_qualification": "passed",
         "native_tests_executed_this_run": qual["native_tests_executed_this_run"],
+        "fresh_declarations_passed": qual["fresh_declarations_passed"],
+        "reused_native_passed": qual["reused_native_passed"],
+        "reused_declarations": qual["reused_declarations"],
         "verified_passed": qual["verified_passed"],
         "verified_declarations": qual["verified_declarations"],
         "not_executed_this_run": qual["not_executed_this_run"],
+        "unselected_executions": qual["unselected_executions"],
+        "prior_reuse_proof_sha256": qual["prior_reuse_proof_sha256"],
+        "reused_evidence_gate_sha256": qual["reused_evidence_gate_sha256"],
+        "reused_prior": qual["reused_prior"],
         "simulator": qual["simulator"],
         "simulator_linkage_sha256": qual["simulator_linkage_sha256"],
         "device_linkage_sha256": device_linkage,
@@ -1431,8 +2825,8 @@ def complete_delivery(manifest, packaged_files):
     return result
 
 
-def local_check(*, pending=False, root=ROOT):
-    receipt = verify_source(pending=pending, root=root)
+def local_check(*, pending=False, root=ROOT, prior_validation_run=""):
+    receipt = verify_source(pending=pending, root=root, prior_validation_run=prior_validation_run)
     return {
         "kind": "LOCAL_SOURCE_CHECK_NOT_NATIVE",
         "native_executions": 0,
@@ -1445,16 +2839,40 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("scope", help="Verify committed scope/dispatch and write exclusive scope receipts")
-    run_all_cmd = sub.add_parser("run-all", help="Execute all selected groups independently without retries")
+    reuse_cmd = sub.add_parser("reuse", help="Download, verify, and retain immutable prior validation evidence")
+    reuse_cmd.add_argument("--prior-zip", type=Path)
+    reuse_cmd.add_argument("--prior-run-json", type=Path)
+    reuse_cmd.add_argument("--prior-artifact-json", type=Path)
+    reuse_cmd.add_argument("--skip-dependency-check", action="store_true")
+    run_all_cmd = sub.add_parser("run-all", help="Execute all fresh selected groups independently without retries")
     run_all_cmd.add_argument("--destination", required=True)
     sub.add_parser("report", help="Update diagnostic case-results.json/md from available raw logs and receipts")
     sub.add_parser("gate", help="Strictly revalidate native/xcresult/linkage/boot receipts and write gate")
     lc_cmd = sub.add_parser("local-check", help="Offline local source/inventory/scope check")
     lc_cmd.add_argument("--pending", action="store_true", help="Allow uncommitted approved edits and protected unrelated files")
+    lc_cmd.add_argument("--prior-validation-run", default="", help="Optional pinned prior run ID for compatibility check")
 
     args = parser.parse_args(argv)
     if args.action == "scope":
         receipt = write_scope(ROOT)
+        print(json.dumps(receipt, indent=2))
+    elif args.action == "reuse":
+        offline_prior = None
+        if args.prior_zip or args.prior_run_json or args.prior_artifact_json:
+            require(
+                args.prior_zip and args.prior_run_json and args.prior_artifact_json,
+                "Offline prior replay requires --prior-zip, --prior-run-json, and --prior-artifact-json",
+            )
+            offline_prior = {
+                "zip_path": args.prior_zip,
+                "run_json": args.prior_run_json,
+                "artifact_json": args.prior_artifact_json,
+            }
+        receipt = reuse_evidence(
+            require_dependencies=not args.skip_dependency_check,
+            offline_prior=offline_prior,
+            root=ROOT,
+        )
         print(json.dumps(receipt, indent=2))
     elif args.action == "run-all":
         require(run_all(args.destination), "Selected tests failed; remaining cases attempted, see case-results.json")
@@ -1465,12 +2883,12 @@ def main(argv=None):
         write(_out_path(GATE_JSON, "author-layout-gate.json"), result)
         print(json.dumps(result, indent=2))
     else:
-        print(json.dumps(local_check(pending=args.pending, root=ROOT), indent=2))
+        print(json.dumps(local_check(pending=args.pending, root=ROOT, prior_validation_run=args.prior_validation_run), indent=2))
     return 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    except (ValueError, OSError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
         raise SystemExit("EPUB author-layout validation stopped: " + str(error))
