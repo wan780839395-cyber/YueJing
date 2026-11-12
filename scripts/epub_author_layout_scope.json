@@ -4,6 +4,8 @@
   "version": "0.2.16",
   "build": "18",
   "allowed_paths": [
+    ".github/workflows/task3-validate.yml",
+    "Tests/ReaderDomainTests/EPUBPackageTests.swift",
     "App/EPUB/EPUBLayoutMode.swift",
     "App/EPUB/EPUBLocationScript.swift",
     "App/EPUB/EPUBReaderScreen.swift",
@@ -50,7 +52,7 @@
     "Sources/ReaderDomain/EPUB/EPUBStyleCompatibility.swift": "275a46719fb1cd3d6b32403e4f408d055839b96cbadd7db2c7682cec8094ed36",
     "Sources/ReaderDomain/LibraryService.swift": "f66357560cdb2021d918a2d203ed02edb9f716a30f5fa4d3a2dcac53ca3d8efe",
     "Sources/ReaderDomain/LibraryStore.swift": "c8f659c06512b56edf9f50852bf34c57496d020c67614e3bfc10f232c286a895",
-    "Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": "7957686b31ff28bbf6b5e089afac0989b72423b53b8cffbffcc5876520da8628",
+    "Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": "c9df990e78fdddeb922c757a2800a5287614097c7e6cc57311ac5a65cee5e90b",
     "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift": "50dfe2c993df01db2e383110fd936b729341c87616605f57dded5f93b9cfac86",
     "Tests/ReaderDomainTests/EPUBP2CompatibilityTests.swift": "b05ed384070701829e2979708d798e7058647cad6a9011c1b1adcb78dd57ad19",
     "Tests/ReaderDomainTests/EPUBStyleCompatibilityTests.swift": "45905a7e7d1b08eb7125960e713c5dbe0d8f71fd438eebbb2bfc313f4fbdb437",
@@ -58,6 +60,7 @@
     "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "9e6996417e438d4ed7ae1d6298741cf6497cf74cea02096e73d7bb96c1500ae6",
     "scripts/epub_author_layout_fixture.cjs": "31708ca561a3d04e4c51c72d918dc911e89b44a8d2127c3943ac9c4c65811a0e",
     "scripts/task3_test_inventory.py": "edd96ffd526ce736aa80b50863dfba98c80e865d0e6a2fe49efd917acf6b5d68",
+    "Tests/ReaderDomainTests/EPUBPackageTests.swift": "dd04474878b82aae0875e0252af4d1e87cd242a6b45ea347aa15e242e33817c9",
     "App/Library/EncodingChoiceView.swift": "a9c0ecbf5232287b9e7b727835e3bfb7988d3248f0c6e6b145395e69a0b79ab1"
   },
   "selected_files": {

@@ -1495,9 +1495,13 @@ jobs:
         if: ${{ !cancelled() && steps.boot.outcome == 'success' && (inputs.prior_validation_run == '' || steps.reuse.outcome == 'success') }}
         run: |
           set -euo pipefail
-          python3 -B scripts/check_webkit_linkage.py \
-            --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
-            --output artifacts/task3/webkit-simulator-linkage
+          if [ "$PRIOR_VALIDATION_RUN" = '43196231175' ]; then
+            python3 -B scripts/run_epub_author_layout_validation.py p2-linkage
+          else
+            python3 -B scripts/check_webkit_linkage.py \
+              --app build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app \
+              --output artifacts/task3/webkit-simulator-linkage
+          fi
 
       - name: Require strict native qualification across fresh and any reused groups
         id: native_gate

@@ -413,7 +413,7 @@ struct EPUBPackageTests {
             }
         }
 
-        // 4. Active/unsupported XHTML elements, event handlers, embedded fonts, external URLs
+        // 4. Active/unsupported XHTML, event handlers, and external URLs remain fatal.
         let forbiddenSnippets = [
             "<script>alert(1)</script><p>Text</p>",
             "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg><p>Text</p>",
@@ -426,7 +426,7 @@ struct EPUBPackageTests {
             "<p onclick=\"alert(1)\">Click</p>",
             "<p><a href=\"javascript:alert(1)\">JS</a></p>",
             "<p><img src=\"https://example.com/pic.png\"/></p>",
-            "<style>@font-face { font-family: Custom; src: url(f.woff); }</style><p>Text</p>"
+            "<style>@font-face { font-family: Custom; src: url(https://example.com/f.woff); }</style><p>Text</p>"
         ]
 
         for snippet in forbiddenSnippets {
@@ -441,6 +441,21 @@ struct EPUBPackageTests {
                 _ = try EPUBPackageParser.parse(archiveURL: url, destination: dest)
             }
         }
+
+        // Missing local WOFF is optional styling, never a served font capability.
+        let optionalURL = root.appendingPathComponent("optional-woff.epub")
+        let optionalBody = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>T</title></head><body><h1 id=\"heading\">T</h1><style>@font-face { font-family: Custom; src: url(f.woff); }</style><p>Text</p></body></html>"
+        try EPUBTestSupport.writeEPUB3(at: optionalURL, chapters: [
+            EPUBSyntheticChapter(id: "ch1", path: "one.xhtml", title: "T", bodyXHTML: optionalBody)
+        ])
+        let optionalDest = root.appendingPathComponent("optional-woff", isDirectory: true)
+        let optional = try EPUBPackageParser.parse(archiveURL: optionalURL, destination: optionalDest)
+        #expect(optional.resource(at: "OPS/f.woff") == nil)
+        #expect(optional.styleCompatibility?.issues.contains(.fontUnavailable) == true)
+        #expect(try optional.nodes(at: "OPS/one.xhtml")?.joined().contains("Text") == true)
+        let sanitized = try String(contentsOf: optionalDest.appendingPathComponent("OPS/one.xhtml"), encoding: .utf8)
+        #expect(!sanitized.contains("f.woff"))
+        #expect(!sanitized.contains("@font-face"))
     }
 
     @Test func epubPackageSelectsValidCoversAndFallsBackOnOptionalCoverProblems() async throws {

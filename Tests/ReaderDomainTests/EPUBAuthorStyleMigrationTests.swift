@@ -541,6 +541,11 @@ struct EPUBAuthorStyleMigrationTests {
         let receipt = try await f.install(archive)
         try await rewriteMetadataAsPreAuthorStyleLegacy(in: f.managed, bookID: receipt.book.id)
         let previous = try await f.store.storedEPUBSnapshot(bookID: receipt.book.id)
+        // Migration retires the old unleased Ready directory; capture its nodes before opening.
+        var previousNodes: [String: [String]] = [:]
+        for path in previous.package.spine {
+            previousNodes[path] = try #require(try previous.package.nodes(at: path))
+        }
         let position = EPUBReadingPosition(bookID: receipt.book.id, versionID: previous.package.versionID,
             path: "OPS/Text/ch1.xhtml", node: 1, utf16Offset: 1, viewportOffset: 23)
         try await persistReadingProgress(store: f.store, snapshot: previous, position: position, preferences: ReaderPreferences())
@@ -552,7 +557,7 @@ struct EPUBAuthorStyleMigrationTests {
         #expect(compatibility.issues.contains(.fontUnavailable))
         #expect(opened.publication.package.resource(at: "OPS/Fonts/missing-a.ttf") == nil)
         for path in previous.package.spine {
-            #expect(try opened.publication.package.nodes(at: path) == previous.package.nodes(at: path))
+            #expect(try opened.publication.package.nodes(at: path) == previousNodes[path])
         }
         let directory = opened.publication.package.ready?.directory
         try await opened.abandon()

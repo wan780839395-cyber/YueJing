@@ -115,7 +115,18 @@ PRIOR2_REUSE_ALLOWED_DIFF_PATHS = frozenset({
     ".github/workflows/task3-validate.yml",
     "scripts/epub_author_layout_scope.json",
 })
-AUTHORIZED_PRIOR_RUNS = frozenset({PRIOR_RUN_ID, PRIOR2_RUN_ID})
+P2_RUN_ID = "43196231175"
+P2_SOURCE = "f3e5a69ec2c903631389183b3fc6efba334b4ee9"
+P2_ARTIFACT_ID = 13934927352
+P2_ARTIFACT_SHA = "6acba54acba779b7a65881919777ddb8c47c87c580ac75965556fc62281f8553"
+P2_FRESH = frozenset({"domain-1", "domain-7"})
+P2_REUSED = frozenset({"domain-2", "domain-3", "domain-4", "domain-5", "domain-6",
+                       "domain-8", "domain-9", "domain-10", "host-1", "host-2", "ui-1", "ui-2", "ui-3"})
+P2_CHANGED_TESTS = frozenset({"Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift",
+                              "Tests/ReaderDomainTests/EPUBPackageTests.swift"})
+P2_ALLOWED_DIFF = P2_CHANGED_TESTS | frozenset({"scripts/run_epub_author_layout_validation.py",
+    "scripts/check_epub_author_layout_validation.py", "scripts/epub_author_layout_scope.json", WORKFLOW_PATH})
+AUTHORIZED_PRIOR_RUNS = frozenset({PRIOR_RUN_ID, PRIOR2_RUN_ID, P2_RUN_ID})
 QUALIFICATION = "EPUB_AUTHOR_LAYOUT_TARGETED_NATIVE"
 COVERAGE = "EPUB_AUTHOR_LAYOUT_TARGETED_NOT_FULL"
 
@@ -302,6 +313,11 @@ def _planned_group_executions(spec):
 
 def _prior_spec(prior_id):
     pid = str(prior_id)
+    if pid == P2_RUN_ID:
+        return dict(run_id=P2_RUN_ID, source_commit=P2_SOURCE, artifact_id=P2_ARTIFACT_ID,
+                    artifact_name=f"task3-evidence-{P2_RUN_ID}-{P2_SOURCE}", archive_sha256=P2_ARTIFACT_SHA,
+                    groups=P2_REUSED, declarations=83, executions=84,
+                    changed_pins=P2_CHANGED_TESTS, allowed_diff_paths=P2_ALLOWED_DIFF)
     if pid == PRIOR_RUN_ID:
         return {
             "run_id": PRIOR_RUN_ID,
@@ -334,6 +350,8 @@ def _prior_spec(prior_id):
 def _prior_origin_ids(prior_validation_run):
     if not prior_validation_run:
         return []
+    if prior_validation_run == P2_RUN_ID:
+        return [P2_RUN_ID]
     if prior_validation_run == PRIOR_RUN_ID:
         return [PRIOR_RUN_ID]
     if prior_validation_run == PRIOR2_RUN_ID:
@@ -366,6 +384,16 @@ def _prior_origins_plan(prior_validation_run, groups=None):
 def partition_groups(groups, prior_validation_run=""):
     if not prior_validation_run:
         return list(groups), []
+    if prior_validation_run == P2_RUN_ID:
+        require(set(groups) == P2_FRESH | P2_REUSED, "P2 group identity drift")
+        fresh = [g for g in groups if g in P2_FRESH]
+        reused = [g for g in groups if g in P2_REUSED]
+        require({"Tests/" + groups[g]["file"] for g in fresh} == P2_CHANGED_TESTS, "P2 changed test selection drift")
+        require(sum(len(groups[g]["cases"]) for g in fresh) == 15
+                and sum(len(groups[g]["cases"]) for g in reused) == 83
+                and sum(_planned_group_executions(groups[g]) for g in reused) == 84,
+                "P2 15 fresh + 83/84 reused partition drift")
+        return fresh, reused
     require(
         prior_validation_run in AUTHORIZED_PRIOR_RUNS,
         f"Only pinned prior validation runs {sorted(AUTHORIZED_PRIOR_RUNS)} are authorized for bounded reuse",
@@ -668,14 +696,21 @@ def validate_prior_source_compatibility(
                 "Pending changes outside prior reuse diff boundary: "
                 + repr(sorted(changed - allowed_diff)))
 
-    for field in ("baseline", "scope", "version", "build", "allowed_paths", "selected_files"):
-        require(prior_config[field] == current_config[field],
-                f"Scope config {field} changed since prior run")
-    require(set(prior_config["candidate_sha256"]) == set(current_config["candidate_sha256"]),
-            "Scope candidate_sha256 keys changed since prior run")
+    fields = ("baseline", "scope", "version", "build", "selected_files")
+    for field in fields:
+        require(prior_config[field] == current_config[field], f"Scope config {field} changed since prior run")
+    if expected_prior_commit == P2_SOURCE:
+        require(set(current_config["allowed_paths"]) == set(prior_config["allowed_paths"]) |
+                {WORKFLOW_PATH, "Tests/ReaderDomainTests/EPUBPackageTests.swift"}, "P2 allowed path drift")
+        require(set(current_config["candidate_sha256"]) == set(prior_config["candidate_sha256"]) |
+                {"Tests/ReaderDomainTests/EPUBPackageTests.swift"}, "P2 candidate key drift")
+    else:
+        require(prior_config["allowed_paths"] == current_config["allowed_paths"], "Scope config allowed_paths changed since prior run")
+        require(set(prior_config["candidate_sha256"]) == set(current_config["candidate_sha256"]),
+                "Scope candidate_sha256 keys changed since prior run")
     changed_pins = {
         path_str for path_str in current_config["candidate_sha256"]
-        if current_config["candidate_sha256"][path_str] != prior_config["candidate_sha256"][path_str]
+        if current_config["candidate_sha256"][path_str] != prior_config["candidate_sha256"].get(path_str)
     }
     require(
         changed_pins <= allowed_pins,
@@ -864,7 +899,7 @@ def scope_receipt(root=ROOT):
     prior_spec = _prior_spec(prior) if prior else None
     prior_origins = _prior_origins_plan(prior, groups=groups)
     reused_group_origins = {
-        g: (PRIOR_RUN_ID if g in ELIGIBLE_PRIOR_REUSE_GROUPS else PRIOR2_RUN_ID)
+        g: next(oid for oid in _prior_origin_ids(prior) if g in _prior_spec(oid)["groups"])
         for g in reused_ids
     }
     return {
@@ -1693,12 +1728,16 @@ def _verify_reused_prior2_group(
     verify_native=True,
     current_effective_domain=None,
     current_effective_host=None,
+    expected_source_commit=PRIOR2_SOURCE_COMMIT,
+    expected_run_id=PRIOR2_RUN_ID,
+    eligible_groups=ELIGIBLE_PRIOR2_REUSE_GROUPS,
+    changed_test_pins=PRIOR2_REUSE_CHANGED_TEST_PINS,
 ):
     require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true",
             "Cloud requires live native xcresult verification for prior2 reused group")
     require(
-        group in ELIGIBLE_PRIOR2_REUSE_GROUPS
-        and ("Tests/" + spec["file"]) not in PRIOR2_REUSE_CHANGED_TEST_PINS,
+        group in eligible_groups
+        and ("Tests/" + spec["file"]) not in changed_test_pins,
         "Ineligible prior2 group cannot be reused: " + group,
     )
     folder = ev_dir / "epub-author-layout" / group
@@ -1733,8 +1772,8 @@ def _verify_reused_prior2_group(
     want_cmd = command_for_spec(spec, prior_destination, bundle_arg)
     want = {
         "scope": SCOPE,
-        "source_commit": PRIOR2_SOURCE_COMMIT,
-        "run_id": PRIOR2_RUN_ID,
+        "source_commit": expected_source_commit,
+        "run_id": expected_run_id,
         "run_attempt": "1",
         "group": group,
         "target": target,
@@ -1755,14 +1794,14 @@ def _verify_reused_prior2_group(
             folder,
             ev_dir,
             current_effective_domain=current_effective_domain,
-            expected_source_commit=PRIOR2_SOURCE_COMMIT,
+            expected_source_commit=expected_source_commit,
         )
     else:
         _verify_reused_host_or_ui_settings(
             spec["kind"],
             target,
             folder,
-            expected_source_commit=PRIOR2_SOURCE_COMMIT,
+            expected_source_commit=expected_source_commit,
             current_effective_host=current_effective_host,
         )
 
@@ -1789,8 +1828,8 @@ def _verify_reused_prior2_group(
         "group": group,
         "target": target,
         "file": spec["file"],
-        "source_commit": PRIOR2_SOURCE_COMMIT,
-        "run_id": PRIOR2_RUN_ID,
+        "source_commit": expected_source_commit,
+        "run_id": expected_run_id,
         "run_attempt": "1",
         "declarations_passed": parsed["declarations_passed"],
         "executions": parsed["executions"],
@@ -2535,6 +2574,9 @@ def reuse_evidence(*, require_dependencies=True, offline_prior=None, check_share
     root = Path(root)
     scope = live_scope(root=root)
     prior_id = scope["prior_validation_run"]
+    if prior_id == P2_RUN_ID:
+        require(require_dependencies and offline_prior is None and check_shared_sources, "P2 cloud reuse requires full prerequisites")
+        return p2_reuse(scope, root=root)
     require(
         prior_id in AUTHORIZED_PRIOR_RUNS,
         f"reuse requires prior_validation_run in {sorted(AUTHORIZED_PRIOR_RUNS)}",
@@ -2643,6 +2685,8 @@ def verify_prior_reuse_saved(
     check_live_api=None,
 ):
     prior_id = scope["prior_validation_run"]
+    if prior_id == P2_RUN_ID:
+        return p2_verify_saved(scope, packages=packages, root=root)
     require(
         prior_id in AUTHORIZED_PRIOR_RUNS,
         f"Unsupported prior_validation_run: {prior_id!r}",
@@ -2895,6 +2939,8 @@ def _inspect_group_raw_events(spec, raw_bytes):
 def _summarize_prior_reuse(prior_id, scope):
     if not prior_id:
         return None
+    if prior_id == P2_RUN_ID:
+        return p2_summary(scope)
     if prior_id not in AUTHORIZED_PRIOR_RUNS:
         return {
             "status": "failed",
@@ -3112,7 +3158,8 @@ def summarize(*, publish=False):
 
         if group in reused_set:
             group_origin_id = (
-                PRIOR_RUN_ID if (group in ELIGIBLE_PRIOR_REUSE_GROUPS or prior_id != PRIOR2_RUN_ID) else PRIOR2_RUN_ID
+                P2_RUN_ID if prior_id == P2_RUN_ID else
+                (PRIOR_RUN_ID if (group in ELIGIBLE_PRIOR_REUSE_GROUPS or prior_id != PRIOR2_RUN_ID) else PRIOR2_RUN_ID)
             )
             group_origin_spec = _prior_spec(group_origin_id)
             group_origin_commit = group_origin_spec["source_commit"]
@@ -3537,7 +3584,8 @@ def qualification():
         and boot.get("timeout_seconds", BOOT_TIMEOUT_SECONDS) == BOOT_TIMEOUT_SECONDS,
         "Missing same-run successful simulator boot",
     )
-    sim_linkage_sha = validate_linkage("simulator", scope)
+    sim_linkage_sha = (p2_verify_saved(scope, packages=packages)["prior"]["simulator_linkage_sha256"]
+                       if scope["prior_validation_run"] == P2_RUN_ID else validate_linkage("simulator", scope))
 
     fresh_parsed_groups = []
     for group in fresh_ids:
@@ -3611,6 +3659,8 @@ def qualification():
             if scope["prior_validation_run"] == PRIOR_RUN_ID
             else COMBINED_PRIOR2_REUSED_EXECUTIONS
         )
+        if scope["prior_validation_run"] == P2_RUN_ID:
+            expected_reused_decl, expected_reused_exec = 83, 84
         require(
             reused_decl == expected_reused_decl == scope["reused_declarations_planned"]
             and reused_exec == expected_reused_exec == scope["reused_executions_planned"],
@@ -3844,6 +3894,107 @@ def complete_delivery(manifest, packaged_files):
     return result
 
 
+def p2_inspect(scope, *, root=ROOT, packages=None, verify_native=True):
+    """Requalify only the pinned first P2 run's wholly passing, unchanged groups."""
+    require(verify_native or os.environ.get("GITHUB_ACTIONS") != "true", "Cloud must parse original xcresults")
+    require(scope["prior_validation_run"] == P2_RUN_ID, "Wrong P2 origin")
+    current = verify_source(pending=os.environ.get("GITHUB_ACTIONS") != "true", root=root,
+                            prior_validation_run=P2_RUN_ID)
+    require(current["source_commit"] == scope["source_commit"], "Current P2 source mismatch")
+    folder = _reused_out() / f"prior-{P2_RUN_ID}"
+    _, _, archive = _verify_archive_receipt(folder, prior_id=P2_RUN_ID, current_run_id=scope["run_id"])
+    ev = folder / "evidence"
+    prior_scope = load(ev / "author-layout-scope.json")
+    require(prior_scope["source_commit"] == P2_SOURCE and prior_scope["run_id"] == P2_RUN_ID
+            and prior_scope["run_attempt"] == "1" and prior_scope["prior_validation_run"] == ""
+            and prior_scope["scope"] == SCOPE and prior_scope["baseline_commit"] == BASE
+            and prior_scope["selected_declarations"] == 98 and prior_scope["native_tests_planned"] == 99,
+            "Pinned P2 scope identity mismatch")
+    require(prior_scope["selected_files"] == current["selected_summary"]["selected_files"], "P2 selected identities changed")
+    prior_files, current_files = prior_scope["files"], current["candidate_files"]
+    require(set(prior_files) == set(current_files), "P2 candidate inventory drift")
+    require({p for p in current_files if current_files[p] != prior_files[p]} <= P2_ALLOWED_DIFF,
+            "P2 production/build/reused-test fingerprints changed")
+    _verify_prior_toolchain_and_deps(ev, packages, expected_source_commit=P2_SOURCE)
+    sim, linkage = _verify_prior_simulator_and_linkage(ev, archive["members"],
+        expected_source_commit=P2_SOURCE, expected_run_id=P2_RUN_ID)
+    current_eff, _ = _load_current_effective_settings()
+    groups = build_groups(load_scope_config())
+    _, reused = partition_groups(groups, P2_RUN_ID)
+    parsed = [_verify_reused_prior2_group(g, groups[g], ev, archive["members"],
+        "platform=iOS Simulator,id=" + sim["udid"], verify_native=verify_native,
+        current_effective_domain=current_eff, expected_source_commit=P2_SOURCE,
+        expected_run_id=P2_RUN_ID, eligible_groups=P2_REUSED, changed_test_pins=P2_CHANGED_TESTS)
+        for g in reused]
+    require(sum(g["declarations_passed"] for g in parsed) == 83
+            and sum(g["executions"] for g in parsed) == 84, "P2 reused execution totals drift")
+    result = dict(run_id=P2_RUN_ID, source_commit=P2_SOURCE, artifact_id=P2_ARTIFACT_ID,
+        archive_sha256=P2_ARTIFACT_SHA, passed=True, qualified=verify_native, errors=[],
+        declarations_passed=83, executions_passed=84, groups=parsed,
+        simulator_linkage_sha256=linkage, simulator=sim,
+        native_bundle_parse="passed" if verify_native else "OFFLINE_SAVED_EXPORTS_ONLY")
+    # Proof is stable across offline export replay and actual native bundle verification;
+    # qualified/native_bundle_parse remain separate mandatory cloud qualifications.
+    result["proof_sha256"] = digest_bytes(json.dumps({k: v for k, v in result.items()
+        if k not in {"qualified", "native_bundle_parse"}}, sort_keys=True).encode())
+    return result
+
+
+def p2_receipt(scope, prior):
+    return dict(scope=SCOPE, phase="validation", source_commit=scope["source_commit"],
+        run_id=scope["run_id"], run_attempt="1", prior_validation_run=P2_RUN_ID,
+        prior_source_commit=P2_SOURCE, prior_artifact_id=P2_ARTIFACT_ID,
+        prior_artifact_sha256=P2_ARTIFACT_SHA, provenance_valid=True,
+        passed=prior["passed"], qualified=prior["qualified"], reused_declarations=83,
+        reused_executions=84, reused_native_passed=84, proof_sha256=prior["proof_sha256"],
+        errors=[], prior=prior, prior_origins=[prior])
+
+
+def p2_reuse(scope, *, root=ROOT):
+    packages = compat.validate_toolchain_and_dependencies(root, OUT, check_live_tools=False)
+    dest = _reused_out()
+    require(not dest.exists(), "Existing P2 evidence; no overwrite/retry")
+    dest.mkdir(parents=True)
+    _retain_prior_archive(P2_RUN_ID, scope, dest)
+    prior = p2_inspect(scope, root=root, packages=packages)
+    receipt = p2_receipt(scope, prior)
+    write(_reused_gate_json(), receipt)
+    return receipt
+
+
+def p2_verify_saved(scope, *, root=ROOT, packages=None, verify_native=None):
+    if verify_native is None:
+        verify_native = sys.platform == "darwin" or os.environ.get("GITHUB_ACTIONS") == "true"
+    require({p.name for p in _reused_out().iterdir()} ==
+            {f"prior-{P2_RUN_ID}", _reused_gate_json().name}, "P2 retained evidence closure drift")
+    prior = p2_inspect(scope, root=root, packages=packages, verify_native=verify_native)
+    saved = load(_reused_gate_json())
+    require(saved.get("qualified") is True and saved.get("prior", {}).get("native_bundle_parse") == "passed",
+            "Missing real cloud xcresult qualification")
+    if not verify_native:
+        # Compare against the cloud receipt without claiming a Windows xcresult execution.
+        prior = {**prior, "qualified": True, "native_bundle_parse": "passed"}
+    expected = p2_receipt(scope, prior)
+    require(saved == expected, "P2 saved qualification drift")
+    return expected
+
+
+def p2_summary(scope):
+    result = dict(status="not_verified", run_id=P2_RUN_ID, source_commit=P2_SOURCE,
+        artifact_id=P2_ARTIFACT_ID, archive_sha256=P2_ARTIFACT_SHA, proof_sha256=None,
+        declarations_passed=None, executions_passed=None, verified_groups=[], origins=[], error=None)
+    try:
+        require(scope is not None, "Missing current scope")
+        verified = p2_verify_saved(scope)
+        prior = verified["prior"]
+        result.update(status="passed", proof_sha256=prior["proof_sha256"], declarations_passed=83,
+                      executions_passed=84, verified_groups=[g["group"] for g in prior["groups"]])
+        result["origins"] = [{k: v for k, v in result.items() if k != "origins"}]
+    except (ValueError, OSError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
+        result.update(status="failed" if _reused_gate_json().exists() else "not_verified", error=str(error))
+    return result
+
+
 def local_check(*, pending=False, root=ROOT, prior_validation_run=""):
     receipt = verify_source(pending=pending, root=root, prior_validation_run=prior_validation_run)
     return {
@@ -3858,6 +4009,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("scope", help="Verify committed scope/dispatch and write exclusive scope receipts")
+    sub.add_parser("p2-linkage", help="Verify explicitly reused P2 simulator linkage, not a new simulator App")
     reuse_cmd = sub.add_parser("reuse", help="Download, verify, and retain immutable prior validation evidence")
     reuse_cmd.add_argument("--prior-zip", type=Path)
     reuse_cmd.add_argument("--prior-run-json", type=Path)
@@ -3878,6 +4030,13 @@ def main(argv=None):
     if args.action == "scope":
         receipt = write_scope(ROOT)
         print(json.dumps(receipt, indent=2))
+    elif args.action == "p2-linkage":
+        scope = live_scope()
+        proof = p2_verify_saved(scope)
+        write(OUT / "reused-simulator-linkage.json", dict(source_commit=scope["source_commit"],
+            run_id=scope["run_id"], origin_run=P2_RUN_ID, origin_source=P2_SOURCE,
+            evidence_sha256=proof["prior"]["simulator_linkage_sha256"],
+            qualification="REUSED_UNCHANGED_APP_NOT_NEW_SIMULATOR_BUILD"))
     elif args.action == "reuse":
         offline_prior = None
         has_p1 = any((args.prior_zip, args.prior_run_json, args.prior_artifact_json))

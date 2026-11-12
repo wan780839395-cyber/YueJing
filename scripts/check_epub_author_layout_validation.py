@@ -3331,6 +3331,18 @@ def run_checks(root):
         for rel, cases in selection["selected_files"].items():
             assert cases == r.inventory.FILES[rel].split(), "Frozen file group is incomplete: " + rel
         passed("frozen P2 exact full-file selection: 98 declarations / 99 executions")
+        groups = r.build_groups(r.load_scope_config())
+        fresh, reused = r.partition_groups(groups, r.P2_RUN_ID)
+        assert fresh == ["domain-1", "domain-7"] and set(reused) == r.P2_REUSED
+        assert sum(len(groups[g]["cases"]) for g in fresh) == 15
+        assert sum(r._planned_group_executions(groups[g]) for g in reused) == 84
+        passed("P2 followup schedules only 15 repaired-file cases and reuses 83/84")
+        bad_groups = copy.deepcopy(groups)
+        bad_groups["domain-1"]["cases"] = bad_groups["domain-1"]["cases"][:-1]
+        rejects("P2 partition rejects omitted repaired case", lambda: r.partition_groups(bad_groups, r.P2_RUN_ID))
+        assert r._prior_origin_ids(r.P2_RUN_ID) == [r.P2_RUN_ID]
+        assert r._prior_spec(r.P2_RUN_ID)["source_commit"] == r.P2_SOURCE
+        passed("P2 origin is nonrecursive and source pinned")
 
     wf_status = "skipped_workflow_not_wired_yet"
     wf_text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding="utf-8")
