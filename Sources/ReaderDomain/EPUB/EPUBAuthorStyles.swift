@@ -546,7 +546,7 @@ public enum EPUBAuthorStyles {
             return className
         }
 
-        private func addStylesheet(_ cssText: String, sourcePath: String, maxSingleBytes: Int, emitRules: Bool = true) throws {
+        fileprivate func addStylesheet(_ cssText: String, sourcePath: String, maxSingleBytes: Int, emitRules: Bool = true) throws {
             let utf8Count = cssText.utf8.count
             guard utf8Count <= maxSingleBytes else {
                 throw EPUBError.limitExceeded

@@ -383,7 +383,7 @@ struct EPUBAuthorStyleMigrationTests {
             makePkg(title: "Changed Title", resources: nextResources, authorStyleRevision: EPUBFormat.authorStyleRevision),
             makePkg(spine: ["OPS/ch2.xhtml", "OPS/ch1.xhtml"], resources: nextResources, authorStyleRevision: EPUBFormat.authorStyleRevision),
             makePkg(navigation: [EPUBNavigationItem(title: "Renamed", path: "OPS/ch1.xhtml", fragment: "h1", depth: 0)], resources: nextResources, authorStyleRevision: EPUBFormat.authorStyleRevision),
-            makePkg(coverPath: nil, resources: nextResources, authorStyleRevision: EPUBFormat.authorStyleRevision)
+            makePkg(resources: nextResources, coverPath: nil, authorStyleRevision: EPUBFormat.authorStyleRevision)
         ]
         for mutant in metadataMutants {
             #expect(throws: EPUBError.corruptResource) {
