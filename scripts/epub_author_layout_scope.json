@@ -75,7 +75,7 @@
     "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift": "767c308d3dfbcd711c665b988b6d36849a8e4c8dd9019af39969185a448747fc",
     "Tests/YueJingHostTests/EPUBContentsNavigationTests.swift": "effed3422f700bf55c3681cd65add3896f6d50a44e2e99ed47cc0a222ce214a3",
     "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift": "bf3dc3a1ef21cfb3b1f06f94e4c127eb57d364f730a01e080cf6b52bbad8b1f5",
-    "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "e8a97a888ab04d389dcec1ce23f3e2a55d665f30e99a9ff1307f340187a362be",
+    "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "4c6b464e1d744a3814d3369843eaffd02b9696aefd69703ad4d77f427035fea7",
     "project.yml": "96745e7bd8ad6844ee992bc31633d70c354e55eec9bcaf6836dda606ac9c3124",
     "scripts/check_epub_boundary_restore.py": "5fb54554c3e3b3839f72d44a8d4470519361ea5da1526800c3c5196b5eb00a0d",
     "scripts/check_epub_contents_navigation.py": "3afc3f33a8f5f9db9db5ee6b0e9c87be1e842b2e481ee82734d7573828a24e9e",

@@ -2406,8 +2406,10 @@ struct EPUBReaderHostTests {
     }
 }
 
+// The production handler invokes every callback on MainActor. The legacy ObjC
+// protocol is unannotated; retain a runtime isolation check at its witness boundary.
 @MainActor
-private final class EPUBResourceProbeTask: NSObject, WKURLSchemeTask {
+private final class EPUBResourceProbeTask: NSObject, @preconcurrency WKURLSchemeTask {
     let request: URLRequest
     private let completion: @MainActor () -> Void
     private(set) var response: HTTPURLResponse?
