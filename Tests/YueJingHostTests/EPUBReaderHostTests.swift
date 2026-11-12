@@ -1686,13 +1686,21 @@ struct EPUBReaderHostTests {
                     await first.load()
                     let token = try #require(first.currentToken)
                     try await waitUntilReady(model: first, expectedToken: token)
+                    let boundaryDeadline = Date().addingTimeInterval(12)
                     try await waitForChapterWindow(firstController, count: 3)
-                    _ = try await firstController.evaluateLocatorJavaScriptForTesting("""
-                    var next = document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]');
-                    window.scrollTo(0, window.scrollY + next.getBoundingClientRect().top - 113.25);
-                    true;
-                    """)
-                    let sample = try #require(await firstController.sampleVisibleNow())
+                    let targetY = try #require(try await firstController.evaluateLocatorJavaScriptForTesting("""
+                    window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top - 113.25;
+                    """) as? Double)
+                    let nativeScroll = firstController.webView.scrollView
+                    nativeScroll.setContentOffset(CGPoint(x: 0, y: CGFloat(targetY)), animated: false)
+                    var boundaryPayload = await firstController.sampleVisibleNow()
+                    while (boundaryPayload == nil || abs((boundaryPayload?.scrollY ?? 0) - targetY) > 1), Date() < boundaryDeadline {
+                        try await Task.sleep(for: .milliseconds(10))
+                        boundaryPayload = await firstController.sampleVisibleNow()
+                    }
+                    let sample = try #require(boundaryPayload)
+                    #expect(abs(sample.scrollY - targetY) <= 1)
+                    #expect(abs(Double(nativeScroll.contentOffset.y) - targetY) <= 1)
                     #expect(sample.path == "OEBPS/text/ch1.xhtml")
                     #expect(sample.visibleText.contains("EPUB_CH1_END") && sample.visibleText.contains("EPUB_CH2_START"))
                     #expect(sample.viewportOffset != nil)
@@ -1701,6 +1709,9 @@ struct EPUBReaderHostTests {
                     if !returnToShelf { await first.suspend() }
                     let closed = await first.close()
                     #expect(closed)
+                    let closedPosition = try #require(first.currentPosition)
+                    #expect(closedPosition.path == sample.path && closedPosition.node == sample.node && closedPosition.utf16Offset == sample.utf16Offset)
+                    #expect(abs(try #require(closedPosition.viewportOffset) - (try #require(sample.viewportOffset))) <= 1)
                 }
                 // New store/service/controller exercises persistent progress, not a parked DOM.
                 let service = LibraryService(store: try LibraryStore(root: fixture.root.appendingPathComponent("Managed")))
@@ -1715,8 +1726,11 @@ struct EPUBReaderHostTests {
                 try await fixture.withHostedController(secondController) {
                     await second.load()
                     let token = try #require(second.currentToken)
-                    try await waitUntilReady(model: second, expectedToken: token)
                     let before = try #require(saved)
+                    let persisted = try #require(second.navigationRequest?.targetPosition)
+                    #expect(persisted.path == before.path && persisted.node == before.node && persisted.utf16Offset == before.utf16Offset)
+                    #expect(abs(try #require(persisted.viewportOffset) - (try #require(before.viewportOffset))) <= 1)
+                    try await waitUntilReady(model: second, expectedToken: token)
                     let after = try #require(await secondController.sampleVisibleNow())
                     #expect(after.path == before.path && after.node == before.node && after.utf16Offset == before.utf16Offset)
                     let beforeY = try #require(before.viewportOffset), afterY = try #require(after.viewportOffset)
