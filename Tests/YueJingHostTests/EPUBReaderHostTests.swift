@@ -1414,13 +1414,26 @@ struct EPUBReaderHostTests {
                 #expect((sampleAfterTurn?.scrollY ?? 0) > 0)
 
                 let scroll = controller.webView.scrollView
+                // Drive the same native scroll channel as a gesture. Direct JS scrolling
+                // followed immediately by native drag callbacks can race WebKit's IPC.
+                @MainActor func scrollToBoundary(_ offset: Double) async throws -> EPUBLocatorPayload {
+                    let target = try #require(try await controller.evaluateLocatorJavaScriptForTesting("""
+                    window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top + \(offset);
+                    """) as? Double)
+                    scroll.setContentOffset(CGPoint(x: 0, y: CGFloat(target)), animated: false)
+                    var payload = await controller.sampleVisibleNow()
+                    // Share the existing scroll synchronization deadline, never extend it.
+                    while (payload == nil || abs((payload?.scrollY ?? 0) - target) >= 2), Date() < scrollDeadline {
+                        try await Task.sleep(for: .milliseconds(10))
+                        payload = await controller.sampleVisibleNow()
+                    }
+                    let result = try #require(payload)
+                    #expect(abs(result.scrollY - target) < 2)
+                    #expect(abs(Double(scroll.contentOffset.y) - target) < 2)
+                    return result
+                }
                 // Both sides of the boundary are rendered simultaneously, not a replacement screenshot.
-                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
-                var next = document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]');
-                window.scrollTo(0, window.scrollY + next.getBoundingClientRect().top - 100);
-                true;
-                """)
-                let boundarySample = try #require(await controller.sampleVisibleNow())
+                let boundarySample = try await scrollToBoundary(-100)
                 #expect(boundarySample.visibleText.contains("EPUB_CH1_END"))
                 #expect(boundarySample.visibleText.contains("EPUB_CH2_START"))
                 #expect(boundarySample.path == ch1Token.path)
@@ -1428,11 +1441,7 @@ struct EPUBReaderHostTests {
                 controller.scrollViewWillBeginDragging(scroll)
                 let draggingProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
                 #expect(draggingProtected == true)
-                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
-                window.scrollTo(0, window.scrollY + document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]').getBoundingClientRect().top + 20);
-                true;
-                """)
-                let crossed = try #require(await controller.sampleVisibleNow())
+                let crossed = try await scrollToBoundary(20)
                 model.handleLocatorEvent(crossed)
                 controller.scrollViewDidEndDragging(scroll, willDecelerate: true)
                 let decelerationProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
