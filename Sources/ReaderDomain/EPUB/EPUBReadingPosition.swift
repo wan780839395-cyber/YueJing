@@ -7,14 +7,20 @@ public struct EPUBReadingPosition: Codable, Sendable, Equatable {
     public let path: String
     public let node: Int
     public let utf16Offset: Int
+    /// Text-anchor top in CSS pixels relative to the viewport. Nil for legacy/paged positions.
+    public let viewportOffset: Double?
 
     public init(bookID: String, versionID: String, path: String, node: Int, utf16Offset: Int,
-                unit: String = EPUBFormat.positionUnit) {
+                unit: String = EPUBFormat.positionUnit, viewportOffset: Double? = nil) {
         self.bookID = bookID; self.versionID = versionID; self.unit = unit
         self.path = path; self.node = node; self.utf16Offset = utf16Offset
+        self.viewportOffset = viewportOffset
     }
 
     public func validate(in package: EPUBPackage) throws {
+        if let viewportOffset {
+            guard viewportOffset.isFinite, abs(viewportOffset) <= 16_384 else { throw EPUBError.invalidPosition }
+        }
         guard bookID == package.sourceSHA256, versionID == package.versionID,
               package.parserVersion == EPUBFormat.parserVersion, unit == EPUBFormat.positionUnit,
               package.spine.contains(path), let nodes = try package.nodes(at: path),

@@ -8,6 +8,7 @@ struct EPUBResourceCapability: Sendable, Equatable {
     let publication: EPUBPublication
     var preferences: ReaderPreferences
     var readingMode: EPUBReadingMode = .scroll
+    var layoutMode: EPUBLayoutMode = .original
 
     var expectedHost: String {
         Self.host(for: token)
@@ -40,7 +41,7 @@ struct EPUBResourceCapability: Sendable, Equatable {
         lhs.token == rhs.token &&
             lhs.publication.package == rhs.publication.package &&
             lhs.publication.resourceRoot == rhs.publication.resourceRoot &&
-            lhs.preferences == rhs.preferences && lhs.readingMode == rhs.readingMode
+            lhs.preferences == rhs.preferences && lhs.readingMode == rhs.readingMode && lhs.layoutMode == rhs.layoutMode
     }
 }
 
@@ -50,7 +51,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
     // Immutable Sendable value; URL construction does not access MainActor-owned state.
     nonisolated static let scheme = "yjepub"
     static let contentSecurityPolicy =
-        "default-src 'none'; img-src yjepub:; style-src 'unsafe-inline'; " +
+        "default-src 'none'; img-src yjepub:; font-src yjepub:; style-src 'unsafe-inline'; " +
         "script-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; " +
         "frame-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'"
 
@@ -114,7 +115,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
               let canonical = try? EPUBResourcePath.canonical(rawPath),
               canonical == rawPath,
               let resource = capability.publication.package.resource(at: canonical),
-              ["application/xhtml+xml", "image/jpeg", "image/png", "image/webp"].contains(resource.mediaType) else {
+              EPUBAuthorStyles.isAllowedServedMediaType(resource.mediaType) else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.corruptResource)
             return
@@ -124,8 +125,8 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(EPUBError.corruptResource)
             return
         }
-        let maxBytes = (resource.mediaType == "application/xhtml+xml" ? EPUBLimits().xhtmlBytes : EPUBLimits().imageBytes)
-        guard resource.byteCount >= 0, resource.byteCount <= maxBytes else {
+        guard let maxBytes = EPUBAuthorStyles.maximumServedBytes(forMediaType: resource.mediaType),
+              resource.byteCount >= 0, resource.byteCount <= maxBytes else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.limitExceeded)
             return
@@ -136,6 +137,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         let expectedToken = capability.token
         let preferences = capability.preferences
         let readingMode = capability.readingMode
+        let layoutMode = capability.layoutMode
         #if DEBUG
         let overrideData = rawXHTMLOverrideForTesting[canonical]
         #else
@@ -161,7 +163,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
                 }
                 let payload: Data
                 if resource.mediaType == "application/xhtml+xml" {
-                    payload = Self.decorateXHTML(rawData, preferences: preferences, readingMode: readingMode)
+                    payload = Self.decorateXHTML(rawData, preferences: preferences, readingMode: readingMode, layoutMode: layoutMode)
                 } else {
                     payload = rawData
                 }
@@ -206,9 +208,12 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
     }
 
     static func decorateXHTML(_ data: Data, preferences: ReaderPreferences,
-                              readingMode: EPUBReadingMode = .scroll) -> Data {
+                              readingMode: EPUBReadingMode = .scroll, layoutMode: EPUBLayoutMode = .original) -> Data {
         guard var xhtml = String(data: data, encoding: .utf8) else { return data }
-        let css = EPUBLocationScript.trustedStyleSheet(for: preferences, readingMode: readingMode)
+        let css = EPUBLocationScript.trustedStyleSheet(for: preferences, readingMode: readingMode, layoutMode: layoutMode)
+        if let root = xhtml.range(of: "<html ") {
+            xhtml.insert(contentsOf: "data-yj-layout=\"\(layoutMode.rawValue)\" ", at: root.upperBound)
+        }
         let cspMeta = xhtml.contains("Content-Security-Policy")
             ? ""
             : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(contentSecurityPolicy)\"/>"

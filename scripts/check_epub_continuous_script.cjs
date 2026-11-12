@@ -7,13 +7,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {spawn} = require('node:child_process');
+const http = require('node:http');
 const swift = fs.readFileSync(process.env.EPUB_LOCATION_SOURCE || path.join(__dirname, '../App/EPUB/EPUBLocationScript.swift'), 'utf8');
-const source = swift.match(/static let bootstrapSource: String = """\r?\n([\s\S]*?)\r?\n    """/)[1].replace(/^    /gm, '');
-assert.ok(!source.includes('\\'), 'Swift JS escaping must be decoded if introduced');
-let base = swift.match(/let base = """\r?\n([\s\S]*?)\r?\n        """/)[1];
-const paged = swift.match(/return base \+ """\r?\n([\s\S]*?)\r?\n        """/)[1];
-for (const [key, value] of Object.entries({'colors.bg':'white','colors.fg':'black','fontSize':'20','lineHeight':'30','max(8, spacing + 6)':'10'})) base = base.split('\\(' + key + ')').join(value);
-assert.ok(!base.includes('\\('));
+const {source, base, author, paged} = require('./epub_script_source.cjs').extract(swift);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function fixture(source, css, pagedCSS) {
@@ -41,7 +37,7 @@ async function fixture(source, css, pagedCSS) {
     function config(i, extra = {}) {
         return {sessionID:'session', epoch, path:chapter(i).path, chapterIndex:i,
             expectedNodeCount:8, expectedNodeLengths:chapter(i).lengths,
-            targetNode:-1, targetOffset:0, readingMode:'scroll', css, ...extra};
+            targetNode:-1, targetOffset:0, readingMode:'scroll', layoutMode:'reader', css, ...extra};
     }
     async function configure(i, extra) { api.configure(config(i, extra)); await settle(); ok(api.sampleNow(), 'configuration ready'); }
     async function sync(indices, extra = {}) {
@@ -102,6 +98,89 @@ async function fixture(source, css, pagedCSS) {
     scrollTo(0, scrollY + section(3).getBoundingClientRect().top - 130); await settle();
     let sample = api.sampleNow();
     ok(sample.path === chapter(2).path && sample.visibleText.includes('chapter3'), 'adjacent chapters simultaneously visible');
+    // Cold DOM: saved chapter alone first, then the existing incremental neighbor path.
+    // Compare a real character rectangle, not just the saved node/offset numbers.
+    async function coldBoundaryRestore(distance, cancelPending = false) {
+        scrollTo(0, scrollY + section(3).getBoundingClientRect().top - distance); await settle();
+        const saved = api.sampleNow(), savedRect = rectFor(saved);
+        ok(saved.path === chapter(2).path && saved.visibleText.includes('chapter3'), 'cold boundary straddles chapters');
+        const frame = document.createElement('iframe');
+        frame.style.cssText = `position:fixed;left:0;top:0;width:${innerWidth}px;height:${innerHeight}px;border:0;z-index:9999`;
+        const loaded = new Promise(resolve => frame.onload = resolve);
+        frame.srcdoc = '<html><head></head><body>' + chapter(2).body + '</body></html>';
+        document.body.appendChild(frame); await loaded;
+        const w = frame.contentWindow, d = frame.contentDocument, coldMessages = [];
+        try {
+            w.webkit = {messageHandlers:{yjepubLocator:{postMessage(p) { coldMessages.push(p); }}}};
+            w.eval(source);
+            const cold = w.__yjEpub;
+            const cfg = config(2, {targetNode:saved.node, targetOffset:saved.utf16Offset,
+                targetViewportOffset:savedRect.top, preserveTargetAnchor:true, spineCount:4});
+            cold.configure(cfg);
+            for (let n=0; n<120 && !coldMessages.some(m=>m.kind==='ready'); n++) await tick();
+            ok(coldMessages.some(m=>m.kind==='ready'), 'cold initial readiness response');
+            const provisional = coldMessages.find(m=>m.kind==='ready');
+            ok(cold.sampleNow() === null && !coldMessages.some(m=>m.kind==='scroll'), 'pending restore cannot expose a savable position');
+            if (cancelPending) {
+                cold.configure({...cfg, targetNode:0, targetOffset:0, targetViewportOffset:18, epoch:'superseding'});
+                await settle();
+                ok(cold.sampleNow()?.epoch === 'superseding', 'new navigation supersedes pending restore');
+                ok(!coldMessages.some(m=>m.kind==='ready' && m.epoch===epoch && !m.restorationPending), 'no late final ready from cancelled restoration');
+                ok(!cold.syncWindow({sessionID:'session', epoch, chapters:[chapter(3)], keepPaths:[chapter(2).path,chapter(3).path]}), 'cancelled restore rejects old neighbor transaction');
+                return;
+            }
+            ok(cold.syncWindow({sessionID:'session', epoch, chapters:[chapter(3)], keepPaths:[chapter(2).path,chapter(3).path]}), 'cold neighbor accepted');
+            for (let n=0; n<120 && !coldMessages.some(m=>m.kind==='window'); n++) await tick();
+            await settle();
+            const target = d.querySelector(`[data-yj-chapter="${saved.path}"]`).querySelector(`[data-yj-original-id="yj-t${saved.node}"], #yj-t${saved.node}`);
+            const range = d.createRange(); range.setStart(target.firstChild,saved.utf16Offset); range.setEnd(target.firstChild,saved.utf16Offset+1);
+            const rect = range.getBoundingClientRect();
+            ok(Math.abs(rect.top-savedRect.top)<=1, `cold boundary exact viewport: ${rect.top} != ${savedRect.top}`);
+            ok(provisional.restorationPending === true, 'clamped cold location must not be presented as final ready');
+            ok(coldMessages.some(m=>m.kind==='ready' && m.restorationPending !== true), 'final ready after required neighbor');
+            const sampled = cold.sampleNow();
+            ok(sampled && Math.abs(sampled.viewportOffset-savedRect.top)<=1, 'sampling retains viewport offset');
+            // Same-DOM reopen must also use the persisted screen offset, not align to 18px.
+            cold.parkForReopen();
+            cold.configure({...cfg, sessionID:'fresh-session', epoch:'fresh-epoch'});
+            await settle();
+            ok(Math.abs(range.getBoundingClientRect().top-savedRect.top)<=1, 'warm reopen exact viewport');
+            // The true end of the book has no following chapter to wait for.
+            const end = chapter(3);
+            cold.configure({...cfg, path:end.path, chapterIndex:3, expectedNodeLengths:end.lengths,
+                targetNode:7, targetOffset:end.texts[7].length-1, targetViewportOffset:0, epoch:'book-end'});
+            await settle();
+            ok(coldMessages.some(m=>m.kind==='ready' && m.epoch==='book-end' && !m.restorationPending), 'true book end does not wait for nonexistent next chapter');
+        } finally { frame.remove(); }
+    }
+    await coldBoundaryRestore(130);
+    await coldBoundaryRestore(277);
+    await coldBoundaryRestore(130, true);
+    const imageFrame = document.createElement('iframe');
+    imageFrame.style.cssText = 'position:fixed;left:0;top:0;width:520px;height:420px;border:0;z-index:9999';
+    const imageCanvas = document.createElement('canvas'); imageCanvas.width=300; imageCanvas.height=1400;
+    imageCanvas.getContext('2d').fillRect(0,0,300,1400);
+    imageFrame.srcdoc = `<html><head></head><body><img src="${imageCanvas.toDataURL('image/png')}"/><p><span id="yj-t0">尾部文字</span></p></body></html>`;
+    const imageLoaded = new Promise(resolve=>imageFrame.onload=resolve);
+    document.body.appendChild(imageFrame); await imageLoaded;
+    try {
+        const w=imageFrame.contentWindow;
+        w.webkit={messageHandlers:{yjepubLocator:{postMessage() {}}}};
+        w.eval(source);
+        const cfg={sessionID:'image',epoch:'first',path:'image.xhtml',chapterIndex:0,spineCount:1,
+            expectedNodeCount:1,expectedNodeLengths:[4],targetNode:-1,readingMode:'scroll',css};
+        w.__yjEpub.configure(cfg); await settle();
+        w.scrollTo(0,200); await settle();
+        const saved=w.__yjEpub.sampleNow(), y=w.scrollY;
+        ok(saved && saved.viewportOffset>w.innerHeight, 'image-before-text records offscreen text anchor');
+        w.__yjEpub.parkForReopen();
+        w.__yjEpub.configure({...cfg,epoch:'second',targetNode:saved.node,targetOffset:saved.utf16Offset,
+            targetViewportOffset:saved.viewportOffset,preserveTargetAnchor:true});
+        await settle();
+        ok(Math.abs(w.scrollY-y)<=1, `image-before-text viewport preserved: ${w.scrollY} != ${y}`);
+    } finally {imageFrame.remove();}
+    results.push('offscreen text anchor preserves image viewport without viewport-height clipping');
+    results.push('cold cross-chapter restoration preserves exact viewport and waits for necessary neighbor');
     atChapter(3, 20); await settle(); ok(api.sampleNow().path === chapter(3).path, 'forward crossing path');
     atChapter(2, 20); await settle(); ok(api.sampleNow().path === chapter(2).path, 'reverse crossing path');
     ok(originalSpan.isConnected && document === originalDocument, 'no reload/replacement across crossings');
@@ -426,7 +505,7 @@ async function fixture(source, css, pagedCSS) {
     const sameDocument = rd;
     for (let n=0;n<240 && current<9;n++) { rw.scrollBy(0,180); await tick(); }
     await settle();
-    ok(current >= 9 && observed.has(6), 'continuous scrolling must advance beyond initial five-chapter window');
+    ok(current >= 9 && observed.has(6), 'continuous scrolling must advance beyond initial five-chapter window: ' + JSON.stringify({current,observed:[...observed],paths:rw.__yjEpub.windowPaths(),errors:rollingErrors,status:rw.__yjEpub.sampleStatus()}));
     for (let n=0;n<240 && current>0;n++) { rw.scrollBy(0,-180); await tick(); }
     await settle();
     ok(current === 0 && rw.__yjEpub.windowPaths().length <= 5 && rw.document === sameDocument,
@@ -540,7 +619,13 @@ async function fixture(source, css, pagedCSS) {
     if (!browser) throw new Error('Set BROWSER_EXE to an existing Chromium browser (no installation performed).');
     if (!process.env.PI_SCRATCH_DIR) throw new Error('PI_SCRATCH_DIR is required for the temporary browser profile.');
     const profile = fs.mkdtempSync(path.join(process.env.PI_SCRATCH_DIR, 'epub-layout-'));
-    const child = spawn(browser, ['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'], {stdio:'ignore'});
+    // A real loopback origin keeps XHTML Blob frames same-origin; about:blank has an opaque origin.
+    const server = http.createServer((request, response) => {
+        response.writeHead(200, {'Content-Type':'text/html; charset=utf-8'});
+        response.end('<!doctype html><html><head></head><body></body></html>');
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const child = spawn(browser, ['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--remote-debugging-port=0',`--user-data-dir=${profile}`,`http://127.0.0.1:${server.address().port}/`], {stdio:'ignore'});
     let ws;
     try {
         const portFile = path.join(profile, 'DevToolsActivePort');
@@ -553,13 +638,24 @@ async function fixture(source, css, pagedCSS) {
         ws.onmessage = e => { const m=JSON.parse(e.data); if(m.id && pending.has(m.id)) { const [resolve,reject]=pending.get(m.id); pending.delete(m.id); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result); } };
         const send = (method,params={}) => new Promise((resolve,reject)=>{const id=++next;pending.set(id,[resolve,reject]);ws.send(JSON.stringify({id,method,params}));});
         await send('Emulation.setDeviceMetricsOverride',{width:520,height:420,deviceScaleFactor:1,mobile:false});
-        const result = await send('Runtime.evaluate',{expression:`(${fixture.toString()})(${JSON.stringify(source)},${JSON.stringify(base)},${JSON.stringify(paged)})`,awaitPromise:true,returnByValue:true,timeout:45000});
-        if(result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || JSON.stringify(result.exceptionDetails));
-        for(const name of result.result.value) console.log('PASS ' + name);
-        console.log(`${result.result.value.length} real-browser groups passed. Native resource transport, Swift compilation, and WKWebView NOT verified.`);
+        const authorFixture = require('./epub_author_layout_fixture.cjs');
+        const failures = []; let passed = 0;
+        for (const [name, fn, css] of [['continuous', fixture, paged], ['author-layout', authorFixture, author]]) {
+            try {
+                const result = await send('Runtime.evaluate',{expression:`(${fn.toString()})(${JSON.stringify(source)},${JSON.stringify(base)},${JSON.stringify(css)})`,awaitPromise:true,returnByValue:true,timeout:45000});
+                if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || JSON.stringify(result.exceptionDetails));
+                for (const group of result.result.value) console.log('PASS ' + group);
+                passed += result.result.value.length;
+            } catch (error) {
+                failures.push(name + ': ' + error.message); console.error('FAIL ' + name + ': ' + error.message);
+            }
+        }
+        console.log(`${passed} real-browser groups passed. Font waits use controlled doubles; native transport, Swift compilation, and WKWebView NOT verified.`);
+        if (failures.length) throw new Error(failures.join('\n'));
     } finally {
         if (ws) ws.close();
         child.kill();
+        await new Promise(resolve => server.close(resolve));
         await sleep(500);
         try { fs.rmSync(profile,{recursive:true,force:true,maxRetries:5,retryDelay:200}); } catch { console.log('Temporary profile retained in scratch: ' + profile); }
     }

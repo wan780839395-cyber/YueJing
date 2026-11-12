@@ -152,6 +152,13 @@ def main():
     require(sys.platform == "darwin", "IPA packaging requires the actual macOS build; no substitute input")
     commit = os.environ.get("GITHUB_SHA", "")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "A real workflow source SHA is required")
+    if os.environ.get("VALIDATION_SCOPE") == "epub-author-layout":
+        # This scope never emits even a provisional IPA without native qualification.
+        from run_epub_author_layout_validation import delivery_gate
+        qualified = delivery_gate()
+        dependency = json.loads((OUT / "task3/app-dependency-gate.json").read_text(encoding="utf-8"))
+        require(all(dependency.get(key) == qualified[key] for key in ("source_commit", "run_id", "run_attempt"))
+                and dependency.get("signing") == "unsigned", "Missing same-run strict device dependency gate")
     expected = expected_project_identity(PROJECT_SPEC)
     require(APP.is_dir() and not APP.is_symlink(), "Expected built App is missing or is a symlink")
     info_path = APP / "Info.plist"

@@ -7,10 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const swift = fs.readFileSync(path.join(__dirname, '../App/EPUB/EPUBLocationScript.swift'), 'utf8');
-const match = swift.match(/static let bootstrapSource: String = """\r?\n([\s\S]*?)\r?\n    """/);
-assert.ok(match, 'production bootstrap must be extracted, not copied into tests');
-const source = match[1].replace(/^    /gm, '');
-assert.ok(!source.includes('\\'), 'update Swift string unescaping if production starts using escapes');
+const {source} = require('./epub_script_source.cjs').extract(swift);
 new vm.Script(source);
 
 function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat(100)], mode = 'paged') {
@@ -56,6 +53,9 @@ function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat
         return { left, right, top, bottom, width: right - left, height: bottom - top };
     }
     const root = {
+        attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return this.attrs[k] || null; },
+        hasAttribute(k) { return Object.hasOwn(this.attrs, k); }, removeAttribute(k) { delete this.attrs[k]; },
+        querySelectorAll(selector) { return selector === '[id]' ? [...elements.values()].filter(e => e.id) : []; },
         get scrollWidth() { return model.mode === 'paged' ? model.pages * window.innerWidth : window.innerWidth; },
         get scrollHeight() { return model.mode === 'paged' ? window.innerHeight : model.pages * 240; },
         get clientWidth() { return window.innerWidth; },
@@ -65,7 +65,7 @@ function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat
     texts.forEach((text, index) => {
         const node = { nodeType: 3, nodeValue: text, nextSibling: null, index };
         elements.set('yj-t' + index, {
-            id: 'yj-t' + index, getAttribute() { return null; },
+            id: 'yj-t' + index, getAttribute() { return null; }, setAttribute() {},
             firstChild: node, textContent: text,
             getClientRects() { return rects(index, 0, text.length); },
             getBoundingClientRect() { return union(this.getClientRects()); }
@@ -73,13 +73,14 @@ function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat
     });
     const document = {
         documentElement: root, body: root, head: root, images: [],
+        querySelectorAll() { return []; },
         getElementById(id) { return elements.get(id) || null; },
         getElementsByName(name) { return name === 'named' ? [elements.get('fragment')] : []; },
         createElement() {
             const attrs = {};
             return { id: '', textContent: '',
                 setAttribute(k, v) { attrs[k] = v; }, getAttribute(k) { return attrs[k] || null; },
-                querySelectorAll(selector) { return selector === 'img' || selector === 'a[href]' ? [] : [...elements.values()].filter(e => e.id); },
+                querySelectorAll(selector) { return selector === 'img' || selector === 'a[href]' || selector.includes('style[') ? [] : [...elements.values()].filter(e => e.id); },
                 getClientRects() { return [rect(0, 0, root.scrollWidth, root.scrollHeight)]; },
                 getBoundingClientRect() { return this.getClientRects()[0]; }
             };
@@ -95,7 +96,7 @@ function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat
         }
     };
     elements.set('fragment', {
-        id: 'fragment', getAttribute(k) { return k === 'name' ? 'named' : null; },
+        id: 'fragment', getAttribute(k) { return k === 'name' ? 'named' : null; }, setAttribute() {},
         getClientRects() { return [rect(window.innerWidth * 2 + 20, 40)]; },
         getBoundingClientRect() { return union(this.getClientRects()); }
     });
@@ -116,7 +117,7 @@ function harness(texts = ['a'.repeat(100) + '😀' + 'b'.repeat(98) + 'c'.repeat
             chapterIndex: 0,
             expectedNodeCount: texts.length, expectedNodeLengths: texts.map(t => t.length),
             targetNode: -1, targetOffset: 0, preserveTargetAnchor: false,
-            readingMode: mode, css: 'synthetic-style', ...extra });
+            readingMode: mode, layoutMode: 'reader', css: 'synthetic-style', ...extra });
         if (settle) flush();
     }
     return { window, document, api, model, messages, calls, elements, frames, timers, configure, flush,
@@ -136,7 +137,8 @@ test('Swift compatibility defaults, horizontal payload decoding, paged-only CSS 
         assert.ok(swift.includes(`var ${field}: Double = 0`));
         assert.ok(swift.includes(`${field}: (dict["${field}"] as? NSNumber)?.doubleValue ?? 0`));
     }
-    assert.ok(swift.includes('guard readingMode == .paged else { return base }'));
+    assert.ok(swift.includes('guard readingMode == .paged else { return effectiveBase }'));
+    assert.ok(swift.includes('layoutMode == .original ? authorBase : base'));
     for (const rule of ['padding: 16px 20px 40px 20px', 'height: 100vh', 'column-width: calc(100vw - 40px)',
         'column-gap: 40px', 'column-fill: auto', 'overflow-y: hidden', 'max-height: calc(100vh - 64px)']) {
         assert.ok(swift.includes(rule), rule);

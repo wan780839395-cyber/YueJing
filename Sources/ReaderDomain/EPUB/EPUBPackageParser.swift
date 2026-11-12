@@ -115,6 +115,8 @@ public enum EPUBPackageParser {
             var textNodesByPath: [String: [String]] = [:]
             var referencedBodyImages: Set<String> = []
             var validatedImageMediaTypes: [String: String] = [:]
+            var validatedFontMediaTypes: [String: String] = [:]
+            let styleCache = EPUBAuthorStyles.ValidationCache()
 
             for spinePath in spinePaths {
                 try Task.checkCancellation()
@@ -131,7 +133,8 @@ public enum EPUBPackageParser {
                     manifestByPath: manifestMediaTypesByPath,
                     spineSet: spineSet,
                     destination: destination,
-                    limits: limits
+                    limits: limits,
+                    styleCache: styleCache
                 )
                 sanitizedByPath[spinePath] = sanitized
                 fragmentIDsByPath[spinePath] = sanitized.fragmentIDs
@@ -142,6 +145,12 @@ public enum EPUBPackageParser {
                         throw EPUBError.corruptResource
                     }
                     validatedImageMediaTypes[path] = mediaType
+                }
+                for (path, mediaType) in sanitized.referencedFonts {
+                    if let previous = validatedFontMediaTypes[path], previous != mediaType {
+                        throw EPUBError.corruptResource
+                    }
+                    validatedFontMediaTypes[path] = mediaType
                 }
             }
 
@@ -253,13 +262,18 @@ public enum EPUBPackageParser {
 
             var servedResources: [EPUBResource] = []
             var servedPaths: Set<String> = []
+            var totalServedBytes = 0
 
             for spinePath in spinePaths {
                 guard let sanitized = sanitizedByPath[spinePath] else {
                     throw EPUBError.invalidPackage
                 }
+                guard sanitized.xhtmlData.count <= limits.expandedBytes - totalServedBytes else {
+                    throw EPUBError.limitExceeded
+                }
                 try writeSanitizedFile(sanitized.xhtmlData, at: spinePath, under: destination)
                 let sha = EPUBResourceStore.digest(sanitized.xhtmlData)
+                totalServedBytes += sanitized.xhtmlData.count
                 servedResources.append(
                     EPUBResource(
                         path: spinePath,
@@ -281,9 +295,11 @@ public enum EPUBPackageParser {
                       let imgEntry = extraction.entries[imagePath] else {
                     throw EPUBError.invalidPackage
                 }
-                guard imgEntry.byteCount <= limits.imageBytes else {
+                guard imgEntry.byteCount <= limits.imageBytes,
+                      imgEntry.byteCount <= limits.expandedBytes - totalServedBytes else {
                     throw EPUBError.limitExceeded
                 }
+                totalServedBytes += imgEntry.byteCount
                 servedResources.append(
                     EPUBResource(
                         path: imagePath,
@@ -295,6 +311,33 @@ public enum EPUBPackageParser {
                 servedPaths.insert(imagePath)
             }
 
+            var totalFontBytes = 0
+            for fontPath in validatedFontMediaTypes.keys.sorted() {
+                guard let fontMediaType = validatedFontMediaTypes[fontPath],
+                      EPUBAuthorStyles.allowedFontMediaTypes.contains(fontMediaType),
+                      let item = manifestByPath[fontPath],
+                      EPUBAuthorStyles.isSupportedFontManifestMediaType(item.mediaType),
+                      let fontEntry = extraction.entries[fontPath] else {
+                    throw EPUBError.invalidPackage
+                }
+                guard fontEntry.byteCount > 0,
+                      fontEntry.byteCount <= EPUBAuthorStyles.maxFontBytes,
+                      fontEntry.byteCount <= EPUBAuthorStyles.maxTotalFontBytes - totalFontBytes,
+                      fontEntry.byteCount <= limits.expandedBytes - totalServedBytes else {
+                    throw EPUBError.limitExceeded
+                }
+                totalFontBytes += fontEntry.byteCount
+                totalServedBytes += fontEntry.byteCount
+                servedResources.append(
+                    EPUBResource(
+                        path: fontPath,
+                        mediaType: fontMediaType,
+                        sha256: fontEntry.sha256,
+                        byteCount: fontEntry.byteCount
+                    )
+                )
+                servedPaths.insert(fontPath)
+            }
             for extractedPath in extraction.entries.keys where !servedPaths.contains(extractedPath) {
                 let url = fileURL(for: extractedPath, under: destination)
                 try? FileManager.default.removeItem(at: url)

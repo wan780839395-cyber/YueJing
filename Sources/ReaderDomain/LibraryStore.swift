@@ -536,11 +536,15 @@ extension LibraryStore {
         guard let ready = package.ready, package.sourceSHA256 == bookID,
               package.versionID == previous.package.versionID else { throw EPUBError.corruptResource }
         try EPUBReadyArtifact.validate(ready, package: package)
-        guard package == previous.package.withReady(ready) else { throw EPUBError.corruptResource }
-        if let old = previous.package.ready {
-            guard ready.hasSameContent(as: old) else { throw EPUBError.corruptResource }
+        if previous.package.authorStyleRevision == nil {
+            try EPUBAuthorStyleMigration.validate(previous: previous.package, replacement: package)
         } else {
-            guard try EPUBMetadataFingerprintCache.canonical(previous.package) == ready.legacyPackageSHA256 else { throw EPUBError.corruptResource }
+            guard package == previous.package.withReady(ready) else { throw EPUBError.corruptResource }
+            if let old = previous.package.ready {
+                guard ready.hasSameContent(as: old) else { throw EPUBError.corruptResource }
+            } else {
+                guard try EPUBMetadataFingerprintCache.canonical(previous.package) == ready.legacyPackageSHA256 else { throw EPUBError.corruptResource }
+            }
         }
         let metadata = try JSONEncoder().encode(package)
         try queue.write { db in

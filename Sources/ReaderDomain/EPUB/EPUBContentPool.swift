@@ -398,6 +398,15 @@ extension EPUBContentPool {
         }
     }
 
+    /// Reparse the still-verified original; publish only after proving unchanged text coordinates.
+    func upgradeAuthorStyles(archive: URL, expected: EPUBPackage, root: URL, work: URL) throws -> EPUBContentLease {
+        defer { try? FileManager.default.removeItem(at: work) }
+        guard try EPUBResourceStore.sourceDigest(archive) == expected.sourceSHA256 else { throw LibraryError.changedFile }
+        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work)
+        try EPUBAuthorStyleMigration.validate(previous: expected, replacement: package)
+        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root)
+    }
+
     /// Recovery is permitted only when the freshly parsed source proves the exact old semantic package.
     func rebuildReady(archive: URL, expected: EPUBPackage, root: URL, work: URL) throws -> EPUBContentLease {
         defer { try? FileManager.default.removeItem(at: work) }

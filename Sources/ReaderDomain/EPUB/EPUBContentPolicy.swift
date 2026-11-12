@@ -18,6 +18,7 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
     public let referencedImages: Set<String>
     public let referencedLinks: [EPUBResolvedLink]
     public let imageMediaTypes: [String: String]
+    public let referencedFonts: [String: String]
 
     public init(
         path: String,
@@ -26,7 +27,8 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         fragmentIDs: Set<String>,
         referencedImages: Set<String>,
         referencedLinks: [EPUBResolvedLink],
-        imageMediaTypes: [String: String] = [:]
+        imageMediaTypes: [String: String] = [:],
+        referencedFonts: [String: String] = [:]
     ) {
         self.path = path
         self.xhtmlData = xhtmlData
@@ -35,14 +37,14 @@ public struct EPUBSanitizedDocument: Sendable, Equatable {
         self.referencedImages = referencedImages
         self.referencedLinks = referencedLinks
         self.imageMediaTypes = imageMediaTypes
+        self.referencedFonts = referencedFonts
     }
 }
 
 public enum EPUBContentPolicy {
     public static let xhtmlNamespace = "http://www.w3.org/1999/xhtml"
     public static let contentSecurityPolicy =
-        "default-src 'none'; script-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; media-src 'none'; font-src 'none'; img-src yjepub:; style-src 'unsafe-inline'"
-
+        "default-src 'none'; script-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; media-src 'none'; font-src yjepub:; img-src yjepub:; style-src 'unsafe-inline'"
     private static let forbiddenElements: Set<String> = [
         "script", "noscript", "svg", "math", "video", "audio", "source", "track",
         "object", "embed", "applet", "param", "iframe", "frame", "frameset", "portal",
@@ -74,16 +76,45 @@ public enum EPUBContentPolicy {
         destination: URL,
         limits: EPUBLimits = EPUBLimits()
     ) throws -> EPUBSanitizedDocument {
+        try sanitizeXHTML(
+            data: data,
+            path: path,
+            manifestByPath: manifestByPath,
+            spineSet: spineSet,
+            destination: destination,
+            limits: limits,
+            styleCache: nil
+        )
+    }
+
+    static func sanitizeXHTML(
+        data: Data,
+        path: String,
+        manifestByPath: [String: String],
+        spineSet: Set<String>,
+        destination: URL,
+        limits: EPUBLimits = EPUBLimits(),
+        styleCache: EPUBAuthorStyles.ValidationCache?
+    ) throws -> EPUBSanitizedDocument {
         try Task.checkCancellation()
         let canonicalPath = try EPUBResourcePath.canonical(path)
         let preparedXML = try EPUBXMLSupport.prepareXMLData(data, limit: limits.xhtmlBytes)
+        let scopeID = EPUBAuthorStyles.scopeIdentifier(for: canonicalPath)
+        let styleCollector = EPUBAuthorStyles.ChapterCollector(
+            documentPath: canonicalPath,
+            scopeID: scopeID,
+            manifestByPath: manifestByPath,
+            destination: destination,
+            cache: styleCache
+        )
 
         let delegate = XHTMLBuilderDelegate(
             documentPath: canonicalPath,
             manifestByPath: manifestByPath,
             spineSet: spineSet,
             destination: destination,
-            limits: limits
+            limits: limits,
+            styleCollector: styleCollector
         )
         try EPUBXMLSupport.parse(preparedXML, delegate: delegate)
         guard delegate.sawHTML, delegate.sawBody else {
@@ -105,12 +136,20 @@ public enum EPUBContentPolicy {
             serializeChildren(of: bodyRoot, into: &bodyMarkup, textNodes: &textNodes)
         }
 
+        let authorCSS = try styleCollector.renderCSS(bodyClasses: delegate.bodyClasses, bodyID: delegate.bodyID)
+        if !authorCSS.isEmpty {
+            bodyRoot.attributes.insert(("data-yj-author-scope", scopeID), at: 0)
+        }
+        let styleTag = authorCSS.isEmpty
+            ? ""
+            : "<style data-yj-author-style=\"true\">\(escapeXMLText(authorCSS))</style>"
+
         let cleanTitle = delegate.titleText.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveTitle = cleanTitle.isEmpty ? "Chapter" : cleanTitle
         let bodyAttributes = bodyRoot.attributes.map { " \($0.0)=\"\(escapeXMLAttribute($0.1))\"" }.joined()
         let xhtml = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <html xmlns="\(xhtmlNamespace)"><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)"/><title>\(escapeXMLText(effectiveTitle))</title></head><body\(bodyAttributes)>\(bodyMarkup)</body></html>
+        <html xmlns="\(xhtmlNamespace)"><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)"/><title>\(escapeXMLText(effectiveTitle))</title>\(styleTag)</head><body\(bodyAttributes)>\(bodyMarkup)</body></html>
         """
         let outputData = Data(xhtml.utf8)
         guard outputData.count <= limits.xhtmlBytes else {
@@ -124,10 +163,10 @@ public enum EPUBContentPolicy {
             fragmentIDs: delegate.fragmentIDs,
             referencedImages: delegate.referencedImages,
             referencedLinks: delegate.referencedLinks,
-            imageMediaTypes: delegate.imageMediaTypes
+            imageMediaTypes: delegate.imageMediaTypes,
+            referencedFonts: styleCollector.referencedFonts
         )
     }
-
     public static func verifyImageData(_ data: Data, mediaType: String) throws {
         guard !data.isEmpty else { throw EPUBError.corruptResource }
         switch mediaType {
@@ -186,7 +225,7 @@ public enum EPUBContentPolicy {
 
     fileprivate final class DOMElement {
         let name: String
-        let attributes: [(String, String)]
+        var attributes: [(String, String)]
         var children: [DOMNode] = []
 
         init(name: String, attributes: [(String, String)]) {
@@ -248,6 +287,7 @@ public enum EPUBContentPolicy {
         let spineSet: Set<String>
         let destination: URL
         let limits: EPUBLimits
+        let styleCollector: EPUBAuthorStyles.ChapterCollector
 
         var sawHTML = false
         var sawBody = false
@@ -256,10 +296,13 @@ public enum EPUBContentPolicy {
         var inTitle = false
         var ignoredStyleDepth = 0
         var currentStyleText = ""
+        var currentStyleEmitRules = true
         var titleText = ""
         var pendingText = ""
 
         var bodyRoot: DOMElement?
+        var bodyID: String?
+        var bodyClasses: Set<String> = []
         var elementStack: [DOMElement] = []
         var fragmentIDs: Set<String> = []
         var referencedImages: Set<String> = []
@@ -275,15 +318,16 @@ public enum EPUBContentPolicy {
             manifestByPath: [String: String],
             spineSet: Set<String>,
             destination: URL,
-            limits: EPUBLimits
+            limits: EPUBLimits,
+            styleCollector: EPUBAuthorStyles.ChapterCollector
         ) {
             self.documentPath = documentPath
             self.manifestByPath = manifestByPath
             self.spineSet = spineSet
             self.destination = destination
             self.limits = limits
+            self.styleCollector = styleCollector
         }
-
         private func flushPendingText() {
             guard !pendingText.isEmpty else { return }
             let text = pendingText
@@ -332,8 +376,8 @@ public enum EPUBContentPolicy {
                 if lowerAttr == "srcdoc" || lowerAttr == "formaction" || lowerAttr == "xlink:href" {
                     throw EPUBError.unsupportedContent
                 }
-                if lowerAttr == "style" {
-                    try validateInlineStyleAttribute(attrValue)
+                if lowerAttr == "style", lowerLocal != "body", !allowedBodyElements.contains(lowerLocal) {
+                    try styleCollector.auditInlineStyleAttribute(attrValue)
                 }
             }
 
@@ -362,9 +406,19 @@ public enum EPUBContentPolicy {
             }
 
             if inHead {
+                if ignoredStyleDepth > 0 {
+                    if lowerLocal == "style" {
+                        ignoredStyleDepth += 1
+                    } else {
+                        throw EPUBError.unsupportedContent
+                    }
+                    return
+                }
                 if lowerLocal == "title" {
                     inTitle = true
                 } else if lowerLocal == "style" {
+                    try validateStyleElementAttributes(attributes)
+                    currentStyleEmitRules = isScreenMedia(attributeValue(attributes, named: "media"))
                     ignoredStyleDepth += 1
                     currentStyleText = ""
                 } else if lowerLocal == "meta" {
@@ -373,7 +427,7 @@ public enum EPUBContentPolicy {
                         throw EPUBError.unsupportedContent
                     }
                 } else if lowerLocal == "link" {
-                    try validateHeadLink(attributes)
+                    try handleHeadLink(attributes)
                 } else {
                     throw EPUBError.unsupportedContent
                 }
@@ -386,8 +440,25 @@ public enum EPUBContentPolicy {
                 }
                 sawBody = true
                 inBody = true
-                let bodyID = try extractAndRecordID(from: attributes)
-                let root = DOMElement(name: "body", attributes: bodyID.map { [("id", $0)] } ?? [])
+                let parsedBodyID = try extractAndRecordID(from: attributes)
+                self.bodyID = parsedBodyID
+                var bodyAttrs: [(String, String)] = []
+                if let parsedBodyID {
+                    bodyAttrs.append(("id", parsedBodyID))
+                }
+                var classes = EPUBAuthorStyles.sanitizeClassAttribute(attributeValue(attributes, named: "class"))
+                self.bodyClasses = Set(classes)
+                if let rawStyle = attributeValue(attributes, named: "style"),
+                   let generatedClass = try styleCollector.addInlineStyleAttribute(rawStyle, isBody: true) {
+                    classes.append(generatedClass)
+                }
+                if !classes.isEmpty {
+                    bodyAttrs.append(("class", classes.joined(separator: " ")))
+                }
+                if let dir = attributeValue(attributes, named: "dir"), ["ltr", "rtl", "auto"].contains(dir.lowercased()) {
+                    bodyAttrs.append(("dir", dir.lowercased()))
+                }
+                let root = DOMElement(name: "body", attributes: bodyAttrs)
                 bodyRoot = root
                 elementStack = [root]
                 return
@@ -407,6 +478,8 @@ public enum EPUBContentPolicy {
             }
 
             if lowerLocal == "style" {
+                try validateStyleElementAttributes(attributes)
+                currentStyleEmitRules = isScreenMedia(attributeValue(attributes, named: "media"))
                 ignoredStyleDepth = 1
                 currentStyleText = ""
                 return
@@ -419,6 +492,15 @@ public enum EPUBContentPolicy {
             var sanitizedAttrs: [(String, String)] = []
             if let id = try extractAndRecordID(from: attributes) {
                 sanitizedAttrs.append(("id", id))
+            }
+
+            var classes = EPUBAuthorStyles.sanitizeClassAttribute(attributeValue(attributes, named: "class"))
+            if let rawStyle = attributeValue(attributes, named: "style"),
+               let generatedClass = try styleCollector.addInlineStyleAttribute(rawStyle, isBody: false) {
+                classes.append(generatedClass)
+            }
+            if !classes.isEmpty {
+                sanitizedAttrs.append(("class", classes.joined(separator: " ")))
             }
 
             if lowerLocal == "img" {
@@ -447,7 +529,6 @@ public enum EPUBContentPolicy {
             if let dir = attributes["dir"], ["ltr", "rtl", "auto"].contains(dir.lowercased()) {
                 sanitizedAttrs.append(("dir", dir.lowercased()))
             }
-
             let element = DOMElement(name: lowerLocal, attributes: sanitizedAttrs)
             guard let parent = elementStack.last, !voidElements.contains(parent.name) else {
                 throw EPUBError.invalidPackage
@@ -479,8 +560,10 @@ public enum EPUBContentPolicy {
                 if lowerLocal == "title" {
                     inTitle = false
                 } else if lowerLocal == "style" {
-                    try validateStyleContent(currentStyleText)
-                    currentStyleText = ""
+                    if ignoredStyleDepth == 1 {
+                        try styleCollector.addInlineBlockStylesheet(currentStyleText, emitRules: currentStyleEmitRules)
+                        currentStyleText = ""
+                    }
                     ignoredStyleDepth = max(0, ignoredStyleDepth - 1)
                 } else if lowerLocal == "head" {
                     inHead = false
@@ -490,8 +573,10 @@ public enum EPUBContentPolicy {
             if inBody {
                 if ignoredStyleDepth > 0 {
                     if lowerLocal == "style" {
-                        try validateStyleContent(currentStyleText)
-                        currentStyleText = ""
+                        if ignoredStyleDepth == 1 {
+                            try styleCollector.addInlineBlockStylesheet(currentStyleText, emitRules: currentStyleEmitRules)
+                            currentStyleText = ""
+                        }
                         ignoredStyleDepth -= 1
                     }
                     return
@@ -556,35 +641,52 @@ public enum EPUBContentPolicy {
             }
         }
 
-        private func validateHeadLink(_ attributes: [String: String]) throws {
-            let rel = (attributeValue(attributes, named: "rel") ?? "").lowercased()
-            let type = (attributeValue(attributes, named: "type") ?? "").lowercased()
-            let href = (attributeValue(attributes, named: "href") ?? "").lowercased()
-            if rel.contains("font") || type.contains("font") || type.contains("javascript") ||
-                href.hasSuffix(".ttf") || href.hasSuffix(".otf") ||
-                href.hasSuffix(".woff") || href.hasSuffix(".woff2") {
-                throw EPUBError.unsupportedContent
-            }
-            if href.hasPrefix("http:") || href.hasPrefix("https:") || href.hasPrefix("//") ||
-                href.hasPrefix("javascript:") || href.hasPrefix("data:") {
-                throw EPUBError.unsupportedContent
+        private func validateStyleElementAttributes(_ attributes: [String: String]) throws {
+            if let rawType = attributeValue(attributes, named: "type")?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawType.isEmpty {
+                let mediaType = rawType.split(separator: ";", maxSplits: 1).first?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                guard mediaType == "text/css" else {
+                    throw EPUBError.unsupportedContent
+                }
             }
         }
 
-        private func validateStyleContent(_ css: String) throws {
-            let lower = css.lowercased()
-            if lower.contains("@font-face") || lower.contains("javascript:") || lower.contains("expression(") ||
-                lower.contains(".woff") || lower.contains(".ttf") || lower.contains(".otf") ||
-                lower.contains("http://") || lower.contains("https://") {
-                throw EPUBError.unsupportedContent
-            }
+        private func isScreenMedia(_ rawMedia: String?) -> Bool {
+            guard let rawMedia else { return true }
+            let trimmed = rawMedia.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if trimmed.isEmpty { return true }
+            let parts = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            return parts.contains { $0 == "all" || $0 == "screen" }
         }
 
-        private func validateInlineStyleAttribute(_ style: String) throws {
-            let lower = style.lowercased()
-            if lower.contains("url(") || lower.contains("@import") || lower.contains("@font-face") ||
-                lower.contains("javascript:") || lower.contains("expression(") {
+        private func handleHeadLink(_ attributes: [String: String]) throws {
+            let relRaw = (attributeValue(attributes, named: "rel") ?? "").lowercased()
+            let typeRaw = (attributeValue(attributes, named: "type") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let hrefRaw = (attributeValue(attributes, named: "href") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let hrefLower = hrefRaw.lowercased()
+            if relRaw.contains("font") || typeRaw.contains("font") || typeRaw.contains("javascript") ||
+                hrefLower.hasSuffix(".ttf") || hrefLower.hasSuffix(".otf") ||
+                hrefLower.hasSuffix(".woff") || hrefLower.hasSuffix(".woff2") {
                 throw EPUBError.unsupportedContent
+            }
+            if !hrefRaw.isEmpty {
+                try rejectActiveOrExternalScheme(hrefRaw)
+            }
+            let relTokens = Set(relRaw.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+            if relTokens.contains("stylesheet") && !relTokens.contains("alternate") {
+                guard !hrefRaw.isEmpty else {
+                    throw EPUBError.invalidPackage
+                }
+                if !typeRaw.isEmpty {
+                    let mediaType = typeRaw.split(separator: ";", maxSplits: 1).first?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    guard mediaType == "text/css" else {
+                        throw EPUBError.unsupportedContent
+                    }
+                }
+                let emitRules = isScreenMedia(attributeValue(attributes, named: "media"))
+                try styleCollector.addExternalStylesheet(href: hrefRaw, emitRules: emitRules)
             }
         }
 

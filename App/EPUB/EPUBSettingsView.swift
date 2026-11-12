@@ -11,6 +11,7 @@ struct EPUBSettingsView: View {
 
     @Binding var preferences: ReaderPreferences
     @Binding var readingMode: EPUBReadingMode
+    @Binding var layoutMode: EPUBLayoutMode
     let changed: @MainActor () -> Void
     var openingSummary: String?
     let runtimeDiagnostics: (@MainActor () async -> String)?
@@ -29,6 +30,7 @@ struct EPUBSettingsView: View {
     init(
         preferences: Binding<ReaderPreferences>,
         readingMode: Binding<EPUBReadingMode>,
+        layoutMode: Binding<EPUBLayoutMode>,
         changed: @escaping @MainActor () -> Void,
         openingSummary: String? = nil,
         runtimeDiagnostics: (@MainActor () async -> String)? = nil,
@@ -38,6 +40,7 @@ struct EPUBSettingsView: View {
     ) {
         _preferences = preferences
         _readingMode = readingMode
+        _layoutMode = layoutMode
         self.changed = changed
         self.openingSummary = openingSummary
         self.runtimeDiagnostics = runtimeDiagnostics
@@ -68,6 +71,18 @@ struct EPUBSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                    ReaderSettingsSection(title: "排版来源", detail: "默认尊重书籍排版；切换保留当前文本位置", appearance: appearance) {
+                        Picker("排版来源", selection: $layoutMode) {
+                            ForEach(EPUBLayoutMode.allCases, id: \.self) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(!isActive())
+                        .accessibilityIdentifier("epub.layoutMode")
+                        Text("原始排版保留安全支持的作者样式与未混淆字体；夜间背景优先保障可读性。复杂版式可能简化。")
+                            .font(.caption).foregroundStyle(appearance.foreground.opacity(0.78))
+                    }
                     ReaderSettingsSection(title: "阅读方式", detail: "切换后保留当前文本位置", appearance: appearance) {
                         Picker("阅读方式", selection: $readingMode) {
                             ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
@@ -78,9 +93,9 @@ struct EPUBSettingsView: View {
                         .disabled(!isActive())
                         .accessibilityIdentifier("epub.readingMode")
                     }
-                    typographySection
+                    typographySection.disabled(layoutMode == .original)
                     themeSection
-                    presetsSection
+                    presetsSection.disabled(layoutMode == .original)
                     epubScopeSection
                     moreSection
                     Text("当前版本：\(AppVersion.current.displayText)")
@@ -202,7 +217,7 @@ struct EPUBSettingsView: View {
 
     private var epubScopeSection: some View {
         ReaderSettingsSection(title: "EPUB 首版范围", detail: "可重排阅读与安全限制", appearance: appearance) {
-            Text("支持受支持 XHTML 正文（段落、标题、强调、列表）与本地 JPEG/PNG 插图；使用受控基本排版样式，不还原任意出版物 CSS，不支持固定版式、DRM、脚本、表单、联网资源及 EPUB 书签。")
+            Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版优先使用书中字号与行距；切换阅读器排版可自定义。暂不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
                 .font(.caption)
                 .foregroundStyle(appearance.foreground.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)

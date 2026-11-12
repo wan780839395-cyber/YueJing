@@ -2,6 +2,45 @@ import ReaderDomain
 import SwiftUI
 import UIKit
 
+/// A reveal is explicit and bounded: one initial scroll, then at most one correction
+/// when the lazy target row mounts. Scrolling/filtering/dismissal cancels ownership.
+struct EPUBContentsRevealState {
+    private(set) var requestID: UUID?
+    private(set) var targetIndex: Int?
+    private(set) var initialIssued = false
+
+    mutating func request(_ index: Int?) {
+        targetIndex = index
+        requestID = index == nil ? nil : UUID()
+        initialIssued = false
+    }
+
+    mutating func cancel() { request(nil) }
+
+    mutating func initialTarget() -> Int? {
+        guard requestID != nil, !initialIssued, let targetIndex else { return nil }
+        initialIssued = true
+        return targetIndex
+    }
+
+    mutating func mountedTarget(_ index: Int) -> Int? {
+        guard requestID != nil, initialIssued, targetIndex == index else { return nil }
+        cancel()
+        return index
+    }
+}
+
+private struct EPUBContentsRevealKey: Equatable {
+    let requestID: UUID?
+    let active: Bool
+    let laidOut: Bool
+}
+
+private struct EPUBContentsLayoutKey: PreferenceKey {
+    static var defaultValue: Bool { false }
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
 @MainActor
 struct EPUBContentsView: View {
     let items: [EPUBNavigationItem]
@@ -13,6 +52,12 @@ struct EPUBContentsView: View {
     let selected: @MainActor (EPUBNavigationItem) -> Void
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var query = ""
+    @State private var presented = false
+    @State private var laidOut = false
+    @State private var reveal = EPUBContentsRevealState()
+    @FocusState private var searchFocused: Bool
 
     static func currentIndex(in items: [EPUBNavigationItem], path currentPath: String?, fragment currentFragment: String?) -> Int? {
         guard let currentPath else { return nil }
@@ -23,14 +68,28 @@ struct EPUBContentsView: View {
         return items.firstIndex(where: { $0.path == currentPath })
     }
 
+    /// Keep original indices (including duplicate path/fragment entries), never filtered ordinals.
+    static func filteredIndices(in items: [EPUBNavigationItem], query: String) -> [Int] {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return Array(items.indices) }
+        return items.indices.filter { index in
+            let title = items[index].title.isEmpty ? "第 \(index + 1) 节" : items[index].title
+            return title.localizedStandardContains(term) || String(index + 1) == term
+        }
+    }
+
+    private var active: Bool { presented && scenePhase == .active && isActive() }
+    private var revealKey: EPUBContentsRevealKey {
+        EPUBContentsRevealKey(requestID: reveal.requestID, active: active, laidOut: laidOut)
+    }
+
     var body: some View {
         // Resolve once for the whole render, never once per lazy row/header branch.
         let selectedIndex = Self.currentIndex(in: items, path: currentPath, fragment: currentFragment)
+        let visibleIndices = Self.filteredIndices(in: items, query: query)
         VStack(spacing: 0) {
             ReaderPanelHeader(title: "目录", appearance: appearance) {
-                Button {
-                    if isActive() { close() }
-                } label: {
+                Button { dismiss() } label: {
                     Text("完成").font(ReaderVisualStyle.panelActionFont)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 12)
@@ -41,66 +100,164 @@ struct EPUBContentsView: View {
                         )
                 }
                 .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
-                .disabled(!isActive())
+                .disabled(!active)
                 .accessibilityLabel("关闭目录")
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
             summaryHeader(currentIndex: selectedIndex)
-            List {
-                if items.isEmpty {
-                    Text("暂无目录。")
-                        .foregroundStyle(appearance.secondary)
-                        .listRowBackground(appearance.surface)
-                } else {
-                    ForEach(items.indices, id: \.self) { index in
-                        let item = items[index]
-                        let isCurrent = (selectedIndex == index)
-                        Button {
-                            guard isActive() else { return }
-                            selected(item)
-                        } label: {
-                            ReaderDirectoryChapterRow(
-                                title: item.title.isEmpty ? "第 \(index + 1) 节" : item.title,
-                                ordinal: index + 1,
-                                totalCount: items.count,
-                                isCurrent: isCurrent,
-                                appearance: appearance
-                            )
-                            .padding(.leading, CGFloat(min(max(item.depth, 0), 4)) * 12)
+            searchControls(currentIndex: selectedIndex)
+            ScrollViewReader { proxy in
+                List {
+                    if items.isEmpty {
+                        emptyRow("暂无目录。")
+                    } else if visibleIndices.isEmpty {
+                        emptyRow("没有匹配的章节。请修改或清空筛选。")
+                    } else {
+                        ForEach(visibleIndices, id: \.self) { index in
+                            let item = items[index]
+                            let isCurrent = (selectedIndex == index)
+                            Button {
+                                guard active else { return }
+                                reveal.cancel()
+                                selected(item)
+                            } label: {
+                                ReaderDirectoryChapterRow(
+                                    title: item.title.isEmpty ? "第 \(index + 1) 节" : item.title,
+                                    ordinal: index + 1,
+                                    totalCount: items.count,
+                                    isCurrent: isCurrent,
+                                    appearance: appearance
+                                )
+                                .padding(.leading, CGFloat(min(max(item.depth, 0), 4)) * 12)
+                            }
+                            .id(index)
+                            .accessibilityIdentifier("reader.chapter.\(index)")
+                            .accessibilityValue(isCurrent ? "当前章节" : "")
+                            .accessibilityHint("阅读本章")
+                            .buttonStyle(.plain)
+                            .listRowBackground(isCurrent ? appearance.selection : appearance.surface)
+                            .listRowSeparator(.hidden)
+                            .task(id: reveal.initialIssued ? revealKey : nil) {
+                                // Unlike another timed retry, this only runs after the target exists.
+                                guard reveal.targetIndex == index, reveal.initialIssued else { return }
+                                let owner = reveal.requestID
+                                await Task.yield()
+                                guard !Task.isCancelled, active, reveal.requestID == owner,
+                                      let target = reveal.mountedTarget(index) else { return }
+                                proxy.scrollTo(target, anchor: .center)
+                            }
                         }
-                        .accessibilityIdentifier("reader.chapter.\(index)")
-                        .accessibilityValue(isCurrent ? "当前章节" : "")
-                        .accessibilityHint("阅读本章")
-                        .buttonStyle(.plain)
-                        .listRowBackground(isCurrent ? appearance.selection : appearance.surface)
-                        .listRowSeparator(.hidden)
+                    }
+                    Section {
+                        Text("当前支持 EPUB 目录与章节/锚点跳转；EPUB 书签暂未纳入本批范围。")
+                            .font(.caption)
+                            .foregroundStyle(appearance.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("epub.directory.scopeNote")
+                    }
+                    .listRowBackground(appearance.surface)
+                    .listRowSeparator(.hidden)
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(appearance.surface)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: EPUBContentsLayoutKey.self,
+                            value: geometry.size.width > 0 && geometry.size.height > 0)
                     }
                 }
-                Section {
-                    Text("当前支持 EPUB 目录与章节/锚点跳转；EPUB 书签暂未纳入本批范围。")
-                        .font(.caption)
-                        .foregroundStyle(appearance.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("epub.directory.scopeNote")
+                .onPreferenceChange(EPUBContentsLayoutKey.self) { [laidOut = $laidOut] ready in
+                    laidOut.wrappedValue = ready
                 }
-                .listRowBackground(appearance.surface)
-                .listRowSeparator(.hidden)
+                .simultaneousGesture(DragGesture().onChanged { _ in reveal.cancel() })
+                .task(id: revealKey) {
+                    let owner = reveal.requestID
+                    guard active, laidOut, owner != nil else { return }
+                    // Wait for the List transaction, not an arbitrary fixed sleep.
+                    await Task.yield()
+                    guard !Task.isCancelled, active, laidOut, reveal.requestID == owner,
+                          let target = reveal.initialTarget() else { return }
+                    proxy.scrollTo(target, anchor: .center)
+                }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(appearance.surface)
         }
-        .task {
-            guard UIAccessibility.isVoiceOverRunning else { return }
+        .onAppear {
+            presented = true
+            query = ""
+            reveal.request(scenePhase == .active && isActive() ? selectedIndex : nil)
+        }
+        .onChange(of: active) { if !$0 { reveal.cancel(); searchFocused = false } }
+        .onDisappear {
+            presented = false
+            laidOut = false
+            reveal.cancel()
+            closeFocused = false
+            searchFocused = false
+        }
+        .task(id: active) {
+            guard active, UIAccessibility.isVoiceOverRunning else { return }
             await Task.yield()
-            if !Task.isCancelled, isActive() {
-                closeFocused = true
+            if !Task.isCancelled, active { closeFocused = true }
+        }
+        .accessibilityAction(.escape) { dismiss() }
+    }
+
+    private func dismiss() {
+        guard active else { return }
+        reveal.cancel()
+        presented = false
+        searchFocused = false
+        close()
+    }
+
+    private func emptyRow(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(appearance.secondary)
+            .listRowBackground(appearance.surface)
+    }
+
+    private func searchControls(currentIndex: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "magnifyingglass").accessibilityHidden(true)
+                TextField("筛选标题或章节序号", text: Binding(
+                    get: { query },
+                    set: { query = $0; reveal.cancel() }
+                ))
+                .focused($searchFocused)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .accessibilityIdentifier("epub.directory.search")
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                        reveal.cancel()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityLabel("清空筛选")
+                    .accessibilityIdentifier("epub.directory.clear")
+                }
             }
+            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+            Button(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节") {
+                guard active else { return }
+                query = ""
+                searchFocused = false
+                reveal.request(currentIndex)
+            }
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
+            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+            .disabled(currentIndex == nil)
+            .accessibilityIdentifier("epub.directory.current")
         }
-        .accessibilityAction(.escape) {
-            if isActive() { close() }
-        }
+        .foregroundStyle(appearance.foreground)
+        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+        .background(appearance.surface)
+        .disabled(!active)
     }
 
     private func summaryHeader(currentIndex: Int?) -> some View {
@@ -151,7 +308,7 @@ struct EPUBContentsView: View {
         if let currentIndex {
             text = "当前第 \(currentIndex + 1) 章 · 共 \(items.count) 章"
         } else if !items.isEmpty {
-            text = "共 \(items.count) 章"
+            text = "未找到当前章节 · 共 \(items.count) 章"
         } else {
             text = "暂无章节"
         }

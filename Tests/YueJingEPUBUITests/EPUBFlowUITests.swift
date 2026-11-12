@@ -95,6 +95,8 @@ final class EPUBFlowUITests: XCTestCase {
         withEPUBFixture { app in
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open", app)
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
+            XCTAssertEqual(Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")["layout"], "original")
+            selectLayoutMode("阅读器排版", rawValue: "reader", app)
             selectReadingMode("上下滚动", rawValue: "scroll", app)
             openDirectory(app)
             let chapter2 = app.buttons["reader.chapter.1"]
@@ -148,6 +150,7 @@ final class EPUBFlowUITests: XCTestCase {
             openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_A_C2_P", stage: "after-relaunch", app)
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
             let restored = Self.parseCanvasValue(canvas.value as? String ?? "")
+            XCTAssertEqual(restored["layout"], "reader", "Layout preference must survive process relaunch")
             XCTAssertEqual(restored["path"], "OEBPS/text/ch2.xhtml")
             XCTAssertEqual(Int(restored["node"] ?? "-1"), scrolledNode)
             XCTAssertGreaterThan(Int(restored["scrollY"] ?? "0") ?? 0, 20)
@@ -156,6 +159,11 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(chapter2.waitForExistence(timeout: 10))
             XCTAssertEqual(chapter2.value as? String, "当前章节")
             closePanel(app)
+            selectLayoutMode("原始排版", rawValue: "original", app)
+            let originalRestored = Self.parseCanvasValue(canvas.value as? String ?? "")
+            XCTAssertEqual(originalRestored["path"], restored["path"])
+            XCTAssertEqual(originalRestored["node"], restored["node"])
+            XCTAssertEqual(originalRestored["offset"], restored["offset"])
             exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
         }
     }
@@ -170,6 +178,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(txtRow.label.contains("TXT"))
 
             openEPUB("EPUBTest-NoCover-B", expectedMarker: "EPUB_NOCOVER_START", stage: "open", app)
+            selectLayoutMode("阅读器排版", rawValue: "reader", app)
             openSettings(app)
 
             let darkButton = app.buttons["reader.theme.dark"]
@@ -537,6 +546,23 @@ final class EPUBFlowUITests: XCTestCase {
         XCTContext.runActivity(named: prefix + "--ax") { activity in
             activity.add(text)
         }
+    }
+
+    @MainActor private func selectLayoutMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
+        showTools(app)
+        openSettings(app)
+        let picker = app.segmentedControls["epub.layoutMode"]
+        revealSetting(picker, app)
+        let option = picker.buttons[title]
+        waitHittable(option)
+        option.tap()
+        let canvas = readerCanvas(app)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            Self.parseCanvasValue(canvas.value as? String ?? "")["layout"] == rawValue
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([ready], timeout: 12), .completed)
+        XCTAssertTrue(option.isSelected)
+        closePanel(app)
     }
 
     @MainActor private func selectReadingMode(_ title: String, rawValue: String, _ app: XCUIApplication) {

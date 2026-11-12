@@ -602,8 +602,12 @@ extension LibraryService {
             try await EPUBContentPool.shared.reconcileReady(root: readyRoot, referenced: references)
             let decoded = await EPUBContentPool.shared.reusableMetadata(bookID: id, root: readyRoot)
             var snapshot = try await store.storedEPUBSnapshot(bookID: id, reusing: decoded)
+            guard snapshot.package.authorStyleRevision == nil ||
+                    snapshot.package.authorStyleRevision == EPUBFormat.authorStyleRevision else {
+                throw EPUBError.unsupportedContent
+            }
             var preparedOnce = false
-            if snapshot.package.ready == nil {
+            if snapshot.package.ready == nil || snapshot.package.authorStyleRevision == nil {
                 snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot)
                 preparedOnce = true
             }
@@ -678,7 +682,10 @@ extension LibraryService {
                                      previous: EPUBMetadataSnapshot) async throws -> EPUBMetadataSnapshot {
         let pool = EPUBContentPool.shared
         let staged: EPUBContentLease
-        if previous.package.ready == nil {
+        if previous.package.authorStyleRevision == nil {
+            let work = await store.epubWorkURL(id: UUID())
+            staged = try await pool.upgradeAuthorStyles(archive: source, expected: previous.package, root: root, work: work)
+        } else if previous.package.ready == nil {
             let legacyRoot = await store.epubContentPoolURL()
             let legacy = try await pool.acquire(bookID: bookID, archive: source, snapshot: previous, root: legacyRoot)
             do {

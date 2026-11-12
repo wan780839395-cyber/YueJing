@@ -399,7 +399,7 @@ struct EPUBReaderHostTests {
             try EPUBUITestFixture.writeIllustratedEPUB(to: archiveURL, title: "Host Reflow")
             let receipt = try await fixture.install(archiveURL)
 
-            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, layoutMode: .reader)
             let controller = EPUBWebViewController()
             model.webView.attach(controller)
             controller.onLocatorEvent = { [weak model] payload in
@@ -1619,5 +1619,828 @@ struct EPUBReaderHostTests {
                 #expect(closed)
             }
         }
+    }
+
+    @Test func epubFailedRestorationRejectsLateReadyAndPendingContinuation() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("FailedRestore.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Failed Restore")
+            let receipt = try await fixture.install(archive)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, readingMode: .scroll)
+            let controller = EPUBWebViewController()
+            model.webView.attach(controller)
+            controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
+            await model.load()
+            let token = try #require(model.currentToken)
+            let payload = EPUBLocatorPayload(kind: .ready, sessionID: token.sessionID, epoch: token.epoch,
+                path: token.path, node: 0, utf16Offset: 0, restoredNode: 0, restoredOffset: 0,
+                scrollY: 0, viewportHeight: 700, contentHeight: 2000, visibleText: "fixture", reason: nil)
+            // Queue the async markReady continuation, then revoke before it can publish.
+            model.handleLocatorEvent(payload)
+            controller.expireReadiness(for: token)
+            model.handleLocatorEvent(payload)
+            await Task.yield()
+            #expect(controller.activeRequest == nil)
+            #expect(model.currentToken == nil && model.navigationRequest == nil)
+            #expect(!model.ready && !model.loading && model.currentPosition == nil)
+            let closed = await model.close()
+            #expect(closed)
+            controller.detachCallbacks()
+        }
+    }
+
+    @Test func epubBoundaryViewportRestoresInFreshControllerAfterCloseOrSuspend() async throws {
+        for returnToShelf in [true, false] {
+            try await withHostFixture { fixture in
+                let archive = fixture.root.appendingPathComponent("BoundaryRestore.epub")
+                try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Boundary Restore")
+                let receipt = try await fixture.install(archive)
+                let first = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service, readingMode: .scroll)
+                let firstController = EPUBWebViewController()
+                first.webView.attach(firstController)
+                firstController.onLocatorEvent = { [weak first] in first?.handleLocatorEvent($0) }
+                firstController.onLoadFailure = { [weak first] error, token in first?.handleLoadFailure(error, token: token) }
+                var saved: EPUBLocatorPayload?
+                try await fixture.withHostedController(firstController) {
+                    await first.load()
+                    let token = try #require(first.currentToken)
+                    try await waitUntilReady(model: first, expectedToken: token)
+                    try await waitForChapterWindow(firstController, count: 3)
+                    _ = try await firstController.evaluateLocatorJavaScriptForTesting("""
+                    var next = document.querySelector('[data-yj-chapter="OEBPS/text/ch2.xhtml"]');
+                    window.scrollTo(0, window.scrollY + next.getBoundingClientRect().top - 113.25);
+                    true;
+                    """)
+                    let sample = try #require(await firstController.sampleVisibleNow())
+                    #expect(sample.path == "OEBPS/text/ch1.xhtml")
+                    #expect(sample.visibleText.contains("EPUB_CH1_END") && sample.visibleText.contains("EPUB_CH2_START"))
+                    #expect(sample.viewportOffset != nil)
+                    first.handleLocatorEvent(sample)
+                    saved = sample
+                    if !returnToShelf { await first.suspend() }
+                    let closed = await first.close()
+                    #expect(closed)
+                }
+                // New store/service/controller exercises persistent progress, not a parked DOM.
+                let service = LibraryService(store: try LibraryStore(root: fixture.root.appendingPathComponent("Managed")))
+                let second = EPUBReaderViewModel(bookID: receipt.book.id, service: service, readingMode: .scroll)
+                let secondController = EPUBWebViewController()
+                second.webView.attach(secondController)
+                secondController.onLocatorEvent = { [weak second] payload in
+                    #expect(!payload.restorationPending, "Provisional restoration must never reach the reading model")
+                    second?.handleLocatorEvent(payload)
+                }
+                secondController.onLoadFailure = { [weak second] error, token in second?.handleLoadFailure(error, token: token) }
+                try await fixture.withHostedController(secondController) {
+                    await second.load()
+                    let token = try #require(second.currentToken)
+                    try await waitUntilReady(model: second, expectedToken: token)
+                    let before = try #require(saved)
+                    let after = try #require(await secondController.sampleVisibleNow())
+                    #expect(after.path == before.path && after.node == before.node && after.utf16Offset == before.utf16Offset)
+                    let beforeY = try #require(before.viewportOffset), afterY = try #require(after.viewportOffset)
+                    #expect(abs(afterY - beforeY) <= 1)
+                    #expect(after.visibleText.contains("EPUB_CH1_END") && after.visibleText.contains("EPUB_CH2_START"))
+                    #expect(secondController.documentLoadCount == 1 && secondController.closedDocumentReuseCount == 0)
+                    let closed = await second.close()
+                    #expect(closed)
+                }
+            }
+        }
+    }
+
+    @Test func epubLayoutModeDefaultsToOriginalFallsBackOnUnknownAndPersistsReaderPreference() throws {
+        let suite = "YueJing-layout-mode-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(EPUBLayoutMode.defaultsKey == "epub.layoutMode.v1")
+        #expect(EPUBLayoutMode.allCases == [.original, .reader])
+        #expect(EPUBLayoutMode.original.title == "原始排版")
+        #expect(EPUBLayoutMode.reader.title == "阅读器排版")
+        #expect(EPUBLayoutMode.restored(from: defaults) == .original)
+
+        for invalid in ["", "unknown-mode", "READER", "publisher"] {
+            defaults.set(invalid, forKey: EPUBLayoutMode.defaultsKey)
+            #expect(EPUBLayoutMode.restored(from: defaults) == .original)
+        }
+
+        defaults.set(EPUBLayoutMode.reader.rawValue, forKey: EPUBLayoutMode.defaultsKey)
+        #expect(EPUBLayoutMode.restored(from: defaults) == .reader)
+
+        defaults.set(EPUBLayoutMode.original.rawValue, forKey: EPUBLayoutMode.defaultsKey)
+        #expect(EPUBLayoutMode.restored(from: defaults) == .original)
+    }
+
+    @Test func epubWebKitAppliesAuthorCSSPerChapterSwitchesLayoutModesAndReopensColdAndWarm() async throws {
+        let savedLayoutMode = UserDefaults.standard.object(forKey: EPUBLayoutMode.defaultsKey)
+        let savedThemeHint = UserDefaults.standard.object(forKey: EPUBPresentationThemeHint.key)
+        defer {
+            if let savedLayoutMode { UserDefaults.standard.set(savedLayoutMode, forKey: EPUBLayoutMode.defaultsKey) }
+            else { UserDefaults.standard.removeObject(forKey: EPUBLayoutMode.defaultsKey) }
+            if let savedThemeHint { UserDefaults.standard.set(savedThemeHint, forKey: EPUBPresentationThemeHint.key) }
+            else { UserDefaults.standard.removeObject(forKey: EPUBPresentationThemeHint.key) }
+        }
+        UserDefaults.standard.removeObject(forKey: EPUBLayoutMode.defaultsKey)
+
+        try await withHostFixture { fixture in
+            let container = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+              <rootfiles>
+                <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+              </rootfiles>
+            </container>
+            """
+            let opf = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/opf" version="3.0" unique-identifier="uid">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:identifier id="uid">urn:uuid:synthetic-author-css</dc:identifier>
+                <dc:title>Author CSS Isolation</dc:title>
+                <dc:language>zh-Hans</dc:language>
+              </metadata>
+              <manifest>
+                <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="ch2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                <item id="css1" href="Styles/ch1.css" media-type="text/css"/>
+                <item id="css2" href="Styles/ch2.css" media-type="text/css"/>
+              </manifest>
+              <spine>
+                <itemref idref="ch1"/>
+                <itemref idref="ch2"/>
+              </spine>
+            </package>
+            """
+            let nav = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+              <head><title>目录</title></head>
+              <body>
+                <nav epub:type="toc">
+                  <ol>
+                    <li><a href="Text/ch1.xhtml#ch1-top">第一章</a></li>
+                    <li><a href="Text/ch2.xhtml#ch2-top">第二章</a></li>
+                  </ol>
+                </nav>
+              </body>
+            </html>
+            """
+            let ch1CSS = """
+            p.verse {
+                font-size: 26px;
+                line-height: 42px;
+                text-indent: 32px;
+            }
+            #chapter-lead {
+                color: rgb(80, 20, 40);
+            }
+            p.verse { color: rgb(1, 2, 3); }
+            #inline-probe { font-size: 70px; }
+            p.verse.inline-probe { font-size: 60px; }
+            """
+            let ch2CSS = """
+            p.verse {
+                font-size: 34px;
+                line-height: 48px;
+                text-indent: 16px;
+            }
+            #chapter-lead {
+                color: rgb(20, 80, 40);
+            }
+            """
+            let ch1Paragraphs = (1...24).map { idx in
+                "<p id=\"c1-p\(idx)\" class=\"verse\">CH1_P\(idx) 第一章作者排版测试段落，包含足够长度的中文正文与标点符号，用于验证滚动位置与字符坐标恢复。</p>"
+            }.joined(separator: "\n")
+            let ch1XHTML = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+              <head>
+                <title>第一章</title>
+                <link rel="stylesheet" type="text/css" href="../Styles/ch1.css"/>
+              </head>
+              <body>
+                <h1 id="ch1-top">第一章 作者排版</h1>
+                <p id="chapter-lead" class="verse">CH1_LEAD 第一章导语段落，验证作者字体大小、行高、首行缩进、类与ID样式。</p>
+                <p id="inline-probe" class="verse inline-probe" style="font-size: 31px">INLINE precedence</p>
+                \(ch1Paragraphs)
+              </body>
+            </html>
+            """
+            let ch2Paragraphs = (1...10).map { idx in
+                "<p id=\"c2-p\(idx)\" class=\"verse\">CH2_P\(idx) 第二章同类名对照段落，验证跨章节样式互不干扰。</p>"
+            }.joined(separator: "\n")
+            let ch2XHTML = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+              <head>
+                <title>第二章</title>
+                <link rel="stylesheet" type="text/css" href="../Styles/ch2.css"/>
+              </head>
+              <body>
+                <h1 id="ch2-top">第二章 样式隔离</h1>
+                <p id="chapter-lead" class="verse">CH2_LEAD 第二章使用相同类名与ID，验证连续渲染时不串样式。</p>
+                \(ch2Paragraphs)
+              </body>
+            </html>
+            """
+
+            let archive = fixture.root.appendingPathComponent("AuthorCSS.epub")
+            try EPUBUITestFixture.writeArchive(entries: [
+                ("mimetype", Data("application/epub+zip".utf8)),
+                ("META-INF/container.xml", Data(container.utf8)),
+                ("OEBPS/content.opf", Data(opf.utf8)),
+                ("OEBPS/nav.xhtml", Data(nav.utf8)),
+                ("OEBPS/Styles/ch1.css", Data(ch1CSS.utf8)),
+                ("OEBPS/Styles/ch2.css", Data(ch2CSS.utf8)),
+                ("OEBPS/Text/ch1.xhtml", Data(ch1XHTML.utf8)),
+                ("OEBPS/Text/ch2.xhtml", Data(ch2XHTML.utf8))
+            ], to: archive)
+
+            let parsedPackage = try EPUBPackageParser.parse(
+                archiveURL: archive,
+                destination: fixture.root.appendingPathComponent("ParsedAuthorCheck", isDirectory: true)
+            )
+            #expect(parsedPackage.authorStyleRevision == EPUBFormat.authorStyleRevision)
+            #expect(parsedPackage.resource(at: "OEBPS/Styles/ch1.css") == nil)
+            #expect(parsedPackage.resource(at: "OEBPS/Styles/ch2.css") == nil)
+
+            let receipt = try await fixture.install(archive)
+            let cache = EPUBWarmRendererCache()
+            defer { cache.discard() }
+
+            @MainActor
+            func readComputedStyles(in controller: EPUBWebViewController) async throws -> [String: String] {
+                let raw = try await controller.evaluateLocatorJavaScriptForTesting("""
+                (function() {
+                    var ch1 = document.querySelector('[data-yj-chapter="OEBPS/Text/ch1.xhtml"]');
+                    var ch2 = document.querySelector('[data-yj-chapter="OEBPS/Text/ch2.xhtml"]');
+                    var p1 = ch1 && ch1.querySelector('p.verse');
+                    var lead1 = ch1 && ch1.querySelector('[data-yj-original-id="chapter-lead"]');
+                    var p2 = ch2 && ch2.querySelector('p.verse');
+                    var lead2 = ch2 && ch2.querySelector('[data-yj-original-id="chapter-lead"]');
+                    var bodyStyle = window.getComputedStyle(document.body);
+                    var s1 = p1 ? window.getComputedStyle(p1) : null;
+                    var l1 = lead1 ? window.getComputedStyle(lead1) : null;
+                    var s2 = p2 ? window.getComputedStyle(p2) : null;
+                    var l2 = lead2 ? window.getComputedStyle(lead2) : null;
+                    var inlineProbe = ch1 && ch1.querySelector('[data-yj-original-id="inline-probe"]');
+                    return {
+                        layout: document.documentElement.getAttribute('data-yj-layout') || '',
+                        inlineFont: inlineProbe ? window.getComputedStyle(inlineProbe).fontSize : '',
+                        bodyFont: bodyStyle ? bodyStyle.fontSize : '',
+                        ch1Font: s1 ? s1.fontSize : '',
+                        ch1Line: s1 ? s1.lineHeight : '',
+                        ch1Indent: s1 ? s1.textIndent : '',
+                        ch1LeadColor: l1 ? l1.color : '',
+                        ch2Font: s2 ? s2.fontSize : '',
+                        ch2Line: s2 ? s2.lineHeight : '',
+                        ch2Indent: s2 ? s2.textIndent : '',
+                        ch2LeadColor: l2 ? l2.color : ''
+                    };
+                })();
+                """) as? [String: String]
+                return try #require(raw)
+            }
+
+            @MainActor
+            func expectOriginalAuthorStyles(_ styles: [String: String]) {
+                #expect(styles["layout"] == "original")
+                #expect(styles["inlineFont"] == "31px")
+                #expect(styles["ch1Font"] == "26px")
+                #expect(styles["ch1Line"] == "42px")
+                #expect(styles["ch1Indent"] == "32px")
+                #expect(styles["ch1LeadColor"] == "rgb(80, 20, 40)")
+                #expect(styles["ch2Font"] == "34px")
+                #expect(styles["ch2Line"] == "48px")
+                #expect(styles["ch2Indent"] == "16px")
+                #expect(styles["ch2LeadColor"] == "rgb(20, 80, 40)")
+            }
+
+            @MainActor
+            func bind(_ model: EPUBReaderViewModel, _ controller: EPUBWebViewController) {
+                controller.onLocatorEvent = { [weak model] payload in model?.handleLocatorEvent(payload) }
+                controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
+                controller.onChapterBoundary = { [weak model] direction, token in
+                    model?.turnChapter(direction, from: token) ?? false
+                }
+            }
+
+            let first = EPUBReaderViewModel(
+                bookID: receipt.book.id,
+                service: fixture.service,
+                readingMode: .scroll,
+                rendererCache: cache
+            )
+            #expect(first.layoutMode == .original)
+            let controller = first.webView.makeController()
+            bind(first, controller)
+
+            var beforeSample: EPUBLocatorPayload?
+            var roundtripSample: EPUBLocatorPayload?
+
+            try await fixture.withHostedController(controller, preservingParked: true) {
+                await first.load()
+                let initialToken = try #require(first.currentToken)
+                try await waitUntilReady(model: first, expectedToken: initialToken)
+                try await waitForChapterWindow(controller, count: 2)
+                #expect(controller.documentLoadCount == 1)
+
+                let originalStyles = try await readComputedStyles(in: controller)
+                expectOriginalAuthorStyles(originalStyles)
+
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("""
+                var target = document.querySelector('[data-yj-chapter="OEBPS/Text/ch1.xhtml"] [data-yj-original-id="c1-p10"]');
+                window.scrollTo(0, window.scrollY + target.getBoundingClientRect().top - 120);
+                true;
+                """)
+                let sampled = try #require(await controller.sampleVisibleNow())
+                #expect(sampled.path == "OEBPS/Text/ch1.xhtml" && sampled.node > 5 && sampled.scrollY > 100)
+                let beforeY = try #require(sampled.viewportOffset)
+                first.handleLocatorEvent(sampled)
+                let savedAnchor = try #require(first.currentPosition)
+                #expect(savedAnchor.path == sampled.path && savedAnchor.node == sampled.node && savedAnchor.utf16Offset == sampled.utf16Offset)
+                beforeSample = sampled
+
+                // Switch to reader layout with custom font size/line spacing.
+                first.preferences = ReaderPreferences(fontSize: 28, lineSpacing: 10, theme: .paper)
+                first.setLayoutMode(.reader)
+                try await waitForNewToken(model: first, previous: initialToken)
+                let readerToken = try #require(first.currentToken)
+                try await waitUntilReady(model: first, expectedToken: readerToken)
+
+                #expect(first.layoutMode == .reader)
+                #expect(UserDefaults.standard.string(forKey: EPUBLayoutMode.defaultsKey) == EPUBLayoutMode.reader.rawValue)
+                #expect(controller.documentLoadCount == 1)
+                #expect(first.currentPosition?.path == savedAnchor.path)
+                #expect(first.currentPosition?.node == savedAnchor.node)
+                #expect(first.currentPosition?.utf16Offset == savedAnchor.utf16Offset)
+                let readerVisible = try #require(await controller.sampleVisibleNow())
+                #expect(readerVisible.path == sampled.path && readerVisible.node == sampled.node && readerVisible.utf16Offset == sampled.utf16Offset)
+
+                let readerStyles = try await readComputedStyles(in: controller)
+                #expect(readerStyles["layout"] == "reader")
+                #expect(readerStyles["bodyFont"] == "28px")
+                #expect(readerStyles["inlineFont"] == "28px")
+                #expect(readerStyles["ch1Font"] == "28px")
+                #expect(readerStyles["ch1Line"] == "48px")
+                #expect(readerStyles["ch1Indent"] == "0px")
+                #expect(readerStyles["ch1LeadColor"] == "rgb(31, 31, 31)")
+                #expect(readerStyles["ch2Font"] == "28px")
+
+                // Switch back to original layout; author styles and exact pixel anchor recover.
+                first.setLayoutMode(.original)
+                try await waitForNewToken(model: first, previous: readerToken)
+                let returnToken = try #require(first.currentToken)
+                try await waitUntilReady(model: first, expectedToken: returnToken)
+
+                #expect(first.layoutMode == .original)
+                #expect(UserDefaults.standard.string(forKey: EPUBLayoutMode.defaultsKey) == EPUBLayoutMode.original.rawValue)
+                #expect(controller.documentLoadCount == 1)
+                #expect(first.currentPosition?.path == savedAnchor.path)
+                #expect(first.currentPosition?.node == savedAnchor.node)
+                #expect(first.currentPosition?.utf16Offset == savedAnchor.utf16Offset)
+
+                let restored = try #require(await controller.sampleVisibleNow())
+                #expect(restored.path == sampled.path && restored.node == sampled.node && restored.utf16Offset == sampled.utf16Offset)
+                let restoredY = try #require(restored.viewportOffset)
+                #expect(abs(restoredY - beforeY) <= 1)
+                roundtripSample = restored
+
+                let roundtripStyles = try await readComputedStyles(in: controller)
+                expectOriginalAuthorStyles(roundtripStyles)
+
+                #expect(await first.close())
+                #expect(controller.hasParkedDocument)
+            }
+
+            let expectedBefore = try #require(beforeSample)
+            let expectedRoundtripY = try #require(roundtripSample?.viewportOffset)
+
+            // Warm reopen reusing the parked controller/DOM.
+            let warm = EPUBReaderViewModel(
+                bookID: receipt.book.id,
+                service: fixture.service,
+                readingMode: .scroll,
+                rendererCache: cache
+            )
+            let warmController = warm.webView.makeController()
+            #expect(warmController === controller)
+            bind(warm, warmController)
+            try await fixture.withHostedController(warmController) {
+                await warm.load()
+                let warmToken = try #require(warm.currentToken)
+                try await waitUntilReady(model: warm, expectedToken: warmToken)
+                #expect(warm.layoutMode == .original)
+                #expect(warm.preferences == ReaderPreferences(fontSize: 28, lineSpacing: 10, theme: .paper))
+                #expect(warmController.documentLoadCount == 1 && warmController.closedDocumentReuseCount == 1)
+                let warmVisible = try #require(await warmController.sampleVisibleNow())
+                #expect(warmVisible.path == expectedBefore.path && warmVisible.node == expectedBefore.node && warmVisible.utf16Offset == expectedBefore.utf16Offset)
+                let warmY = try #require(warmVisible.viewportOffset)
+                #expect(abs(warmY - expectedRoundtripY) <= 1)
+                expectOriginalAuthorStyles(try await readComputedStyles(in: warmController))
+                #expect(await warm.close())
+            }
+            cache.discard()
+
+            // Cold reopen with fresh LibraryService and fresh controller.
+            let coldService = LibraryService(store: try LibraryStore(root: fixture.root.appendingPathComponent("Managed", isDirectory: true)))
+            let cold = EPUBReaderViewModel(bookID: receipt.book.id, service: coldService, readingMode: .scroll)
+            let coldController = EPUBWebViewController()
+            cold.webView.attach(coldController)
+            bind(cold, coldController)
+            try await fixture.withHostedController(coldController) {
+                await cold.load()
+                let coldToken = try #require(cold.currentToken)
+                try await waitUntilReady(model: cold, expectedToken: coldToken)
+                try await waitForChapterWindow(coldController, count: 2)
+                #expect(coldController !== controller)
+                #expect(coldController.documentLoadCount == 1 && coldController.closedDocumentReuseCount == 0)
+                #expect(cold.layoutMode == .original)
+                #expect(cold.preferences == ReaderPreferences(fontSize: 28, lineSpacing: 10, theme: .paper))
+                let coldVisible = try #require(await coldController.sampleVisibleNow())
+                #expect(coldVisible.path == expectedBefore.path && coldVisible.node == expectedBefore.node && coldVisible.utf16Offset == expectedBefore.utf16Offset)
+                let coldY = try #require(coldVisible.viewportOffset)
+                #expect(abs(coldY - expectedRoundtripY) <= 1)
+                expectOriginalAuthorStyles(try await readComputedStyles(in: coldController))
+                #expect(await cold.close())
+            }
+        }
+    }
+
+    @Test func epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification() async throws {
+        try await withHostFixture { fixture in
+            let ttfData = makeMinimalSFNT(flavor: .ttf)
+            let otfData = makeMinimalSFNT(flavor: .otf)
+            #expect(try EPUBAuthorStyles.verifyFontData(ttfData, declaredMediaType: "font/ttf") == "font/ttf")
+            #expect(try EPUBAuthorStyles.verifyFontData(otfData, declaredMediaType: "font/otf") == "font/otf")
+
+            let container = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+              <rootfiles>
+                <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+              </rootfiles>
+            </container>
+            """
+            let opf = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/opf" version="3.0" unique-identifier="uid">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:identifier id="uid">urn:uuid:synthetic-font-transport</dc:identifier>
+                <dc:title>Font Transport</dc:title>
+                <dc:language>zh-Hans</dc:language>
+              </metadata>
+              <manifest>
+                <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="ch2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                <item id="css" href="Styles/font.css" media-type="text/css"/>
+                <item id="ttf" href="Fonts/book.ttf" media-type="application/font-sfnt"/>
+                <item id="otf" href="Fonts/book.otf" media-type="font/otf"/>
+              </manifest>
+              <spine>
+                <itemref idref="ch1"/>
+                <itemref idref="ch2"/>
+              </spine>
+            </package>
+            """
+            let nav = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+              <head><title>目录</title></head>
+              <body>
+                <nav epub:type="toc"><ol><li><a href="Text/ch1.xhtml">第一章</a></li><li><a href="Text/ch2.xhtml">第二章</a></li></ol></nav>
+              </body>
+            </html>
+            """
+            let css = """
+            @font-face {
+                font-family: "SyntheticBookTTF";
+                src: url("../Fonts/book.ttf") format("truetype");
+            }
+            @font-face {
+                font-family: "SyntheticBookOTF";
+                src: url("../Fonts/book.otf") format("opentype");
+            }
+            p.styled { font-family: "SyntheticBookTTF", serif; }
+            """
+            let ch1 = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+              <head><title>Ch1</title><link rel="stylesheet" type="text/css" href="../Styles/font.css"/></head>
+              <body><p class="styled">Font transport chapter 1.</p></body>
+            </html>
+            """
+            let ch2 = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+              <head><title>Ch2</title></head>
+              <body><p>Font transport chapter 2.</p></body>
+            </html>
+            """
+
+            let archive = fixture.root.appendingPathComponent("FontTransport.epub")
+            try EPUBUITestFixture.writeArchive(entries: [
+                ("mimetype", Data("application/epub+zip".utf8)),
+                ("META-INF/container.xml", Data(container.utf8)),
+                ("OEBPS/content.opf", Data(opf.utf8)),
+                ("OEBPS/nav.xhtml", Data(nav.utf8)),
+                ("OEBPS/Styles/font.css", Data(css.utf8)),
+                ("OEBPS/Text/ch1.xhtml", Data(ch1.utf8)),
+                ("OEBPS/Text/ch2.xhtml", Data(ch2.utf8)),
+                ("OEBPS/Fonts/book.ttf", ttfData),
+                ("OEBPS/Fonts/book.otf", otfData)
+            ], to: archive)
+
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let package = reader.publication.package
+            #expect(package.resource(at: "OEBPS/Fonts/book.ttf")?.mediaType == "font/ttf")
+            #expect(package.resource(at: "OEBPS/Fonts/book.otf")?.mediaType == "font/otf")
+            #expect(package.resource(at: "OEBPS/Styles/font.css") == nil)
+
+            let ch1Path = try #require(package.spine.first)
+            let token = try await reader.beginNavigation(path: ch1Path)
+
+            let handler = EPUBResourceHandler()
+            let delegate = EPUBResourceProbeDelegate()
+            let config = WKWebViewConfiguration()
+            config.websiteDataStore = .nonPersistent()
+            let pagePrefs = WKWebpagePreferences()
+            pagePrefs.allowsContentJavaScript = false
+            config.defaultWebpagePreferences = pagePrefs
+            config.preferences.javaScriptCanOpenWindowsAutomatically = false
+            config.setURLSchemeHandler(handler, forURLScheme: EPUBResourceHandler.scheme)
+
+            let probeWebView = WKWebView(frame: .zero, configuration: config)
+            probeWebView.navigationDelegate = delegate
+            let probeController = UIViewController()
+            probeWebView.frame = probeController.view.bounds
+            probeWebView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            probeController.view.addSubview(probeWebView)
+
+            try await fixture.withHostedController(probeController) {
+                defer {
+                    probeWebView.stopLoading()
+                    probeWebView.navigationDelegate = nil
+                    handler.invalidate()
+                }
+
+                handler.activate(EPUBResourceCapability(
+                    token: token,
+                    publication: reader.publication,
+                    preferences: reader.preferences,
+                    layoutMode: .original
+                ))
+
+                let ttfURL = try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Fonts/book.ttf"))
+                let ttfProbe = try await probeResource(URLRequest(url: ttfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let ttfHTTP = try #require(ttfProbe.response)
+                #expect(ttfProbe.error == nil && ttfHTTP.statusCode == 200)
+                #expect(ttfHTTP.mimeType == "font/ttf")
+                #expect(ttfHTTP.value(forHTTPHeaderField: "Content-Length") == "\(ttfData.count)")
+                #expect(ttfHTTP.value(forHTTPHeaderField: "X-Content-Type-Options") == "nosniff")
+
+                let otfURL = try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Fonts/book.otf"))
+                let otfProbe = try await probeResource(URLRequest(url: otfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let otfHTTP = try #require(otfProbe.response)
+                #expect(otfProbe.error == nil && otfHTTP.statusCode == 200)
+                #expect(otfHTTP.mimeType == "font/otf")
+                #expect(otfHTTP.value(forHTTPHeaderField: "Content-Length") == "\(otfData.count)")
+                #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+                #expect(handler.rejectedURLs.isEmpty)
+
+                // Permission rejections: wrong epoch, wrong session, query string, unscheduled chapter, stripped CSS.
+                let wrongEpochToken = EPUBNavigationToken(sessionID: token.sessionID, path: ch1Path)
+                let wrongSessionToken = EPUBNavigationToken(sessionID: "foreign-session", epoch: token.epoch, path: ch1Path)
+                var queryComponents = try #require(URLComponents(url: ttfURL, resolvingAgainstBaseURL: false))
+                queryComponents.query = "raw=1"
+                let permissionRejectedURLs: [URL] = [
+                    try #require(EPUBResourceCapability.url(for: wrongEpochToken, path: "OEBPS/Fonts/book.ttf")),
+                    try #require(EPUBResourceCapability.url(for: wrongSessionToken, path: "OEBPS/Fonts/book.ttf")),
+                    try #require(queryComponents.url),
+                    try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Text/ch2.xhtml")),
+                    try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Styles/font.css"))
+                ]
+                for url in permissionRejectedURLs {
+                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                    #expect(result.response == nil && result.error != nil)
+                    #expect(handler.rejectedURLs.contains(url.absoluteString))
+                }
+                #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+
+                // Type and size rejections in handler guard before reading disk.
+                let typeToken = EPUBNavigationToken(sessionID: "type-check-session", path: ch1Path)
+                let badTypePackage = EPUBPackage(
+                    sourceSHA256: reader.book.id,
+                    title: "Font Type Check",
+                    spine: [ch1Path],
+                    navigation: [],
+                    resources: [
+                        EPUBResource(path: "OEBPS/Fonts/bad.woff", mediaType: "font/woff", sha256: EPUBResourceStore.digest(ttfData), byteCount: ttfData.count),
+                        EPUBResource(path: "OEBPS/Fonts/huge.ttf", mediaType: "font/ttf", sha256: EPUBResourceStore.digest(ttfData), byteCount: EPUBAuthorStyles.maxFontBytes + 1)
+                    ],
+                    textNodes: [ch1Path: ["T"]],
+                    coverPath: nil
+                )
+                handler.activate(EPUBResourceCapability(
+                    token: typeToken,
+                    publication: EPUBPublication(package: badTypePackage, resourceRoot: reader.publication.resourceRoot),
+                    preferences: reader.preferences,
+                    layoutMode: .original
+                ))
+                for rejectedPath in ["OEBPS/Fonts/bad.woff", "OEBPS/Fonts/huge.ttf"] {
+                    let url = try #require(EPUBResourceCapability.url(for: typeToken, path: rejectedPath))
+                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                    #expect(result.response == nil && result.error != nil)
+                    #expect(handler.rejectedURLs.contains(url.absoluteString))
+                }
+                #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+
+                // Hash mismatch on disk must fail while untouched sibling OTF still succeeds.
+                let freshToken = EPUBNavigationToken(sessionID: token.sessionID, path: ch1Path)
+                handler.activate(EPUBResourceCapability(
+                    token: freshToken,
+                    publication: reader.publication,
+                    preferences: reader.preferences,
+                    layoutMode: .original
+                ))
+                let diskTTF = reader.publication.resourceRoot.appendingPathComponent("OEBPS/Fonts/book.ttf")
+                var tampered = ttfData
+                tampered[tampered.count - 1] ^= 0xFF
+                try tampered.write(to: diskTTF)
+                defer { try? ttfData.write(to: diskTTF) }
+
+                let tamperedTTFURL = try #require(EPUBResourceCapability.url(for: freshToken, path: "OEBPS/Fonts/book.ttf"))
+                let tamperedResult = try await probeResource(URLRequest(url: tamperedTTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                #expect(tamperedResult.response == nil && tamperedResult.error != nil)
+                #expect(handler.rejectedURLs.contains(tamperedTTFURL.absoluteString))
+                #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
+
+                let freshOTFURL = try #require(EPUBResourceCapability.url(for: freshToken, path: "OEBPS/Fonts/book.otf"))
+                let freshOTFResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                #expect(freshOTFResult.error == nil && freshOTFResult.response?.statusCode == 200)
+                #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf", "OEBPS/Fonts/book.otf"])
+
+                // Invalidated capability rejects subsequent requests for the previously valid URL.
+                handler.invalidate()
+                let invalidatedResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                #expect(invalidatedResult.response == nil && invalidatedResult.error != nil)
+                #expect(handler.rejectedURLs.contains(freshOTFURL.absoluteString))
+            }
+
+            try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        }
+    }
+
+    private func probeResource(
+        _ request: URLRequest,
+        in webView: WKWebView,
+        delegate: EPUBResourceProbeDelegate
+    ) async throws -> (response: HTTPURLResponse?, error: Error?) {
+        let expectation = XCTestExpectation(description: "EPUB resource handler probe")
+        var capturedResponse: HTTPURLResponse?
+        var capturedError: Error?
+        var settled = false
+        delegate.onResponse = { response in
+            guard !settled else { return }
+            settled = true
+            delegate.expectedNavigation = nil
+            capturedResponse = response
+            expectation.fulfill()
+        }
+        delegate.onFailure = { error in
+            guard !settled else { return }
+            settled = true
+            delegate.expectedNavigation = nil
+            capturedError = error
+            expectation.fulfill()
+        }
+        defer {
+            delegate.expectedNavigation = nil
+            delegate.onResponse = nil
+            delegate.onFailure = nil
+        }
+        let navigation = try #require(webView.load(request))
+        delegate.expectedNavigation = navigation
+        let waitResult = await XCTWaiter.fulfillment(of: [expectation], timeout: 10)
+        try #require(waitResult == .completed)
+        return (capturedResponse, capturedError)
+    }
+
+    private enum MinimalSFNTFlavor {
+        case ttf
+        case otf
+    }
+
+    // Minimal SFNT container satisfying EPUBAuthorStyles.verifyFontData for resource transport checks;
+    // it omits full glyph metrics and does not represent a WebKit-renderable font face.
+    private func makeMinimalSFNT(flavor: MinimalSFNTFlavor) -> Data {
+        func appendUInt16BE(_ data: inout Data, _ value: UInt16) {
+            data.append(UInt8((value >> 8) & 0xFF))
+            data.append(UInt8(value & 0xFF))
+        }
+        func appendUInt32BE(_ data: inout Data, _ value: UInt32) {
+            data.append(UInt8((value >> 24) & 0xFF))
+            data.append(UInt8((value >> 16) & 0xFF))
+            data.append(UInt8((value >> 8) & 0xFF))
+            data.append(UInt8(value & 0xFF))
+        }
+
+        var head = Data(repeating: 0, count: 54)
+        let magic: UInt32 = 0x5F0F3CF5
+        head[12] = UInt8((magic >> 24) & 0xFF)
+        head[13] = UInt8((magic >> 16) & 0xFF)
+        head[14] = UInt8((magic >> 8) & 0xFF)
+        head[15] = UInt8(magic & 0xFF)
+
+        var tables: [(String, Data)] = [
+            ("head", head),
+            ("hhea", Data(repeating: 0, count: 36)),
+            ("maxp", Data(repeating: 0, count: 6)),
+            ("name", Data(repeating: 0, count: 8))
+        ]
+        let version: UInt32
+        switch flavor {
+        case .ttf:
+            version = 0x00010000
+            tables.append(("loca", Data(repeating: 0, count: 4)))
+            tables.append(("glyf", Data(repeating: 0x01, count: 16)))
+        case .otf:
+            version = 0x4F54544F
+            tables.append(("CFF ", Data(repeating: 0x01, count: 16)))
+        }
+        tables.sort { $0.0 < $1.0 }
+
+        let numTables = tables.count
+        var out = Data()
+        appendUInt32BE(&out, version)
+        appendUInt16BE(&out, UInt16(numTables))
+        var maxPow2 = 1
+        var entrySelector: UInt16 = 0
+        while maxPow2 * 2 <= numTables {
+            maxPow2 *= 2
+            entrySelector += 1
+        }
+        let searchRange = UInt16(maxPow2 * 16)
+        let rangeShift = UInt16(numTables * 16) - searchRange
+        appendUInt16BE(&out, searchRange)
+        appendUInt16BE(&out, entrySelector)
+        appendUInt16BE(&out, rangeShift)
+
+        var offset = 12 + numTables * 16
+        var bodies = Data()
+        for (tag, body) in tables {
+            out.append(contentsOf: Array(tag.utf8))
+            appendUInt32BE(&out, 0)
+            appendUInt32BE(&out, UInt32(offset))
+            appendUInt32BE(&out, UInt32(body.count))
+            bodies.append(body)
+            let pad = (4 - (body.count % 4)) % 4
+            if pad > 0 { bodies.append(Data(repeating: 0, count: pad)) }
+            offset += body.count + pad
+        }
+        out.append(bodies)
+        return out
+    }
+}
+
+@MainActor
+private final class EPUBResourceProbeDelegate: NSObject, WKNavigationDelegate {
+    weak var expectedNavigation: WKNavigation?
+    var onResponse: (@MainActor (HTTPURLResponse) -> Void)?
+    var onFailure: (@MainActor (Error) -> Void)?
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        preferences: WKWebpagePreferences,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
+    ) {
+        preferences.allowsContentJavaScript = false
+        decisionHandler(.allow, preferences)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
+    ) {
+        if let http = navigationResponse.response as? HTTPURLResponse {
+            onResponse?(http)
+        }
+        decisionHandler(.cancel)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard let navigation, navigation === expectedNavigation else { return }
+        onFailure?(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard let navigation, navigation === expectedNavigation else { return }
+        onFailure?(error)
     }
 }

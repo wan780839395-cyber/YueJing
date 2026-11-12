@@ -223,6 +223,13 @@ struct EPUBReaderScreen: View {
                             model.setReadingMode(mode)
                         }
                     ),
+                    layoutMode: Binding(
+                        get: { model.layoutMode },
+                        set: { mode in
+                            guard panelActive(.settings, session.id) else { return }
+                            model.setLayoutMode(mode)
+                        }
+                    ),
                     changed: {
                         if panelActive(.settings, session.id) {
                             model.settingsChanged()

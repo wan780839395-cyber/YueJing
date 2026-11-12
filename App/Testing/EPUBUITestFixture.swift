@@ -32,6 +32,9 @@ enum EPUBUITestFixture {
         let service = LibraryService(store: store)
 
         if try await store.books().isEmpty {
+            // Reset only a new isolated DEBUG fixture, never a process relaunch of it.
+            UserDefaults.standard.removeObject(forKey: EPUBLayoutMode.defaultsKey)
+            UserDefaults.standard.removeObject(forKey: EPUBReadingMode.defaultsKey)
             let txtURL = inputs.appendingPathComponent(txtCompanionTitle).appendingPathExtension("txt")
             let txtBody = "第一章 TXT_COMPANION_START\n" + (1...16).map { line in
                 "TXT_C_LINE_\(line) 合成对照 TXT 文本，用于验证 EPUB 与 TXT 共存且互不串书。\n"

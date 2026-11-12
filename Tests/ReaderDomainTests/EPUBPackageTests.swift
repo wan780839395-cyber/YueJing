@@ -83,7 +83,10 @@ struct EPUBPackageTests {
         #expect(sanitizedBText.contains("img-src yjepub:"))
         #expect(sanitizedBText.contains("id=\"hb\""))
         #expect(sanitizedBText.contains("<span id=\"yj-t0\">Part B &amp; &lt;1&gt;</span>"))
-        #expect(!sanitizedBText.contains("<style"))
+        #expect(sanitizedBText.contains("<style data-yj-author-style=\"true\">"))
+        #expect(sanitizedBText.contains("data-yj-layout=\"original\""))
+        #expect(sanitizedBText.contains("color: #111"))
+        #expect(!sanitizedBText.contains("<style>body"))
         #expect(!sanitizedBText.contains("<link"))
 
         let epub2Chapters = [

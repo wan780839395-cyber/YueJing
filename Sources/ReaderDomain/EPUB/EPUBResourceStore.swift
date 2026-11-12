@@ -21,9 +21,9 @@ public enum EPUBResourceStore {
         var started = timings == nil ? nil : ContinuousClock.now
         let path = resource.path
         guard try EPUBResourcePath.canonical(path) == path,
-              ["application/xhtml+xml", "image/jpeg", "image/png", "image/webp"].contains(resource.mediaType),
+              let maxBytes = EPUBAuthorStyles.maximumServedBytes(forMediaType: resource.mediaType),
               resource.byteCount >= 0,
-              resource.byteCount <= (resource.mediaType == "application/xhtml+xml" ? 8 : 16) * 1024 * 1024
+              resource.byteCount <= maxBytes
         else { throw EPUBError.corruptResource }
         started = checkpoint(.pathPolicy, since: started, timings: &timings)
         var url = root

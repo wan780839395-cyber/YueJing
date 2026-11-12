@@ -14,6 +14,7 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var navigationRequest: EPUBNavigationRequest?
     @Published var preferences = ReaderPreferences()
     @Published private(set) var readingMode: EPUBReadingMode
+    @Published private(set) var layoutMode: EPUBLayoutMode
     @Published private(set) var loading = true
     @Published private(set) var ready = false
     @Published private(set) var exitSaveFailed = false
@@ -61,7 +62,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil,
          rendererCache: EPUBWarmRendererCache? = nil, openingIntent: ContinuousClock.Instant? = nil,
-         processOpenOrdinal: Int? = nil, openingTitle: String? = nil) {
+         processOpenOrdinal: Int? = nil, openingTitle: String? = nil, layoutMode: EPUBLayoutMode? = nil) {
         self.bookID = bookID
         self.service = service
         self.rendererCache = rendererCache
@@ -71,6 +72,7 @@ final class EPUBReaderViewModel: ObservableObject {
         self.readingMode = readingMode ?? EPUBReadingMode(
             rawValue: UserDefaults.standard.string(forKey: EPUBReadingMode.defaultsKey) ?? ""
         ) ?? .scroll
+        self.layoutMode = layoutMode ?? EPUBLayoutMode.restored()
         openingObservation = EPUBOpeningObservation(intentAt: openingIntent, processOpenOrdinal: processOpenOrdinal,
                                                     rendererTaken: rendererCache.map { _ in retained?.controller != nil })
         preferences = ReaderPreferences(theme: EPUBPresentationThemeHint.read())
@@ -100,6 +102,13 @@ final class EPUBReaderViewModel: ObservableObject {
         guard mode != readingMode, ready, !closing, !suspended, !exitSaveFailed else { return }
         readingMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: EPUBReadingMode.defaultsKey)
+        settingsChanged()
+    }
+
+    func setLayoutMode(_ mode: EPUBLayoutMode) {
+        guard mode != layoutMode, ready, !closing, !suspended, !exitSaveFailed else { return }
+        layoutMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: EPUBLayoutMode.defaultsKey)
         settingsChanged()
     }
 
@@ -291,7 +300,8 @@ final class EPUBReaderViewModel: ObservableObject {
         guard let reader, !closing, !suspended, !exitSaveFailed else { return }
         let validated = preferences.validated
         preferences = validated
-        guard navigationRequest?.preferences != validated || navigationRequest?.readingMode != readingMode else { return }
+        guard navigationRequest?.preferences != validated || navigationRequest?.readingMode != readingMode ||
+                navigationRequest?.layoutMode != layoutMode else { return }
         let targetPath = currentPath ?? currentPosition?.path ?? reader.publication.package.spine.first
         guard let path = targetPath else { return }
         let preserved = currentPosition?.path == path ? currentPosition : nil
@@ -316,12 +326,24 @@ final class EPUBReaderViewModel: ObservableObject {
 
         navigationTask?.cancel()
         navigationTask = Task { @MainActor [weak self] in
-            await self?.beginChapterNavigation(
-                path: path,
-                targetPosition: preserved,
-                fragment: preserved == nil ? self?.currentFragment : nil,
-                preserveTargetAnchor: preserved != nil,
-                persistOnReady: (self?.hasUserPosition ?? false) || preserved != nil,
+            guard let self, self.lifecycle == life, !Task.isCancelled else { return }
+            let token = self.currentToken
+            var target = preserved
+            if self.ready, let token, let sampled = await self.webView.sampleNow(),
+               self.currentToken == token, sampled.sessionID == token.sessionID, sampled.epoch == token.epoch,
+               self.webView.controller?.renderedChapterPaths.contains(sampled.path) == true,
+               let position = try? EPUBLocationScript.makeValidatedPosition(
+                   bookID: reader.book.id, package: reader.publication.package, path: sampled.path,
+                   node: sampled.node, rawUTF16Offset: sampled.utf16Offset, viewportOffset: sampled.viewportOffset) {
+                target = position
+            }
+            guard self.lifecycle == life, !Task.isCancelled, self.currentToken == token else { return }
+            await self.beginChapterNavigation(
+                path: target?.path ?? path,
+                targetPosition: target,
+                fragment: target == nil ? self.currentFragment : nil,
+                preserveTargetAnchor: target != nil,
+                persistOnReady: self.hasUserPosition || target != nil,
                 reloadDocument: false
             )
         }
@@ -366,7 +388,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 preserveTargetAnchor: preserveTargetAnchor,
                 reloadDocument: reloadDocument,
                 startAtEnd: startAtEnd,
-                readingMode: readingMode
+                readingMode: readingMode, layoutMode: layoutMode
             )
             // Do not wait for SwiftUI reconciliation to revoke the old viewport epoch.
             if let request = navigationRequest { webView.controller?.apply(request) }
@@ -399,6 +421,7 @@ final class EPUBReaderViewModel: ObservableObject {
             navigationRequest = nil
             message = "章节内容校验或定位未通过，原阅读位置已保留。"
         case .ready:
+            guard !payload.restorationPending else { return }
             // A seamless promotion was already marked ready before publishing the request.
             // Do not replace its real observed position with a synthetic ready fallback.
             if navigationRequest?.preserveViewport == true {
@@ -413,7 +436,9 @@ final class EPUBReaderViewModel: ObservableObject {
                 package: reader.publication.package,
                 path: token.path,
                 node: node,
-                rawUTF16Offset: rawOffset
+                rawUTF16Offset: rawOffset,
+                viewportOffset: navigationRequest?.preserveTargetAnchor == true
+                    ? navigationRequest?.targetPosition?.viewportOffset : payload.viewportOffset
             ) else {
                 loading = false
                 ready = false
@@ -487,7 +512,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 package: reader.publication.package,
                 path: token.path,
                 node: payload.node,
-                rawUTF16Offset: payload.utf16Offset
+                rawUTF16Offset: payload.utf16Offset,
+                viewportOffset: payload.viewportOffset
             ) else {
                 return
             }
@@ -526,7 +552,8 @@ final class EPUBReaderViewModel: ObservableObject {
     private func promoteVisibleChapter(_ payload: EPUBLocatorPayload, from oldToken: EPUBNavigationToken) {
         guard currentToken == oldToken, let reader, let position = try? EPUBLocationScript.makeValidatedPosition(
             bookID: reader.book.id, package: reader.publication.package, path: payload.path,
-            node: payload.node, rawUTF16Offset: payload.utf16Offset
+            node: payload.node, rawUTF16Offset: payload.utf16Offset,
+            viewportOffset: payload.viewportOffset
         ) else { return }
         saveTask?.cancel()
         navigationTask?.cancel()
@@ -556,7 +583,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     id: UUID(), token: token, publication: reader.publication,
                     targetPosition: nil, fragment: nil, preferences: self.preferences.validated,
                     preserveTargetAnchor: false, reloadDocument: false,
-                    readingMode: self.readingMode, preserveViewport: true
+                    readingMode: self.readingMode, preserveViewport: true, layoutMode: self.layoutMode
                 )
                 // Apply immediately: SwiftUI updates may arrive after the user exits the page.
                 if let request = self.navigationRequest { self.webView.controller?.apply(request) }
@@ -596,6 +623,13 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func handleLoadFailure(_ error: Error, token: EPUBNavigationToken) {
         guard !closing, !suspended, currentToken == token else { return }
+        // Revoke callback ownership before any suspended markReady/save continuation resumes.
+        generation = UUID()
+        currentToken = nil
+        saveTask?.cancel()
+        navigationTask?.cancel()
+        promotionTask?.cancel()
+        webView.clearPayload()
         loading = false
         ready = false
         navigationRequest = nil
@@ -622,7 +656,8 @@ final class EPUBReaderViewModel: ObservableObject {
                package: reader.publication.package,
                path: token.path,
                node: sampled.node,
-               rawUTF16Offset: sampled.utf16Offset
+               rawUTF16Offset: sampled.utf16Offset,
+               viewportOffset: sampled.viewportOffset
            ) {
             if sampled.scrollY > 1 {
                 hasUserPosition = true
@@ -737,7 +772,8 @@ final class EPUBReaderViewModel: ObservableObject {
                package: reader.publication.package,
                path: token.path,
                node: sampled.node,
-               rawUTF16Offset: sampled.utf16Offset
+               rawUTF16Offset: sampled.utf16Offset,
+               viewportOffset: sampled.viewportOffset
            ) {
             if sampled.scrollY > 1 {
                 hasUserPosition = true

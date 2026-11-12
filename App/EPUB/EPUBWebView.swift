@@ -17,6 +17,7 @@ struct EPUBNavigationRequest: Equatable {
     var startAtEnd: Bool = false
     var readingMode: EPUBReadingMode = .scroll
     var preserveViewport: Bool = false
+    var layoutMode: EPUBLayoutMode = .original
 
     static func == (lhs: EPUBNavigationRequest, rhs: EPUBNavigationRequest) -> Bool {
         lhs.id == rhs.id &&
@@ -28,7 +29,8 @@ struct EPUBNavigationRequest: Equatable {
             lhs.preferences == rhs.preferences &&
             lhs.preserveTargetAnchor == rhs.preserveTargetAnchor &&
             lhs.reloadDocument == rhs.reloadDocument && lhs.startAtEnd == rhs.startAtEnd &&
-            lhs.readingMode == rhs.readingMode && lhs.preserveViewport == rhs.preserveViewport
+            lhs.readingMode == rhs.readingMode && lhs.preserveViewport == rhs.preserveViewport &&
+            lhs.layoutMode == rhs.layoutMode
     }
 }
 
@@ -168,6 +170,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var windowRequestedPaths: Set<String> = []
     private var windowFailedToken: EPUBNavigationToken?
     private var windowDeferredToken: EPUBNavigationToken?
+    private var pendingViewportRestoreToken: EPUBNavigationToken?
     private var nativeScrollActive = false
     private var runtimeTrace = EPUBRuntimeTrace()
     private struct ParkedDocument {
@@ -345,6 +348,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowInFlight = false
         windowFailedToken = nil
         windowDeferredToken = nil
+        pendingViewportRestoreToken = nil
         if !reuseDOM {
             nativeScrollActive = false
             renderedChapterPaths.removeAll()
@@ -372,7 +376,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             token: request.token,
             publication: request.publication,
             preferences: request.preferences,
-            readingMode: request.readingMode
+            readingMode: request.readingMode, layoutMode: request.layoutMode
         )
         resourceHandler.activate(capability)
 
@@ -417,6 +421,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     /// A missing didFinish/JS-ready callback must not leave the reader loading forever.
     /// The deadline starts before content rules/navigation; stale deadlines cannot cancel a retry.
     func expireReadiness(for token: EPUBNavigationToken) {
+        failReadiness(for: token, error: URLError(.timedOut))
+    }
+
+    private func failReadiness(for token: EPUBNavigationToken, error: Error) {
         guard activeRequest?.token == token, readyToken != token else { return }
         readinessTask?.cancel()
         readinessTask = nil
@@ -426,6 +434,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowTask?.cancel()
         windowTask = nil
         windowInFlight = false
+        pendingViewportRestoreToken = nil
+        readyToken = nil
         activeRequest = nil
         loadingNavigation = nil
         loadedDocumentToken = nil
@@ -435,7 +445,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         webView.stopLoading()
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
-        onLoadFailure?(URLError(.timedOut), token)
+        onLoadFailure?(error, token)
     }
 
     /// Revoke native authority first; cancel JS transactions and retain only acknowledged installed paths.
@@ -531,6 +541,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         loadTask?.cancel()
         loadTask = nil
         activeRequest = nil
+        pendingViewportRestoreToken = nil
         readyToken = nil
         pageAnimationToken = nil
         dragOrigin = nil
@@ -640,7 +651,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 preserveTargetAnchor: request.preserveTargetAnchor,
                 startAtEnd: request.startAtEnd,
                 readingMode: request.readingMode,
-                preserveViewport: request.preserveViewport
+                preserveViewport: request.preserveViewport, layoutMode: request.layoutMode
             )
             let motion = "window.__yjEpub && window.__yjEpub.setScrollActive(\(nativeScrollActive));"
             let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + motion + invoke
@@ -662,7 +673,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func refreshChapterWindow() {
-        guard let current = activeRequest, readyToken == current.token,
+        guard let current = activeRequest,
+              readyToken == current.token || pendingViewportRestoreToken == current.token,
               !windowInFlight, windowFailedToken != current.token,
               windowDeferredToken != current.token || !nativeScrollActive else { return }
         let desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
@@ -711,6 +723,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowTask = nil
         windowInFlight = false
         windowFailedToken = token
+        if pendingViewportRestoreToken == token {
+            failReadiness(for: token, error: EPUBError.corruptResource)
+            return
+        }
         onPreloadFailure?()
     }
 
@@ -744,6 +760,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         applyReadingGesturePolicy()
         if body["error"] as? Bool == true {
             failChapterWindow(current.token)
+        } else if pendingViewportRestoreToken == current.token {
+            // JS must resample/reapply the original target before it can confirm readiness.
+            // Its next provisional/final reply schedules any further bounded work.
+            return
         } else if body["needsMore"] as? Bool == true, windowChapterCount < EPUBChapterWindow.maximumChapters,
                   Set(EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path,
                                               count: windowChapterCount)).isSubset(of: renderedChapterPaths) {
@@ -779,6 +799,26 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         if payload.kind == .ready {
+            if payload.restorationPending {
+                guard current.readingMode == .scroll, current.targetPosition != nil,
+                      !current.preserveViewport else { return }
+                pendingViewportRestoreToken = current.token
+                renderedChapterPaths.insert(current.token.path)
+                var desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
+                if Set(desired).isSubset(of: renderedChapterPaths) {
+                    guard windowChapterCount < EPUBChapterWindow.maximumChapters else {
+                        failChapterWindow(current.token); return
+                    }
+                    windowChapterCount = min(EPUBChapterWindow.maximumChapters, windowChapterCount + EPUBChapterWindow.defaultChapters)
+                    desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
+                    guard !Set(desired).isSubset(of: renderedChapterPaths) else {
+                        failChapterWindow(current.token); return
+                    }
+                }
+                refreshChapterWindow()
+                return // Not presented, not saved, and the original readiness deadline remains active.
+            }
+            pendingViewportRestoreToken = nil
             if pendingClosedReuseToken == current.token {
                 closedDocumentReuseCount += 1
                 pendingClosedReuseToken = nil
@@ -911,6 +951,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             "font=\(Int(validated.fontSize.rounded()))|spacing=\(Int(validated.lineSpacing.rounded()))|" +
             "theme=\(validated.theme.rawValue)|scrollX=\(Int(payload.scrollX.rounded()))|" +
             "mode=\(activeRequest?.readingMode.rawValue ?? "scroll")|zoom=\(webView.scrollView.zoomScale)|" +
+            "layout=\(activeRequest?.layoutMode.rawValue ?? "original")|" +
             "window=\(renderedChapterPaths.count)|loads=\(documentLoadCount)"
     }
 
@@ -1028,6 +1069,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowTask = nil
         windowInFlight = false
         renderedChapterPaths.removeAll()
+        pendingViewportRestoreToken = nil
         readyToken = nil
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil

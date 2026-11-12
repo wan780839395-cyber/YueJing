@@ -87,4 +87,32 @@ struct EPUBProgressTests {
         try await reopened.close(position: nil, sequence: 1, token: nil, preferences: reopened.preferences)
         // Native WebKit layout restoration is separately verified by the Host/UI cases.
     }
+
+    @Test func epubViewportOffsetPersistsAndLegacyAnchorsRemainReadable() async throws {
+        let f = try EPUBLibraryFixture(); defer { f.remove() }
+        let receipt = try await f.install(f.archive())
+        let reader = try await f.service.openEPUB(id: receipt.book.id)
+        let anchor = try EPUBLibraryFixture.position(reader, offset: 1)
+        // Synthesized Codable must continue to accept old JSON with no optional geometry.
+        let legacy = try JSONEncoder().encode(anchor)
+        let legacyObject = try #require(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        #expect(legacyObject["viewportOffset"] == nil)
+        #expect(try JSONDecoder().decode(EPUBReadingPosition.self, from: legacy).viewportOffset == nil)
+        let position = EPUBReadingPosition(bookID: anchor.bookID, versionID: anchor.versionID,
+            path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset, viewportOffset: -7.25)
+        try position.validate(in: reader.publication.package)
+        let token = try await reader.beginNavigation(path: position.path)
+        #expect(try await reader.save(position, sequence: 1, token: token) == false)
+        #expect(try await reader.markReady(token))
+        #expect(try await reader.save(position, sequence: 2, token: token))
+        try await reader.close(position: position, sequence: 3, token: token, preferences: reader.preferences)
+        let reopened = try await LibraryService(store: LibraryStore(root: f.managed)).openEPUB(id: receipt.book.id)
+        #expect(reopened.reading.position == position)
+        for offset in [Double.nan, Double.infinity, -Double.infinity, 16_385, -16_385] {
+            let bad = EPUBReadingPosition(bookID: anchor.bookID, versionID: anchor.versionID,
+                path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset, viewportOffset: offset)
+            #expect(throws: EPUBError.invalidPosition) { try bad.validate(in: reopened.publication.package) }
+        }
+        try await reopened.close(position: nil, sequence: 1, token: nil, preferences: reopened.preferences)
+    }
 }

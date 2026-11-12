@@ -26,6 +26,8 @@ struct EPUBLocatorPayload: Sendable, Equatable {
     var scrollX: Double = 0
     var viewportWidth: Double = 0
     var contentWidth: Double = 0
+    var viewportOffset: Double? = nil
+    var restorationPending = false
 }
 
 /// Isolated content-world script for DOM text-node + UTF-16 offset locating and restoration.
@@ -44,6 +46,11 @@ enum EPUBLocationScript {
     }
 
     static func trustedStyleSheet(for preferences: ReaderPreferences, readingMode: EPUBReadingMode = .scroll) -> String {
+        trustedStyleSheet(for: preferences, readingMode: readingMode, layoutMode: .original)
+    }
+
+    static func trustedStyleSheet(for preferences: ReaderPreferences, readingMode: EPUBReadingMode,
+                                 layoutMode: EPUBLayoutMode) -> String {
         let validated = preferences.validated
         let fontSize = Int(validated.fontSize.rounded())
         let spacing = Int(validated.lineSpacing.rounded())
@@ -103,9 +110,23 @@ enum EPUBLocationScript {
             display: inline !important;
         }
         """
-        guard readingMode == .paged else { return base }
+        let authorBase = """
+        html, body {
+            margin: 0; padding: 16px 20px 40px 20px;
+            background-color: \(colors.bg); color: \(colors.fg);
+            font-family: -apple-system, "PingFang SC", serif;
+            font-size: 20px; line-height: 1.7;
+            overflow-wrap: break-word; -webkit-text-size-adjust: none;
+            overflow-anchor: none !important;
+        }
+        body > section[data-yj-chapter] { display: flow-root !important; }
+        span[id^="yj-t"], span[data-yj-original-id^="yj-t"] { display: inline !important; }
+        img { max-width: 100% !important; height: auto; }
+        """ + (validated.theme == .dark ? "[data-yj-author-scope], [data-yj-author-scope] * { color: rgb(224,224,224) !important; background-color: rgb(23,23,23) !important; }" : "")
+        let effectiveBase = layoutMode == .original ? authorBase : base
+        guard readingMode == .paged else { return effectiveBase }
         // Content width + column gap equals one viewport; padding is not added per column.
-        return base + """
+        return effectiveBase + """
 
         html {
             padding: 0 !important;
@@ -180,7 +201,8 @@ enum EPUBLocationScript {
         package: EPUBPackage,
         path: String,
         node: Int,
-        rawUTF16Offset: Int
+        rawUTF16Offset: Int,
+        viewportOffset: Double? = nil
     ) throws -> EPUBReadingPosition {
         guard package.spine.contains(path),
               let nodes = try package.nodes(at: path),
@@ -193,7 +215,8 @@ enum EPUBLocationScript {
             versionID: package.versionID,
             path: path,
             node: node,
-            utf16Offset: snapped
+            utf16Offset: snapped,
+            viewportOffset: viewportOffset
         )
         try position.validate(in: package)
         return position
@@ -208,7 +231,8 @@ enum EPUBLocationScript {
         preserveTargetAnchor: Bool,
         startAtEnd: Bool = false,
         readingMode: EPUBReadingMode = .scroll,
-        preserveViewport: Bool = false
+        preserveViewport: Bool = false,
+        layoutMode: EPUBLayoutMode = .original
     ) throws -> String {
         guard let chapterIndex = package.spine.firstIndex(of: token.path),
               let nodes = try package.nodes(at: token.path) else {
@@ -222,6 +246,7 @@ enum EPUBLocationScript {
             "chapterIndex": chapterIndex,
             "chapterBytes": package.resource(at: token.path)?.byteCount ?? 0,
             "preserveViewport": preserveViewport,
+            "spineCount": package.spine.count,
             "expectedNodeCount": nodes.count,
             "expectedNodeLengths": lengths,
             "targetNode": targetPosition?.path == token.path ? (targetPosition?.node ?? -1) : -1,
@@ -230,8 +255,14 @@ enum EPUBLocationScript {
             "preserveTargetAnchor": preserveTargetAnchor && (targetPosition?.path == token.path),
             "startAtEnd": startAtEnd && targetPosition == nil && fragment == nil,
             "readingMode": readingMode.rawValue,
-            "css": trustedStyleSheet(for: preferences, readingMode: readingMode)
+            "layoutMode": layoutMode.rawValue,
+            "css": trustedStyleSheet(for: preferences, readingMode: readingMode, layoutMode: layoutMode)
         ]
+        if readingMode == .scroll, targetPosition?.path == token.path,
+           let offset = targetPosition?.viewportOffset {
+            guard offset.isFinite, abs(offset) <= 16_384 else { throw EPUBError.invalidPosition }
+            config["targetViewportOffset"] = offset
+        }
         if targetPosition == nil {
             config["targetNode"] = -1
             config["targetOffset"] = 0
@@ -276,7 +307,9 @@ enum EPUBLocationScript {
             reason: reason,
             scrollX: (dict["scrollX"] as? NSNumber)?.doubleValue ?? 0,
             viewportWidth: (dict["viewportWidth"] as? NSNumber)?.doubleValue ?? 0,
-            contentWidth: (dict["contentWidth"] as? NSNumber)?.doubleValue ?? 0
+            contentWidth: (dict["contentWidth"] as? NSNumber)?.doubleValue ?? 0,
+            viewportOffset: (dict["viewportOffset"] as? NSNumber)?.doubleValue,
+            restorationPending: dict["restorationPending"] as? Bool ?? false
         )
     }
 
@@ -299,6 +332,8 @@ enum EPUBLocationScript {
             preserveTargetAnchor: false,
             targetNode: -1,
             targetOffset: 0,
+            targetViewportOffset: null,
+            restoreCompletion: null,
             restoredScrollY: 0,
             restoredScrollX: 0,
             paginated: false,
@@ -371,12 +406,100 @@ enum EPUBLocationScript {
             element.setAttribute("data-yj-chapter", config.path);
             element.setAttribute("data-yj-index", config.chapterIndex);
             if (document.body.id) { element.setAttribute("data-yj-original-id", document.body.id); }
+            copyAuthorAttributes(document.body, element);
+            Array.prototype.forEach.call(document.querySelectorAll("head style[data-yj-author-style]"), function(style) {
+                element.appendChild(style);
+            });
+            Array.prototype.forEach.call(document.body.querySelectorAll("[id]"), function(el) {
+                el.setAttribute("data-yj-original-id", el.id);
+            });
             var spans = [], index = 0, span;
             while ((span = document.getElementById("yj-t" + index))) { spans.push(span); index++; }
             while (document.body.firstChild) { element.appendChild(document.body.firstChild); }
             document.body.appendChild(element);
             state.chapters.push({path: config.path, index: config.chapterIndex, element: element, spans: spans,
                 bytes: Number.isSafeInteger(config.chapterBytes) ? config.chapterBytes : 0});
+        }
+
+        function copyAuthorAttributes(body, element) {
+            ["class", "dir", "data-yj-author-scope"].forEach(function(key) {
+                if (body.hasAttribute(key)) { element.setAttribute(key, body.getAttribute(key)); }
+            });
+            // The real body must not retain a chapter's scope when subsequent chapters are mounted.
+            if (body === document.body) {
+                body.removeAttribute("data-yj-author-scope");
+                body.removeAttribute("class");
+            }
+        }
+
+        function authorStyles(root) {
+            return Array.prototype.slice.call(root.querySelectorAll("style[data-yj-author-style]"));
+        }
+
+        function rebaseAuthorStyle(style) {
+            if (typeof style.__yjCSS !== "string") { style.__yjCSS = style.textContent; }
+            var host = "s-" + state.sessionID.toLowerCase().replace(/[^a-z0-9-]/g, "-") + "--e-" + state.epoch.toLowerCase();
+            // Only canonical root-relative URLs emitted by the native CSS parser are admitted.
+            var css = style.__yjCSS.replace(/url\\(["']?(\\/[^"'()\\s]+)["']?\\)/g, function(_, path) {
+                return 'url("' + capabilityURL("yjepub://" + host + path).href + '")';
+            });
+            if (style.textContent !== css) { style.textContent = css; }
+        }
+        function hasAuthorFonts(root) {
+            return Boolean(document.fonts) && document.documentElement.getAttribute("data-yj-layout") === "original" &&
+                authorStyles(root).some(function(style) { return style.textContent.indexOf("@font-face") >= 0; });
+        }
+
+
+        function waitForAuthorFonts(root) {
+            if (!document.fonts || document.documentElement.getAttribute("data-yj-layout") !== "original") { return Promise.resolve(); }
+            var temporary = [], families = new Set();
+            function familyKey(value) { return value.replace(/^["']|["']$/g, ""); }
+            try {
+                authorStyles(root).forEach(function(style) {
+                    rebaseAuthorStyle(style);
+                    var installed = style;
+                    if (!style.isConnected) {
+                        installed = style.cloneNode(true);
+                        document.head.appendChild(installed);
+                        temporary.push(installed);
+                    }
+                    Array.prototype.forEach.call(installed.sheet ? installed.sheet.cssRules : [], function(rule) {
+                        if (rule.type === 5) { families.add(familyKey(rule.style.getPropertyValue("font-family"))); }
+                    });
+                });
+            } catch (error) {
+                temporary.forEach(function(style) { style.remove(); });
+                return Promise.reject(error);
+            }
+            var cancelFontWait;
+            var cancelled = new Promise(function(_, reject) {
+                cancelFontWait = function() {
+                    temporary.forEach(function(style) { style.remove(); });
+                    reject(new Error("font-wait-cancelled"));
+                };
+            });
+            state.imageCancels = state.imageCancels || [];
+            state.imageCancels.push(cancelFontWait);
+            var faces = [], matched = new Set();
+            document.fonts.forEach(function(font) {
+                var family = familyKey(font.family);
+                if (families.has(family)) { faces.push(font); matched.add(family); }
+            });
+            // Loading FontFace objects covers weight/style and unicode-range subsets;
+            // FontFaceSet.load("16px family") only probes a normal face for a space.
+            var loaded = Promise.resolve().then(function() {
+                if (matched.size !== families.size) { throw new Error("font-face-missing"); }
+                return Promise.all(faces.map(function(font) { return font.load(); }));
+            }).then(function(fonts) {
+                if (fonts.some(function(font) { return font.status !== "loaded"; })) { throw new Error("font-not-ready"); }
+                return document.fonts.ready;
+            });
+            return Promise.race([loaded, cancelled]).finally(function() {
+                temporary.forEach(function(style) { style.remove(); });
+                var index = (state.imageCancels || []).indexOf(cancelFontWait);
+                if (index >= 0) { state.imageCancels.splice(index, 1); }
+            });
         }
 
         function firstTextChild(span) {
@@ -427,13 +550,14 @@ enum EPUBLocationScript {
             return Math.max(document.documentElement.scrollWidth || 0, document.body.scrollWidth || 0);
         }
 
-        function scrollToRect(rect) {
+        function scrollToRect(rect, viewportOffset) {
             if (state.paginated) {
                 var width = viewportWidth();
                 var page = Math.floor(Math.max(0, (window.scrollX || 0) + rect.left) / width);
                 observedScrollTo(page * width, 0);
             } else {
-                observedScrollTo(0, Math.max(0, window.scrollY + rect.top - 18));
+                var top = Number.isFinite(viewportOffset) && Math.abs(viewportOffset) <= 16384 ? viewportOffset : 18;
+                observedScrollTo(0, Math.max(0, window.scrollY + rect.top - top));
             }
         }
 
@@ -444,30 +568,35 @@ enum EPUBLocationScript {
             return null;
         }
 
-        function scrollToTarget(targetNode, targetOffset, fragment, path) {
+        function textAnchorRect(path, node, offset) {
+            var chapter = chapterFor(path), span = chapter && chapter.spans[node];
+            if (!span) { return null; }
+            var textNode = firstTextChild(span), rect = null;
+            var textLength = textNode && textNode.nodeValue ? textNode.nodeValue.length : 0;
+            if (textLength > 0) {
+                var start = Math.max(0, Math.min(offset || 0, textLength - 1));
+                var code = textNode.nodeValue.charCodeAt(start);
+                if (start > 0 && code >= 0xDC00 && code <= 0xDFFF) { start -= 1; }
+                var length = textNode.nodeValue.codePointAt(start) > 0xFFFF ? 2 : 1;
+                var range = document.createRange();
+                range.setStart(textNode, start); range.setEnd(textNode, Math.min(textLength, start + length));
+                rect = firstRect(range.getClientRects());
+            }
+            return rect || firstRect(span.getClientRects()) || span.getBoundingClientRect();
+        }
+
+        function positionViewportOffset(path, node, offset) {
+            if (state.paginated) { return null; }
+            var rect = textAnchorRect(path, node, offset);
+            return rect && Number.isFinite(rect.top) && Math.abs(rect.top) <= 16384 ? rect.top : null;
+        }
+
+        function scrollToTarget(targetNode, targetOffset, fragment, path, viewportOffset) {
             path = path || state.path;
-            // Character ranges avoid the union bounding box of a multi-column span.
             if (typeof targetNode === "number" && targetNode >= 0) {
-                var chapter = chapterFor(path);
-                var span = chapter && chapter.spans[targetNode];
-                if (!span) { return false; }
-                var textNode = firstTextChild(span);
-                var rect = null;
-                if (textNode && textNode.nodeValue && textNode.nodeValue.length > 0) {
-                    var len = textNode.nodeValue.length;
-                    var clamped = Math.max(0, Math.min(targetOffset || 0, len - 1));
-                    var code = textNode.nodeValue.charCodeAt(clamped);
-                    if (clamped > 0 && code >= 0xDC00 && code <= 0xDFFF) { clamped -= 1; }
-                    var scalarLength = textNode.nodeValue.codePointAt(clamped) > 0xFFFF ? 2 : 1;
-                    var range = document.createRange();
-                    range.setStart(textNode, clamped);
-                    range.setEnd(textNode, Math.min(len, clamped + scalarLength));
-                    rect = firstRect(range.getClientRects());
-                }
-                if (!rect || (rect.width === 0 && rect.height === 0 && rect.top === 0)) {
-                    rect = firstRect(span.getClientRects()) || span.getBoundingClientRect();
-                }
-                scrollToRect(rect);
+                var rect = textAnchorRect(path, targetNode, targetOffset);
+                if (!rect) { return false; }
+                scrollToRect(rect, viewportOffset);
                 return true;
             }
             if (typeof fragment === "string" && fragment.length > 0) {
@@ -586,6 +715,7 @@ enum EPUBLocationScript {
                 scrollX: window.scrollX || window.pageXOffset || 0,
                 viewportWidth: viewportW,
                 contentWidth: contentWidth(),
+                viewportOffset: positionViewportOffset(chosenPath, chosenNode, offset),
                 visibleText: visibleParts.join(" ")
             };
             finishSample(sampleStarted);
@@ -687,12 +817,15 @@ enum EPUBLocationScript {
                 var name = el.localName;
                 var inBody = el === body || body.contains(el);
                 if (el.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
-                    (inBody ? name !== "body" && allowed.indexOf(name) < 0 : ["html", "head", "meta", "title"].indexOf(name) < 0)) {
+                    (inBody ? name !== "body" && allowed.indexOf(name) < 0 : ["html", "head", "meta", "title", "style"].indexOf(name) < 0) ||
+                    (name === "style" && el.getAttribute("data-yj-author-style") !== "true")) {
                     throw new Error("forbidden-element");
                 }
                 Array.prototype.forEach.call(el.attributes, function(attr) {
                     var key = attr.name, value = attr.value;
-                    var permitted = key === "xmlns" || key === "id" || key === "dir" ||
+                    var permitted = key === "xmlns" || key === "id" || key === "dir" || key === "class" ||
+                        (name === "body" && key === "data-yj-author-scope" && /^[a-zA-Z0-9]+$/.test(value)) ||
+                        (name === "style" && key === "data-yj-author-style" && value === "true") ||
                         (name === "a" && key === "href") || (name === "img" && (key === "src" || key === "alt")) ||
                         (!inBody && name === "meta" && ["charset", "http-equiv", "content"].indexOf(key) >= 0);
                     if (!permitted || (key === "xmlns" && value !== "http://www.w3.org/1999/xhtml") ||
@@ -713,6 +846,8 @@ enum EPUBLocationScript {
             element.setAttribute("data-yj-chapter", input.path);
             element.setAttribute("data-yj-index", input.index);
             if (body.hasAttribute("dir")) { element.setAttribute("dir", body.getAttribute("dir")); }
+            copyAuthorAttributes(body, element);
+            authorStyles(parsed).forEach(function(style) { element.appendChild(document.importNode(style, true)); });
             // IDs are local to a chapter, including original body fragment IDs.
             if (body.id) { element.setAttribute("data-yj-original-id", body.id); }
             Array.prototype.forEach.call(body.querySelectorAll("[src], [href]"), function(el) {
@@ -845,7 +980,10 @@ enum EPUBLocationScript {
                      additions.some(function(c) { return c.index < state.chapters[0].index; }));
             }
             if (deferForScroll()) { windowMessage(false, true); return true; }
-            Promise.all(additions.map(preloadChapter)).then(function() {
+            Promise.all(additions.map(function(chapter) {
+                var images = preloadChapter(chapter);
+                return hasAuthorFonts(chapter.element) ? Promise.all([images, waitForAuthorFonts(chapter.element)]) : images;
+            })).then(function() {
                 if (!live()) { return; }
                 recordDiagnostic("window-prepared", diagnosticNow() - windowStarted, additions.length);
                 // A gesture may have begun while images were being decoded.
@@ -877,10 +1015,17 @@ enum EPUBLocationScript {
                     if (!chapterFor(kept[i].path)) { document.body.insertBefore(kept[i].element, i + 1 < kept.length ? kept[i + 1].element : null); }
                 }
                 state.chapters = kept;
+                // Flush mounting/clamping before measuring subsequent natural scroll.
+                if (anchor) { anchorRect(anchor); }
+                var committedScrollX = window.scrollX || 0, committedScrollY = window.scrollY || 0;
+                function completeCommit() {
+                if (!live()) { return; }
                 updatePageMetrics();
                 var after = anchor && anchorRect(anchor);
-                var deltaX = before && after && state.paginated ? after.left - before.left : 0;
-                var deltaY = before && after && !state.paginated ? after.top - before.top : 0;
+                // Exclude only movement during the font wait; synchronous DOM removal
+                // may clamp scroll coordinates and still needs the original compensation.
+                var deltaX = before && after && state.paginated ? after.left - before.left + (window.scrollX || 0) - committedScrollX : 0;
+                var deltaY = before && after && !state.paginated ? after.top - before.top + (window.scrollY || 0) - committedScrollY : 0;
                 // Even scrollTo(currentX, currentY) can cancel WebKit's native momentum.
                 // Append-only commits must not issue any programmatic scroll command.
                 if (deltaX !== 0 || deltaY !== 0) {
@@ -888,16 +1033,19 @@ enum EPUBLocationScript {
                 }
                 state.observedScrollX = window.scrollX || 0;
                 state.observedScrollY = window.scrollY || 0;
-                state.preserveTargetAnchor = false;
-                state.suppressingReflow = false;
+                if (!state.restoreCompletion) { state.preserveTargetAnchor = false; }
+                state.suppressingReflow = Boolean(state.restoreCompletion);
                 state.lastAnchor = anchor && {path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset};
                 // ResizeObserver delivery from this commit must not snap to a page/line start.
                 window.requestAnimationFrame(function() { window.requestAnimationFrame(function() {
                     if (!live()) { return; }
                     state.syncing = false;
+                    if (state.restoreCompletion) { state.restoreCompletion(); }
                     windowMessage(false);
                     // A preload is not user navigation and cannot create a progress event.
                 }); });
+                }
+                return hasAuthorFonts(document) ? waitForAuthorFonts(document).then(completeCommit) : completeCommit();
             }).catch(function() {
                 if (live()) { state.syncing = false; cancelImagePreloads(); windowMessage(true); }
             });
@@ -912,6 +1060,7 @@ enum EPUBLocationScript {
                     var url = new URL(link.getAttribute("href"), base);
                     if (url.protocol === "yjepub:") { url.host = host; link.setAttribute("href", url.href); }
                 });
+                authorStyles(c.element).forEach(rebaseAuthorStyle);
             });
         }
 
@@ -921,6 +1070,7 @@ enum EPUBLocationScript {
             state.syncGeneration += 1;
             cancelImagePreloads();
             state.syncing = false;
+            state.restoreCompletion = null;
             installInitial(config);
             if (config.preserveViewport === true) {
                 var selected = chapterFor(config.path);
@@ -931,17 +1081,30 @@ enum EPUBLocationScript {
                 state.path = config.path;
                 refreshChapterLinks();
                 state.reflowRevision += 1;
-                state.ready = true;
-                state.suppressingReflow = false;
-                state.preserveTargetAnchor = false;
-                state.observedScrollX = window.scrollX || 0;
-                state.observedScrollY = window.scrollY || 0;
-                var current = sampleVisible();
-                var ready = Object.assign({}, current, {kind: "ready", path: config.path});
-                if (current.path !== config.path) { ready.node = 0; ready.utf16Offset = 0; ready.visibleText = ""; }
-                ready.restoredNode = ready.node; ready.restoredOffset = ready.utf16Offset;
-                post(ready);
-                reportScrollNow();
+                var promotedSession = state.sessionID, promotedEpoch = state.epoch;
+                function confirmPromotion() {
+                    if (state.sessionID !== promotedSession || state.epoch !== promotedEpoch) { return; }
+                    state.ready = true;
+                    state.suppressingReflow = false;
+                    state.preserveTargetAnchor = false;
+                    state.observedScrollX = window.scrollX || 0;
+                    state.observedScrollY = window.scrollY || 0;
+                    var current = sampleVisible();
+                    var ready = Object.assign({}, current, {kind: "ready", path: config.path});
+                    if (current.path !== config.path) { ready.node = 0; ready.utf16Offset = 0; ready.visibleText = ""; }
+                    ready.restoredNode = ready.node; ready.restoredOffset = ready.utf16Offset;
+                    post(ready);
+                    reportScrollNow();
+                }
+                if (hasAuthorFonts(document)) {
+                    state.ready = false;
+                    state.suppressingReflow = true;
+                    waitForAuthorFonts(document).then(confirmPromotion).catch(function() {
+                        if (state.sessionID === promotedSession && state.epoch === promotedEpoch) {
+                            post({kind: "error", reason: "font-not-ready", sessionID: promotedSession, epoch: promotedEpoch, path: state.path});
+                        }
+                    });
+                } else { confirmPromotion(); }
                 return true;
             }
             if (state.scrollTimer !== null) {
@@ -957,8 +1120,11 @@ enum EPUBLocationScript {
             state.preserveTargetAnchor = Boolean(config.preserveTargetAnchor);
             state.targetNode = typeof config.targetNode === "number" ? config.targetNode : -1;
             state.targetOffset = typeof config.targetOffset === "number" ? config.targetOffset : 0;
+            state.targetViewportOffset = Number.isFinite(config.targetViewportOffset) && Math.abs(config.targetViewportOffset) <= 16384
+                ? config.targetViewportOffset : null;
             state.targetPath = state.path;
             state.paginated = config.readingMode === "paged";
+            document.documentElement.setAttribute("data-yj-layout", config.layoutMode === "reader" ? "reader" : "original");
             state.lastAnchor = null;
             state.reflowRevision += 1;
 
@@ -994,67 +1160,63 @@ enum EPUBLocationScript {
 
             var mySession = state.sessionID;
             var myEpoch = state.epoch;
-            waitForImagesAndTwoFrames(mySession, myEpoch, function() {
+            function restoreAndConfirm() {
+                if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
+                state.suppressingReflow = true;
                 updatePageMetrics();
                 var ok = config.startAtEnd === true && state.targetNode < 0 && !config.fragment
                     ? scrollToChapterEnd()
-                    : scrollToTarget(state.targetNode, state.targetOffset, config.fragment || "");
+                    : scrollToTarget(state.targetNode, state.targetOffset, config.fragment || "", state.path, state.targetViewportOffset);
                 if (!ok) {
-                    post({
-                        kind: "error",
-                        reason: "target-restore-failed",
-                        sessionID: state.sessionID,
-                        epoch: state.epoch,
-                        path: state.path
-                    });
+                    state.restoreCompletion = null;
+                    post({kind: "error", reason: "target-restore-failed", sessionID: state.sessionID, epoch: state.epoch, path: state.path});
                     return;
                 }
-                window.requestAnimationFrame(function() {
+                window.requestAnimationFrame(function() { window.requestAnimationFrame(function() {
                     if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
-                    window.requestAnimationFrame(function() {
-                        if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
-                        // A short target near the window end cannot always reach the viewport
-                        // top. Acknowledge the configured chapter, not a visible predecessor;
-                        // ordinary scroll sampling remains unscoped and reports the real view.
-                        var sample = sampleVisible(state.path);
-                        if (!sample) {
-                            post({
-                                kind: "error",
-                                reason: "empty-visible-sample",
-                                sessionID: state.sessionID,
-                                epoch: state.epoch,
-                                path: state.path
-                            });
-                            return;
-                        }
+                    var sample = sampleVisible(state.path);
+                    if (!sample) {
+                        state.restoreCompletion = null;
+                        post({kind: "error", reason: "empty-visible-sample", sessionID: state.sessionID, epoch: state.epoch, path: state.path});
+                        return;
+                    }
+                    var targetRect = state.targetNode >= 0 ? textAnchorRect(state.path, state.targetNode, state.targetOffset) : null;
+                    var desiredTop = Number.isFinite(state.targetViewportOffset)
+                        ? state.targetViewportOffset : 18;
+                    var last = state.chapters[state.chapters.length - 1];
+                    var hasFollowing = last && Number.isSafeInteger(config.spineCount) && last.index + 1 < config.spineCount;
+                    // Permit only the bounded window loader, not interaction/progress, while
+                    // the cold single chapter is too short to reach the saved viewport.
+                    if (!state.paginated && targetRect && targetRect.top > desiredTop + 1 && hasFollowing) {
                         state.ready = true;
-                        state.suppressingReflow = false;
-                        state.restoredScrollY = sample.scrollY;
-                        state.restoredScrollX = sample.scrollX;
-                        state.observedScrollX = sample.scrollX;
-                        state.observedScrollY = sample.scrollY;
-                        var restoredNode = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetNode : sample.node;
-                        var restoredOffset = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetOffset : sample.utf16Offset;
-                        state.lastAnchor = {path: sample.path, node: restoredNode, utf16Offset: restoredOffset};
-                        post({
-                            kind: "ready",
-                            sessionID: sample.sessionID,
-                            epoch: sample.epoch,
-                            path: sample.path,
-                            node: sample.node,
-                            utf16Offset: sample.utf16Offset,
-                            restoredNode: restoredNode,
-                            restoredOffset: restoredOffset,
-                            scrollY: sample.scrollY,
-                            viewportHeight: sample.viewportHeight,
-                            contentHeight: sample.contentHeight,
-                            scrollX: sample.scrollX,
-                            viewportWidth: sample.viewportWidth,
-                            contentWidth: sample.contentWidth,
-                            visibleText: sample.visibleText
-                        });
-                    });
-                });
+                        state.restoreCompletion = restoreAndConfirm;
+                        post(Object.assign({}, sample, {kind: "ready", restorationPending: true}));
+                        return;
+                    }
+                    state.restoreCompletion = null;
+                    state.ready = true;
+                    state.suppressingReflow = false;
+                    state.restoredScrollY = sample.scrollY;
+                    state.restoredScrollX = sample.scrollX;
+                    state.observedScrollX = sample.scrollX;
+                    state.observedScrollY = sample.scrollY;
+                    var restoredNode = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetNode : sample.node;
+                    var restoredOffset = (state.preserveTargetAnchor && state.targetNode >= 0) ? state.targetOffset : sample.utf16Offset;
+                    state.lastAnchor = {path: sample.path, node: restoredNode, utf16Offset: restoredOffset};
+                    post(Object.assign({}, sample, {kind: "ready", restoredNode: restoredNode, restoredOffset: restoredOffset,
+                        viewportOffset: positionViewportOffset(sample.path, restoredNode, restoredOffset)}));
+                }); });
+            }
+            if (!hasAuthorFonts(document)) {
+                waitForImagesAndTwoFrames(mySession, myEpoch, restoreAndConfirm);
+                return;
+            }
+            waitForAuthorFonts(document).then(function() {
+                if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
+                waitForImagesAndTwoFrames(mySession, myEpoch, restoreAndConfirm);
+            }).catch(function() {
+                if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
+                post({kind: "error", reason: "font-not-ready", sessionID: mySession, epoch: myEpoch, path: state.path});
             });
         }
 
@@ -1084,6 +1246,7 @@ enum EPUBLocationScript {
                 scrollX: sample.scrollX,
                 viewportWidth: sample.viewportWidth,
                 contentWidth: sample.contentWidth,
+                viewportOffset: positionViewportOffset(sample.path, activeNode, activeOffset),
                 visibleText: sample.visibleText
             };
             return payload;
@@ -1203,6 +1366,7 @@ enum EPUBLocationScript {
                 cancelImagePreloads();
                 if (state.scrollTimer !== null) { window.clearTimeout(state.scrollTimer); }
                 state.scrollTimer = null;
+                state.restoreCompletion = null;
                 state.ready = false;
                 state.syncing = false;
                 state.suppressingReflow = true;

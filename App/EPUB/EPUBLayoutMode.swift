@@ -1,0 +1,19 @@
+import Foundation
+
+/// EPUB-only presentation preference. Missing/unknown values use author typography.
+enum EPUBLayoutMode: String, CaseIterable, Sendable {
+    case original
+    case reader
+
+    static let defaultsKey = "epub.layoutMode.v1"
+    static func restored(from defaults: UserDefaults = .standard) -> Self {
+        Self(rawValue: defaults.string(forKey: defaultsKey) ?? "") ?? .original
+    }
+
+    var title: String {
+        switch self {
+        case .original: "原始排版"
+        case .reader: "阅读器排版"
+        }
+    }
+}
