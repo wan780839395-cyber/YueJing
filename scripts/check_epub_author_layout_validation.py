@@ -2046,6 +2046,1268 @@ def check_processes(root):
     assert expired and code != 0
     assert r.stream_case([sys.executable, "-c", 'print("after")'], p_dir / "after.log", 10) == (0, False)
     passed("local Python stream_case success/failure/timeout/next")
+def _write_xcode_sim_metadata(repo_root):
+    resolved_path = repo_root / "YueJing.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+    pins = [
+        {
+            "identity": k,
+            "kind": "remoteSourceControl",
+            "location": d["url"],
+            "state": {"revision": d["revision"], "version": d["version"]},
+        }
+        for k, d in r.compat.epub_batch.DEPENDENCIES.items()
+    ]
+    save(resolved_path, {"pins": pins, "version": 2})
+    scheme_path = repo_root / "YueJing.xcodeproj/xcshareddata/xcschemes/YueJingUI.xcscheme"
+    scheme_path.parent.mkdir(parents=True, exist_ok=True)
+    testables = "\n".join(
+        f'         <TestableReference skipped="NO"><BuildableReference BlueprintName="{t}"/></TestableReference>'
+        for t in sorted(r.reading.ui.GROUPS)
+    )
+    scheme_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Scheme LastUpgradeVersion="1600" version="1.7">\n'
+        '   <TestAction>\n'
+        '      <Testables>\n'
+        f'{testables}\n'
+        '      </Testables>\n'
+        '      <EnvironmentVariables>\n'
+        '         <EnvironmentVariable key="YUEJING_UI_TEST_SESSION" '
+        'value="11111111-2222-3333-4444-555555555555" isEnabled="YES"/>\n'
+        '      </EnvironmentVariables>\n'
+        '   </TestAction>\n'
+        '</Scheme>\n',
+        encoding="utf-8",
+    )
+    domain_scheme_path = repo_root / "YueJing.xcodeproj/xcshareddata/xcschemes/ReaderDomain.xcscheme"
+    domain_scheme_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Scheme LastUpgradeVersion="1600" version="1.7">\n'
+        '   <TestAction>\n'
+        '      <Testables>\n'
+        '         <TestableReference skipped="NO"><BuildableReference BlueprintName="ReaderDomainTests"/></TestableReference>\n'
+        '      </Testables>\n'
+        '   </TestAction>\n'
+        '</Scheme>\n',
+        encoding="utf-8",
+    )
+    return resolved_path, scheme_path, domain_scheme_path
+
+
+def _write_exact_group_settings(kind, target, folder, eff_path, source_commit, *, scheme_path=None, domain_scheme_path=None):
+    common = {
+        "SWIFT_VERSION": "6.0",
+        "SWIFT_STRICT_CONCURRENCY": "complete",
+        "IPHONEOS_DEPLOYMENT_TARGET": "16.6",
+    }
+    if kind == "domain":
+        values = json.loads(eff_path.read_text(encoding="utf-8"))["ReaderDomainTests"]
+        receipt = {
+            "source_commit": source_commit,
+            "target": target,
+            "scheme": "ReaderDomain",
+            "scheme_sha256": r.sha(domain_scheme_path) if domain_scheme_path is not None else ("1" * 64),
+            "effective_settings_sha256": r.sha(eff_path),
+            "testables": ["ReaderDomainTests"],
+            "settings": values,
+        }
+        save(folder / f"{target}-settings.json", receipt)
+        return receipt
+
+    app = {
+        **common,
+        "PRODUCT_TYPE": "com.apple.product-type.application",
+        "TEST_HOST": "",
+        "BUNDLE_LOADER": "",
+        "TEST_TARGET_NAME": "",
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
+    }
+    if kind == "host":
+        host_bin = "/Users/runner/work/YueJing/YueJing/build/Debug-iphonesimulator/YueJing.app/YueJing"
+        test = {
+            **common,
+            "PRODUCT_TYPE": "com.apple.product-type.bundle.unit-test",
+            "TEST_HOST": host_bin,
+            "BUNDLE_LOADER": host_bin,
+            "TEST_TARGET_NAME": "",
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
+        }
+    else:
+        test = {
+            **common,
+            "PRODUCT_TYPE": "com.apple.product-type.bundle.ui-testing",
+            "TEST_HOST": "",
+            "BUNDLE_LOADER": "",
+            "TEST_TARGET_NAME": "YueJing",
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
+        }
+    targets = {"YueJing": app, target: test}
+    scheme_sha = r.sha(scheme_path) if scheme_path is not None else ("2" * 64)
+    receipt = {
+        "source_commit": source_commit,
+        "targets": targets,
+        "scheme_sha256": scheme_sha,
+        "testables": sorted(r.reading.ui.GROUPS),
+        "fixture_environment": "11111111-2222-3333-4444-555555555555",
+    }
+    save(folder / f"{target}-settings.json", receipt)
+    for sub in ("YueJing", target):
+        save(folder / f"{target}-{sub}-settings.stdout.json", [{"target": sub, "buildSettings": targets[sub]}])
+        (folder / f"{target}-{sub}-settings-exit-code.txt").write_text("0\n", encoding="utf-8")
+    return receipt
+
+
+def _build_3commit_dual_origin_fixture(base_root):
+    prior1_sha = r.PRIOR_SOURCE_COMMIT
+    prior1_id = r.PRIOR_RUN_ID
+    prior2_sha = r.PRIOR2_SOURCE_COMMIT
+    prior2_id = r.PRIOR2_RUN_ID
+    cur_sha = "e" * 40
+    cur_run_id = "930001"
+    base_root.mkdir(parents=True, exist_ok=True)
+
+    domain_groups = [
+        ("domain-1", "ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift", [f"migCase{i}" for i in range(4)]),
+        ("domain-2", "ReaderDomainTests/EPUBAuthorStylesTests.swift", [f"styleCase{i}" for i in range(5)]),
+        ("domain-3", "ReaderDomainTests/EPUBCompatibilityTests.swift", [f"compatCase{i}" for i in range(8)]),
+        ("domain-4", "ReaderDomainTests/EPUBContentPoolTests.swift", [f"poolCase{i}" for i in range(6)]),
+        ("domain-5", "ReaderDomainTests/EPUBLibraryTests.swift",
+         [f"libCase{i}" for i in range(4)]
+         + ["epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime"]
+         + [f"libCase{i}" for i in range(4, 13)]),
+        ("domain-6", "ReaderDomainTests/EPUBPackageTests.swift", [f"pkgCase{i}" for i in range(8)]),
+        ("domain-7", "ReaderDomainTests/EPUBProgressTests.swift", [f"progCase{i}" for i in range(5)]),
+        ("domain-8", "ReaderDomainTests/EPUBReadyTests.swift", [f"readyCase{i}" for i in range(10)]),
+    ]
+    host_groups = [
+        ("host-1", "YueJingHostTests/EPUBContentsNavigationTests.swift", [f"navCase{i}" for i in range(6)]),
+        ("host-2", "YueJingHostTests/EPUBFontLoadingHostTests.swift", [f"fontCase{i}" for i in range(2)]),
+        ("host-3", "YueJingHostTests/EPUBReaderHostTests.swift", [f"hostCase{i}" for i in range(12)]),
+    ]
+    ui_cases = [
+        "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
+        "testEPUBProgressSurvivesExitAndProcessRelaunch",
+        "testEPUBTypographyNoCoverFallbackAndTXTIsolation",
+    ]
+    files = {}
+    selected_files = {}
+    for _, rel, cases in domain_groups + host_groups:
+        files[rel] = " ".join(cases)
+        selected_files[rel] = list(cases)
+    files["YueJingEPUBUITests/EPUBFlowUITests.swift"] = " ".join(ui_cases)
+    selected_files["YueJingEPUBUITests/EPUBFlowUITests.swift"] = list(ui_cases)
+    files["TXTCoreTests/TXTChapterTests.swift"] = " ".join(f"txtCoreOmitted{i}" for i in range(25))
+    files["TXTCoreTests/TXTBlockDecoderTests.swift"] = " ".join(f"txtBlockOmitted{i}" for i in range(6))
+    files["ReaderDomainTests/DerivedReadingIntegrationTests.swift"] = " ".join(f"domainOmitted{i}" for i in range(120))
+    files["ProcessingReuseMeasurementTests/ProcessingReuseMeasurementTests.swift"] = "procMeasureOmitted0"
+    files["YueJingHostTests/ReaderViewportLifecycleTests.swift"] = " ".join(f"hostOmitted{i}" for i in range(14))
+    files["YueJingUITests/ReadingFlowUITests.swift"] = " ".join(f"testTXTOmitted{i}" for i in range(12))
+    files["YueJingCanvasTests/ReadingCanvasRenderingTests.swift"] = " ".join(f"canvasOmitted{i}" for i in range(3))
+    files["TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift"] = "perfExcluded0"
+
+    counts = {
+        "TXTCoreTests": 25,
+        "ReaderDomainTests": 180,
+        "TXTBlockDecoderTests": 6,
+        "ProcessingReuseMeasurementTests": 1,
+        "YueJingHostTests": 34,
+        "YueJingUITests": 12,
+        "YueJingCanvasTests": 3,
+        "YueJingEPUBUITests": 3,
+    }
+    parameterized = {
+        "epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
+            "signature": "(symlink:)",
+            "argument": "symlink",
+            "values": ["false", "true"],
+        }
+    }
+    excluded = {"TXTCorePerformanceTests": "Independent baseline; excluded."}
+
+    def fake_validate_source(root_arg=None):
+        cases = {}
+        for t in (*counts, *excluded):
+            cases[t] = [
+                n for p, ns in sorted(files.items())
+                if r.inventory.group_for(p) == t for n in ns.split()
+            ]
+        return {
+            "kind": "SOURCE_INVENTORY_NOT_NATIVE",
+            "groups": dict(counts),
+            "selected": sum(counts.values()),
+            "execution_groups": {**counts, "ReaderDomainTests": counts["ReaderDomainTests"] + 1},
+            "selected_executions": sum(counts.values()) + 1,
+            "parameterized": dict(parameterized),
+            "excluded": dict(excluded),
+            "all_declared": sum(counts.values()) + 1,
+            "native_executions": 0,
+            "cases": cases,
+        }
+
+    def write_repo(repo_root, variant):
+        assert variant in ("prior1", "prior2", "current")
+        repo_root.mkdir(parents=True, exist_ok=True)
+        for rel, names_str in files.items():
+            names = names_str.split()
+            target = rel.split("/", 1)[0]
+            body = []
+            if target in ("YueJingEPUBUITests", "YueJingUITests"):
+                cls = "EPUBFlowUITests" if target == "YueJingEPUBUITests" else "ReadingFlowUITests"
+                body.append(f"final class {cls}: XCTestCase {{")
+                for n in names:
+                    body.append(f"    @MainActor func {n}() {{}}")
+                body.append("}")
+            else:
+                for n in names:
+                    if n in parameterized:
+                        body.append(f"@Test(arguments: [false, true]) func {n}(symlink: Bool) {{}}")
+                    else:
+                        body.append(f"@Test func {n}() {{}}")
+            if variant in ("prior2", "current") and rel in (
+                "ReaderDomainTests/EPUBAuthorStylesTests.swift",
+                "YueJingHostTests/EPUBFontLoadingHostTests.swift",
+            ):
+                body.append("// prior2 repaired fixture")
+            if variant == "current" and rel == "YueJingHostTests/EPUBReaderHostTests.swift":
+                body.append("// current host-3 repaired fixture")
+            p = repo_root / "Tests" / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+        for extra_rel, extra_text in (
+            ("Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift", "public struct AuthorStyles {}\n"),
+            ("App/EPUB/EPUBWebView.swift", "public struct EPUBWebView {}\n"),
+            ("Tests/ReaderDomainTests/EPUBTestSupport.swift", "struct EPUBTestSupport {}\n"),
+            ("scripts/run_epub_author_layout_validation.py", f"# {variant}\n"),
+            ("scripts/check_epub_author_layout_validation.py", f"# check-{variant}\n"),
+            (".github/workflows/task3-validate.yml", f"# wf-{variant}\n"),
+        ):
+            fp = repo_root / extra_rel
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(extra_text, encoding="utf-8")
+        proj = repo_root / "project.yml"
+        proj.write_text(
+            f'name: YueJing\nsettings:\n  base:\n    MARKETING_VERSION: "{r.VERSION}"\n'
+            f'    CURRENT_PROJECT_VERSION: "{r.BUILD}"\n    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon\n',
+            encoding="utf-8",
+        )
+        allowed = [
+            ".github/workflows/task3-validate.yml",
+            "App/EPUB/EPUBWebView.swift",
+            "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift",
+            "Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift",
+            "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift",
+            "Tests/ReaderDomainTests/EPUBCompatibilityTests.swift",
+            "Tests/ReaderDomainTests/EPUBContentPoolTests.swift",
+            "Tests/ReaderDomainTests/EPUBLibraryTests.swift",
+            "Tests/ReaderDomainTests/EPUBPackageTests.swift",
+            "Tests/ReaderDomainTests/EPUBProgressTests.swift",
+            "Tests/ReaderDomainTests/EPUBReadyTests.swift",
+            "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift",
+            "Tests/YueJingHostTests/EPUBContentsNavigationTests.swift",
+            "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift",
+            "Tests/YueJingHostTests/EPUBReaderHostTests.swift",
+            "project.yml",
+            "scripts/check_epub_author_layout_validation.py",
+            "scripts/epub_author_layout_scope.json",
+            "scripts/run_epub_author_layout_validation.py",
+        ]
+        pinned = {
+            "App/EPUB/EPUBWebView.swift": r.sha(repo_root / "App/EPUB/EPUBWebView.swift"),
+            "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift": r.sha(repo_root / "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift"),
+            "project.yml": r.sha(proj),
+        }
+        for _, rel, _ in domain_groups + host_groups:
+            pinned["Tests/" + rel] = r.sha(repo_root / "Tests" / rel)
+        pinned["Tests/YueJingEPUBUITests/EPUBFlowUITests.swift"] = r.sha(repo_root / "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift")
+        cfg = {
+            "baseline": r.BASE,
+            "scope": r.SCOPE,
+            "version": r.VERSION,
+            "build": r.BUILD,
+            "allowed_paths": allowed,
+            "candidate_sha256": pinned,
+            "selected_files": selected_files,
+        }
+        cfg_path = repo_root / "scripts/epub_author_layout_scope.json"
+        save(cfg_path, cfg)
+        return cfg, cfg_path
+
+    p1_repo = base_root / "p1-repo"
+    p2_repo = base_root / "p2-repo"
+    cur_repo = base_root / "cur-repo"
+    p1_cfg, p1_cfg_path = write_repo(p1_repo, "prior1")
+    p2_cfg, p2_cfg_path = write_repo(p2_repo, "prior2")
+    cur_cfg, cur_cfg_path = write_repo(cur_repo, "current")
+
+    def tree_for_dir(root_dir):
+        return {
+            p.relative_to(root_dir).as_posix(): ["100644", "blob", r.git_blob_sha1(p.read_bytes())]
+            for p in sorted(root_dir.rglob("*")) if p.is_file()
+        }
+
+    p1_tree = tree_for_dir(p1_repo)
+    p2_tree = tree_for_dir(p2_repo)
+    cur_tree = tree_for_dir(cur_repo)
+    base_tree = dict(p1_tree)
+    base_tree["Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift"] = ["100644", "blob", r.git_blob_sha1(b"base-styles")]
+    base_tree["project.yml"] = ["100644", "blob", r.git_blob_sha1(b"base-project")]
+
+    _, scheme_path, domain_scheme_path = _write_xcode_sim_metadata(cur_repo)
+    _write_xcode_sim_metadata(p2_repo)
+    _write_xcode_sim_metadata(p1_repo)
+
+    def write_common_archive_base(src_dir, run_id, src_commit):
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "toolchain.log").write_text(
+            f"Source: {src_commit}\narm64\nXcode 16.4\nBuild version 16F6\nApple Swift version 6.1.2\n",
+            encoding="utf-8",
+        )
+        (src_dir / "xcodegen.log").write_text("Version: 2.46.0\n", encoding="utf-8")
+        pins = [
+            {"identity": k, "kind": "remoteSourceControl", "location": d["url"],
+             "state": {"revision": d["revision"], "version": d["version"]}}
+            for k, d in r.compat.epub_batch.DEPENDENCIES.items()
+        ]
+        save(src_dir / "Package.resolved", {"pins": pins, "version": 2})
+        save(src_dir / "dependency-resolution.json", {"packages": packages_fixture()})
+        eff = {
+            "PRODUCT_TYPE": "com.apple.product-type.bundle.unit-test",
+            "SWIFT_VERSION": "6.0",
+            "SWIFT_STRICT_CONCURRENCY": "complete",
+            "IPHONEOS_DEPLOYMENT_TARGET": "16.6",
+            "TEST_HOST": "",
+            "BUNDLE_LOADER": "",
+            "TEST_TARGET_NAME": "",
+        }
+        save(src_dir / "effective-test-settings.json", {"ReaderDomainTests": eff})
+        save(src_dir / "simulator-selection.json", {
+            "udid": DESTINATION.split("id=")[1],
+            "device_name": "iPhone SE",
+            "architecture": "arm64",
+            "physical_device": False,
+        })
+        save(src_dir / "simulator-boot.json", {
+            "source_commit": src_commit,
+            "run_id": run_id,
+            "run_attempt": "1",
+            "exit_code": 0,
+            "timed_out": False,
+            "timeout_seconds": 120,
+        })
+        link = src_dir / "webkit-simulator-linkage"
+        link.mkdir(parents=True)
+        (link / "binary").write_bytes(b"synthetic-sim-macho-" + run_id.encode())
+        save(link / "verification.json", {
+            "source_commit": src_commit,
+            "run_id": run_id,
+            "run_attempt": "1",
+            "passed": True,
+            "errors": [],
+            "binaries": [{
+                "path": "YueJing",
+                "evidence": "binary",
+                "sha256": r.sha(link / "binary"),
+                "passed": True,
+                "nm_exit": 0,
+            }],
+        })
+
+    def build_prior1_src(src_dir):
+        write_common_archive_base(src_dir, prior1_id, prior1_sha)
+        prior_ev = {
+            "ref": "refs/heads/main",
+            "repository": {"full_name": r.REPO},
+            "inputs": {"validation_scope": r.SCOPE, "allow_unqualified_ipa": "false", "build_ipa": "true"},
+        }
+        save(src_dir / "dispatch-event.json", prior_ev)
+        with patch.object(r.inventory, "FILES", files), \
+             patch.object(r.inventory, "COUNTS", counts), \
+             patch.object(r.inventory, "PARAMETERIZED", parameterized), \
+             patch.object(r.inventory, "EXCLUDED", excluded), \
+             patch.object(r.inventory, "validate_source", side_effect=fake_validate_source):
+            p_groups = r.build_groups(p1_cfg)
+            p_cand = r._candidate_files(p1_repo)
+            p_inv = fake_validate_source(p1_repo)
+            p_scope = {
+                "scope": r.SCOPE, "phase": "validation", "prior_validation_run": "",
+                "source_commit": prior1_sha, "source_status": "clean", "baseline_commit": r.BASE,
+                "run_id": prior1_id, "run_attempt": "1", "repository": r.REPO, "ref": "refs/heads/main",
+                "workflow_id": r.WORKFLOW_ID, "workflow_path": r.WORKFLOW_PATH,
+                "version": r.VERSION, "build": r.BUILD, "allow_unqualified_ipa": False, "build_ipa": True,
+                "dispatch_event_sha256": r.sha(src_dir / "dispatch-event.json"),
+                "scope_config_sha256": r.sha(p1_cfg_path),
+                "allowed_paths": p1_cfg["allowed_paths"], "candidate_sha256": p1_cfg["candidate_sha256"],
+                "files": p_cand, "selected_files": p1_cfg["selected_files"],
+                "selected": {g: list(s["cases"]) for g, s in p_groups.items()},
+                "selected_declarations": 83, "native_tests_planned": 84,
+                "full_inventory_declared": 264, "full_inventory_executions": 265,
+            }
+            save(src_dir / "candidate-sources.json", {
+                "source_commit": prior1_sha, "run_id": prior1_id, "run_attempt": "1",
+                "files": p_cand, "inventory": p_inv,
+            })
+            save(src_dir / "author-layout-scope.json", p_scope)
+            for group, spec in p_groups.items():
+                gdir = src_dir / "epub-author-layout" / group
+                gdir.mkdir(parents=True)
+                target = spec["target"]
+                bundle = gdir / f"{target}.xcresult"
+                (bundle / "Data").mkdir(parents=True)
+                (bundle / "Info.plist").write_bytes(b"p1-xcresult")
+                (bundle / "Data/data.0").write_bytes(b"p1-data")
+                save(bundle / "synthetic-tests.json", tree_for(spec))
+                save(bundle / "synthetic-summary.json", summary_for(spec))
+                with patch.object(r, "xcresult_export", side_effect=synthetic_export):
+                    r.retain_xcresult_exports(gdir, bundle)
+                bundle_str = f"/Users/runner/work/YueJing/YueJing/artifacts/task3/epub-author-layout/{group}/{target}.xcresult"
+                want = r.provenance(group, DESTINATION, bundle_str, p_scope, groups=p_groups)
+                save(gdir / "selection.json", want)
+                _write_exact_group_settings(spec["kind"], target, gdir, src_dir / "effective-test-settings.json", prior1_sha, scheme_path=scheme_path)
+                if group in r.ELIGIBLE_PRIOR_REUSE_GROUPS:
+                    save(gdir / "execution.json", {**want, "native_exit": 0, "timed_out": False})
+                    raw = fixture_log(spec)
+                    (gdir / f"{target}.log").write_bytes(raw)
+                    parsed = r.parse_log(group, raw, 0, False, groups=p_groups)
+                    with patch.object(r, "xcresult_export", side_effect=synthetic_export):
+                        parsed["parameter_xcresult"] = r.parameter_evidence(group, gdir, bundle, group_specs=p_groups)
+                    save(gdir / "counts.json", parsed)
+                else:
+                    save(gdir / "execution.json", {**want, "native_exit": 65, "timed_out": False})
+                    (gdir / f"{target}.log").write_bytes(b"** TEST FAILED **\n")
+                    save(gdir / "failure.json", {
+                        "group": group, "target": target, "kind": spec["kind"],
+                        "cases": list(spec["cases"]), "error": "prior1 failed/blocked",
+                        "status": "error", "source_commit": prior1_sha, "run_id": prior1_id,
+                    })
+        return p_groups
+
+    def zip_dir(src_dir, zip_path):
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as arc:
+            for p in sorted(src_dir.rglob("*")):
+                if p.is_file():
+                    arc.write(p, p.relative_to(src_dir).as_posix())
+        return r.sha(zip_path)
+
+    def make_api_files(out_dir, zip_path, run_id, src_commit, art_id, art_name):
+        run_obj = {
+            "id": int(run_id), "head_sha": src_commit, "run_attempt": 1,
+            "workflow_id": r.WORKFLOW_ID, "path": r.WORKFLOW_PATH, "event": "workflow_dispatch",
+            "head_branch": "main", "status": "completed", "conclusion": "failure",
+            "repository": {"full_name": r.REPO}, "head_repository": {"full_name": r.REPO},
+        }
+        art_obj = {
+            "id": art_id, "expired": False, "name": art_name,
+            "workflow_run": {"id": int(run_id), "head_sha": src_commit},
+            "size_in_bytes": zip_path.stat().st_size, "digest": "sha256:" + r.sha(zip_path),
+        }
+        run_p = out_dir / f"api-run-{run_id}.json"
+        art_p = out_dir / f"api-artifact-{run_id}.json"
+        save(run_p, run_obj)
+        save(art_p, {"artifacts": [art_obj]})
+        return run_obj, art_obj, run_p, art_p
+
+    p1_src = base_root / "p1-src"
+    full_groups = build_prior1_src(p1_src)
+    p1_zip = base_root / "p1.zip"
+    p1_zip_sha = zip_dir(p1_src, p1_zip)
+    api_dir = base_root / "api-meta"
+    p1_run_obj, p1_art_obj, p1_run_p, p1_art_p = make_api_files(
+        api_dir, p1_zip, prior1_id, prior1_sha, r.PRIOR_ARTIFACT_ID, r.PRIOR_ARTIFACT_NAME
+    )
+
+    def build_prior2_src(src_dir):
+        write_common_archive_base(src_dir, prior2_id, prior2_sha)
+        ev2 = {
+            "ref": "refs/heads/main",
+            "repository": {"full_name": r.REPO},
+            "inputs": {
+                "validation_scope": r.SCOPE,
+                "allow_unqualified_ipa": False,
+                "build_ipa": True,
+                "prior_validation_run": prior1_id,
+            },
+        }
+        save(src_dir / "dispatch-event.json", ev2)
+        with patch.object(r.inventory, "FILES", files), \
+             patch.object(r.inventory, "COUNTS", counts), \
+             patch.object(r.inventory, "PARAMETERIZED", parameterized), \
+             patch.object(r.inventory, "EXCLUDED", excluded), \
+             patch.object(r.inventory, "validate_source", side_effect=fake_validate_source):
+            p2_groups = r.build_groups(p2_cfg)
+            p1_fresh, p1_reused = r.partition_groups(p2_groups, prior1_id)
+            p2_cand = r._candidate_files(p2_repo)
+            p2_inv = fake_validate_source(p2_repo)
+            p2_scope = {
+                "scope": r.SCOPE, "phase": "validation",
+                "prior_validation_run": prior1_id, "prior_source_commit": prior1_sha,
+                "prior_artifact_id": r.PRIOR_ARTIFACT_ID, "prior_artifact_sha256": p1_zip_sha,
+                "source_commit": prior2_sha, "source_status": "clean", "baseline_commit": r.BASE,
+                "run_id": prior2_id, "run_attempt": "1", "repository": r.REPO, "ref": "refs/heads/main",
+                "workflow_id": r.WORKFLOW_ID, "workflow_path": r.WORKFLOW_PATH,
+                "version": r.VERSION, "build": r.BUILD, "allow_unqualified_ipa": False, "build_ipa": True,
+                "dispatch_event_sha256": r.sha(src_dir / "dispatch-event.json"),
+                "scope_config_sha256": r.sha(p2_cfg_path),
+                "allowed_paths": p2_cfg["allowed_paths"], "candidate_sha256": p2_cfg["candidate_sha256"],
+                "files": p2_cand, "selected_files": p2_cfg["selected_files"],
+                "selected": {g: list(s["cases"]) for g, s in p2_groups.items()},
+                "fresh_groups": p1_fresh, "reused_groups": p1_reused,
+                "fresh_selected": {g: list(p2_groups[g]["cases"]) for g in p1_fresh},
+                "reused_selected": {g: list(p2_groups[g]["cases"]) for g in p1_reused},
+                "selected_declarations": 83, "native_tests_planned": 84,
+                "fresh_declarations_planned": 28, "fresh_executions_planned": 28,
+                "reused_declarations_planned": 55, "reused_executions_planned": 56,
+                "full_inventory_declared": 264, "full_inventory_executions": 265,
+            }
+            save(src_dir / "candidate-sources.json", {
+                "source_commit": prior2_sha, "run_id": prior2_id, "run_attempt": "1",
+                "files": p2_cand, "inventory": p2_inv,
+            })
+            save(src_dir / "author-layout-scope.json", p2_scope)
+            for group in p1_fresh:
+                spec = p2_groups[group]
+                gdir = src_dir / "epub-author-layout" / group
+                gdir.mkdir(parents=True)
+                target = spec["target"]
+                bundle = gdir / f"{target}.xcresult"
+                bundle_str = f"/Users/runner/work/YueJing/YueJing/artifacts/task3/epub-author-layout/{group}/{target}.xcresult"
+                want = r.provenance(group, DESTINATION, bundle_str, p2_scope, groups=p2_groups)
+                save(gdir / "selection.json", want)
+                _write_exact_group_settings(spec["kind"], target, gdir, src_dir / "effective-test-settings.json", prior2_sha, scheme_path=scheme_path)
+                if group in r.ELIGIBLE_PRIOR2_REUSE_GROUPS:
+                    (bundle / "Data").mkdir(parents=True)
+                    (bundle / "Info.plist").write_bytes(b"p2-xcresult")
+                    (bundle / "Data/data.0").write_bytes(b"p2-data")
+                    save(bundle / "synthetic-tests.json", tree_for(spec))
+                    save(bundle / "synthetic-summary.json", summary_for(spec))
+                    with patch.object(r, "xcresult_export", side_effect=synthetic_export):
+                        r.retain_xcresult_exports(gdir, bundle)
+                    save(gdir / "execution.json", {**want, "native_exit": 0, "timed_out": False})
+                    raw = fixture_log(spec)
+                    (gdir / f"{target}.log").write_bytes(raw)
+                    parsed = r.parse_log(group, raw, 0, False, groups=p2_groups)
+                    with patch.object(r, "xcresult_export", side_effect=synthetic_export):
+                        parsed["parameter_xcresult"] = r.parameter_evidence(group, gdir, bundle, group_specs=p2_groups)
+                    save(gdir / "counts.json", parsed)
+                else:
+                    # host-3 failed 2 cases (10 passed, 2 failed) - must NEVER be reused
+                    save(gdir / "execution.json", {**want, "native_exit": 65, "timed_out": False})
+                    lines = []
+                    for idx_c, cn in enumerate(spec["cases"]):
+                        lines.append(f"◇ Test {cn}() started.")
+                        lines.append(f"{'✘' if idx_c >= 10 else '✔'} Test {cn}() {'failed' if idx_c >= 10 else 'passed'} after 0.1 seconds.")
+                    (gdir / f"{target}.log").write_text("\n".join(lines) + "\n** TEST FAILED **\n", encoding="utf-8")
+                    save(gdir / "failure.json", {
+                        "group": group, "target": target, "kind": spec["kind"],
+                        "cases": list(spec["cases"]), "error": "host-3 2 failed",
+                        "status": "error", "source_commit": prior2_sha, "run_id": prior2_id,
+                    })
+        # Poisoned reused-evidence subtree & erroneous case-results.json like real 43158884847!
+        # Non-recursion requires leaving these untouched and NEVER trusting them.
+        save(src_dir / "reused-evidence/reused-prior-gate.json", {"poisoned": True, "passed": True})
+        save(src_dir / "reused-evidence/author-layout-gate.json", {"poisoned": True})
+        save(src_dir / "reused-evidence/prior-43153993787/evidence/epub-author-layout/domain-1/failure.json", {"poisoned": True})
+        save(src_dir / "case-results.json", {"counts": {"passed": 26, "failed": 2, "error": 55}, "prior_reuse": {"status": "failed"}})
+        (src_dir / "case-results.md").write_text("# erroneous report from 43158884847\n", encoding="utf-8")
+        save(src_dir / "delivery-summary.json", {"package_qualification": "NOT_DELIVERABLE"})
+        (src_dir / "reuse-evidence-check.log").write_text("ok\n", encoding="utf-8")
+        return p2_groups
+
+    p2_src = base_root / "p2-src"
+    build_prior2_src(p2_src)
+    p2_zip = base_root / "p2.zip"
+    p2_zip_sha = zip_dir(p2_src, p2_zip)
+    p2_run_obj, p2_art_obj, p2_run_p, p2_art_p = make_api_files(
+        api_dir, p2_zip, prior2_id, prior2_sha, r.PRIOR2_ARTIFACT_ID, r.PRIOR2_ARTIFACT_NAME
+    )
+
+    @contextlib.contextmanager
+    def sandbox(work_dir, *, build_ipa=True, prior_val=prior2_id, github_actions="false"):
+        out_dir = work_dir / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ev_path = work_dir / "event.json"
+        save(ev_path, {
+            "ref": "refs/heads/main",
+            "repository": {"full_name": r.REPO},
+            "workflow": r.WORKFLOW_PATH,
+            "workflow_id": r.WORKFLOW_ID,
+            "inputs": {
+                "validation_scope": r.SCOPE,
+                "allow_unqualified_ipa": False,
+                "build_ipa": build_ipa,
+                "prior_validation_run": prior_val,
+            },
+        })
+        summary_md_path = work_dir / "step-summary.md"
+        tree_state = {
+            "base": copy.deepcopy(base_tree),
+            "p1": copy.deepcopy(p1_tree),
+            "p2": copy.deepcopy(p2_tree),
+            "cur": copy.deepcopy(cur_tree),
+            "status": b"",
+            "p1_anc": True,
+            "p2_anc": True,
+        }
+        p1_cfg_bytes = p1_cfg_path.read_bytes()
+        p2_cfg_bytes = p2_cfg_path.read_bytes()
+
+        def fake_git(*args, root=None):
+            if args[:2] == ("rev-parse", "HEAD"):
+                return (cur_sha + "\n").encode("utf-8")
+            if args[0] == "status":
+                return tree_state["status"]
+            if args[:2] == ("show", f"{prior1_sha}:scripts/epub_author_layout_scope.json"):
+                return p1_cfg_bytes
+            if args[:2] == ("show", f"{prior2_sha}:scripts/epub_author_layout_scope.json"):
+                return p2_cfg_bytes
+            raise AssertionError("Unexpected git call: " + repr(args))
+
+        def fake_tree(rev, root=None):
+            if rev == r.BASE:
+                return copy.deepcopy(tree_state["base"])
+            if rev == prior1_sha:
+                return copy.deepcopy(tree_state["p1"])
+            if rev == prior2_sha:
+                return copy.deepcopy(tree_state["p2"])
+            return copy.deepcopy(tree_state["cur"])
+
+        def fake_anc(base_arg, head_arg, root=None):
+            if base_arg == prior1_sha:
+                return tree_state["p1_anc"]
+            if base_arg == prior2_sha:
+                return tree_state["p2_anc"]
+            return True
+
+        def fake_validate_checkouts(pins, root_arg=None):
+            r.compat.epub_batch.validate_pins(pins)
+            return packages_fixture()
+
+        def fake_api_ok(suffix):
+            if suffix == f"/actions/runs/{prior1_id}":
+                return dict(p1_run_obj)
+            if suffix == f"/actions/artifacts/{r.PRIOR_ARTIFACT_ID}":
+                return dict(p1_art_obj)
+            if suffix == f"/actions/runs/{prior2_id}":
+                return dict(p2_run_obj)
+            if suffix == f"/actions/artifacts/{r.PRIOR2_ARTIFACT_ID}":
+                return dict(p2_art_obj)
+            raise AssertionError("Unexpected API suffix: " + suffix)
+
+        def fake_dl(artifact_id, dest_path):
+            src_zip = p1_zip if artifact_id == r.PRIOR_ARTIFACT_ID else p2_zip
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            with dest_path.open("xb") as dst, src_zip.open("rb") as src:
+                shutil.copyfileobj(src, dst)
+
+        real_live = r.live_scope
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(r, "ROOT", cur_repo))
+            stack.enter_context(patch.object(r, "OUT", out_dir))
+            stack.enter_context(patch.object(r, "REUSED_STAGING", work_dir / "reused-downloads"))
+            stack.enter_context(patch.object(r, "SCOPE_CONFIG_JSON", cur_cfg_path))
+            stack.enter_context(patch.object(r, "PRIOR_ARTIFACT_SHA256", p1_zip_sha))
+            stack.enter_context(patch.object(r, "PRIOR2_ARTIFACT_SHA256", p2_zip_sha))
+            stack.enter_context(patch.object(r, "live_scope", side_effect=lambda root=cur_repo: real_live(root=root)))
+            stack.enter_context(patch.object(r.inventory, "FILES", files))
+            stack.enter_context(patch.object(r.inventory, "COUNTS", counts))
+            stack.enter_context(patch.object(r.inventory, "PARAMETERIZED", parameterized))
+            stack.enter_context(patch.object(r.inventory, "EXCLUDED", excluded))
+            stack.enter_context(patch.object(r.inventory, "validate_source", side_effect=fake_validate_source))
+            stack.enter_context(patch.object(r.compat, "git", side_effect=fake_git))
+            stack.enter_context(patch.object(r.compat, "git_tree", side_effect=fake_tree))
+            stack.enter_context(patch.object(r, "_git_is_ancestor", side_effect=fake_anc))
+            stack.enter_context(patch.object(r.compat.epub_batch, "validate_checkouts", side_effect=fake_validate_checkouts))
+            stack.enter_context(patch.object(r, "xcresult_export", side_effect=synthetic_export))
+            stack.enter_context(patch.object(r, "github_api_json", side_effect=fake_api_ok))
+            stack.enter_context(patch.object(r, "github_download_artifact_zip", side_effect=fake_dl))
+            stack.enter_context(patch.dict(
+                os.environ,
+                GITHUB_ACTIONS=github_actions,
+                VALIDATION_SCOPE=r.SCOPE,
+                GITHUB_EVENT_NAME="workflow_dispatch",
+                GITHUB_REF="refs/heads/main",
+                GITHUB_RUN_ATTEMPT="1",
+                GITHUB_REPOSITORY=r.REPO,
+                GITHUB_WORKFLOW_REF=f"{r.REPO}/{r.WORKFLOW_PATH}@refs/heads/main",
+                GITHUB_SHA=cur_sha,
+                GITHUB_RUN_ID=cur_run_id,
+                GITHUB_EVENT_PATH=str(ev_path),
+                GITHUB_STEP_SUMMARY=str(summary_md_path),
+                ALLOW_UNQUALIFIED_IPA="false",
+                PRIOR_VALIDATION_RUN=prior_val,
+                BUILD_IPA="true" if build_ipa else "false",
+            ))
+            yield out_dir, tree_state, summary_md_path
+
+    return {
+        "prior1_id": prior1_id,
+        "prior1_sha": prior1_sha,
+        "prior2_id": prior2_id,
+        "prior2_sha": prior2_sha,
+        "cur_sha": cur_sha,
+        "cur_run_id": cur_run_id,
+        "p1_repo": p1_repo,
+        "p2_repo": p2_repo,
+        "cur_repo": cur_repo,
+        "p1_cfg": p1_cfg,
+        "p2_cfg": p2_cfg,
+        "cur_cfg": cur_cfg,
+        "p1_tree": p1_tree,
+        "p2_tree": p2_tree,
+        "cur_tree": cur_tree,
+        "p1_src": p1_src,
+        "p2_src": p2_src,
+        "p1_zip": p1_zip,
+        "p1_zip_sha": p1_zip_sha,
+        "p2_zip": p2_zip,
+        "p2_zip_sha": p2_zip_sha,
+        "p1_run_obj": p1_run_obj,
+        "p1_art_obj": p1_art_obj,
+        "p1_run_p": p1_run_p,
+        "p1_art_p": p1_art_p,
+        "p2_run_obj": p2_run_obj,
+        "p2_art_obj": p2_art_obj,
+        "p2_run_p": p2_run_p,
+        "p2_art_p": p2_art_p,
+        "scheme_path": scheme_path,
+        "domain_scheme_path": domain_scheme_path,
+        "full_groups": full_groups,
+        "sandbox": sandbox,
+        "zip_dir": zip_dir,
+        "make_api_files": make_api_files,
+        "tree_for_dir": tree_for_dir,
+    }
+
+
+def _write_current_common_and_exec_fresh(fx, out_dir, scope, *, executed_log=None):
+    cur_sha = fx["cur_sha"]
+    cur_run_id = fx["cur_run_id"]
+    cur_repo = fx["cur_repo"]
+    scheme_path = fx["scheme_path"]
+    domain_scheme_path = fx["domain_scheme_path"]
+    (out_dir / "toolchain.log").write_text(
+        f"Source: {cur_sha}\narm64\nXcode 16.4\nBuild version 16F6\nApple Swift version 6.1.2\n",
+        encoding="utf-8",
+    )
+    (out_dir / "xcodegen.log").write_text("Version: 2.46.0\n", encoding="utf-8")
+    save(out_dir / "dependency-resolution.json", {"packages": packages_fixture()})
+    eff_cur = {
+        "PRODUCT_TYPE": "com.apple.product-type.bundle.unit-test",
+        "SWIFT_VERSION": "6.0",
+        "SWIFT_STRICT_CONCURRENCY": "complete",
+        "IPHONEOS_DEPLOYMENT_TARGET": "16.6",
+        "TEST_HOST": "",
+        "BUNDLE_LOADER": "",
+        "TEST_TARGET_NAME": "",
+    }
+    save(out_dir / "effective-test-settings.json", {"ReaderDomainTests": eff_cur})
+    save(out_dir / "simulator-selection.json", {
+        "udid": DESTINATION.split("id=")[1],
+        "device_name": "iPhone SE",
+        "architecture": "arm64",
+        "physical_device": False,
+    })
+    save(out_dir / "simulator-boot.json", {
+        "source_commit": cur_sha,
+        "run_id": cur_run_id,
+        "run_attempt": "1",
+        "exit_code": 0,
+        "timed_out": False,
+        "timeout_seconds": 120,
+    })
+    sim_link = out_dir / "webkit-simulator-linkage"
+    sim_link.mkdir(parents=True, exist_ok=True)
+    (sim_link / "binary").write_bytes(b"cur-sim-macho")
+    save(sim_link / "verification.json", {
+        "source_commit": cur_sha,
+        "run_id": cur_run_id,
+        "run_attempt": "1",
+        "passed": True,
+        "errors": [],
+        "binaries": [{"path": "YueJing", "evidence": "binary", "sha256": r.sha(sim_link / "binary"), "passed": True, "nm_exit": 0}],
+    })
+    sim_app = cur_repo / "build/ReadingUIDerivedData/Build/Products/Debug-iphonesimulator/YueJing.app"
+    sim_app.mkdir(parents=True, exist_ok=True)
+    (sim_app / "YueJing").write_bytes(b"cur-sim-macho")
+
+    def fake_exec_fresh(group, dest, checked_scope=None, groups=None):
+        if executed_log is not None:
+            executed_log.append(group)
+        folder = out_dir / "epub-author-layout" / group
+        folder.mkdir(parents=True, exist_ok=True)
+        spec = groups[group]
+        target = spec["target"]
+        bundle = folder / f"{target}.xcresult"
+        (bundle / "Data").mkdir(parents=True)
+        (bundle / "Info.plist").write_bytes(b"synthetic")
+        (bundle / "Data/data.0").write_bytes(b"synthetic")
+        save(bundle / "synthetic-tests.json", tree_for(spec))
+        save(bundle / "synthetic-summary.json", summary_for(spec))
+        r.retain_xcresult_exports(folder, bundle)
+        want = r.provenance(group, dest, bundle, scope, groups=groups)
+        save(folder / "selection.json", want)
+        save(folder / "execution.json", {**want, "native_exit": 0, "timed_out": False})
+        _write_exact_group_settings(spec["kind"], target, folder, out_dir / "effective-test-settings.json", cur_sha, scheme_path=scheme_path, domain_scheme_path=domain_scheme_path)
+        raw = fixture_log(spec)
+        (folder / f"{target}.log").write_bytes(raw)
+        parsed = r.parse_log(group, raw, 0, False, groups=groups)
+        parsed["parameter_xcresult"] = r.parameter_evidence(group, folder, bundle, group_specs=groups)
+        save(folder / "counts.json", parsed)
+
+    return fake_exec_fresh
+
+
+def check_cloud_summarize_and_qualification(root):
+    """Actual GITHUB_ACTIONS=true integration tests for summarize(publish=True) + qualification() + delivery_gate()."""
+    fx = _build_3commit_dual_origin_fixture(root / "cloud-fx")
+    for prior_val, exp_fresh_groups, exp_fresh_decl, exp_reused_decl, exp_reused_exec in (
+        (fx["prior1_id"], 7, 28, 55, 56),
+        (fx["prior2_id"], 1, 12, 71, 72),
+    ):
+        with fx["sandbox"](root / f"cloud-pos-{prior_val}", build_ipa=True, prior_val=prior_val, github_actions="true") as (out_dir, tree_state, summary_md):
+            scope = r.write_scope(fx["cur_repo"])
+            # Before reuse runs, summarize reports not_verified without crashing
+            rep_pre = r.summarize(publish=False)
+            assert rep_pre["prior_reuse"]["status"] == "not_verified"
+            assert rep_pre["counts"]["not_verified"] == exp_reused_decl
+            assert rep_pre["counts"]["error"] == 0
+
+            executed = []
+            fake_exec = _write_current_common_and_exec_fresh(fx, out_dir, scope, executed_log=executed)
+            reused_gate = r.reuse_evidence(require_dependencies=True, offline_prior=None, check_shared_sources=True, root=fx["cur_repo"])
+            assert reused_gate["passed"] is True and reused_gate["qualified"] is True
+
+            orig_vtd = r.compat.validate_toolchain_and_dependencies
+            with patch.object(r.compat, "validate_toolchain_and_dependencies", side_effect=lambda rt, ot, check_live_tools=True: orig_vtd(rt, ot, check_live_tools=False)) as dep_spy, \
+                 patch.object(r.compat, "validate_destination"), \
+                 patch.object(r, "run_group", side_effect=fake_exec):
+                assert r.run_all(DESTINATION) is True
+                assert len(executed) == exp_fresh_groups
+                assert dep_spy.call_count >= 1
+            # Real cloud report step (`publish=True`) with full source/dependency/settings/xcresult verification!
+            rep = r.summarize(publish=True)
+            assert rep["prior_reuse"]["status"] == "passed", rep["prior_reuse"]
+            assert rep["counts"]["error"] == 0
+            assert rep["counts"]["reused"] == exp_reused_decl
+            assert rep["counts"]["passed"] == exp_fresh_decl
+            assert rep["native_tests_executed_this_run"] == exp_fresh_decl
+            assert rep["reused_declarations"] == exp_reused_decl
+            assert rep["reused_native_passed"] == exp_reused_exec
+            assert rep["verified_declarations"] == 83 and rep["verified_passed"] == 84
+            assert summary_md.is_file() and f"fresh this run {exp_fresh_decl} declarations" in summary_md.read_text(encoding="utf-8")
+
+            qual = r.qualification()
+            assert qual["passed"] is True
+            assert qual["native_tests_executed_this_run"] == exp_fresh_decl
+            assert qual["fresh_declarations_passed"] == exp_fresh_decl
+            assert qual["reused_declarations"] == exp_reused_decl
+            assert qual["reused_native_passed"] == exp_reused_exec
+            assert qual["verified_declarations"] == 83 and qual["verified_passed"] == 84
+            r.write(out_dir / "author-layout-gate.json", qual)
+            assert r.validate_saved() == qual
+
+            dev_app = root / f"cloud-dev-{prior_val}/YueJing.app"
+            dev_app.mkdir(parents=True)
+            (dev_app / "YueJing").write_bytes(b"cloud-dev-macho")
+            (out_dir / "app-build.log").write_text("ok\n", encoding="utf-8")
+            (out_dir / "app-build-exit-code.txt").write_text("0\n", encoding="utf-8")
+            dev_link = out_dir / "webkit-device-linkage"
+            dev_link.mkdir(parents=True)
+            (dev_link / "binary").write_bytes(b"cloud-dev-macho")
+            save(dev_link / "verification.json", {
+                "source_commit": fx["cur_sha"], "run_id": fx["cur_run_id"], "run_attempt": "1",
+                "passed": True, "errors": [],
+                "binaries": [{"path": "YueJing", "evidence": "binary", "sha256": r.sha(dev_app / "YueJing"), "passed": True, "nm_exit": 0}],
+            })
+            with patch.object(r.v, "APP", dev_app):
+                dg = r.delivery_gate()
+                assert dg["strict_native_qualification"] == "passed"
+                manifest = {
+                    "source_commit": fx["cur_sha"], "version": r.VERSION, "build": r.BUILD,
+                    "signing": "unsigned", "ipa_sha256": "c" * 64,
+                }
+                save(out_dir / "app-dependency-gate.json", {
+                    "source_commit": fx["cur_sha"], "run_id": fx["cur_run_id"], "run_attempt": "1",
+                    "signing": "unsigned", "packages": packages_fixture(),
+                    "actual_images": [{"binary": "YueJing", "sha256": r.sha(dev_app / "YueJing")}],
+                })
+                pkg = r.complete_delivery(manifest, 16)
+                assert pkg["ipa_integrity"] == "passed"
+            passed(f"GITHUB_ACTIONS=true integration summarize+qualification+delivery passed (prior={prior_val})")
+
+            # Cloud negative integration checks on the exact same cloud sandbox:
+            # 1. Missing Package.resolved causes cloud summarize to reject (and qualification fails)
+            res_p = fx["cur_repo"] / "YueJing.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+            res_orig = res_p.read_bytes()
+            res_p.unlink()
+            rep_no_res = r.summarize(publish=False)
+            assert rep_no_res["prior_reuse"]["status"] == "failed" and rep_no_res["counts"]["error"] == exp_reused_decl
+            rejects(f"cloud missing Package.resolved blocks qualification ({prior_val})", r.qualification)
+            res_p.write_bytes(res_orig)
+
+            # 2. Missing author-layout-scope.json in cloud causes summarize to fail reuse
+            sc_p = out_dir / "author-layout-scope.json"
+            sc_orig = sc_p.read_bytes()
+            sc_p.unlink()
+            rep_no_sc = r.summarize(publish=False)
+            assert rep_no_sc["prior_reuse"]["status"] == "failed" and rep_no_sc["counts"]["error"] == exp_reused_decl
+            sc_p.write_bytes(sc_orig)
+
+            # 3. Source tampering (dirty tree) caught in cloud summarize + qualification
+            tree_state["status"] = b" M Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift\0"
+            rep_dirty = r.summarize(publish=False)
+            assert rep_dirty["prior_reuse"]["status"] == "failed" and rep_dirty["counts"]["error"] == exp_reused_decl
+            rejects(f"cloud dirty tree blocks qualification ({prior_val})", r.qualification)
+            tree_state["status"] = b""
+
+            # 4. Live xcresult export drift caught in cloud summarize + qualification
+            def drift_export(bundle, section):
+                data = synthetic_export(bundle, section)
+                if bundle.parent.name == "domain-3" and section == "summary":
+                    doc = json.loads(data)
+                    doc["skippedTests"] = 1
+                    return json.dumps(doc).encode()
+                return data
+            with patch.object(r, "xcresult_export", side_effect=drift_export):
+                rep_xc = r.summarize(publish=False)
+                assert rep_xc["prior_reuse"]["status"] == "failed" and rep_xc["counts"]["error"] == exp_reused_decl
+                rejects(f"cloud xcresult drift blocks qualification ({prior_val})", r.qualification)
+
+            # 5. Missing reused-prior-gate.json while prior directory exists marks failed
+            rg_p = out_dir / "reused-evidence/reused-prior-gate.json"
+            rg_orig = rg_p.read_bytes()
+            rg_p.unlink()
+            rep_no_rg = r.summarize(publish=False)
+            assert rep_no_rg["prior_reuse"]["status"] == "failed" and rep_no_rg["counts"]["error"] == exp_reused_decl
+            rejects(f"cloud missing reused-prior-gate blocks qualification ({prior_val})", r.qualification)
+            rg_p.write_bytes(rg_orig)
+            passed(f"GITHUB_ACTIONS=true negative summarize+qualification checks passed (prior={prior_val})")
+
+
+def check_dual_origin_reuse_and_mutations(root):
+    """Full 3-commit dual-origin reuse (43158884847: 12 fresh + 71/72 reused = 83/84) + mutation matrix."""
+    fx = _build_3commit_dual_origin_fixture(root / "dual-fx")
+    p1_id, p1_sha = fx["prior1_id"], fx["prior1_sha"]
+    p2_id, p2_sha = fx["prior2_id"], fx["prior2_sha"]
+    cur_sha, cur_run_id = fx["cur_sha"], fx["cur_run_id"]
+    cur_repo = fx["cur_repo"]
+    full_groups = fx["full_groups"]
+
+    # 1. Positive offline dual-origin end-to-end (including verify_source(prior=p1_id) and prior=p2_id!)
+    src_p1_ok = None
+    src_p2_ok = None
+    with fx["sandbox"](root / "dual-pos-e2e", build_ipa=True, prior_val=p2_id, github_actions="false") as (out_dir, _, _):
+        src_p1_ok = r.verify_source(pending=False, root=cur_repo, prior_validation_run=p1_id)
+        src_p2_ok = r.verify_source(pending=False, root=cur_repo, prior_validation_run=p2_id)
+        assert set(src_p1_ok["prior_origins_compat"]) == {p1_id}
+        assert set(src_p2_ok["prior_origins_compat"]) == {p1_id, p2_id}
+        assert src_p2_ok["prior_origins_compat"][p2_id]["changed_test_pins"] == ["Tests/YueJingHostTests/EPUBReaderHostTests.swift"]
+
+        scope = r.write_scope(cur_repo)
+        assert scope["prior_validation_run"] == p2_id
+        assert scope["prior_source_commit"] == p2_sha
+        assert scope["fresh_groups"] == ["host-3"]
+        assert len(scope["reused_groups"]) == 13
+        assert scope["fresh_declarations_planned"] == 12 and scope["fresh_executions_planned"] == 12
+        assert scope["reused_declarations_planned"] == 71 and scope["reused_executions_planned"] == 72
+        assert scope["selected_declarations"] == 83 and scope["native_tests_planned"] == 84
+        assert [o["run_id"] for o in scope["prior_origins"]] == [p1_id, p2_id]
+        assert scope["reused_group_origins"]["domain-1"] == p1_id
+        assert scope["reused_group_origins"]["domain-2"] == p2_id
+        assert scope["reused_group_origins"]["host-1"] == p2_id
+        assert scope["reused_group_origins"]["ui-3"] == p2_id
+
+        executed = []
+        fake_exec = _write_current_common_and_exec_fresh(fx, out_dir, scope, executed_log=executed)
+        offline = {
+            p1_id: {"zip_path": fx["p1_zip"], "run_json": fx["p1_run_p"], "artifact_json": fx["p1_art_p"]},
+            p2_id: {"zip_path": fx["p2_zip"], "run_json": fx["p2_run_p"], "artifact_json": fx["p2_art_p"]},
+        }
+        reused_gate = r.reuse_evidence(require_dependencies=True, offline_prior=offline, check_shared_sources=True, root=cur_repo)
+        assert reused_gate["reused_declarations"] == 71 and reused_gate["reused_native_passed"] == 72
+        assert len(reused_gate["prior_origins"]) == 2
+        assert (out_dir / f"reused-evidence/prior-{p1_id}/archive.zip").read_bytes() == fx["p1_zip"].read_bytes()
+        assert (out_dir / f"reused-evidence/prior-{p2_id}/archive.zip").read_bytes() == fx["p2_zip"].read_bytes()
+        for rg in scope["reused_groups"]:
+            rejects(f"dual-origin run_group rejects reused {rg}", lambda g=rg: r.run_group(g, DESTINATION, checked_scope=scope, groups=full_groups))
+        rejects("dual-origin reuse refuses overwrite", lambda: r.reuse_evidence(require_dependencies=True, offline_prior=offline, check_shared_sources=True, root=cur_repo))
+        # Require dual offline entries when prior_validation_run == p2_id
+        rejects("dual-origin offline missing prior2 rejected", lambda: r.reuse_evidence(
+            require_dependencies=False, offline_prior=offline[p1_id], check_shared_sources=True, root=cur_repo
+        ))
+
+        orig_vtd = r.compat.validate_toolchain_and_dependencies
+        with patch.object(r.compat, "validate_toolchain_and_dependencies", side_effect=lambda rt, ot, check_live_tools=True: orig_vtd(rt, ot, check_live_tools=False)), \
+             patch.object(r.compat, "validate_destination"), \
+             patch.object(r, "run_group", side_effect=fake_exec):
+            assert r.run_all(DESTINATION) is True
+        assert executed == ["host-3"]
+        for rg in scope["reused_groups"]:
+            assert not (out_dir / "epub-author-layout" / rg).exists()
+
+        rep = r.summarize()
+        assert rep["native_tests_executed_this_run"] == 12
+        assert rep["reused_declarations"] == 71 and rep["reused_native_passed"] == 72
+        assert rep["verified_declarations"] == 83 and rep["verified_passed"] == 84
+        assert rep["counts"]["passed"] == 12 and rep["counts"]["reused"] == 71 and rep["counts"]["error"] == 0
+        md_text = (out_dir / "case-results.md").read_text(encoding="utf-8")
+        assert "fresh this run 12 declarations (12 executions)" in md_text
+        assert "reused 71 declarations (72 executions) from two pinned origins" in md_text
+        assert f"reused:{p1_id}" in md_text and f"reused:{p2_id}" in md_text
+
+        qual = r.qualification()
+        assert qual["passed"] is True
+        assert qual["native_tests_executed_this_run"] == 12
+        assert qual["fresh_declarations_passed"] == 12
+        assert qual["reused_declarations"] == 71 and qual["reused_native_passed"] == 72
+        assert qual["verified_declarations"] == 83 and qual["verified_passed"] == 84
+        assert qual["not_executed_this_run"] == 253
+        assert qual["unselected_executions"] == 181
+        assert len(qual["groups"]) == 1 and len(qual["reused_prior"]["groups"]) == 13
+        assert len(qual["prior_origins"]) == 2
+        r.write(out_dir / "author-layout-gate.json", qual)
+        assert r.validate_saved() == qual
+
+        dev_app = root / "dual-dev-app/YueJing.app"
+        dev_app.mkdir(parents=True)
+        (dev_app / "YueJing").write_bytes(b"dual-dev-macho")
+        (out_dir / "app-build.log").write_text("ok\n", encoding="utf-8")
+        (out_dir / "app-build-exit-code.txt").write_text("0\n", encoding="utf-8")
+        dev_link = out_dir / "webkit-device-linkage"
+        dev_link.mkdir(parents=True)
+        (dev_link / "binary").write_bytes(b"dual-dev-macho")
+        save(dev_link / "verification.json", {
+            "source_commit": cur_sha, "run_id": cur_run_id, "run_attempt": "1",
+            "passed": True, "errors": [],
+            "binaries": [{"path": "YueJing", "evidence": "binary", "sha256": r.sha(dev_app / "YueJing"), "passed": True, "nm_exit": 0}],
+        })
+        with patch.object(r.v, "APP", dev_app):
+            dg = r.delivery_gate()
+            assert dg["reused_native_passed"] == 72 and dg["verified_passed"] == 84
+            assert f"reused-evidence/prior-{p1_id}/archive.zip" in dg["evidence_sha256"]
+            assert f"reused-evidence/prior-{p2_id}/archive.zip" in dg["evidence_sha256"]
+            manifest = {
+                "source_commit": cur_sha, "version": r.VERSION, "build": r.BUILD,
+                "signing": "unsigned", "ipa_sha256": "f" * 64,
+            }
+            save(out_dir / "app-dependency-gate.json", {
+                "source_commit": cur_sha, "run_id": cur_run_id, "run_attempt": "1",
+                "signing": "unsigned", "packages": packages_fixture(),
+                "actual_images": [{"binary": "YueJing", "sha256": r.sha(dev_app / "YueJing")}],
+            })
+            pkg = r.complete_delivery(manifest, 17)
+            assert pkg["ipa_integrity"] == "passed" and pkg["reused_declarations"] == 71
+        passed("dual-origin 12 fresh + 71/72 reused = 83/84 e2e + delivery verified (ignoring prior2 poisoned subtree)")
+
+        # Negative gate/tamper checks on dual-origin positive sandbox:
+        saved_gate_orig = (out_dir / "author-layout-gate.json").read_bytes()
+        for label, mut in (
+            ("dual gate forged native_tests_executed_this_run=28", lambda q: q.update(native_tests_executed_this_run=28)),
+            ("dual gate forged reused_native_passed=56", lambda q: q.update(reused_native_passed=56)),
+            ("dual gate forged reused_declarations=55", lambda q: q.update(reused_declarations=55)),
+            ("dual gate forged proof_sha256", lambda q: q.update(prior_reuse_proof_sha256="0" * 64)),
+        ):
+            m = copy.deepcopy(qual)
+            mut(m)
+            save(out_dir / "author-layout-gate.json", m)
+            rejects(label, r.validate_saved)
+        (out_dir / "author-layout-gate.json").write_bytes(saved_gate_orig)
+
+        # Non-recursion check: removing prior-43153993787 cannot be satisfied by 43158884847's reused-evidence/!
+        shutil.move(out_dir / f"reused-evidence/prior-{p1_id}", root / "tmp-p1-bak")
+        rejects("dual-origin missing prior1 rejected even with prior2 reused-evidence", r.qualification)
+        shutil.move(root / "tmp-p1-bak", out_dir / f"reused-evidence/prior-{p1_id}")
+
+        # Forged host-1 fresh directory alongside reused host-1 rejected
+        (out_dir / "epub-author-layout/host-1").mkdir()
+        rejects("dual-origin extra fresh host-1 rejected", r.qualification)
+        (out_dir / "epub-author-layout/host-1").rmdir()
+
+        # Host-3 settings drift vs reused host-1/ui-1 rejected
+        h3_stg_p = out_dir / "epub-author-layout/host-3/YueJingHostTests-settings.json"
+        h3_orig = h3_stg_p.read_bytes()
+        h3_bad = json.loads(h3_orig)
+        h3_bad["fixture_environment"] = "99999999-2222-3333-4444-555555555555"
+        save(h3_stg_p, h3_bad)
+        rejects("dual-origin fixture_environment drift vs host-3 rejected", lambda: r.verify_prior_reuse_saved(
+            scope, packages_fixture(), current_effective_domain=load_json_safe(out_dir / "effective-test-settings.json")["ReaderDomainTests"],
+            current_effective_host=h3_bad, root=cur_repo,
+        ))
+        h3_stg_p.write_bytes(h3_orig)
+
+    # 2. Partial fresh failure in host-3 (10 pass, 2 fail) with prior_validation_run=43158884847
+    with fx["sandbox"](root / "dual-partial-fail", build_ipa=False, prior_val=p2_id, github_actions="true") as (out_dir, _, _):
+        scope = r.write_scope(cur_repo)
+        _write_current_common_and_exec_fresh(fx, out_dir, scope)
+        r.reuse_evidence(require_dependencies=True, offline_prior=None, check_shared_sources=True, root=cur_repo)
+        exec_called = []
+        def fail_host3(group, dest, checked_scope=None, groups=None):
+            exec_called.append(group)
+            folder = out_dir / "epub-author-layout" / group
+            folder.mkdir(parents=True, exist_ok=True)
+            spec = groups[group]
+            target = spec["target"]
+            want = r.provenance(group, dest, folder / f"{target}.xcresult", scope, groups=groups)
+            save(folder / "selection.json", want)
+            save(folder / "execution.json", {**want, "native_exit": 65, "timed_out": False})
+            lines = []
+            for idx_c, cn in enumerate(spec["cases"]):
+                lines.append(f"◇ Test {cn}() started.")
+                lines.append(f"{'✘' if idx_c >= 10 else '✔'} Test {cn}() {'failed' if idx_c >= 10 else 'passed'} after 0.1 seconds.")
+            (folder / f"{target}.log").write_text("\n".join(lines) + "\n** TEST FAILED **\n", encoding="utf-8")
+            raise ValueError("host-3 partial 2 failed")
+
+        orig_vtd = r.compat.validate_toolchain_and_dependencies
+        with patch.object(r.compat, "validate_toolchain_and_dependencies", side_effect=lambda rt, ot, check_live_tools=True: orig_vtd(rt, ot, check_live_tools=False)), \
+             patch.object(r.compat, "validate_destination"), \
+             patch.object(r, "run_group", side_effect=fail_host3):
+            assert r.run_all(DESTINATION) is False
+        assert exec_called == ["host-3"]
+        rep = r.summarize(publish=True)
+        assert rep["counts"]["reused"] == 71 and rep["counts"]["passed"] == 10 and rep["counts"]["failed"] == 2
+        assert rep["native_tests_executed_this_run"] is None and rep["verified_passed"] is None
+        rejects("dual-origin host-3 partial failure blocks qualification despite 72 reused pass", r.qualification)
+        passed("dual-origin host-3 partial 10/2 failure isolated cleanly without relaxing gate")
+
+    # 3. Dual-origin source compatibility negative matrix vs b99156e (prior2)
+    p2_tree, cur_tree = fx["p2_tree"], fx["cur_tree"]
+    p2_cfg, cur_cfg = fx["p2_cfg"], fx["cur_cfg"]
+    for label, tree_mut, cfg_mut in (
+        ("changed EPUBAuthorStylesTests vs b99156e",
+         lambda t: t.__setitem__("Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift", ["100644", "blob", r.git_blob_sha1(b"mut-styles")]),
+         lambda c: None),
+        ("changed EPUBFontLoadingHostTests vs b99156e",
+         lambda t: t.__setitem__("Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift", ["100644", "blob", r.git_blob_sha1(b"mut-font")]),
+         lambda c: None),
+        ("changed EPUBContentsNavigationTests vs b99156e",
+         lambda t: t.__setitem__("Tests/YueJingHostTests/EPUBContentsNavigationTests.swift", ["100644", "blob", r.git_blob_sha1(b"mut-nav")]),
+         lambda c: None),
+        ("changed EPUBFlowUITests vs b99156e",
+         lambda t: t.__setitem__("Tests/YueJingEPUBUITests/EPUBFlowUITests.swift", ["100644", "blob", r.git_blob_sha1(b"mut-ui")]),
+         lambda c: None),
+        ("changed EPUBTestSupport helper vs b99156e",
+         lambda t: t.__setitem__("Tests/ReaderDomainTests/EPUBTestSupport.swift", ["100644", "blob", r.git_blob_sha1(b"mut-helper")]),
+         lambda c: None),
+        ("changed production EPUBAuthorStyles.swift vs b99156e",
+         lambda t: t.__setitem__("Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift", ["100644", "blob", r.git_blob_sha1(b"mut-prod")]),
+         lambda c: None),
+        ("changed project.yml vs b99156e",
+         lambda t: t.__setitem__("project.yml", ["100644", "blob", r.git_blob_sha1(b"mut-proj")]),
+         lambda c: None),
+        ("changed EPUBAuthorStylesTests pin vs b99156e",
+         lambda t: None,
+         lambda c: c["candidate_sha256"].__setitem__("Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift", "0" * 64)),
+        ("changed EPUBFontLoadingHostTests pin vs b99156e",
+         lambda t: None,
+         lambda c: c["candidate_sha256"].__setitem__("Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift", "0" * 64)),
+    ):
+        t_mut = copy.deepcopy(cur_tree)
+        c_mut = copy.deepcopy(cur_cfg)
+        tree_mut(t_mut)
+        cfg_mut(c_mut)
+        rejects("dual-origin source compat " + label, lambda tm=t_mut, cm=c_mut: r.validate_prior_source_compatibility(
+            p2_tree, tm, p2_cfg, cm, head=cur_sha, is_prior_ancestor=True,
+            prior_commit=p2_sha, allowed_diff_paths=r.PRIOR2_REUSE_ALLOWED_DIFF_PATHS,
+            changed_test_pins=r.PRIOR2_REUSE_CHANGED_TEST_PINS,
+        ))
+    rejects("dual-origin non-ancestor b99156e rejected", lambda: r.validate_prior_source_compatibility(
+        p2_tree, cur_tree, p2_cfg, cur_cfg, head=cur_sha, is_prior_ancestor=False,
+        prior_commit=p2_sha, allowed_diff_paths=r.PRIOR2_REUSE_ALLOWED_DIFF_PATHS,
+        changed_test_pins=r.PRIOR2_REUSE_CHANGED_TEST_PINS,
+    ))
+    rejects("dual-origin unadvanced HEAD == b99156e rejected", lambda: r.validate_prior_source_compatibility(
+        p2_tree, cur_tree, p2_cfg, cur_cfg, head=p2_sha, is_prior_ancestor=True,
+        prior_commit=p2_sha, allowed_diff_paths=r.PRIOR2_REUSE_ALLOWED_DIFF_PATHS,
+        changed_test_pins=r.PRIOR2_REUSE_CHANGED_TEST_PINS,
+    ))
+
+    # 4. Dual-origin API + archive + settings + UI + non-recursion negative mutation matrix on 43158884847
+    p2_api_muts = [
+        ("prior2 wrong head_sha", lambda rn, ar: rn.update(head_sha="0" * 40)),
+        ("prior2 wrong run.id", lambda rn, ar: rn.update(id=111)),
+        ("prior2 wrong run_attempt=2", lambda rn, ar: rn.update(run_attempt=2)),
+        ("prior2 wrong artifact.id", lambda rn, ar: ar.update(id=999)),
+        ("prior2 wrong artifact.digest", lambda rn, ar: ar.update(digest="sha256:" + "0" * 64)),
+    ]
+    for label, mut in p2_api_muts:
+        rn_m = copy.deepcopy(fx["p2_run_obj"])
+        ar_m = copy.deepcopy(fx["p2_art_obj"])
+        mut(rn_m, ar_m)
+        rejects("API " + label, lambda rn=rn_m, ar=ar_m: r.validate_prior_run_and_artifact(p2_id, rn, ar, p2_sha, cur_run_id))
+
+    def bind_prior2_mut(src_dir, work_dir):
+        zpath = work_dir / "p2-mut.zip"
+        zsha = fx["zip_dir"](src_dir, zpath)
+        rn, ar, _, _ = fx["make_api_files"](work_dir, zpath, p2_id, p2_sha, r.PRIOR2_ARTIFACT_ID, r.PRIOR2_ARTIFACT_NAME)
+        folder = work_dir / f"prior-{p2_id}"
+        folder.mkdir(parents=True)
+        with (folder / "archive.zip").open("xb") as d, zpath.open("rb") as s:
+            shutil.copyfileobj(s, d)
+        save(folder / "api-run.json", rn)
+        save(folder / "api-artifact.json", ar)
+        mems = r.safe_zip_members(zpath)
+        ret = r.extract_selected_members(zpath, mems, set(mems), folder / "evidence")
+        save(folder / "archive-receipt.json", {
+            "run_id": p2_id, "run_attempt": "1", "source_commit": p2_sha,
+            "artifact_id": r.PRIOR2_ARTIFACT_ID, "artifact_name": r.PRIOR2_ARTIFACT_NAME,
+            "archive_bytes": ar["size_in_bytes"], "archive_sha256": zsha,
+            "member_count": len(mems), "members": mems, "retained_files": ret,
+        })
+        return folder, zsha
+
+    p2_mutations = [
+        ("own-member pre-existing author-layout-gate.json", lambda s: save(s / "author-layout-gate.json", {})),
+        ("own-member reused-native-gate.json", lambda s: save(s / "reused-native-gate.json", {})),
+        ("host-3 missing failure.json", lambda s: (s / "epub-author-layout/host-3/failure.json").unlink()),
+        ("host-3 forged counts.json (cannot reuse partial)", lambda s: save(s / "epub-author-layout/host-3/counts.json", {"passed": []})),
+        ("missing domain-2 group", lambda s: shutil.rmtree(s / "epub-author-layout/domain-2")),
+        ("missing ui-2 group", lambda s: shutil.rmtree(s / "epub-author-layout/ui-2")),
+        ("domain-2 failure.json present", lambda s: save(s / "epub-author-layout/domain-2/failure.json", {"error": "fail"})),
+        ("host-1 nonzero exit", lambda s: save(s / "epub-author-layout/host-1/execution.json", {**r.load(s / "epub-author-layout/host-1/execution.json"), "native_exit": 65})),
+        ("host-2 missing stdout.json", lambda s: (s / "epub-author-layout/host-2/YueJingHostTests-YueJingHostTests-settings.stdout.json").unlink()),
+        ("host-1 settings exit code 1", lambda s: (s / "epub-author-layout/host-1/YueJingHostTests-YueJing-settings-exit-code.txt").write_text("1\n", encoding="utf-8")),
+        ("host-1 stdout JSON value drift", lambda s: save(s / "epub-author-layout/host-1/YueJingHostTests-YueJingHostTests-settings.stdout.json", [{"target": "YueJingHostTests", "buildSettings": {"PRODUCT_TYPE": "wrong"}}])),
+        ("host-1 missing settings key", lambda s: (lambda d: (d["targets"]["YueJing"].pop("TEST_TARGET_NAME"), save(s / "epub-author-layout/host-1/YueJingHostTests-settings.json", d)))(r.load(s / "epub-author-layout/host-1/YueJingHostTests-settings.json"))),
+        ("host-1 wrong TEST_HOST", lambda s: (lambda d: (d["targets"]["YueJingHostTests"].update(TEST_HOST="/tmp/Fake.app/Fake", BUNDLE_LOADER="/tmp/Fake.app/Fake"), save(s / "epub-author-layout/host-1/YueJingHostTests-settings.json", d)))(r.load(s / "epub-author-layout/host-1/YueJingHostTests-settings.json"))),
+        ("host-1 BUNDLE_LOADER != TEST_HOST", lambda s: (lambda d: (d["targets"]["YueJingHostTests"].update(BUNDLE_LOADER="/other/YueJing.app/YueJing"), save(s / "epub-author-layout/host-1/YueJingHostTests-settings.json", d)))(r.load(s / "epub-author-layout/host-1/YueJingHostTests-settings.json"))),
+        ("ui-1 missing DEBUG active condition", lambda s: (lambda d: (d["targets"]["YueJing"].update(SWIFT_ACTIVE_COMPILATION_CONDITIONS=""), save(s / "epub-author-layout/ui-1/YueJingEPUBUITests-settings.json", d)))(r.load(s / "epub-author-layout/ui-1/YueJingEPUBUITests-settings.json"))),
+        ("ui-1 wrong TEST_TARGET_NAME", lambda s: (lambda d: (d["targets"]["YueJingEPUBUITests"].update(TEST_TARGET_NAME="Other"), save(s / "epub-author-layout/ui-1/YueJingEPUBUITests-settings.json", d)))(r.load(s / "epub-author-layout/ui-1/YueJingEPUBUITests-settings.json"))),
+        ("ui-1 log unexpected Swift event", lambda s: (s / "epub-author-layout/ui-1/YueJingEPUBUITests.log").write_bytes((s / "epub-author-layout/ui-1/YueJingEPUBUITests.log").read_bytes() + b"\xe2\x9c\x94 Test extra() passed after 0.1 seconds.\n")),
+        ("ui-3 xcresult skipped summary", lambda s: save(s / "epub-author-layout/ui-3/xcresult-summary.json", {**r.load(s / "epub-author-layout/ui-3/xcresult-summary.json"), "skippedTests": 1})),
+        ("prior2 scope prior_validation_run != 43153993787", lambda s: save(s / "author-layout-scope.json", {**r.load(s / "author-layout-scope.json"), "prior_validation_run": "999"})),
+        ("prior2 dispatch-event prior_validation_run wrong", lambda s: (lambda d: (d["inputs"].update(prior_validation_run=""), save(s / "dispatch-event.json", d)))(r.load(s / "dispatch-event.json"))),
+    ]
+    for idx, (label, mut) in enumerate(p2_mutations):
+        wdir = root / f"p2-mut-{idx}"
+        sdir = wdir / "src"
+        shutil.copytree(fx["p2_src"], sdir)
+        mut(sdir)
+        folder, zsha = bind_prior2_mut(sdir, wdir)
+        with fx["sandbox"](wdir / "sb", prior_val=p2_id, github_actions="false"):
+            scope = r.write_scope(cur_repo)
+            with patch.object(r, "PRIOR2_ARTIFACT_SHA256", zsha):
+                def check_p2(fld=folder, sc=scope):
+                    res = r.inspect_prior2_evidence(fld, sc, root=cur_repo, expected_packages=packages_fixture())
+                    r.require(res["passed"], "; ".join(res["errors"]))
+                rejects("prior2 mutation " + label, check_p2)
+
+    passed("dual-origin positive + full source/archive/settings/UI/non-recursion negative matrix verified")
+
+
+def load_json_safe(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def check_processes(root):
+    p_dir = root / "proc"
+    p_dir.mkdir(parents=True, exist_ok=True)
+    assert r.stream_case([sys.executable, "-c", 'print("ok")'], p_dir / "ok.log", 10) == (0, False)
+    assert r.stream_case([sys.executable, "-c", "raise SystemExit(7)"], p_dir / "fail.log", 10) == (7, False)
+    code, expired = r.stream_case([sys.executable, "-c", "import time; time.sleep(20)"], p_dir / "timeout.log", 0.2)
+    assert expired and code != 0
+    assert r.stream_case([sys.executable, "-c", 'print("after")'], p_dir / "after.log", 10) == (0, False)
+    passed("local Python stream_case success/failure/timeout/next")
 
 
 def run_checks(root):
@@ -2093,8 +3355,11 @@ def run_checks(root):
             "artifacts/task3/author-layout-gate.json",
             "artifacts/task3/delivery-summary.json",
             "fresh_native_executed",
+            "fresh_declarations_passed",
             "reused_native_passed",
             "prior_reuse_proof_sha256",
+            "prior_origins",
+            "case_results",
         ):
             assert token in job, "Missing epub_author_layout workflow contract token: " + token
         wf_status = "passed"
@@ -2109,9 +3374,10 @@ def run_checks(root):
         check_qualification_and_delivery(root)
         check_processes(root)
         check_prior_reuse_and_mutations(root)
+        check_cloud_summarize_and_qualification(root)
+        check_dual_origin_reuse_and_mutations(root)
 
     return live_source_status, wf_status
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

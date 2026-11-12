@@ -1548,20 +1548,25 @@ jobs:
           outcomes = {key: value['outcome'] for key, value in json.loads(os.environ['STEP_RESULTS']).items()}
           receipt = out / 'author-layout-package.json'
           gate_path = out / 'author-layout-gate.json'
+          case_results_path = out / 'case-results.json'
           package = json.loads(receipt.read_text()) if outcomes.get('package') == 'success' and receipt.is_file() else None
           gate = json.loads(gate_path.read_text()) if gate_path.is_file() else None
+          case_results = json.loads(case_results_path.read_text()) if case_results_path.is_file() else None
+          src = gate or case_results or {}
           result = dict(
               source_commit=os.environ['GITHUB_SHA'],
               run_id=os.environ['GITHUB_RUN_ID'],
               run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
               prior_validation_run=os.environ.get('PRIOR_VALIDATION_RUN', ''),
               steps=outcomes,
-              fresh_native_executed=(gate or {}).get('native_tests_executed_this_run'),
-              reused_declarations=(gate or {}).get('reused_declarations'),
-              reused_native_passed=(gate or {}).get('reused_native_passed'),
-              verified_declarations=(gate or {}).get('verified_declarations'),
-              verified_passed=(gate or {}).get('verified_passed'),
-              prior_reuse_proof_sha256=(gate or {}).get('prior_reuse_proof_sha256'),
+              fresh_native_executed=src.get('native_tests_executed_this_run'),
+              fresh_declarations_passed=(gate or {}).get('fresh_declarations_passed'),
+              reused_declarations=src.get('reused_declarations'),
+              reused_native_passed=src.get('reused_native_passed'),
+              verified_declarations=src.get('verified_declarations'),
+              verified_passed=src.get('verified_passed'),
+              prior_reuse_proof_sha256=src.get('prior_reuse_proof_sha256'),
+              prior_origins=src.get('prior_origins', []),
               package_qualification=package['qualification'] if package else 'NOT_DELIVERABLE',
           )
           (out / 'delivery-summary.json').write_text(json.dumps(result, indent=2))

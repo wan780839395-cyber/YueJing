@@ -419,22 +419,34 @@ struct EPUBReaderHostTests {
                 let package = try #require(model.reader?.publication.package)
                 let ch1Nodes = try #require(try package.nodes(at: firstToken.path))
                 let anchorNode = try #require(ch1Nodes.firstIndex(where: { $0.contains("EPUB_A_C1_P20") }))
-                let scrolledPayload = EPUBLocatorPayload(
-                    kind: .scroll,
-                    sessionID: firstToken.sessionID,
-                    epoch: firstToken.epoch,
-                    path: firstToken.path,
-                    node: anchorNode,
-                    utf16Offset: 4,
-                    restoredNode: anchorNode,
-                    restoredOffset: 4,
-                    scrollY: 420,
-                    viewportHeight: 700,
-                    contentHeight: 2400,
-                    visibleText: ch1Nodes[anchorNode],
-                    reason: nil
+                // Put the real DOM at the exact UTF-16 anchor before settingsChanged samples it.
+                let targetAnchor = EPUBReadingPosition(
+                    bookID: receipt.book.id, versionID: package.versionID,
+                    path: firstToken.path, node: anchorNode, utf16Offset: 4, viewportOffset: 18
                 )
-                model.handleLocatorEvent(scrolledPayload)
+                let positioned = XCTestExpectation(description: "Real reflow fixture anchor restored")
+                let originalLocatorCallback = controller.onLocatorEvent
+                var didPosition = false
+                controller.onLocatorEvent = { payload in
+                    originalLocatorCallback?(payload)
+                    if !didPosition, payload.kind == .ready, payload.epoch == firstToken.epoch,
+                       payload.restoredNode == anchorNode, payload.restoredOffset == 4 {
+                        didPosition = true
+                        positioned.fulfill()
+                    }
+                }
+                let positionScript = try EPUBLocationScript.configurationInvokeScript(
+                    token: firstToken, package: package, targetPosition: targetAnchor,
+                    fragment: nil, preferences: model.preferences,
+                    preserveTargetAnchor: true, layoutMode: .reader
+                )
+                _ = try await controller.evaluateLocatorJavaScriptForTesting(positionScript)
+                let positionedResult = await XCTWaiter.fulfillment(of: [positioned], timeout: 15)
+                controller.onLocatorEvent = originalLocatorCallback
+                try #require(positionedResult == .completed)
+                let positionedSample = try #require(await model.webView.sampleNow())
+                #expect(positionedSample.scrollY > 0)
+                model.handleLocatorEvent(positionedSample)
                 let savedAnchor = try #require(model.currentPosition)
                 #expect(savedAnchor.node == anchorNode && savedAnchor.utf16Offset == 4)
                 let loadsBeforeReflow = controller.documentLoadCount
@@ -2165,7 +2177,7 @@ struct EPUBReaderHostTests {
             let token = try await reader.beginNavigation(path: ch1Path)
 
             let handler = EPUBResourceHandler()
-            let delegate = EPUBResourceProbeDelegate()
+            // Transport is tested through the real handler's scheme-task callbacks.
             let config = WKWebViewConfiguration()
             config.websiteDataStore = .nonPersistent()
             let pagePrefs = WKWebpagePreferences()
@@ -2175,7 +2187,7 @@ struct EPUBReaderHostTests {
             config.setURLSchemeHandler(handler, forURLScheme: EPUBResourceHandler.scheme)
 
             let probeWebView = WKWebView(frame: .zero, configuration: config)
-            probeWebView.navigationDelegate = delegate
+            // Binary fonts are subresources, not displayable top-level navigations.
             let probeController = UIViewController()
             probeWebView.frame = probeController.view.bounds
             probeWebView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -2184,7 +2196,6 @@ struct EPUBReaderHostTests {
             try await fixture.withHostedController(probeController) {
                 defer {
                     probeWebView.stopLoading()
-                    probeWebView.navigationDelegate = nil
                     handler.invalidate()
                 }
 
@@ -2196,19 +2207,21 @@ struct EPUBReaderHostTests {
                 ))
 
                 let ttfURL = try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Fonts/book.ttf"))
-                let ttfProbe = try await probeResource(URLRequest(url: ttfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let ttfProbe = try await probeResource(URLRequest(url: ttfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                 let ttfHTTP = try #require(ttfProbe.response)
                 #expect(ttfProbe.error == nil && ttfHTTP.statusCode == 200)
                 #expect(ttfHTTP.mimeType == "font/ttf")
                 #expect(ttfHTTP.value(forHTTPHeaderField: "Content-Length") == "\(ttfData.count)")
                 #expect(ttfHTTP.value(forHTTPHeaderField: "X-Content-Type-Options") == "nosniff")
+                #expect(ttfProbe.data == ttfData)
 
                 let otfURL = try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Fonts/book.otf"))
-                let otfProbe = try await probeResource(URLRequest(url: otfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let otfProbe = try await probeResource(URLRequest(url: otfURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                 let otfHTTP = try #require(otfProbe.response)
                 #expect(otfProbe.error == nil && otfHTTP.statusCode == 200)
                 #expect(otfHTTP.mimeType == "font/otf")
                 #expect(otfHTTP.value(forHTTPHeaderField: "Content-Length") == "\(otfData.count)")
+                #expect(otfProbe.data == otfData)
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
                 #expect(handler.rejectedURLs.isEmpty)
 
@@ -2225,7 +2238,7 @@ struct EPUBReaderHostTests {
                     try #require(EPUBResourceCapability.url(for: token, path: "OEBPS/Styles/font.css"))
                 ]
                 for url in permissionRejectedURLs {
-                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                     #expect(result.response == nil && result.error != nil)
                     #expect(handler.rejectedURLs.contains(url.absoluteString))
                 }
@@ -2253,7 +2266,7 @@ struct EPUBReaderHostTests {
                 ))
                 for rejectedPath in ["OEBPS/Fonts/bad.woff", "OEBPS/Fonts/huge.ttf"] {
                     let url = try #require(EPUBResourceCapability.url(for: typeToken, path: rejectedPath))
-                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                    let result = try await probeResource(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                     #expect(result.response == nil && result.error != nil)
                     #expect(handler.rejectedURLs.contains(url.absoluteString))
                 }
@@ -2274,19 +2287,20 @@ struct EPUBReaderHostTests {
                 defer { try? ttfData.write(to: diskTTF) }
 
                 let tamperedTTFURL = try #require(EPUBResourceCapability.url(for: freshToken, path: "OEBPS/Fonts/book.ttf"))
-                let tamperedResult = try await probeResource(URLRequest(url: tamperedTTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let tamperedResult = try await probeResource(URLRequest(url: tamperedTTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                 #expect(tamperedResult.response == nil && tamperedResult.error != nil)
                 #expect(handler.rejectedURLs.contains(tamperedTTFURL.absoluteString))
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf"])
 
                 let freshOTFURL = try #require(EPUBResourceCapability.url(for: freshToken, path: "OEBPS/Fonts/book.otf"))
-                let freshOTFResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let freshOTFResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                 #expect(freshOTFResult.error == nil && freshOTFResult.response?.statusCode == 200)
+                #expect(freshOTFResult.data == otfData)
                 #expect(handler.servedPaths == ["OEBPS/Fonts/book.ttf", "OEBPS/Fonts/book.otf", "OEBPS/Fonts/book.otf"])
 
                 // Invalidated capability rejects subsequent requests for the previously valid URL.
                 handler.invalidate()
-                let invalidatedResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, delegate: delegate)
+                let invalidatedResult = try await probeResource(URLRequest(url: freshOTFURL, cachePolicy: .reloadIgnoringLocalCacheData), in: probeWebView, handler: handler)
                 #expect(invalidatedResult.response == nil && invalidatedResult.error != nil)
                 #expect(handler.rejectedURLs.contains(freshOTFURL.absoluteString))
             }
@@ -2298,36 +2312,21 @@ struct EPUBReaderHostTests {
     private func probeResource(
         _ request: URLRequest,
         in webView: WKWebView,
-        delegate: EPUBResourceProbeDelegate
-    ) async throws -> (response: HTTPURLResponse?, error: Error?) {
+        handler: EPUBResourceHandler
+    ) async throws -> (response: HTTPURLResponse?, error: Error?, data: Data) {
         let expectation = XCTestExpectation(description: "EPUB resource handler probe")
-        var capturedResponse: HTTPURLResponse?
-        var capturedError: Error?
-        var settled = false
-        delegate.onResponse = { response in
-            guard !settled else { return }
-            settled = true
-            delegate.expectedNavigation = nil
-            capturedResponse = response
-            expectation.fulfill()
-        }
-        delegate.onFailure = { error in
-            guard !settled else { return }
-            settled = true
-            delegate.expectedNavigation = nil
-            capturedError = error
-            expectation.fulfill()
-        }
-        defer {
-            delegate.expectedNavigation = nil
-            delegate.onResponse = nil
-            delegate.onFailure = nil
-        }
-        let navigation = try #require(webView.load(request))
-        delegate.expectedNavigation = navigation
+        let task = EPUBResourceProbeTask(request: request, completion: { expectation.fulfill() })
+        handler.webView(webView, start: task)
+        defer { handler.webView(webView, stop: task) }
         let waitResult = await XCTWaiter.fulfillment(of: [expectation], timeout: 10)
         try #require(waitResult == .completed)
-        return (capturedResponse, capturedError)
+        if task.error == nil {
+            #expect(task.events == ["response", "data", "finish"])
+        } else {
+            #expect(task.events == ["error"])
+            #expect(task.data.isEmpty)
+        }
+        return (task.response, task.error, task.data)
     }
 
     private enum MinimalSFNTFlavor {
@@ -2408,39 +2407,37 @@ struct EPUBReaderHostTests {
 }
 
 @MainActor
-private final class EPUBResourceProbeDelegate: NSObject, WKNavigationDelegate {
-    weak var expectedNavigation: WKNavigation?
-    var onResponse: (@MainActor (HTTPURLResponse) -> Void)?
-    var onFailure: (@MainActor (Error) -> Void)?
+private final class EPUBResourceProbeTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    private let completion: @MainActor () -> Void
+    private(set) var response: HTTPURLResponse?
+    private(set) var error: Error?
+    private(set) var data = Data()
+    private(set) var events: [String] = []
 
-    func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        preferences: WKWebpagePreferences,
-        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
-    ) {
-        preferences.allowsContentJavaScript = false
-        decisionHandler(.allow, preferences)
+    init(request: URLRequest, completion: @escaping @MainActor () -> Void) {
+        self.request = request
+        self.completion = completion
     }
 
-    func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationResponse: WKNavigationResponse,
-        decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
-    ) {
-        if let http = navigationResponse.response as? HTTPURLResponse {
-            onResponse?(http)
-        }
-        decisionHandler(.cancel)
+    func didReceive(_ response: URLResponse) {
+        events.append("response")
+        self.response = response as? HTTPURLResponse
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        guard let navigation, navigation === expectedNavigation else { return }
-        onFailure?(error)
+    func didReceive(_ data: Data) {
+        events.append("data")
+        self.data.append(data)
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        guard let navigation, navigation === expectedNavigation else { return }
-        onFailure?(error)
+    func didFinish() {
+        events.append("finish")
+        completion()
+    }
+
+    func didFailWithError(_ error: Error) {
+        events.append("error")
+        self.error = error
+        completion()
     }
 }
