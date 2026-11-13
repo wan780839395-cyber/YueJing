@@ -3,10 +3,10 @@ import Foundation
 public enum EPUBFormat {
     public static let parserVersion = "epub-dom-v1"
     public static let positionUnit = "epub-text-node-utf16-v1"
-    public static let authorStyleRevision = 2
+    public static let authorStyleRevision = 3
 
     public static func supportsAuthorStyleRevision(_ revision: Int?) -> Bool {
-        revision == nil || revision == 1 || revision == authorStyleRevision
+        revision == nil || revision == 1 || revision == 2 || revision == authorStyleRevision
     }
 }
 

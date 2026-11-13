@@ -49,7 +49,7 @@ public enum EPUBContentPolicy {
     public static let contentSecurityPolicy =
         "default-src 'none'; script-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; media-src 'none'; font-src yjepub:; img-src yjepub:; style-src 'unsafe-inline'"
     private static let forbiddenElements: Set<String> = [
-        "script", "noscript", "svg", "math", "video", "audio", "source", "track",
+        "script", "svg", "math", "video", "audio", "source", "track",
         "object", "embed", "applet", "param", "iframe", "frame", "frameset", "portal",
         "form", "input", "button", "select", "textarea", "option", "optgroup", "fieldset",
         "canvas", "base", "template", "slot", "dialog"
@@ -64,7 +64,11 @@ public enum EPUBContentPolicy {
         "q", "cite", "code", "kbd", "samp", "var", "dfn", "abbr", "time", "bdi", "bdo",
         "ruby", "rt", "rp", "del", "ins",
         "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td", "colgroup", "col",
-        "img"
+        "img", "center", "font", "strike", "tt", "big", "noscript"
+    ]
+
+    private static let legacyPresentationTags = [
+        "center": "div", "font": "span", "strike": "s", "tt": "span", "big": "span", "noscript": "div"
     ]
 
     private static let voidElements: Set<String> = [
@@ -133,10 +137,8 @@ public enum EPUBContentPolicy {
         var bodyMarkup = ""
         serializeChildren(of: bodyRoot, into: &bodyMarkup, textNodes: &textNodes)
         if textNodes.isEmpty {
-            guard !delegate.referencedImages.isEmpty else { throw EPUBError.invalidPackage }
-            // Previously rejected image-only pages receive one explicit, stable text anchor.
-            // Already supported text pages remain byte-for-byte unchanged.
-            bodyRoot.children.insert(.text("图片页"), at: 0)
+            // Preserve spine identity and stable anchors; never silently drop an empty page.
+            bodyRoot.children.insert(.text(delegate.referencedImages.isEmpty ? "空白页" : "图片页"), at: 0)
             bodyMarkup = ""
             serializeChildren(of: bodyRoot, into: &bodyMarkup, textNodes: &textNodes)
         }
@@ -267,7 +269,7 @@ public enum EPUBContentPolicy {
                 }
             case .element(let elem):
                 output.append("<")
-                output.append(elem.name)
+                output.append(legacyPresentationTags[elem.name] ?? elem.name)
                 for (key, value) in elem.attributes {
                     output.append(" ")
                     output.append(key)
@@ -281,7 +283,7 @@ public enum EPUBContentPolicy {
                     output.append(">")
                     serializeChildren(of: elem, into: &output, textNodes: &textNodes)
                     output.append("</")
-                    output.append(elem.name)
+                    output.append(legacyPresentationTags[elem.name] ?? elem.name)
                     output.append(">")
                 }
             }
@@ -520,24 +522,23 @@ public enum EPUBContentPolicy {
 
             if lowerLocal == "img" {
                 sanitizedAttrs.append(contentsOf: try imageAttributes(source: attributes["src"], alt: attributes["alt"] ?? ""))
-            } else if lowerLocal == "a" {
-                if let rawHref = attributes["href"]?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                    guard !rawHref.isEmpty else {
-                        throw EPUBError.invalidPackage
-                    }
+            } else if lowerLocal == "a", let rawHref = attributes["href"]?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                let lower = rawHref.lowercased()
+                let ordinaryExternal = ["http:", "https:", "mailto:", "tel:", "//"].contains { lower.hasPrefix($0) }
+                if ordinaryExternal || rawHref.isEmpty {
+                    styleCollector.recordIssue(.navigationUnavailable)
+                } else {
                     try rejectActiveOrExternalScheme(rawHref)
                     let resolved = try EPUBResourcePath.resolve(rawHref, relativeTo: documentPath)
-                    guard spineSet.contains(resolved.path) else {
-                        throw EPUBError.invalidPackage
-                    }
-                    referencedLinks.append(EPUBResolvedLink(path: resolved.path, fragment: resolved.fragment))
-                    let relHref: String
-                    if resolved.path == documentPath, let frag = resolved.fragment {
-                        relHref = "#" + frag
+                    if spineSet.contains(resolved.path) {
+                        referencedLinks.append(EPUBResolvedLink(path: resolved.path, fragment: resolved.fragment))
+                        let href = resolved.path == documentPath && resolved.fragment != nil
+                            ? "#" + (resolved.fragment ?? "")
+                            : EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path, fragment: resolved.fragment)
+                        sanitizedAttrs.append(("href", href))
                     } else {
-                        relHref = EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path, fragment: resolved.fragment)
+                        styleCollector.recordIssue(.navigationUnavailable)
                     }
-                    sanitizedAttrs.append(("href", relHref))
                 }
             }
 
@@ -671,16 +672,11 @@ public enum EPUBContentPolicy {
             let relRaw = (attributeValue(attributes, named: "rel") ?? "").lowercased()
             let typeRaw = (attributeValue(attributes, named: "type") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let hrefRaw = (attributeValue(attributes, named: "href") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let hrefLower = hrefRaw.lowercased()
-            if relRaw.contains("font") || typeRaw.contains("font") || typeRaw.contains("javascript") ||
-                hrefLower.hasSuffix(".ttf") || hrefLower.hasSuffix(".otf") ||
-                hrefLower.hasSuffix(".woff") || hrefLower.hasSuffix(".woff2") {
-                throw EPUBError.unsupportedContent
-            }
-            if !hrefRaw.isEmpty {
-                try rejectActiveOrExternalScheme(hrefRaw)
-            }
             let relTokens = Set(relRaw.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+            // These hints are never emitted, resolved or fetched. Event attributes were
+            // already rejected by the XML builder before reaching this method.
+            guard relTokens.contains("stylesheet"), !relTokens.contains("alternate") else { return }
+            if !hrefRaw.isEmpty { try rejectActiveOrExternalScheme(hrefRaw) }
             if relTokens.contains("stylesheet") && !relTokens.contains("alternate") {
                 guard !hrefRaw.isEmpty else {
                     throw EPUBError.invalidPackage
@@ -760,11 +756,35 @@ public enum EPUBContentPolicy {
             guard let raw = source?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { throw EPUBError.invalidPackage }
             try rejectActiveOrExternalScheme(raw)
             let resolved = try EPUBResourcePath.resolve(raw, relativeTo: documentPath)
-            guard resolved.fragment == nil, let mediaType = manifestByPath[resolved.path] else { throw EPUBError.invalidPackage }
-            guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType) else { throw EPUBError.unsupportedContent }
-            imageMediaTypes[resolved.path] = try validateExtractedImage(at: resolved.path, mediaType: mediaType)
+            guard resolved.fragment == nil else { throw EPUBError.invalidPackage }
+            if let mediaType = manifestByPath[resolved.path] {
+                guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType) else { throw EPUBError.unsupportedContent }
+                imageMediaTypes[resolved.path] = try validateExtractedImage(at: resolved.path, mediaType: mediaType)
+            } else {
+                imageMediaTypes[resolved.path] = try recoverUnmanifestedRaster(at: resolved.path)
+                styleCollector.recordIssue(.manifestImageRecovered)
+            }
             referencedImages.insert(resolved.path)
             return [("src", EPUBResourcePath.relativeHref(from: documentPath, to: resolved.path)), ("alt", alt)]
+        }
+
+        private func recoverUnmanifestedRaster(at path: String) throws -> String {
+            guard let expected = styleCollector.extractedEntries?[path], expected > 0 else { throw EPUBError.invalidPackage }
+            guard expected <= limits.imageBytes else { throw EPUBError.limitExceeded }
+            guard try EPUBAuthorStyles.checkOptionalResourcePresence(at: path, under: destination) else { throw EPUBError.corruptResource }
+            let url = destination.appendingPathComponent(path)
+            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            guard size == expected else { throw EPUBError.corruptResource }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: expected + 1) ?? Data()
+            guard data.count == expected else { throw EPUBError.corruptResource }
+            let type: String
+            if data.starts(with: [0xFF, 0xD8, 0xFF]) { type = "image/jpeg" }
+            else if data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { type = "image/png" }
+            else { throw EPUBError.unsupportedContent }
+            try EPUBCompatibility.verifyCorrectedRaster(data, mediaType: type)
+            return type
         }
 
         private func validateExtractedImage(at canonicalPath: String, mediaType: String) throws -> String {

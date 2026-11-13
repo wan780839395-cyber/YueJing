@@ -55,18 +55,19 @@ FILES = {
     "ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": """legacyPackageWithoutAuthorStyleRevisionDecodesCompatibly authorStyleMigrationRebuildsReadyAndNonReadyLegacyPackagesPreservingTextProgressAndSource authorStyleMigrationValidationRejectsCoordinateMetadataResourceAndRevisionMismatches failedAuthorStyleMigrationPreservesPreviousStorageProgressAndArchive optionalStyleLegacyMigrationPreservesProgressAndPersistsCompatibilityResult revisionOneStyleMigrationRebuildsOnceAndBindsCompatibilityMetadata styleCompatibilityMigrationCancellationAndStaleCASPreservePublishedVersion""",
     "ReaderDomainTests/EPUBStyleCompatibilityTests.swift": """styleCompatibilityDeterministicIssuesCodableAndDistinctProcessingError fontCandidatesSupportSixteenSeventeenEighteenAndLargeListsWithoutRejectingBook fontCandidatesMissingBeforeAndAfterValidSourceAllMissingAndLocalOnly fontCandidatesRejectUnsafeTailCorruptOversizedSymlinkAndWoffOnly localCSSImportsPreserveCascadeOrderDuplicatesRelativeURLsAndDepthBounds localCSSImportsCycleMediaConditionsAndSecurityRejection missingOptionalCSSAndBackgroundDropKeepSafeStylesAndPreserveImgAndTextIntegrity styleComplexityWholeChapterFallbackAndAuditBeforeDowngrade longBook1633ChaptersSharedStylesFontDedupAndCancellation""",
     "ReaderDomainTests/EPUBP2CompatibilityTests.swift": """staticMediaModifiersAgreeAcrossAttributesBlocksAndImports sharedASTCacheBoundsDoNotChangeCascadeScopeOrCancellation sanitizedGrowthRejectsBeforeRetainingAllChaptersAndCleansWorkspace unsupportedFontsAndStructuralSelectorsNeverBecomeServedCapabilities""",
+    "ReaderDomainTests/EPUBDegradationTests.swift": """inertLinksHintsAndLegacyTagsPreserveNodesWithoutCapabilities optionalStylesRollbackEarlierRulesAndNeverHideIntegrityFailure recognizedFontObfuscationOmitsBytesButUnknownProtectionStillFails missingManifestRasterRequiresActualBoundedDecodeAndPreservesSource svgMarkerAndPackagingWhitespaceUseContentValidationNotMetadataRejection preparationStagesAndFailureCodesAreNumericAndIdentityFree""",
     "YueJingHostTests/EPUBContentsNavigationTests.swift": """largeDirectoryResolvesFirstMiddleAndLast samePathPrefersFragmentThenFallsBackToFirstPath filteringKeepsOriginalIndicesOrdinalsAndItems emptyAndUnmatchedDirectoriesHaveNoInventedTarget lazyMountCorrectionIsBoundedAndOnlyForTheTarget cancellationAndNewRequestsInvalidateLateWork""",
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs""",
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 196, "TXTBlockDecoderTests": 6,
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 202, "TXTBlockDecoderTests": 6,
           "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 36,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 3}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 282  # Declaration identities; the Bool parameter adds one execution (283).
+TOTAL = 288  # Declaration identities; the Bool parameter adds one execution (289).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
-EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 197}
-EXECUTION_TOTAL = 283
+EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 203}
+EXECUTION_TOTAL = 289
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

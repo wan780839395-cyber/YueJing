@@ -22,6 +22,9 @@ final class EPUBReaderViewModel: ObservableObject {
     var effectiveLayoutMode: EPUBLayoutMode { layoutMode.effective(for: styleCompatibility) }
     var compatibilitySummary: String? {
         guard runtimeFontFallback || styleCompatibility?.issues.isEmpty == false else { return nil }
+        if styleCompatibility?.issues.contains(.navigationUnavailable) == true {
+            return "部分链接或目录不可用，已去活化链接或使用章节目录；正文和原阅读位置保留。"
+        }
         if effectiveLayoutMode == .reader {
             return "部分作者样式不可用，当前使用阅读器兼容排版；已保留你的排版偏好。"
         }
@@ -147,7 +150,16 @@ final class EPUBReaderViewModel: ObservableObject {
         do {
             let service = service
             let id = bookID
-            let task = Task { try await service.openEPUB(id: id) }
+            let task = Task { [weak self] in
+                try await service.openEPUB(id: id) { [weak self] sample in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.lifecycle == request, self.reader == nil,
+                              self.loading, !self.closing, !self.suspended else { return }
+                        self.loadingStage = sample.stage.label + (sample.totalChapters > 0
+                            ? " \(sample.completedChapters)/\(sample.totalChapters)" : "")
+                    }
+                }
+            }
             openTask = task
             let opened = try await withTaskCancellationHandler {
                 try await task.value

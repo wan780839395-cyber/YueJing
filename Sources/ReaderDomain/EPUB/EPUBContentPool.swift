@@ -312,8 +312,10 @@ extension EPUBContentPool {
     }
 
     /// Freeze a prepared import/migration without parsing the source again. A live lease protects the DB publication gap.
-    func stageReady(publication: EPUBPublication, root: URL) throws -> EPUBContentLease {
+    func stageReady(publication: EPUBPublication, root: URL, observe: EPUBPreparationObserver? = nil) throws -> EPUBContentLease {
         try Task.checkCancellation()
+        let trace = EPUBPreparationTrace(observer: observe)
+        trace.emit(.readyCopy)
         try Self.requireDirectory(root.deletingLastPathComponent())
         let files = FileManager.default
         if !files.fileExists(atPath: root.path) { try files.createDirectory(at: root, withIntermediateDirectories: false) }
@@ -324,8 +326,10 @@ extension EPUBContentPool {
         defer { if !published { try? files.removeItem(at: folder) } }
         let resources = folder.appendingPathComponent("resources", isDirectory: true)
         try EPUBPublicationCache.copyVerified(publication, to: resources)
+        trace.emit(.readyNodes)
         let compact = try EPUBReadyArtifact.writeNodes(package: publication.package, folder: folder)
         try EPUBReadyArtifact.writeManifest(package: compact, folder: folder)
+        trace.emit(.readyVerify)
         try EPUBReadyArtifact.verifyNodes(package: compact, folder: folder)
         try EPUBPublicationCache.verifyResources(EPUBPublication(package: compact, resourceRoot: resources))
         try Task.checkCancellation()
@@ -336,6 +340,7 @@ extension EPUBContentPool {
                            bytes: try Self.size(compact), touched: Date()))
         let lease = grant(EPUBPublication(package: bound, resourceRoot: resources), folder: folder, decoded: nil)
         published = true
+        trace.emit(.complete)
         return lease
     }
 
@@ -399,18 +404,23 @@ extension EPUBContentPool {
     }
 
     /// Reparse the still-verified original; publish only after proving unchanged text coordinates.
-    func upgradeAuthorStyles(archive: URL, expected: EPUBPackage, root: URL, work: URL) throws -> EPUBContentLease {
+    func upgradeAuthorStyles(archive: URL, expected: EPUBPackage, root: URL, work: URL,
+                             observe: EPUBPreparationObserver? = nil) throws -> EPUBContentLease {
         defer { try? FileManager.default.removeItem(at: work) }
         guard try EPUBResourceStore.sourceDigest(archive) == expected.sourceSHA256 else { throw LibraryError.changedFile }
-        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work)
-        try EPUBAuthorStyleMigration.validate(previous: expected, replacement: package)
-        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root)
+        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work, observe: observe)
+        let trace = EPUBPreparationTrace(observer: observe)
+        trace.emit(.migration)
+        do { try EPUBAuthorStyleMigration.validate(previous: expected, replacement: package) }
+        catch { trace.emit(.migration, failure: error); throw error }
+        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root, observe: observe)
     }
 
     /// Recovery is permitted only when the freshly parsed source proves the exact old semantic package.
-    func rebuildReady(archive: URL, expected: EPUBPackage, root: URL, work: URL) throws -> EPUBContentLease {
+    func rebuildReady(archive: URL, expected: EPUBPackage, root: URL, work: URL,
+                      observe: EPUBPreparationObserver? = nil) throws -> EPUBContentLease {
         defer { try? FileManager.default.removeItem(at: work) }
-        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work)
+        let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work, observe: observe)
         let expectedDigest = try expected.ready?.legacyPackageSHA256 ?? EPUBMetadataFingerprintCache.canonical(expected)
         guard try EPUBMetadataFingerprintCache.canonical(package) == expectedDigest else { throw EPUBError.corruptResource }
         if let reference = expected.ready {
@@ -426,6 +436,6 @@ extension EPUBContentPool {
                       EPUBResourceStore.digest(try JSONEncoder().encode(nodes)) == chapter.sha256 else { throw EPUBError.corruptResource }
             }
         }
-        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root)
+        return try stageReady(publication: EPUBPublication(package: package, resourceRoot: work), root: root, observe: observe)
     }
 }

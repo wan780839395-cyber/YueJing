@@ -324,6 +324,19 @@ struct EPUBAuthorStylesTests {
             #"@font-face { src: url(../Fonts/valid.ttf); }"#,
         ]
         for payload in unsupportedCSSPayloads {
+            let presentationOnly = [
+                #"p { content: "unclosed"#, #"p { background: url(unquoted space.png); }"#,
+                #"@font-face { }"#, #"@font-face { font-family: Custom; }"#,
+                #"@font-face { src: url(../Fonts/valid.ttf); }"#
+            ]
+            if presentationOnly.contains(payload) {
+                let result = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(payload,
+                    sourcePath: "OPS/Styles/good.css", documentPath: "OPS/Text/ch1.xhtml",
+                    manifestByPath: manifest, destination: root)
+                #expect(result.css.isEmpty && result.referencedFonts.isEmpty)
+                #expect(!result.styleCompatibility.issues.isEmpty)
+                continue
+            }
             #expect(throws: EPUBError.unsupportedContent, "Must reject CSS: \(payload)") {
                 _ = try EPUBAuthorStyles.sanitizeStylesheet(
                     payload,

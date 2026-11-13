@@ -186,7 +186,8 @@ public enum EPUBAuthorStyles {
         at canonicalPath: String,
         under root: URL,
         declaredMediaType: String,
-        expectedSize: Int? = nil
+        expectedSize: Int? = nil,
+        optionalStyle: Bool = false
     ) throws -> (mediaType: String, byteCount: Int) {
         let verifiedPath = try EPUBResourcePath.canonical(canonicalPath)
         guard verifiedPath == canonicalPath else {
@@ -212,8 +213,14 @@ public enum EPUBAuthorStyles {
         guard data.count == size else {
             throw EPUBError.corruptResource
         }
-        let canonicalMediaType = try verifyFontData(data, declaredMediaType: declaredMediaType)
-        return (mediaType: canonicalMediaType, byteCount: size)
+        do {
+            let canonicalMediaType = try verifyFontData(data, declaredMediaType: declaredMediaType)
+            return (mediaType: canonicalMediaType, byteCount: size)
+        } catch EPUBError.corruptResource where optionalStyle {
+            // Only invalid SFNT structure is optional; IO, size, path and cancellation
+            // failures above are never converted into a presentation fallback.
+            throw EPUBStyleProcessingError.invalidFontStructure
+        }
     }
 
     static func readExtractedCSS(at canonicalPath: String, under root: URL, expectedSize: Int? = nil) throws -> String {
@@ -245,7 +252,7 @@ public enum EPUBAuthorStyles {
             throw EPUBError.corruptResource
         }
         guard let decoded = decodeStrictCSSString(data) else {
-            throw EPUBError.corruptResource
+            throw EPUBStyleProcessingError.malformedStylesheet
         }
         return decoded
     }
@@ -488,8 +495,31 @@ public enum EPUBAuthorStyles {
     // One cache per isolated package parse; canonical paths never cross books or generations.
     final class ValidationCache {
         var verifiedFonts: [String: String] = [:]
+        var omittedFonts: Set<String> = []
         private(set) var parsedStylesheets: [String: (byteCount: Int, items: [CSSItem])] = [:]
         private(set) var parsedStylesheetSourceBytes = 0
+        private var resourcePresence: [String: Bool] = [:]
+        private var resourcePresenceBytes = 0
+        private(set) var presenceCheckCount = 0
+        private(set) var presenceCacheHits = 0
+
+        func optionalResourcePresent(at path: String, under root: URL) throws -> Bool {
+            if let present = resourcePresence[path] {
+                presenceCacheHits += 1
+                return present
+            }
+            let present = try EPUBAuthorStyles.checkOptionalResourcePresence(at: path, under: root)
+            presenceCheckCount += 1
+            // Private extraction is immutable during one parse; no cache crosses a book,
+            // open, or generation. A full cache costs work, never weakens admission.
+            let cost = path.utf8.count + 64
+            if resourcePresence.count < EPUBLimits().entries,
+               cost <= maxTotalChapterCSSBytes - resourcePresenceBytes {
+                resourcePresence[path] = present
+                resourcePresenceBytes += cost
+            }
+            return present
+        }
 
         func retainStylesheet(at path: String, byteCount: Int, items: [CSSItem]) {
             // This bounds retained source work, not measured AST heap size or RSS.
@@ -642,14 +672,59 @@ public enum EPUBAuthorStyles {
             self.extractedEntries = extractedEntries
         }
 
+        fileprivate func optionalResourcePresent(at path: String) throws -> Bool {
+            if extractedEntries != nil, let cache {
+                return try cache.optionalResourcePresent(at: path, under: destination)
+            }
+            return try EPUBAuthorStyles.checkOptionalResourcePresence(at: path, under: destination)
+        }
+
         func recordIssue(_ issue: EPUBStyleIssue) {
             recordedIssues.insert(issue)
         }
 
-        func triggerWholeChapterFallback() {
+        func triggerWholeChapterFallback(_ reason: EPUBStyleIssue = .styleComplexity) {
             wholeChapterStripped = true
-            recordedIssues.insert(.styleComplexity)
+            recordedIssues.insert(reason)
             referencedFonts.removeAll()
+            fontFaces.removeAll()
+            styleRules.removeAll()
+            inlineRules.removeAll()
+            inlineKeyToClass.removeAll()
+            fontFamilyMap.removeAll()
+            fontFamilyOrder.removeAll()
+        }
+
+        private func optionalStyle<T>(_ fallback: T, _ body: () throws -> T) throws -> T {
+            do { return try body() }
+            catch EPUBStyleProcessingError.malformedStylesheet {
+                triggerWholeChapterFallback(.malformedOptionalStyle)
+                return fallback
+            } catch EPUBStyleProcessingError.invalidFontStructure {
+                triggerWholeChapterFallback(.invalidOptionalFont)
+                recordIssue(.fontUnavailable)
+                return fallback
+            } catch EPUBStyleProcessingError.complexityExceeded {
+                triggerWholeChapterFallback()
+                return fallback
+            }
+        }
+
+        private func styleSyntax<T>(_ body: () throws -> T) throws -> T {
+            do { return try body() }
+            catch EPUBError.unsupportedContent { throw EPUBStyleProcessingError.malformedStylesheet }
+        }
+
+        func addExternalStylesheet(href: String, emitRules: Bool = true) throws {
+            try optionalStyle(()) { try addExternalStylesheetChecked(href: href, emitRules: emitRules) }
+        }
+
+        func auditInlineStyleAttribute(_ text: String) throws {
+            try optionalStyle(()) { try auditInlineStyleAttributeChecked(text) }
+        }
+
+        func addInlineStyleAttribute(_ text: String, isBody: Bool) throws -> String? {
+            try optionalStyle(nil) { try addInlineStyleAttributeChecked(text, isBody: isBody) }
         }
 
         private enum StylesheetResolution {
@@ -659,7 +734,7 @@ public enum EPUBAuthorStyles {
 
         private func resolveManifestStylesheet(at canonicalPath: String) throws -> StylesheetResolution {
             guard let mediaType = manifestByPath[canonicalPath] else {
-                _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: canonicalPath, under: destination)
+                _ = try optionalResourcePresent(at: canonicalPath)
                 return .missingOptional
             }
             guard mediaType.lowercased() == "text/css" else {
@@ -667,16 +742,16 @@ public enum EPUBAuthorStyles {
             }
             if let extractedEntries {
                 guard let expectedSize = extractedEntries[canonicalPath] else {
-                    _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: canonicalPath, under: destination)
+                    _ = try optionalResourcePresent(at: canonicalPath)
                     return .missingOptional
                 }
                 return .available(expectedSize: expectedSize)
             }
-            let exists = try EPUBAuthorStyles.checkOptionalResourcePresence(at: canonicalPath, under: destination)
+            let exists = try optionalResourcePresent(at: canonicalPath)
             return exists ? .available(expectedSize: nil) : .missingOptional
         }
 
-        func addExternalStylesheet(href: String, emitRules: Bool = true) throws {
+        private func addExternalStylesheetChecked(href: String, emitRules: Bool) throws {
             try Task.checkCancellation()
             let resolved = try EPUBResourcePath.resolve(href, relativeTo: documentPath)
             guard resolved.fragment == nil else {
@@ -736,8 +811,8 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try CSSTokenizer.tokenize(cssText)
-            let items = try CSSParser.parseStylesheet(tokens)
+            let tokens = try styleSyntax { try CSSTokenizer.tokenize(cssText) }
+            let items = try styleSyntax { try CSSParser.parseStylesheet(tokens) }
             cache?.retainStylesheet(at: canonicalPath, byteCount: utf8Count, items: items)
             try processStylesheetItems(
                 items,
@@ -748,15 +823,17 @@ public enum EPUBAuthorStyles {
         }
 
         func addInlineBlockStylesheet(_ cssText: String, emitRules: Bool = true) throws {
-            try addStylesheet(cssText, sourcePath: documentPath, maxSingleBytes: maxExternalCSSBytes, emitRules: emitRules)
+            try optionalStyle(()) {
+                try addStylesheet(cssText, sourcePath: documentPath, maxSingleBytes: maxExternalCSSBytes, emitRules: emitRules)
+            }
         }
 
-        func auditInlineStyleAttribute(_ styleText: String) throws {
+        private func auditInlineStyleAttributeChecked(_ styleText: String) throws {
             let utf8Count = styleText.utf8.count
             guard utf8Count <= maxInlineCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try CSSTokenizer.tokenize(styleText)
+            let tokens = try styleSyntax { try CSSTokenizer.tokenize(styleText) }
             for token in tokens {
                 if case .atKeyword = token {
                     throw EPUBError.unsupportedContent
@@ -769,7 +846,7 @@ public enum EPUBAuthorStyles {
             try context.auditRawTokens(tokens, allowMissingOptionalURL: true)
         }
 
-        func addInlineStyleAttribute(_ styleText: String, isBody: Bool) throws -> String? {
+        private func addInlineStyleAttributeChecked(_ styleText: String, isBody: Bool) throws -> String? {
             let utf8Count = styleText.utf8.count
             guard utf8Count <= maxInlineCSSBytes else {
                 throw EPUBError.limitExceeded
@@ -778,13 +855,13 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try CSSTokenizer.tokenize(styleText)
+            let tokens = try styleSyntax { try CSSTokenizer.tokenize(styleText) }
             for token in tokens {
                 if case .atKeyword = token {
                     throw EPUBError.unsupportedContent
                 }
             }
-            let parsedDecls = try CSSParser.parseDeclarationListWithOverflow(tokens)
+            let parsedDecls = try styleSyntax { try CSSParser.parseDeclarationListWithOverflow(tokens) }
             let context = SanitizationContext(
                 collector: self,
                 cssSourcePath: documentPath
@@ -813,6 +890,12 @@ public enum EPUBAuthorStyles {
         }
 
         fileprivate func addStylesheet(_ cssText: String, sourcePath: String, maxSingleBytes: Int, emitRules: Bool = true) throws {
+            try optionalStyle(()) {
+                try addStylesheetChecked(cssText, sourcePath: sourcePath, maxSingleBytes: maxSingleBytes, emitRules: emitRules)
+            }
+        }
+
+        private func addStylesheetChecked(_ cssText: String, sourcePath: String, maxSingleBytes: Int, emitRules: Bool) throws {
             try Task.checkCancellation()
             let utf8Count = cssText.utf8.count
             guard utf8Count <= maxSingleBytes else {
@@ -822,8 +905,8 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try CSSTokenizer.tokenize(cssText)
-            let items = try CSSParser.parseStylesheet(tokens)
+            let tokens = try styleSyntax { try CSSTokenizer.tokenize(cssText) }
+            let items = try styleSyntax { try CSSParser.parseStylesheet(tokens) }
             try processStylesheetItems(items, sourcePath: sourcePath, importDepth: 0, emitRules: emitRules)
         }
 
@@ -2307,7 +2390,7 @@ public enum EPUBAuthorStyles {
                 throw EPUBError.invalidPackage
             }
             guard let mediaType = manifestByPath[resolved.path] else {
-                _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+                _ = try collector.optionalResourcePresent(at: resolved.path)
                 return .missingOptional
             }
             let lowerType = mediaType.lowercased()
@@ -2316,15 +2399,15 @@ public enum EPUBAuthorStyles {
             }
             if let extractedEntries = collector.extractedEntries {
                 guard extractedEntries[resolved.path] != nil else {
-                    _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+                    _ = try collector.optionalResourcePresent(at: resolved.path)
                     return .missingOptional
                 }
-                guard try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination) else {
+                guard try collector.optionalResourcePresent(at: resolved.path) else {
                     throw EPUBError.corruptResource
                 }
                 return .present(resolved.path)
             }
-            let exists = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+            let exists = try collector.optionalResourcePresent(at: resolved.path)
             return exists ? .present(resolved.path) : .missingOptional
         }
 
@@ -2332,7 +2415,8 @@ public enum EPUBAuthorStyles {
             let parsed = try CSSParser.parseDeclarationListWithOverflow(blockTokens)
             let declarations = parsed.declarations
             guard !declarations.isEmpty else {
-                throw EPUBError.unsupportedContent
+                collector.recordIssue(.fontUnavailable)
+                return nil
             }
             if !parsed.overflowAudit.isEmpty {
                 _ = try auditAndFilterDeclarations(parsed.overflowAudit)
@@ -2384,7 +2468,7 @@ public enum EPUBAuthorStyles {
                   !resolvedFamily.lowercased().hasPrefix("yjfont-"),
                   let rawSrc = srcTokens,
                   !rawSrc.isEmpty else {
-                throw EPUBError.unsupportedContent
+                throw EPUBStyleProcessingError.malformedStylesheet
             }
             let srcResult = try parseAndValidateFontFaceSrc(rawSrc, emitRules: emitRules)
             if srcResult.sources.isEmpty {
@@ -2673,7 +2757,13 @@ public enum EPUBAuthorStyles {
 
             let resolved = try EPUBResourcePath.resolve(trimmedURL, relativeTo: cssSourcePath)
             // Even a deliberately unserved format must not bypass symlink checks.
-            _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+            _ = try collector.optionalResourcePresent(at: resolved.path)
+            if cache?.omittedFonts.contains(resolved.path) == true {
+                guard resolved.fragment == nil else { throw EPUBError.invalidPackage }
+                collector.recordIssue(.obfuscatedFontOmitted)
+                collector.recordIssue(.fontUnavailable)
+                return .missingOptional
+            }
             let lowerPath = resolved.path.lowercased()
             if lowerPath.hasSuffix(".svg") || declaredFormat == "svg" {
                 return .unsupportedFormat
@@ -2696,7 +2786,7 @@ public enum EPUBAuthorStyles {
             }
 
             guard let manifestType = manifestByPath[resolved.path] else {
-                _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+                _ = try collector.optionalResourcePresent(at: resolved.path)
                 return .missingOptional
             }
             let lowerManifestType = manifestType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -2711,7 +2801,7 @@ public enum EPUBAuthorStyles {
             let canonicalMediaType: String
             if let extractedEntries = collector.extractedEntries {
                 guard let expectedSize = extractedEntries[resolved.path] else {
-                    _ = try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination)
+                    _ = try collector.optionalResourcePresent(at: resolved.path)
                     return .missingOptional
                 }
                 if let cached = cache?.verifiedFonts[resolved.path] {
@@ -2721,7 +2811,8 @@ public enum EPUBAuthorStyles {
                         at: resolved.path,
                         under: destination,
                         declaredMediaType: manifestType,
-                        expectedSize: expectedSize
+                        expectedSize: expectedSize,
+                        optionalStyle: true
                     )
                     canonicalMediaType = verified.mediaType
                     cache?.verifiedFonts[resolved.path] = canonicalMediaType
@@ -2729,13 +2820,14 @@ public enum EPUBAuthorStyles {
             } else if let cached = cache?.verifiedFonts[resolved.path] {
                 canonicalMediaType = cached
             } else {
-                guard try EPUBAuthorStyles.checkOptionalResourcePresence(at: resolved.path, under: destination) else {
+                guard try collector.optionalResourcePresent(at: resolved.path) else {
                     return .missingOptional
                 }
                 let verified = try EPUBAuthorStyles.verifyExtractedFont(
                     at: resolved.path,
                     under: destination,
-                    declaredMediaType: manifestType
+                    declaredMediaType: manifestType,
+                    optionalStyle: true
                 )
                 canonicalMediaType = verified.mediaType
                 cache?.verifiedFonts[resolved.path] = canonicalMediaType

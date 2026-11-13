@@ -4,28 +4,33 @@ public enum EPUBPackageParser {
     public static func parse(
         archiveURL: URL,
         destination: URL,
-        limits: EPUBLimits = EPUBLimits()
+        limits: EPUBLimits = EPUBLimits(),
+        observe: EPUBPreparationObserver? = nil
     ) throws -> EPUBPackage {
         try Task.checkCancellation()
         guard limits.spineItems > 0 else {
             throw EPUBError.limitExceeded
         }
 
+        let trace = EPUBPreparationTrace(observer: observe)
+        trace.emit(.archive)
         let extraction = try EPUBArchive.extract(archiveURL: archiveURL, to: destination, limits: limits)
         do {
+            trace.emit(.package)
             for path in extraction.entries.keys {
                 let lower = path.lowercased()
-                if lower == "meta-inf/encryption.xml" || lower == "meta-inf/rights.xml" {
+                if lower == "meta-inf/rights.xml" {
                     throw EPUBError.unsupportedContent
                 }
             }
 
             guard let mimetypeEntry = extraction.entries["mimetype"],
-                  mimetypeEntry.byteCount == 20, mimetypeEntry.compressionMethod == 0 else {
+                  mimetypeEntry.byteCount >= 20, mimetypeEntry.byteCount <= 64 else {
                 throw EPUBError.invalidArchive
             }
             let mimeData = try readExtractedFile(at: "mimetype", under: destination, expectedSize: mimetypeEntry.byteCount)
-            guard mimeData == Data("application/epub+zip".utf8) else { throw EPUBError.invalidArchive }
+            guard String(data: mimeData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == "application/epub+zip" else { throw EPUBError.invalidArchive }
 
             guard let containerEntry = extraction.entries["META-INF/container.xml"] else {
                 throw EPUBError.invalidPackage
@@ -49,8 +54,8 @@ public enum EPUBPackageParser {
             let opfData = try readExtractedFile(at: opfPath, under: destination, expectedSize: opfEntry.byteCount)
             let opf = try parseOPF(opfData, opfPath: opfPath, limits: limits)
 
-            let title = opf.title
-            guard !title.isEmpty, !opf.spineIDRefs.isEmpty else {
+            let title = opf.title.isEmpty ? "未命名书籍" : opf.title
+            guard !opf.spineIDRefs.isEmpty else {
                 throw EPUBError.invalidPackage
             }
             guard opf.spineIDRefs.count <= limits.spineItems else {
@@ -73,8 +78,7 @@ public enum EPUBPackageParser {
                 guard let item = manifestByID[idref] else {
                     throw EPUBError.invalidPackage
                 }
-                if item.properties.contains("svg") ||
-                    item.properties.contains("mathml") ||
+                if item.properties.contains("mathml") ||
                     item.properties.contains("scripted") ||
                     item.properties.contains("remote-resources") ||
                     item.properties.contains("rendition:layout-pre-paginated") ||
@@ -93,36 +97,44 @@ public enum EPUBPackageParser {
                 spinePaths.append(item.path)
             }
 
+            // Optional navigation must not invalidate already verified spine content.
             let navCandidates = opf.manifestItems.filter { $0.properties.contains("nav") }
-            guard navCandidates.count <= 1 else {
-                throw EPUBError.invalidPackage
-            }
-            let navItem = navCandidates.first
+            let navItem = navCandidates.count == 1 ? navCandidates.first : nil
             var rawNavData: Data?
-            if let navItem {
-                guard navItem.mediaType == "application/xhtml+xml",
-                      let navEntry = extraction.entries[navItem.path] else {
-                    throw EPUBError.invalidPackage
-                }
-                guard navEntry.byteCount <= min(limits.xmlBytes, limits.xhtmlBytes) else {
-                    throw EPUBError.limitExceeded
-                }
-                rawNavData = try readExtractedFile(at: navItem.path, under: destination, expectedSize: navEntry.byteCount)
+            if let navItem, navItem.mediaType == "application/xhtml+xml",
+               let entry = extraction.entries[navItem.path],
+               entry.byteCount <= min(limits.xmlBytes, limits.xhtmlBytes) {
+                rawNavData = try readExtractedFile(at: navItem.path, under: destination, expectedSize: entry.byteCount)
             }
 
-            var sanitizedByPath: [String: EPUBSanitizedDocument] = [:]
+            var linksByPath: [String: [EPUBResolvedLink]] = [:]
+            var chapterResources: [String: EPUBResource] = [:]
             var fragmentIDsByPath: [String: Set<String>] = [:]
             var textNodesByPath: [String: [String]] = [:]
             var referencedBodyImages: Set<String> = []
             var validatedImageMediaTypes: [String: String] = [:]
             var validatedFontMediaTypes: [String: String] = [:]
+            var omittedFonts: Set<String> = []
+            for path in extraction.entries.keys where path.lowercased() == "meta-inf/encryption.xml" {
+                guard let entry = extraction.entries[path], entry.byteCount <= limits.xmlBytes else {
+                    throw EPUBError.limitExceeded
+                }
+                let data = try readExtractedFile(at: path, under: destination, expectedSize: entry.byteCount)
+                omittedFonts.formUnion(try EPUBFontObfuscation.omittedFonts(data: data,
+                    manifest: manifestMediaTypesByPath, entries: Set(extraction.entries.keys), limit: limits.xmlBytes))
+            }
             let styleCache = EPUBAuthorStyles.ValidationCache()
+            styleCache.omittedFonts = omittedFonts
             let extractedEntrySizes = extraction.entries.mapValues(\.byteCount)
-            var aggregatedStyleIssues: [EPUBStyleIssue] = []
+            var aggregatedStyleIssues: Set<EPUBStyleIssue> = []
+            if !omittedFonts.isEmpty { aggregatedStyleIssues.insert(.obfuscatedFontOmitted) }
             var aggregatedUsesReaderLayout = false
             var retainedSanitizedBytes = 0
+            trace.totalChapters = spinePaths.count
+            trace.emit(.chapters)
 
             for spinePath in spinePaths {
+                try autoreleasepool {
                 try Task.checkCancellation()
                 guard let spineEntry = extraction.entries[spinePath] else {
                     throw EPUBError.invalidPackage
@@ -147,11 +159,15 @@ public enum EPUBPackageParser {
                     throw EPUBError.limitExceeded
                 }
                 retainedSanitizedBytes += sanitized.xhtmlData.count
-                aggregatedStyleIssues.append(contentsOf: sanitized.styleCompatibility.issues)
+                aggregatedStyleIssues.formUnion(sanitized.styleCompatibility.issues)
                 if sanitized.styleCompatibility.usesReaderLayout {
                     aggregatedUsesReaderLayout = true
                 }
-                sanitizedByPath[spinePath] = sanitized
+                // Retain only current XHTML in this unpublished work directory.
+                try writeSanitizedFile(sanitized.xhtmlData, at: spinePath, under: destination)
+                chapterResources[spinePath] = EPUBResource(path: spinePath, mediaType: "application/xhtml+xml",
+                    sha256: EPUBResourceStore.digest(sanitized.xhtmlData), byteCount: sanitized.xhtmlData.count)
+                linksByPath[spinePath] = sanitized.referencedLinks
                 fragmentIDsByPath[spinePath] = sanitized.fragmentIDs
                 textNodesByPath[spinePath] = sanitized.textNodes
                 referencedBodyImages.formUnion(sanitized.referencedImages)
@@ -167,74 +183,75 @@ public enum EPUBPackageParser {
                     }
                     validatedFontMediaTypes[path] = mediaType
                 }
+                trace.completedChapters += 1
+                trace.outputBytes = retainedSanitizedBytes
+                trace.peakChapterBytes = max(trace.peakChapterBytes, sanitized.xhtmlData.count)
+                trace.resourcePresenceChecks = styleCache.presenceCheckCount
+                trace.resourcePresenceHits = styleCache.presenceCacheHits
+                if trace.completedChapters % 64 == 0 || trace.completedChapters == spinePaths.count {
+                    trace.emit(.chapters)
+                }
+                }
             }
 
+            trace.emit(.navigation)
+            // Remove exact href attributes emitted by our serializer, never original markup.
             for spinePath in spinePaths {
                 try Task.checkCancellation()
-                guard let sanitized = sanitizedByPath[spinePath] else {
-                    throw EPUBError.invalidPackage
+                let broken = (linksByPath[spinePath] ?? []).filter { link in
+                    !spineSet.contains(link.path) ||
+                        (link.fragment.map { fragmentIDsByPath[link.path]?.contains($0) != true } ?? false)
                 }
-                for link in sanitized.referencedLinks {
-                    guard spineSet.contains(link.path) else {
-                        throw EPUBError.invalidPackage
-                    }
-                    if let fragment = link.fragment {
-                        guard fragmentIDsByPath[link.path]?.contains(fragment) == true else {
-                            throw EPUBError.invalidPackage
-                        }
-                    }
+                guard !broken.isEmpty, let resource = chapterResources[spinePath] else { continue }
+                let data = try readExtractedFile(at: spinePath, under: destination, expectedSize: resource.byteCount)
+                guard EPUBResourceStore.digest(data) == resource.sha256,
+                      var markup = String(data: data, encoding: .utf8) else { throw EPUBError.corruptResource }
+                for link in broken {
+                    let href = link.path == spinePath && link.fragment != nil
+                        ? "#" + (link.fragment ?? "")
+                        : EPUBResourcePath.relativeHref(from: spinePath, to: link.path, fragment: link.fragment)
+                    markup = markup.replacingOccurrences(of: " href=\"\(EPUBContentPolicy.escapeXMLAttribute(href))\"", with: "")
                 }
+                let clean = Data(markup.utf8)
+                try writeSanitizedFile(clean, at: spinePath, under: destination)
+                chapterResources[spinePath] = EPUBResource(path: spinePath, mediaType: resource.mediaType,
+                    sha256: EPUBResourceStore.digest(clean), byteCount: clean.count)
+                aggregatedStyleIssues.insert(.navigationUnavailable)
             }
+            linksByPath.removeAll()
 
-            if let tocID = opf.spineTOCID {
-                guard !tocID.isEmpty,
-                      let ncxItem = manifestByID[tocID],
-                      ncxItem.mediaType == "application/x-dtbncx+xml",
-                      extraction.entries[ncxItem.path] != nil else {
-                    throw EPUBError.invalidPackage
-                }
+            func optionalNavigation(_ body: () throws -> [EPUBNavigationItem]) throws -> [EPUBNavigationItem]? {
+                do { return try body() }
+                catch EPUBError.invalidPackage { return nil }
+                catch EPUBError.unsupportedContent { return nil }
+                catch EPUBError.limitExceeded { return nil }
             }
-
-            let navigation: [EPUBNavigationItem]
+            var parsedNavigation: [EPUBNavigationItem]?
             if let navItem, let rawNavData {
-                navigation = try EPUBNavigationParser.parseNavigationDocument(
-                    data: rawNavData,
-                    navPath: navItem.path,
-                    spineSet: spineSet,
-                    fragmentIDsByPath: fragmentIDsByPath,
-                    limits: limits
-                )
-                if let tocID = opf.spineTOCID, let ncxItem = manifestByID[tocID],
-                   let ncxEntry = extraction.entries[ncxItem.path] {
-                    guard ncxEntry.byteCount <= limits.xmlBytes else {
-                        throw EPUBError.limitExceeded
-                    }
-                    let ncxData = try readExtractedFile(at: ncxItem.path, under: destination, expectedSize: ncxEntry.byteCount)
-                    _ = try EPUBNavigationParser.parseNCX(
-                        data: ncxData,
-                        ncxPath: ncxItem.path,
-                        spineSet: spineSet,
-                        fragmentIDsByPath: fragmentIDsByPath,
-                        limits: limits
-                    )
+                _ = try EPUBXMLSupport.prepareXMLData(rawNavData, limit: min(limits.xmlBytes, limits.xhtmlBytes))
+                parsedNavigation = try optionalNavigation {
+                    try EPUBNavigationParser.parseNavigationDocument(data: rawNavData, navPath: navItem.path,
+                        spineSet: spineSet, fragmentIDsByPath: fragmentIDsByPath, limits: limits)
                 }
-            } else if let ncxItem = (opf.spineTOCID.flatMap { manifestByID[$0] })
-                        ?? opf.manifestItems.first(where: { $0.mediaType == "application/x-dtbncx+xml" }) {
-                guard let ncxEntry = extraction.entries[ncxItem.path] else {
-                    throw EPUBError.invalidPackage
+            }
+            // Valid EPUB3 nav wins; an obsolete NCX is neither read nor required.
+            if parsedNavigation?.isEmpty != false,
+               let ncxItem = (opf.spineTOCID.flatMap { manifestByID[$0] })
+                    ?? opf.manifestItems.first(where: { $0.mediaType == "application/x-dtbncx+xml" }),
+               ncxItem.mediaType == "application/x-dtbncx+xml",
+               let entry = extraction.entries[ncxItem.path], entry.byteCount <= limits.xmlBytes {
+                let data = try readExtractedFile(at: ncxItem.path, under: destination, expectedSize: entry.byteCount)
+                _ = try EPUBXMLSupport.prepareXMLData(data, limit: limits.xmlBytes)
+                parsedNavigation = try optionalNavigation {
+                    try EPUBNavigationParser.parseNCX(data: data, ncxPath: ncxItem.path,
+                        spineSet: spineSet, fragmentIDsByPath: fragmentIDsByPath, limits: limits)
                 }
-                guard ncxEntry.byteCount <= limits.xmlBytes else {
-                    throw EPUBError.limitExceeded
-                }
-                let ncxData = try readExtractedFile(at: ncxItem.path, under: destination, expectedSize: ncxEntry.byteCount)
-                navigation = try EPUBNavigationParser.parseNCX(
-                    data: ncxData,
-                    ncxPath: ncxItem.path,
-                    spineSet: spineSet,
-                    fragmentIDsByPath: fragmentIDsByPath,
-                    limits: limits
-                )
+            }
+            let navigation: [EPUBNavigationItem]
+            if let parsedNavigation, !parsedNavigation.isEmpty {
+                navigation = parsedNavigation
             } else {
+                aggregatedStyleIssues.insert(.navigationUnavailable)
                 navigation = spinePaths.enumerated().map { index, path in
                     EPUBNavigationItem(title: "Chapter \(index + 1)", path: path, fragment: nil, depth: 0)
                 }
@@ -278,29 +295,17 @@ public enum EPUBPackageParser {
                 resolvedCoverPath = nil
             }
 
+            trace.emit(.resources)
             var servedResources: [EPUBResource] = []
             var servedPaths: Set<String> = []
             var totalServedBytes = 0
 
             for spinePath in spinePaths {
                 try Task.checkCancellation()
-                guard let sanitized = sanitizedByPath[spinePath] else {
-                    throw EPUBError.invalidPackage
-                }
-                guard sanitized.xhtmlData.count <= limits.expandedBytes - totalServedBytes else {
-                    throw EPUBError.limitExceeded
-                }
-                try writeSanitizedFile(sanitized.xhtmlData, at: spinePath, under: destination)
-                let sha = EPUBResourceStore.digest(sanitized.xhtmlData)
-                totalServedBytes += sanitized.xhtmlData.count
-                servedResources.append(
-                    EPUBResource(
-                        path: spinePath,
-                        mediaType: "application/xhtml+xml",
-                        sha256: sha,
-                        byteCount: sanitized.xhtmlData.count
-                    )
-                )
+                guard let resource = chapterResources[spinePath] else { throw EPUBError.invalidPackage }
+                guard resource.byteCount <= limits.expandedBytes - totalServedBytes else { throw EPUBError.limitExceeded }
+                totalServedBytes += resource.byteCount
+                servedResources.append(resource)
                 servedPaths.insert(spinePath)
             }
 
@@ -309,8 +314,8 @@ public enum EPUBPackageParser {
                 imagePaths.insert(resolvedCoverPath)
             }
             for imagePath in imagePaths.sorted() {
-                guard let item = manifestByPath[imagePath],
-                      ["image/jpeg", "image/png", "image/webp"].contains(item.mediaType),
+                guard let mediaType = validatedImageMediaTypes[imagePath] ?? manifestByPath[imagePath]?.mediaType,
+                      ["image/jpeg", "image/png", "image/webp"].contains(mediaType),
                       let imgEntry = extraction.entries[imagePath] else {
                     throw EPUBError.invalidPackage
                 }
@@ -322,7 +327,7 @@ public enum EPUBPackageParser {
                 servedResources.append(
                     EPUBResource(
                         path: imagePath,
-                        mediaType: validatedImageMediaTypes[imagePath] ?? item.mediaType,
+                        mediaType: mediaType,
                         sha256: imgEntry.sha256,
                         byteCount: imgEntry.byteCount
                     )
@@ -363,10 +368,11 @@ public enum EPUBPackageParser {
             }
 
             let styleCompatibility = EPUBStyleCompatibility(
-                issues: aggregatedStyleIssues,
+                issues: Array(aggregatedStyleIssues),
                 usesReaderLayout: aggregatedUsesReaderLayout
             )
 
+            trace.emit(.complete)
             return EPUBPackage(
                 sourceSHA256: extraction.sourceSHA256,
                 parserVersion: EPUBFormat.parserVersion,
@@ -379,6 +385,7 @@ public enum EPUBPackageParser {
                 styleCompatibility: styleCompatibility
             )
         } catch {
+            trace.emit(trace.stage, failure: error)
             try? FileManager.default.removeItem(at: destination)
             throw error
         }

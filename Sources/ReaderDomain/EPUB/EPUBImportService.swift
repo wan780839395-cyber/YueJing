@@ -21,9 +21,9 @@ actor EPUBImportService {
         if let previous { try? FileManager.default.removeItem(at: previous.resourceRoot) }
     }
 
-    func prepare(archiveURL: URL, destination: URL) throws -> EPUBPublication {
+    func prepare(archiveURL: URL, destination: URL, observe: EPUBPreparationObserver? = nil) throws -> EPUBPublication {
         try Task.checkCancellation()
-        let package = try EPUBPackageParser.parse(archiveURL: archiveURL, destination: destination)
+        let package = try EPUBPackageParser.parse(archiveURL: archiveURL, destination: destination, observe: observe)
         try Task.checkCancellation()
         return EPUBPublication(package: package, resourceRoot: destination)
     }

@@ -3313,9 +3313,9 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "6b065d48479f8387dc2e9d1bd2c21dc53f2d93da",
-        "0.2.17",
-        "19",
+        "b890588f43870bf6f91ef4f0729ee42a6b520b28",
+        "0.2.18",
+        "20",
     )
     assert r.WORKFLOW_ID == 398234793 and r.REPO == "wan780839395-cyber/YueJing"
 
@@ -3325,20 +3325,24 @@ def run_checks(root):
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
         selection = src["selected_summary"]
-        assert selection["selected_declarations"] == 15 and selection["planned_executions"] == 15
-        assert selection["kind_declarations"] == {"domain": 12, "host": 3, "ui": 0}
-        assert len(selection["selected_files"]) == 4
+        assert selection["selected_declarations"] == 66 and selection["planned_executions"] == 66
+        assert selection["kind_declarations"] == {"domain": 59, "host": 7, "ui": 0}
+        assert len(selection["selected_files"]) == 13
+        partial = {
+            "ReaderDomainTests/EPUBReadyTests.swift": r.inventory.FILES["ReaderDomainTests/EPUBReadyTests.swift"].split()[:6],
+            "ReaderDomainTests/EPUBLibraryTests.swift": ["epubDuplicateKeepsProgressAndRepairsMissingArchive", "epubCancellationBeforeCommitLeavesNoBook", "epubFailedImportCleansOnlyItsWorkspace"],
+            "ReaderDomainTests/ImportDiagnosticsTests.swift": ["safeFailuresDropPrivateDetailsAndDistinguishRealCancellation", "observedImportDeliversOrderedStagesWithoutChangingOriginalBytes"],
+            "ReaderDomainTests/LibraryPresentationTests.swift": ["importPresentationUsesActualStagesAndIgnoresRetiredAttempts"],
+            "YueJingHostTests/EPUBReaderHostTests.swift": ["epubCompatibilityLayoutKeepsOriginalPreferenceAndClassifiesStyleLimits", "epubOpeningRouteStartsOnceAndObservesMountedPresentation", "epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking", "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor", "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification"],
+        }
         for rel, cases in selection["selected_files"].items():
-            if rel == "YueJingHostTests/EPUBReaderHostTests.swift":
-                assert cases == ["epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification"]
-            else:
-                assert cases == r.inventory.FILES[rel].split(), "Selected file group is incomplete: " + rel
-        passed("font MIME repair exact selection: 12 Domain + 3 Host, no unrelated UI or TXT")
+            assert cases == partial.get(rel, r.inventory.FILES[rel].split()), "Unexpected selected identities: " + rel
+        passed("preparation repair exact selection: 59 Domain + 7 Host, no unrelated UI or TXT")
         groups = r.build_groups(r.load_scope_config())
         fresh, reused = r.partition_groups(groups, "")
-        assert len(fresh) == 4 and reused == []
-        passed("all 15 font MIME cases execute freshly")
-        rejects("old P2 reuse is incompatible with the font MIME repair", lambda: r.partition_groups(groups, r.P2_RUN_ID))
+        assert len(fresh) == 13 and reused == []
+        passed("all 66 preparation repair cases execute freshly")
+        rejects("old P2 reuse is incompatible with preparation repair", lambda: r.partition_groups(groups, r.P2_RUN_ID))
 
     wf_status = "skipped_workflow_not_wired_yet"
     wf_text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding="utf-8")

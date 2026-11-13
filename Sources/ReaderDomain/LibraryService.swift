@@ -558,9 +558,8 @@ extension LibraryService {
         defer { Self.removeStaging(staging); Self.removeStaging(work) }
         try check(ticket)
         try Self.copyReadOnlySource(url, to: staging, observe: observe, maximumBytes: EPUBLimits().compressedBytes)
-        observe?(.stagedReadStarted)
-        let publication = try await epubImporter.prepare(archiveURL: staging, destination: work)
-        observe?(.stagedReadCompleted)
+        let preparationObserver: EPUBPreparationObserver = { sample in observe?(sample.stage.importStage) }
+        let publication = try await epubImporter.prepare(archiveURL: staging, destination: work, observe: preparationObserver)
         try check(ticket)
         var cover: Data?
         if let path = publication.package.coverPath, publication.package.resource(at: path) != nil {
@@ -574,7 +573,7 @@ extension LibraryService {
         let book = LibraryBook(id: package.sourceSHA256, title: package.title, encodingRaw: "epub",
                                versionID: package.versionID, byteCount: size, utf16Count: 0, format: .epub)
         let readyRoot = await store.epubReadyURL()
-        let staged = try await EPUBContentPool.shared.stageReady(publication: publication, root: readyRoot)
+        let staged = try await EPUBContentPool.shared.stageReady(publication: publication, root: readyRoot, observe: preparationObserver)
         do {
             try check(ticket)
             let receipt = try await store.commitEPUB(ticket: ticket, proposed: book, package: staged.publication.package, cover: cover)
@@ -590,7 +589,7 @@ extension LibraryService {
         }
     }
 
-    public func openEPUB(id: String) async throws -> OpenedEPUBReader {
+    public func openEPUB(id: String, observe: EPUBPreparationObserver? = nil) async throws -> OpenedEPUBReader {
         let catalogStarted = ContinuousClock.now
         guard let book = try await store.book(id: id), book.format == .epub else { throw LibraryError.missingBook }
         let permit = try await store.reserveReaderOpen(bookID: id)
@@ -607,7 +606,7 @@ extension LibraryService {
             }
             var preparedOnce = false
             if snapshot.package.ready == nil || snapshot.package.needsAuthorStyleUpgrade {
-                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot)
+                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot, observe: observe)
                 preparedOnce = true
             }
             let catalogFinished = ContinuousClock.now
@@ -619,7 +618,7 @@ extension LibraryService {
             catch {
                 // One exact-source repair, not an unbounded retry or a reason to accept modified metadata.
                 let repairStarted = ContinuousClock.now
-                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot)
+                snapshot = try await publishReadyForOpen(bookID: id, source: source, root: readyRoot, previous: snapshot, observe: observe)
                 let repairFinished = ContinuousClock.now
                 let restored = try await EPUBContentPool.shared.acquireReady(archive: source, snapshot: snapshot, root: readyRoot)
                 var recoveryTimings = restored.timings
@@ -678,22 +677,22 @@ extension LibraryService {
     }
 
     private func publishReadyForOpen(bookID: String, source: URL, root: URL,
-                                     previous: EPUBMetadataSnapshot) async throws -> EPUBMetadataSnapshot {
+                                     previous: EPUBMetadataSnapshot, observe: EPUBPreparationObserver?) async throws -> EPUBMetadataSnapshot {
         let pool = EPUBContentPool.shared
         let staged: EPUBContentLease
         if previous.package.needsAuthorStyleUpgrade {
             let work = await store.epubWorkURL(id: UUID())
-            staged = try await pool.upgradeAuthorStyles(archive: source, expected: previous.package, root: root, work: work)
+            staged = try await pool.upgradeAuthorStyles(archive: source, expected: previous.package, root: root, work: work, observe: observe)
         } else if previous.package.ready == nil {
             let legacyRoot = await store.epubContentPoolURL()
             let legacy = try await pool.acquire(bookID: bookID, archive: source, snapshot: previous, root: legacyRoot)
             do {
-                staged = try await pool.stageReady(publication: legacy.lease.publication, root: root)
+                staged = try await pool.stageReady(publication: legacy.lease.publication, root: root, observe: observe)
                 await legacy.lease.release()
             } catch { await legacy.lease.release(); throw error }
         } else {
             let work = await store.epubWorkURL(id: UUID())
-            staged = try await pool.rebuildReady(archive: source, expected: previous.package, root: root, work: work)
+            staged = try await pool.rebuildReady(archive: source, expected: previous.package, root: root, work: work, observe: observe)
         }
         do {
             try await store.publishEPUBReady(bookID: bookID, previous: previous, lease: staged)

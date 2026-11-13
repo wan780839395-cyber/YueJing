@@ -174,9 +174,10 @@ struct EPUBCompatibilityTests {
             #expect(try Self.sanitize(Data(Self.xhtml(body).utf8), at: root, images: images) == clean)
         }
         for body in ["", " \n\t ", "<div id=\"heading\"> \n </div>"] {
-            #expect(throws: EPUBError.invalidPackage) {
-                _ = try Self.sanitize(Data(Self.xhtml(body).utf8), at: root, images: images)
-            }
+            let blank = try Self.sanitize(Data(Self.xhtml(body).utf8), at: root, images: images)
+            #expect(blank.textNodes == ["空白页"])
+            #expect(blank.referencedImages.isEmpty)
+            #expect(String(decoding: blank.xhtmlData, as: UTF8.self).contains("<span id=\"yj-t0\">空白页</span>"))
         }
         #expect(throws: (any Error).self) {
             _ = try Self.sanitize(Data(Self.xhtml("<img src=\"../Images/missing.jpg\"/>").utf8), at: root, images: images)

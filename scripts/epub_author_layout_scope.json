@@ -1,48 +1,71 @@
 {
-  "baseline": "6b065d48479f8387dc2e9d1bd2c21dc53f2d93da",
+  "baseline": "b890588f43870bf6f91ef4f0729ee42a6b520b28",
   "scope": "epub-author-layout",
-  "version": "0.2.17",
-  "build": "19",
+  "version": "0.2.18",
+  "build": "20",
   "allowed_paths": [
+    "App/EPUB/EPUBReaderViewModel.swift",
     "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift",
+    "Sources/ReaderDomain/EPUB/EPUBContentPolicy.swift",
+    "Sources/ReaderDomain/EPUB/EPUBContentPool.swift",
+    "Sources/ReaderDomain/EPUB/EPUBFontObfuscation.swift",
+    "Sources/ReaderDomain/EPUB/EPUBImportService.swift",
+    "Sources/ReaderDomain/EPUB/EPUBModels.swift",
+    "Sources/ReaderDomain/EPUB/EPUBPackageParser.swift",
+    "Sources/ReaderDomain/EPUB/EPUBPreparationDiagnostics.swift",
+    "Sources/ReaderDomain/EPUB/EPUBStyleCompatibility.swift",
+    "Sources/ReaderDomain/ImportDiagnostics.swift",
+    "Sources/ReaderDomain/LibraryPresentation.swift",
+    "Sources/ReaderDomain/LibraryService.swift",
     "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift",
-    "Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift",
-    "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift",
+    "Tests/ReaderDomainTests/EPUBCompatibilityTests.swift",
+    "Tests/ReaderDomainTests/EPUBDegradationTests.swift",
+    "Tests/ReaderDomainTests/EPUBPackageTests.swift",
+    "Tests/ReaderDomainTests/EPUBStyleCompatibilityTests.swift",
+    "docs/COMPATIBILITY_PREPARATION_REPAIR.md",
     "project.yml",
-    "scripts/run_epub_author_layout_validation.py",
     "scripts/check_epub_author_layout_validation.py",
-    "scripts/epub_author_layout_scope.json"
+    "scripts/epub_author_layout_scope.json",
+    "scripts/run_epub_author_layout_validation.py",
+    "scripts/task3_test_inventory.py"
   ],
   "candidate_sha256": {
-    "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift": "99e9e8ae6329c5362ba1e6c65b5113dea2c9b10a3a114b052e526f20d8aa0a1f",
-    "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift": "b440eaf6955498a9c88894412c3888f1711acbc52a7bd279238efd0f34fe8d59",
-    "Tests/ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": "ce95081b0454ca3e8f6ecaf12596ad6af375482d1be3d289b98c2a9160673383",
-    "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift": "e01d8a9aae3dc0aa261de484ff972a55beb33c5e6d59758fe4c9856820700934",
-    "project.yml": "d2f2605b704c4db97015098722e1409f22c7fbd8fb19bad840722cfc881f16b9"
+    "App/EPUB/EPUBReaderViewModel.swift": "2fff7924a36d9bf400f4a66bdb613445d2787fa8197e980c37e0af4980edb16d",
+    "Sources/ReaderDomain/EPUB/EPUBAuthorStyles.swift": "27b42147d8b33a0946b34634ab7b48eaa7a986ea5d36f1cdc23aa5ffc99f58c0",
+    "Sources/ReaderDomain/EPUB/EPUBContentPolicy.swift": "148cf9a34c5281772c039954f49260abe4c156909b1bf680dda651fa9e067592",
+    "Sources/ReaderDomain/EPUB/EPUBContentPool.swift": "a16cdaeebbaab7ea9cb3068cdcbd65be7808c6c7c408606beb9801cf56ce8fb2",
+    "Sources/ReaderDomain/EPUB/EPUBFontObfuscation.swift": "54b03b36f1550dd02f2a1b919a00b18b3816f2fe8af09c8bfe18107e94ea1405",
+    "Sources/ReaderDomain/EPUB/EPUBImportService.swift": "e91e6dbc81a210e4681f7cfaa1fd5adfabae95deadafd64d63ec43727e2fc687",
+    "Sources/ReaderDomain/EPUB/EPUBModels.swift": "c4e526cfe8492d0133bd561346d58895172836636dcef37badd8445c8aef3e72",
+    "Sources/ReaderDomain/EPUB/EPUBPackageParser.swift": "4abc957e9a998b2ff19228baae0c1d9e3b5437adb50b54258bc968bb3bda3b72",
+    "Sources/ReaderDomain/EPUB/EPUBPreparationDiagnostics.swift": "3e8847d255f53894b0cacf36d537abac268a50c3eeb73ebc8ef32e84fd035cf3",
+    "Sources/ReaderDomain/EPUB/EPUBStyleCompatibility.swift": "88973a4d5b2393285af7a549dc1526a469cfae45cf52075a578d47d6646e2c6f",
+    "Sources/ReaderDomain/ImportDiagnostics.swift": "6735df204e2de63ca42801c3b6fef549f0df5ab77c83a0761abf701a2768507b",
+    "Sources/ReaderDomain/LibraryPresentation.swift": "6e96b4fbb2d2bb7f8951b2a8f98cbe02904aa15d9390935b8dcd32cfd340cda0",
+    "Sources/ReaderDomain/LibraryService.swift": "4750747d70b3089b14d040538ad8ac8f9372043c77005d72b08ab929119f164e",
+    "Tests/ReaderDomainTests/EPUBAuthorStylesTests.swift": "d18f7f4fdabe00c1025f2a564bfd4380d6b6fef508f67ed394430e32ebbb84c4",
+    "Tests/ReaderDomainTests/EPUBCompatibilityTests.swift": "ad417d2b62d490eda0efef704c7c96918369560d6f75657167c1e14b303a2f78",
+    "Tests/ReaderDomainTests/EPUBDegradationTests.swift": "54f4dba78108fb736eb4ec5b6d979e9083aa60f93408090ff4383615484917d9",
+    "Tests/ReaderDomainTests/EPUBPackageTests.swift": "52e4002fe2883c30515cc3aaffe9e989dabb9675503a94ee169e446da92bead6",
+    "Tests/ReaderDomainTests/EPUBStyleCompatibilityTests.swift": "fabd7c7b4ccc088df5a014f1d52e00d7a6d495b8b5e7839450faae1010c18250",
+    "docs/COMPATIBILITY_PREPARATION_REPAIR.md": "b0ae9892762b4014e71d67c918b330ff0a832712fee8bcc844af1a38f8fa7d9a",
+    "project.yml": "e952617a7bbdd09517e129151463901a33b6ff5c884b3ab3fae49af12f9e6654",
+    "scripts/run_epub_author_layout_validation.py": "57432ade7acbf53691c72cf7466afb1a1d4f487d03658bb27c9c9e0af9dfa26d",
+    "scripts/task3_test_inventory.py": "1dfd631fa880125ba1878ea3d232caeaaf752f1c1f1432a09f1fa157cbbd8a96"
   },
   "selected_files": {
-    "ReaderDomainTests/EPUBAuthorStylesTests.swift": [
-      "authorStylesSanitizesExternalInlineAndClassCSSWithScopedSelectors",
-      "authorStylesEmbedsManifestFontsAndIsolatesChapters",
-      "authorStylesDropsUnsafeLayoutAndGuardsReaderAndLocatorNodes",
-      "authorStylesRejectsEscapedMaliciousCSSExternalURLsAndUnknownResources",
-      "authorStylesRejectsCorruptOversizedAndInvalidSFNTFontsAndDRM"
-    ],
-    "ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": [
-      "legacyPackageWithoutAuthorStyleRevisionDecodesCompatibly",
-      "authorStyleMigrationRebuildsReadyAndNonReadyLegacyPackagesPreservingTextProgressAndSource",
-      "authorStyleMigrationValidationRejectsCoordinateMetadataResourceAndRevisionMismatches",
-      "failedAuthorStyleMigrationPreservesPreviousStorageProgressAndArchive",
-      "optionalStyleLegacyMigrationPreservesProgressAndPersistsCompatibilityResult",
-      "revisionOneStyleMigrationRebuildsOnceAndBindsCompatibilityMetadata",
-      "styleCompatibilityMigrationCancellationAndStaleCASPreservePublishedVersion"
-    ],
-    "YueJingHostTests/EPUBFontLoadingHostTests.swift": [
-      "epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics",
-      "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"
-    ],
-    "YueJingHostTests/EPUBReaderHostTests.swift": [
-      "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification"
-    ]
+    "ReaderDomainTests/EPUBAuthorStyleMigrationTests.swift": ["legacyPackageWithoutAuthorStyleRevisionDecodesCompatibly", "authorStyleMigrationRebuildsReadyAndNonReadyLegacyPackagesPreservingTextProgressAndSource", "authorStyleMigrationValidationRejectsCoordinateMetadataResourceAndRevisionMismatches", "failedAuthorStyleMigrationPreservesPreviousStorageProgressAndArchive", "optionalStyleLegacyMigrationPreservesProgressAndPersistsCompatibilityResult", "revisionOneStyleMigrationRebuildsOnceAndBindsCompatibilityMetadata", "styleCompatibilityMigrationCancellationAndStaleCASPreservePublishedVersion"],
+    "ReaderDomainTests/EPUBAuthorStylesTests.swift": ["authorStylesSanitizesExternalInlineAndClassCSSWithScopedSelectors", "authorStylesEmbedsManifestFontsAndIsolatesChapters", "authorStylesDropsUnsafeLayoutAndGuardsReaderAndLocatorNodes", "authorStylesRejectsEscapedMaliciousCSSExternalURLsAndUnknownResources", "authorStylesRejectsCorruptOversizedAndInvalidSFNTFontsAndDRM"],
+    "ReaderDomainTests/EPUBCompatibilityTests.swift": ["epubCompatibilityStandardDoctypesPreserveAcceptedTextBytesAndNodes", "epubCompatibilityRejectsEntitiesUnknownDuplicateAndMisplacedDoctypes", "epubCompatibilityStaticSVGBecomesLocalJPEGAndPreservesIDs", "epubCompatibilityRejectsComplexActiveAndEscapingSVG", "epubCompatibilityImageOnlyPagesHaveStableAnchorButBlankPagesFail", "epubCompatibilityWebPRequiresRealBoundedSingleFrameDecode", "epubCompatibilityEPUB2DoctypeImageWebPImportProgressSurvivesReopen", "epubCompatibilityWebPResourcesStillEnforceSizeAndDigestIntegrity"],
+    "ReaderDomainTests/EPUBDegradationTests.swift": ["inertLinksHintsAndLegacyTagsPreserveNodesWithoutCapabilities", "optionalStylesRollbackEarlierRulesAndNeverHideIntegrityFailure", "recognizedFontObfuscationOmitsBytesButUnknownProtectionStillFails", "missingManifestRasterRequiresActualBoundedDecodeAndPreservesSource", "svgMarkerAndPackagingWhitespaceUseContentValidationNotMetadataRejection", "preparationStagesAndFailureCodesAreNumericAndIdentityFree"],
+    "ReaderDomainTests/EPUBLibraryTests.swift": ["epubDuplicateKeepsProgressAndRepairsMissingArchive", "epubCancellationBeforeCommitLeavesNoBook", "epubFailedImportCleansOnlyItsWorkspace"],
+    "ReaderDomainTests/EPUBP2CompatibilityTests.swift": ["staticMediaModifiersAgreeAcrossAttributesBlocksAndImports", "sharedASTCacheBoundsDoNotChangeCascadeScopeOrCancellation", "sanitizedGrowthRejectsBeforeRetainingAllChaptersAndCleansWorkspace", "unsupportedFontsAndStructuralSelectorsNeverBecomeServedCapabilities"],
+    "ReaderDomainTests/EPUBPackageTests.swift": ["epubPackageParsesEPUB3AndEPUB2ContainersInExactSpineOrder", "epubPackageResolvesNavAndNCXHierarchyWithValidatedFragments", "epubPackageRejectsXXEDTDAndEntityDeclarationsAcrossUTF8AndUTF16", "epubPackageRejectsMissingMetadataEmptyBodyAndDuplicateManifestItems", "epubPackageRejectsBrokenSpineAndBodyResourceReferences", "epubPackageRejectsEncryptedFixedLayoutAndActiveContent", "epubPackageSelectsValidCoversAndFallsBackOnOptionalCoverProblems", "epubPackageFailsFatallyOnCorruptBodyImageOrArchiveIntegrityError"],
+    "ReaderDomainTests/EPUBReadyTests.swift": ["readyNodePackKeepsExactNodesWithSmallManifest", "readyImportColdReaderDoesNotDependOnParkedLease", "legacyMigrationPreservesProgressPreferencesAndOriginal", "readyUnvisitedNodeDamageIsDetectedBeforeOpenAndRepairedWithLeaseIsolation", "readyPublicationRollbackAndReconciliationProtectLiveVersions", "readyManifestMutationCannotBeBlessedByRepair"],
+    "ReaderDomainTests/EPUBStyleCompatibilityTests.swift": ["styleCompatibilityDeterministicIssuesCodableAndDistinctProcessingError", "fontCandidatesSupportSixteenSeventeenEighteenAndLargeListsWithoutRejectingBook", "fontCandidatesMissingBeforeAndAfterValidSourceAllMissingAndLocalOnly", "fontCandidatesRejectUnsafeTailCorruptOversizedSymlinkAndWoffOnly", "localCSSImportsPreserveCascadeOrderDuplicatesRelativeURLsAndDepthBounds", "localCSSImportsCycleMediaConditionsAndSecurityRejection", "missingOptionalCSSAndBackgroundDropKeepSafeStylesAndPreserveImgAndTextIntegrity", "styleComplexityWholeChapterFallbackAndAuditBeforeDowngrade", "longBook1633ChaptersSharedStylesFontDedupAndCancellation"],
+    "ReaderDomainTests/ImportDiagnosticsTests.swift": ["safeFailuresDropPrivateDetailsAndDistinguishRealCancellation", "observedImportDeliversOrderedStagesWithoutChangingOriginalBytes"],
+    "ReaderDomainTests/LibraryPresentationTests.swift": ["importPresentationUsesActualStagesAndIgnoresRetiredAttempts"],
+    "YueJingHostTests/EPUBFontLoadingHostTests.swift": ["epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics", "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"],
+    "YueJingHostTests/EPUBReaderHostTests.swift": ["epubCompatibilityLayoutKeepsOriginalPreferenceAndClassifiesStyleLimits", "epubOpeningRouteStartsOnceAndObservesMountedPresentation", "epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking", "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor", "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification"]
   }
 }

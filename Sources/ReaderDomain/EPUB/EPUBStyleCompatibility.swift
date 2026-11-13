@@ -6,6 +6,11 @@ public enum EPUBStyleIssue: String, Codable, Sendable, Hashable {
     case styleComplexity
     case localImportCycle
     case unsupportedStyleCondition
+    case navigationUnavailable
+    case malformedOptionalStyle
+    case invalidOptionalFont
+    case obfuscatedFontOmitted
+    case manifestImageRecovered
 }
 
 public struct EPUBStyleCompatibility: Codable, Sendable, Equatable {
@@ -32,4 +37,6 @@ public struct EPUBStyleCompatibility: Codable, Sendable, Equatable {
 
 public enum EPUBStyleProcessingError: Error, Sendable, Equatable {
     case complexityExceeded
+    case malformedStylesheet
+    case invalidFontStructure
 }

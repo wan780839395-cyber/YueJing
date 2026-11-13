@@ -10,6 +10,7 @@ public enum ImportStage: String, Equatable, Sendable {
     case scopeRequested, scopeGranted, scopeNotGranted, sourceMetadataStarted, sourceMetadataChecked
     case coordinationStarted, accessorStarted, coordinatedMetadataChecked, copyCompleted, coordinationFinished
     case stagedReadStarted, stagedReadCompleted, decodingStarted, decodingCompleted
+    case epubArchive, epubChapters, epubNavigation, epubReady
     case ambiguityDetected, previewsReady, duplicateFound, committed
     case cancelRequested, cancelled, failed, encodingSheetRequested, alertRequested
 
@@ -41,6 +42,10 @@ public enum ImportStage: String, Equatable, Sendable {
         case .coordinationFinished: "协调读取已返回"
         case .stagedReadStarted: "正在读取应用副本"
         case .stagedReadCompleted: "应用副本字节读取完成"
+        case .epubArchive: "正在校验并展开 EPUB 归档"
+        case .epubChapters: "正在处理 EPUB 章节与样式"
+        case .epubNavigation: "正在检查 EPUB 目录与链接"
+        case .epubReady: "正在保存并校验 EPUB 阅读副本"
         case .decodingStarted: "正在解码文字"
         case .decodingCompleted: "文字解码完成"
         case .ambiguityDetected: "需要确认文字编码"
@@ -63,20 +68,33 @@ public struct ImportSafeFailure: Equatable, Sendable {
     public enum Domain: String, Equatable, Sendable {
         case cocoa = "NSCocoaErrorDomain", posix = "NSPOSIXErrorDomain", url = "NSURLErrorDomain"
         case provider = "NSFileProviderErrorDomain", library = "Library", text = "TXT", cancellation = "Cancellation", other = "Other"
+        case epub = "EPUB"
     }
     public enum Kind: String, Equatable, Sendable {
         case cancelled = "操作已取消", library = "应用文件检查未通过", text = "文字读取未完成"
         case unsupported = "暂不支持这种文字编码", damaged = "文字字节无法完整解码", external = "文件操作未完成"
+        case budget = "处理预算超限", structure = "出版物结构不完整"
+        case integrity = "资源完整性校验失败", capability = "出版物能力暂不支持", position = "阅读位置版本不一致"
     }
     public let domain: Domain
     public let code: Int?
     public let kind: Kind
+    public private(set) var reasonCode: String? = nil
 
     public init(_ error: Error) {
         if error is CancellationError {
             domain = .cancellation; code = nil; kind = .cancelled
         } else if error is LibraryError {
             domain = .library; code = nil; kind = .library
+        } else if let error = error as? EPUBError {
+            domain = .epub; code = nil; reasonCode = error.reasonCode
+            switch error {
+            case .limitExceeded: kind = .budget
+            case .invalidPackage: kind = .structure
+            case .invalidArchive, .unsafePath, .corruptResource: kind = .integrity
+            case .unsupportedContent: kind = .capability
+            case .invalidPosition, .staleSession: kind = .position
+            }
         } else if let error = error as? TXTError {
             domain = .text; code = nil
             switch error {
@@ -99,7 +117,8 @@ public struct ImportSafeFailure: Equatable, Sendable {
     }
 
     public var summary: String {
-        kind.rawValue + "（" + domain.rawValue + (code.map { " / \($0)" } ?? "") + "）"
+        kind.rawValue + "（" + domain.rawValue + (code.map { " / \($0)" } ?? "") +
+            (reasonCode.map { " / " + $0 } ?? "") + "）"
     }
 }
 

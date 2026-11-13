@@ -2,7 +2,7 @@ import Foundation
 
 /// Display-only state driven by actual import events, never a second commit authority.
 public struct LibraryImportPresentation: Equatable, Sendable {
-    public enum Phase: Equatable, Sendable { case waiting, copying, reading, decoding, choosing, registering, committed }
+    public enum Phase: Equatable, Sendable { case waiting, copying, reading, decoding, choosing, registering, committed, epubArchive, epubChapters, epubNavigation, epubReady }
     public private(set) var attempt: UUID?
     public private(set) var phase: Phase = .waiting
     public private(set) var active = false
@@ -19,6 +19,10 @@ public struct LibraryImportPresentation: Equatable, Sendable {
              .coordinatedMetadataChecked, .copyCompleted, .coordinationFinished:
             phase = .copying
         case .stagedReadStarted, .stagedReadCompleted: phase = .reading
+        case .epubArchive: phase = .epubArchive
+        case .epubChapters: phase = .epubChapters
+        case .epubNavigation: phase = .epubNavigation
+        case .epubReady: phase = .epubReady
         case .decodingStarted: phase = .decoding
         case .decodingCompleted: phase = .registering
         case .ambiguityDetected, .previewsReady, .encodingSheetRequested: phase = .choosing
@@ -38,6 +42,10 @@ public struct LibraryImportPresentation: Equatable, Sendable {
         case .waiting: return "正在准备导入…"
         case .copying: return "正在复制到应用…"
         case .reading: return "正在读取文字…"
+        case .epubArchive: return "正在校验并展开归档…"
+        case .epubChapters: return "正在处理章节与样式…"
+        case .epubNavigation: return "正在检查目录与链接…"
+        case .epubReady: return "正在保存并校验阅读副本…"
         case .decoding: return "正在处理文字…"
         case .choosing: return "等待确认文字编码"
         case .registering: return "正在保存书籍…"

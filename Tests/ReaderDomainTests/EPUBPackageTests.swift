@@ -169,15 +169,16 @@ struct EPUBPackageTests {
             EPUBNavigationItem(title: "卷二 NCX", path: "OEBPS/Text/ch2.xhtml", fragment: "sec-2", depth: 0)
         ])
 
-        // Broken fragment or non-spine target in Nav/NCX must fail.
+        // Broken optional navigation falls back to verified spine; no chapter is dropped.
         for badHref in ["Text/ch2.xhtml#missing-frag", "nav.xhtml", "../outside.xhtml"] {
             let badNav = "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><body><nav epub:type=\"toc\"><ol><li><a href=\"\(badHref)\">Bad</a></li></ol></nav></body></html>"
             let badURL = root.appendingPathComponent(UUID().uuidString + ".epub")
             try EPUBTestSupport.writeEPUB3(at: badURL, chapters: chapters, navXHTML: badNav)
             let badDest = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            #expect(throws: EPUBError.invalidPackage) {
-                _ = try EPUBPackageParser.parse(archiveURL: badURL, destination: badDest)
-            }
+            let degraded = try EPUBPackageParser.parse(archiveURL: badURL, destination: badDest)
+            #expect(degraded.navigation.map(\.path) == degraded.spine)
+            #expect(degraded.navigation.allSatisfy { $0.fragment == nil })
+            #expect(degraded.styleCompatibility?.issues.contains(.navigationUnavailable) == true)
         }
     }
 
@@ -305,7 +306,12 @@ struct EPUBPackageTests {
             ]
         )
 
-        for url in [noTitleURL, emptySpineURL, dupIDURL, dupHrefURL, emptyBodyURL, prefixCollisionURL] {
+        let untitled = try EPUBPackageParser.parse(archiveURL: noTitleURL, destination: root.appendingPathComponent("untitled"))
+        #expect(untitled.title == "未命名书籍")
+        let blank = try EPUBPackageParser.parse(archiveURL: emptyBodyURL, destination: root.appendingPathComponent("blank"))
+        #expect(blank.spine == ["OPS/one.xhtml"])
+        #expect(blank.textNodes["OPS/one.xhtml"] == ["空白页"])
+        for url in [emptySpineURL, dupIDURL, dupHrefURL, prefixCollisionURL] {
             let dest = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
             #expect(throws: EPUBError.invalidPackage) {
                 _ = try EPUBPackageParser.parse(archiveURL: url, destination: dest)
@@ -373,7 +379,15 @@ struct EPUBPackageTests {
             ]
         )
 
-        for url in [unknownSpineURL, unmanifestedImgURL, badLinkFileURL, badLinkFragURL] {
+        for url in [badLinkFileURL, badLinkFragURL] {
+            let dest = root.appendingPathComponent(UUID().uuidString)
+            let degraded = try EPUBPackageParser.parse(archiveURL: url, destination: dest)
+            #expect(degraded.textNodes["OPS/one.xhtml"] == ["T", "Bad"])
+            #expect(degraded.styleCompatibility?.issues.contains(.navigationUnavailable) == true)
+            let data = try EPUBResourceStore.data(path: "OPS/one.xhtml", publication: EPUBPublication(package: degraded, resourceRoot: dest))
+            #expect(!String(decoding: data, as: UTF8.self).contains(" href="))
+        }
+        for url in [unknownSpineURL, unmanifestedImgURL] {
             let dest = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
             #expect(throws: EPUBError.invalidPackage) {
                 _ = try EPUBPackageParser.parse(archiveURL: url, destination: dest)

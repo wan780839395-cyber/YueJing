@@ -183,6 +183,15 @@ struct EPUBStyleCompatibilityTests {
             ("../../../outside.ttf", EPUBError.unsafePath),
             ("../Fonts/corrupt.ttf", EPUBError.corruptResource)
         ] {
+            if error == .corruptResource {
+                let result = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+                    "@font-face { font-family: Duplicate; src: url(\(source)); src: url(../Fonts/valid.ttf); }",
+                    sourcePath: "OPS/Styles/s.css", documentPath: "OPS/Text/c1.xhtml", manifestByPath: manifest, destination: root)
+                #expect(result.css.isEmpty && result.referencedFonts.isEmpty)
+                #expect(result.styleCompatibility.usesReaderLayout)
+                #expect(result.styleCompatibility.issues.contains(.invalidOptionalFont))
+                continue
+            }
             #expect(throws: error) {
                 _ = try EPUBAuthorStyles.sanitizeStylesheet(
                     "@font-face { font-family: Duplicate; src: url(\(source)); src: url(../Fonts/valid.ttf); }",
@@ -234,28 +243,21 @@ struct EPUBStyleCompatibilityTests {
             )
         }
 
-        // Corrupt font structure in tail -> corruptResource
-        #expect(throws: EPUBError.corruptResource) {
-            _ = try EPUBAuthorStyles.sanitizeStylesheet(
-                "@font-face { font-family: BadTail; src: \(prefix18), url(../Fonts/corrupt.ttf); }",
-                sourcePath: "OPS/Styles/s.css",
-                documentPath: "OPS/Text/c1.xhtml",
-                manifestByPath: manifest,
-                destination: root
-            )
-        }
+        // Corrupt optional tail rolls back all previously registered font capabilities.
+        let corruptTail = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            "@font-face { font-family: BadTail; src: \(prefix18), url(../Fonts/corrupt.ttf); }",
+            sourcePath: "OPS/Styles/s.css", documentPath: "OPS/Text/c1.xhtml", manifestByPath: manifest, destination: root)
+        #expect(corruptTail.css.isEmpty && corruptTail.referencedFonts.isEmpty)
+        #expect(corruptTail.styleCompatibility.usesReaderLayout)
+        #expect(corruptTail.styleCompatibility.issues.contains(.invalidOptionalFont))
 
         // Over 256 candidates -> EPUBStyleProcessingError.complexityExceeded (or unsafe payload first if malicious)
         let prefix260 = (1...260).map { _ in "local(\"F\")" }.joined(separator: ", ")
-        #expect(throws: EPUBStyleProcessingError.complexityExceeded) {
-            _ = try EPUBAuthorStyles.sanitizeStylesheet(
-                "@font-face { font-family: TooMany; src: \(prefix260); }",
-                sourcePath: "OPS/Styles/s.css",
-                documentPath: "OPS/Text/c1.xhtml",
-                manifestByPath: manifest,
-                destination: root
-            )
-        }
+        let tooMany = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            "@font-face { font-family: TooMany; src: \(prefix260); }",
+            sourcePath: "OPS/Styles/s.css", documentPath: "OPS/Text/c1.xhtml", manifestByPath: manifest, destination: root)
+        #expect(tooMany.css.isEmpty && tooMany.referencedFonts.isEmpty)
+        #expect(tooMany.styleCompatibility == EPUBStyleCompatibility(issues: [.styleComplexity], usesReaderLayout: true))
         #expect(throws: EPUBError.unsupportedContent) {
             _ = try EPUBAuthorStyles.sanitizeStylesheet(
                 "@font-face { font-family: TooManyEvil; src: \(prefix260), url(javascript:alert(1)); }",
@@ -355,15 +357,11 @@ struct EPUBStyleCompatibilityTests {
         #expect(depth8OK.css.contains("#654321"))
 
         // Starting from d0.css (depth 0) -> d1(1) -> ... -> d9(9): exceeds maxImportDepth (8)
-        #expect(throws: EPUBStyleProcessingError.complexityExceeded) {
-            _ = try EPUBAuthorStyles.sanitizeStylesheet(
-                #"@import "d1.css";"#,
-                sourcePath: "OPS/Styles/d0.css",
-                documentPath: "OPS/Text/c1.xhtml",
-                manifestByPath: depthManifest,
-                destination: root
-            )
-        }
+        let tooDeep = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            #"@import "d1.css";"#, sourcePath: "OPS/Styles/d0.css", documentPath: "OPS/Text/c1.xhtml",
+            manifestByPath: depthManifest, destination: root)
+        #expect(tooDeep.css.isEmpty && tooDeep.referencedFonts.isEmpty)
+        #expect(tooDeep.styleCompatibility == EPUBStyleCompatibility(issues: [.styleComplexity], usesReaderLayout: true))
     }
 
     @Test func localCSSImportsCycleMediaConditionsAndSecurityRejection() throws {
@@ -569,15 +567,11 @@ struct EPUBStyleCompatibilityTests {
 
         // 2. Excess CSS nesting (>32) cannot be safely audited -> distinct EPUBStyleProcessingError.complexityExceeded
         let deepNested = String(repeating: "(", count: 40) + String(repeating: ")", count: 40)
-        #expect(throws: EPUBStyleProcessingError.complexityExceeded) {
-            _ = try EPUBAuthorStyles.sanitizeStylesheet(
-                "p { width: \(deepNested); }",
-                sourcePath: "OPS/Styles/deep.css",
-                documentPath: "OPS/Text/c1.xhtml",
-                manifestByPath: ["OPS/Styles/deep.css": "text/css"],
-                destination: root
-            )
-        }
+        let nested = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+            "p { width: \(deepNested); }", sourcePath: "OPS/Styles/deep.css", documentPath: "OPS/Text/c1.xhtml",
+            manifestByPath: ["OPS/Styles/deep.css": "text/css"], destination: root)
+        #expect(nested.css.isEmpty && nested.referencedFonts.isEmpty)
+        #expect(nested.styleCompatibility == EPUBStyleCompatibility(issues: [.styleComplexity], usesReaderLayout: true))
     }
 
     @Test func longBook1633ChaptersSharedStylesFontDedupAndCancellation() async throws {
@@ -590,7 +584,8 @@ struct EPUBStyleCompatibilityTests {
         @import "fonts.css";
         p { color: #222222; text-indent: 2em; }
         """
-        let fontsCSS = """
+        let missingFaces = (0..<95).map { "@font-face {font-family: Missing\($0); src: url(../Fonts/missing\($0).ttf);}" }.joined()
+        let fontsCSS = missingFaces + """
         @font-face {
             font-family: LongBookFont;
             src: local("NonExistentLocal"), url(../Fonts/missing-fallback.ttf), url(../Fonts/shared.ttf) format("truetype");
@@ -601,8 +596,10 @@ struct EPUBStyleCompatibilityTests {
         let chapterCount = 1633
         var chapters: [EPUBSyntheticChapter] = []
         chapters.reserveCapacity(chapterCount)
+        let paragraph = "<p>Original synthetic paragraph A😀e\u{301}. " + String(repeating: "测试段落不含原书内容。", count: 4) + "</p>"
+        let prose = String(repeating: paragraph, count: 64)
         for idx in 1...chapterCount {
-            let xhtml = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>C\(idx)</title><link rel=\"stylesheet\" href=\"../Styles/main.css\"/></head><body><h1 id=\"h\(idx)\">Chapter \(idx)</h1><p>Line \(idx)</p></body></html>"
+            let xhtml = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>C\(idx)</title><link rel=\"stylesheet\" href=\"../Styles/main.css\"/></head><body><h1 id=\"h\(idx)\">Chapter \(idx)</h1><p>Line \(idx)</p>\(prose)</body></html>"
             chapters.append(EPUBSyntheticChapter(id: "c\(idx)", path: "Text/c\(idx).xhtml", title: "Chapter \(idx)", headingID: "h\(idx)", bodyXHTML: xhtml))
         }
 
@@ -625,12 +622,36 @@ struct EPUBStyleCompatibilityTests {
         )
 
         let dest = root.appendingPathComponent("long-1633-dest", isDirectory: true)
-        let pkg = try EPUBPackageParser.parse(archiveURL: epubURL, destination: dest)
+        let samples = EPUBPreparationSamples()
+        let pkg = try EPUBPackageParser.parse(archiveURL: epubURL, destination: dest, observe: samples.record)
+        let final = try #require(samples.values.last)
+        #expect(final.stage == .complete && final.completedChapters == chapterCount)
+        #expect(final.resourcePresenceChecks <= 100)
+        #expect(final.resourcePresenceHits > chapterCount * 95)
+        #expect(final.peakChapterBytes < final.outputBytes / 100)
+        for index in [1, 817, 1633] {
+            #expect(pkg.textNodes["OPS/Text/c\(index).xhtml"]?.count == 66)
+        }
+        print("EPUB_SYNTHETIC_1633x96 ms=\(final.elapsedMilliseconds) processPeakRSS=\(final.processPeakRSSBytes) outputBytes=\(final.outputBytes) chapterPeak=\(final.peakChapterBytes) pathChecks=\(final.resourcePresenceChecks) pathHits=\(final.resourcePresenceHits)")
         #expect(pkg.spine.count == chapterCount)
         let fontResources = pkg.resources.filter { $0.mediaType == "font/ttf" }
         #expect(fontResources.count == 1)
         #expect(fontResources.first?.path == "OPS/Fonts/shared.ttf")
-        #expect(pkg.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing], usesReaderLayout: false))
+        #expect(pkg.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable], usesReaderLayout: false))
+
+        let midCancelDest = root.appendingPathComponent("mid-parse-cancel", isDirectory: true)
+        let midCancel = Task {
+            try EPUBPackageParser.parse(archiveURL: epubURL, destination: midCancelDest) { sample in
+                if sample.stage == .chapters && sample.completedChapters >= 64 {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }
+        do { _ = try await midCancel.value; Issue.record("Mid-parse cancellation must throw") }
+        catch is CancellationError {}
+        #expect(!FileManager.default.fileExists(atPath: midCancelDest.path))
+        #expect(FileManager.default.fileExists(atPath: dest.path))
+        #expect(try EPUBResourceStore.sourceDigest(epubURL) == pkg.sourceSHA256)
 
         // Verify cancellation is never swallowed
         let cancelDest = root.appendingPathComponent("long-1633-cancel", isDirectory: true)
