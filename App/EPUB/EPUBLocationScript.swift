@@ -378,6 +378,7 @@ enum EPUBLocationScript {
         }
         function observedScrollTo(x, y) {
             recordDiagnostic("programmatic-scroll", x, y);
+            state.requestedScroll = {x: x, y: y};
             window.scrollTo(x, y);
         }
 
@@ -873,6 +874,17 @@ enum EPUBLocationScript {
             return rect && Number.isFinite(rect.top) && Math.abs(rect.top) <= 16384 ? rect.top : null;
         }
 
+        function persistentViewportOffset(path, node, offset) {
+            var actual = positionViewportOffset(path, node, offset);
+            // Preserve the requested logical coordinate only inside the existing
+            // one-CSS-pixel rounding bound. Real movement releases this anchor.
+            if (!state.paginated && state.preserveTargetAnchor && path === state.targetPath &&
+                node === state.targetNode && offset === state.targetOffset &&
+                Number.isFinite(actual) && Number.isFinite(state.targetViewportOffset) &&
+                Math.abs(actual - state.targetViewportOffset) <= 1) { return state.targetViewportOffset; }
+            return actual;
+        }
+
         function scrollToTarget(targetNode, targetOffset, fragment, path, viewportOffset) {
             path = path || state.path;
             if (typeof targetNode === "number" && targetNode >= 0) {
@@ -1273,6 +1285,7 @@ enum EPUBLocationScript {
                 state.imageCancels = [];
                 // Capture AFTER image decoding: the reader may have moved while it was pending.
                 var anchor = sampleVisible(), before = anchor && anchorRect(anchor);
+                var anchorScrollX = window.scrollX || 0, anchorScrollY = window.scrollY || 0;
                 if (!anchor) { windowMessage(true); return; }
                 state.syncing = true;
                 state.reflowRevision += 1;
@@ -1316,7 +1329,12 @@ enum EPUBLocationScript {
                 }
                 state.observedScrollX = window.scrollX || 0;
                 state.observedScrollY = window.scrollY || 0;
-                if (!state.restoreCompletion) { state.preserveTargetAnchor = false; }
+                if (state.preserveTargetAnchor && !state.restoreCompletion) {
+                    // A preload is not a user move: translate the motion reference
+                    // by DOM-origin compensation, preserving exact UTF-16 identity.
+                    state.restoredScrollX += committedScrollX - anchorScrollX + deltaX;
+                    state.restoredScrollY += committedScrollY - anchorScrollY + deltaY;
+                }
                 state.suppressingReflow = Boolean(state.restoreCompletion);
                 state.lastAnchor = anchor && {path: anchor.path, node: anchor.node, utf16Offset: anchor.utf16Offset};
                 // ResizeObserver delivery from this commit must not snap to a page/line start.
@@ -1477,8 +1495,25 @@ enum EPUBLocationScript {
                     post({kind: "error", reason: "target-restore-failed", sessionID: state.sessionID, epoch: state.epoch, path: state.path});
                     return;
                 }
-                window.requestAnimationFrame(function() { window.requestAnimationFrame(function() {
+                var requested = {x: state.requestedScroll.x, y: state.requestedScroll.y};
+                var settlingFrames = 0, stableFrames = 0, corrections = 0;
+                function confirmRestoration() {
                     if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
+                    var maxX = Math.max(0, contentWidth() - viewportWidth());
+                    var maxY = Math.max(0, Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0) - window.innerHeight);
+                    var expectedX = Math.max(0, Math.min(maxX, requested.x));
+                    var expectedY = Math.max(0, Math.min(maxY, requested.y));
+                    var reached = Math.abs((window.scrollX || 0) - expectedX) <= 1 &&
+                        Math.abs((window.scrollY || 0) - expectedY) <= 1;
+                    stableFrames = reached ? stableFrames + 1 : 0;
+                    settlingFrames += 1;
+                    if (stableFrames < 2) {
+                        if (settlingFrames >= 60) {
+                            state.restoreCompletion = null;
+                            post({kind: "error", reason: "viewport-scroll-not-settled", sessionID: mySession, epoch: myEpoch, path: state.path});
+                        } else { window.requestAnimationFrame(confirmRestoration); }
+                        return;
+                    }
                     var sample = sampleVisible(state.path);
                     if (!sample) {
                         state.restoreCompletion = null;
@@ -1488,6 +1523,18 @@ enum EPUBLocationScript {
                     var targetRect = state.targetNode >= 0 ? textAnchorRect(state.path, state.targetNode, state.targetOffset) : null;
                     var desiredTop = Number.isFinite(state.targetViewportOffset)
                         ? state.targetViewportOffset : 18;
+                    if (!state.paginated && targetRect && expectedY > 0 && expectedY < maxY && Math.abs(targetRect.top - desiredTop) > 1) {
+                        if (corrections >= 2) {
+                            state.restoreCompletion = null;
+                            post({kind: "error", reason: "target-restore-failed", sessionID: mySession, epoch: myEpoch, path: state.path});
+                            return;
+                        }
+                        requested.y += targetRect.top - desiredTop;
+                        corrections += 1; stableFrames = 0;
+                        observedScrollTo(requested.x, requested.y);
+                        window.requestAnimationFrame(confirmRestoration);
+                        return;
+                    }
                     var last = state.chapters[state.chapters.length - 1];
                     var hasFollowing = last && Number.isSafeInteger(config.spineCount) && last.index + 1 < config.spineCount;
                     // Permit only the bounded window loader, not interaction/progress, while
@@ -1514,7 +1561,8 @@ enum EPUBLocationScript {
                         viewportOffset: positionViewportOffset(sample.path, restoredNode, restoredOffset)});
                     if (currentChapterAuthorFallback(sample.path)) { readyPayload.authorStyleFallback = true; }
                     post(readyPayload);
-                }); });
+                }
+                window.requestAnimationFrame(confirmRestoration);
             }
             if (!hasAuthorFonts(document)) {
                 waitForImagesAndTwoFrames(mySession, myEpoch, restoreAndConfirm);
@@ -1555,7 +1603,7 @@ enum EPUBLocationScript {
                 scrollX: sample.scrollX,
                 viewportWidth: sample.viewportWidth,
                 contentWidth: sample.contentWidth,
-                viewportOffset: positionViewportOffset(sample.path, activeNode, activeOffset),
+                viewportOffset: persistentViewportOffset(sample.path, activeNode, activeOffset),
                 visibleText: sample.visibleText
             };
             if (currentChapterAuthorFallback(sample.path)) { payload.authorStyleFallback = true; }

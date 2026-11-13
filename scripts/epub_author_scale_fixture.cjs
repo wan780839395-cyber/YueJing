@@ -119,6 +119,8 @@ ${scope} img {width:160px;height:120px;margin:8px 0;}`;
             ok(f.api.syncWindow({sessionID:'scale-session',epoch:'original',chapters:[c],keepPaths:['OPS/scale0.xhtml',c.path]}),'append accepted');
             for(let n=0;n<120&&!f.messages.slice(start).some(p=>p.kind==='window');n++)await tick();
             ok(f.messages.slice(start).some(p=>p.kind==='window'&&!p.error),'append succeeded');
+            const keptAnchor=f.api.sampleNow();
+            ok(keptAnchor.node===1&&keptAnchor.utf16Offset===11,'background append preserves restored UTF16 anchor');
             const next=f.d.querySelector('[data-yj-chapter="OPS/scale1.xhtml"] .absolute');
             near(parseFloat(f.w.getComputedStyle(next).fontSize),24*1.4,'new chapter same scale');
             const commands=[],scroll=f.w.scrollTo;
@@ -134,6 +136,32 @@ ${scope} img {width:160px;height:120px;margin:8px 0;}`;
             for(const [value,wanted] of [[100,1.8],[-10,0.7],[NaN,1],[undefined,1]]){
                 await f.configure('bound-'+f.messages.length,value);checkScaled(before,f.styles(),wanted);
             }
+        }finally{f.frame.remove();}
+    });
+    await test('delayed native scroll cannot publish ready at the old fragment',async()=>{
+        const f=await create();try{
+            await f.configure('initial');
+            const scroll=f.w.scrollTo;let delivered=false;
+            f.w.scrollTo=function(...args){let frames=8;function deliver(){if(--frames>0)f.w.requestAnimationFrame(deliver);else{scroll.apply(f.w,args);delivered=true;}}f.w.requestAnimationFrame(deliver);};
+            const ready=await f.configure('delayed-fragment',1,{targetNode:-1,targetOffset:0,preserveTargetAnchor:false,fragment:'yj-t3'});
+            ok(delivered&&ready.node>=3,'ready must acknowledge the actually reached fragment, not old pixels');
+            f.w.scrollTo=scroll;
+        }finally{f.frame.remove();}
+    });
+    await test('fractional restore rounding cannot accumulate across settings; real user movement stays real',async()=>{
+        const f=await create();try{
+            const scroll=f.w.scrollTo;f.w.scrollTo=function(x,y){return scroll.call(f.w,x,Math.floor(y));};
+            const intended=42.375;
+            await f.configure('fractional',1,{targetViewportOffset:intended});
+            for(const scale of [1.4,1.8,0.7,1,1.4,1.8,0.7,1]){
+                const saved=f.api.sampleNow();
+                await f.configure('fractional-'+f.messages.length,scale,{targetViewportOffset:saved.viewportOffset});
+                near(f.rect().top,intended,'no accumulated physical drift',1);
+            }
+            f.w.scrollTo=scroll;f.w.scrollBy(0,80);for(let i=0;i<8;i++)await tick();
+            const moved=f.api.sampleNow(),span=f.d.getElementById('yj-t'+moved.node),range=f.d.createRange();
+            range.setStart(span.firstChild,moved.utf16Offset);range.setEnd(span.firstChild,moved.utf16Offset+1);
+            near(moved.viewportOffset,range.getBoundingClientRect().top,'user motion reports actual geometry',0.1);
         }finally{f.frame.remove();}
     });
     if(failures.length)throw new Error(`${results.length} passed; ${failures.length} failed\n${failures.join('\n')}`);

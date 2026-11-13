@@ -28,7 +28,7 @@
   ],
   "candidate_sha256": {
     "App/EPUB/EPUBContentsView.swift": "524b7ae59feb8f4e0de49c3b54b3da572671e608d589bbafeaffc34e8c0d5257",
-    "App/EPUB/EPUBLocationScript.swift": "ee92dd5fc1b67831524c2d46cb4edda92738e5160f7b5ea42772f12b04de6a3e",
+    "App/EPUB/EPUBLocationScript.swift": "697f1f0595e8819f4275e7573080da5a0c7a2bf2061567b755200811d45fc856",
     "App/EPUB/EPUBReaderScreen.swift": "f11efaf10ba94570916aa8b00db23fbfae87c4bbe4e6e4fb5a93681ea4f10574",
     "App/EPUB/EPUBReaderViewModel.swift": "526fe36a165e2e22181760e88ad4b7b2bf4009080bffeab687b339b3ebf70183",
     "App/EPUB/EPUBSettingsView.swift": "ec6b710b8dbbebf998671d87c595440281247acdfc8548c6f490b94c0c750ff5",
@@ -44,7 +44,7 @@
     "scripts/check_epub_interaction_contract.py": "d390423b05a89fad42afa2a1be22eb68ffcd394cf3108cc5e275246195ba4064",
     "scripts/check_epub_ui_projection.cjs": "22bc1cd8529d47c2a463c114e38c88b93078ba693098b6933c0fb0a4f6652ef4",
     "scripts/epub_author_layout_fixture.cjs": "d20fb8ad8013d0eff584b11edf07173da80f00b2dcd80c50ad6baca013363ef9",
-    "scripts/epub_author_scale_fixture.cjs": "ac273d3fd355d1e616933d12704e805740c2bfcb7316b509be11c490f653f0fb",
+    "scripts/epub_author_scale_fixture.cjs": "8a3a33a67e425a10945779fa0b9b3afd3793aff98316883e29fb78ecddd6299a",
     "scripts/epub_interaction_fixture.cjs": "782ab88cfcb84804a67501a9c86200c0070d7c1849f8892052b83ee31f513270",
     "scripts/run_epub_author_layout_validation.py": "1a0b4561bf0738ae8f83a05dd973273a5930000e76da57d3cf12c3058182435a"
   },
