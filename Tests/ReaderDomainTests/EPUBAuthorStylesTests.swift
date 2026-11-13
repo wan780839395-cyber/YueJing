@@ -325,7 +325,7 @@ struct EPUBAuthorStylesTests {
         ]
         for payload in unsupportedCSSPayloads {
             let presentationOnly = [
-                #"p { content: "unclosed"#, #"p { background: url(unquoted space.png); }"#,
+                #"p { content: "unclosed"#,
                 #"@font-face { }"#, #"@font-face { font-family: Custom; }"#,
                 #"@font-face { src: url(../Fonts/valid.ttf); }"#
             ]

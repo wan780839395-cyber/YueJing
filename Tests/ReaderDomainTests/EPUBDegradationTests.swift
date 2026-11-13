@@ -47,7 +47,11 @@ struct EPUBDegradationTests {
     @Test func optionalStylesRollbackEarlierRulesAndNeverHideIntegrityFailure() throws {
         let root = try EPUBTestSupport.makeWorkspace(); defer { try? FileManager.default.removeItem(at: root) }
         try Data("invalid font".utf8).write(to: root.appendingPathComponent("bad.ttf"))
-        for bad in ["p { color: #123456; } /* unterminated", "@font-face {font-family: Bad; src: url(bad.ttf);}"] {
+        let eofComment = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility("p { color: #123456; } /* unterminated",
+            sourcePath: "s.css", documentPath: "c.xhtml", manifestByPath: [:], destination: root)
+        #expect(eofComment.css.contains("#123456") && !eofComment.css.contains("unterminated"))
+        #expect(eofComment.referencedFonts.isEmpty && !eofComment.styleCompatibility.usesReaderLayout)
+        for bad in ["p { content: \"unclosed", "@font-face {font-family: Bad; src: url(bad.ttf);}"] {
             let xhtml = document("<p style=\"color: #654321\">Kept😀</p>", head: "<style>p {color: #112233}</style><style>\(bad)</style>")
             let clean = try EPUBContentPolicy.sanitizeXHTML(data: Data(xhtml.utf8), path: "c.xhtml", manifestByPath: ["bad.ttf": "font/ttf"], spineSet: ["c.xhtml"], destination: root)
             #expect(clean.textNodes == ["Kept😀"])

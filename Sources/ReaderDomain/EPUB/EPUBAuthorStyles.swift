@@ -811,7 +811,7 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try styleSyntax { try CSSTokenizer.tokenize(cssText) }
+            let tokens = try CSSTokenizer.tokenize(cssText)
             let items = try styleSyntax { try CSSParser.parseStylesheet(tokens) }
             cache?.retainStylesheet(at: canonicalPath, byteCount: utf8Count, items: items)
             try processStylesheetItems(
@@ -833,7 +833,7 @@ public enum EPUBAuthorStyles {
             guard utf8Count <= maxInlineCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try styleSyntax { try CSSTokenizer.tokenize(styleText) }
+            let tokens = try CSSTokenizer.tokenize(styleText)
             for token in tokens {
                 if case .atKeyword = token {
                     throw EPUBError.unsupportedContent
@@ -855,7 +855,7 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try styleSyntax { try CSSTokenizer.tokenize(styleText) }
+            let tokens = try CSSTokenizer.tokenize(styleText)
             for token in tokens {
                 if case .atKeyword = token {
                     throw EPUBError.unsupportedContent
@@ -905,7 +905,7 @@ public enum EPUBAuthorStyles {
             guard totalRawCSSBytes <= maxTotalChapterCSSBytes else {
                 throw EPUBError.limitExceeded
             }
-            let tokens = try styleSyntax { try CSSTokenizer.tokenize(cssText) }
+            let tokens = try CSSTokenizer.tokenize(cssText)
             let items = try styleSyntax { try CSSParser.parseStylesheet(tokens) }
             try processStylesheetItems(items, sourcePath: sourcePath, importDepth: 0, emitRules: emitRules)
         }
@@ -1277,7 +1277,7 @@ public enum EPUBAuthorStyles {
                 if ch == 0x22 || ch == 0x27 { // " or '
                     let token = consumeString(scalars: scalars, index: &index, quote: ch)
                     if case .badString = token {
-                        throw EPUBError.unsupportedContent
+                        throw EPUBStyleProcessingError.malformedStylesheet
                     }
                     try push(token)
                     continue

@@ -51,11 +51,10 @@ struct EPUBP2CompatibilityTests {
                 )
                 #expect(result.css.contains("#123456"))
             } else {
-                #expect(throws: EPUBStyleProcessingError.complexityExceeded) {
-                    _ = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
-                        css, sourcePath: "OPS/s.css", documentPath: "OPS/c.xhtml", manifestByPath: [:], destination: root
-                    )
-                }
+                let result = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+                    css, sourcePath: "OPS/s.css", documentPath: "OPS/c.xhtml", manifestByPath: [:], destination: root)
+                #expect(result.css.isEmpty && result.referencedFonts.isEmpty)
+                #expect(result.styleCompatibility == EPUBStyleCompatibility(issues: [.styleComplexity], usesReaderLayout: true))
             }
         }
         // A false condition must still audit dangerous payloads, including import URLs.
