@@ -53,6 +53,7 @@ struct EPUBFontLoadingHostTests {
     @Test func epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics() async throws {
         let fontData = try Self.makeSyntheticGeometricFontData()
         #expect(try EPUBAuthorStyles.verifyFontData(fontData, declaredMediaType: "font/ttf") == "font/ttf")
+        #expect(try EPUBAuthorStyles.verifyFontData(fontData, declaredMediaType: "font/otf") == "font/ttf")
 
         try await withHostFixture { fixture in
             let archiveURL = fixture.root.appendingPathComponent("SyntheticFont.epub")
@@ -62,7 +63,8 @@ struct EPUBFontLoadingHostTests {
                 to: archiveURL,
                 title: "Synthetic Geometric Font",
                 fontFileName: "SyntheticGeometric.ttf",
-                fontData: fontData
+                fontData: fontData,
+                declaredFontMediaType: "font/otf" // Actual TrueType bytes must still decode and serve as font/ttf.
             )
 
             // Exercise production EPUBPackageParser + EPUBContentPolicy + EPUBAuthorStyles directly
@@ -708,7 +710,8 @@ struct EPUBFontLoadingHostTests {
         to archiveURL: URL,
         title: String,
         fontFileName: String,
-        fontData: Data
+        fontData: Data,
+        declaredFontMediaType: String = "font/ttf"
     ) throws {
         let container = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -730,7 +733,7 @@ struct EPUBFontLoadingHostTests {
             <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
             <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
             <item id="css" href="Styles/font.css" media-type="text/css"/>
-            <item id="ttf" href="Fonts/\(EPUBContentPolicy.escapeXMLAttribute(fontFileName))" media-type="font/ttf"/>
+            <item id="ttf" href="Fonts/\(EPUBContentPolicy.escapeXMLAttribute(fontFileName))" media-type="\(EPUBContentPolicy.escapeXMLAttribute(declaredFontMediaType))"/>
           </manifest>
           <spine>
             <itemref idref="ch1"/>

@@ -3313,9 +3313,9 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "dc2a687b3bd72c5609fbc15858fd01491e436631",
-        "0.2.16",
-        "18",
+        "6b065d48479f8387dc2e9d1bd2c21dc53f2d93da",
+        "0.2.17",
+        "19",
     )
     assert r.WORKFLOW_ID == 398234793 and r.REPO == "wan780839395-cyber/YueJing"
 
@@ -3325,24 +3325,20 @@ def run_checks(root):
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
         selection = src["selected_summary"]
-        assert selection["selected_declarations"] == 98 and selection["planned_executions"] == 99
-        assert selection["kind_declarations"] == {"domain": 78, "host": 17, "ui": 3}
-        assert len(selection["selected_files"]) == 13
+        assert selection["selected_declarations"] == 15 and selection["planned_executions"] == 15
+        assert selection["kind_declarations"] == {"domain": 12, "host": 3, "ui": 0}
+        assert len(selection["selected_files"]) == 4
         for rel, cases in selection["selected_files"].items():
-            assert cases == r.inventory.FILES[rel].split(), "Frozen file group is incomplete: " + rel
-        passed("frozen P2 exact full-file selection: 98 declarations / 99 executions")
+            if rel == "YueJingHostTests/EPUBReaderHostTests.swift":
+                assert cases == ["epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification"]
+            else:
+                assert cases == r.inventory.FILES[rel].split(), "Selected file group is incomplete: " + rel
+        passed("font MIME repair exact selection: 12 Domain + 3 Host, no unrelated UI or TXT")
         groups = r.build_groups(r.load_scope_config())
-        fresh, reused = r.partition_groups(groups, r.P2_RUN_ID)
-        assert fresh == ["domain-1", "domain-7"] and set(reused) == r.P2_REUSED
-        assert sum(len(groups[g]["cases"]) for g in fresh) == 15
-        assert sum(r._planned_group_executions(groups[g]) for g in reused) == 84
-        passed("P2 followup schedules only 15 repaired-file cases and reuses 83/84")
-        bad_groups = copy.deepcopy(groups)
-        bad_groups["domain-1"]["cases"] = bad_groups["domain-1"]["cases"][:-1]
-        rejects("P2 partition rejects omitted repaired case", lambda: r.partition_groups(bad_groups, r.P2_RUN_ID))
-        assert r._prior_origin_ids(r.P2_RUN_ID) == [r.P2_RUN_ID]
-        assert r._prior_spec(r.P2_RUN_ID)["source_commit"] == r.P2_SOURCE
-        passed("P2 origin is nonrecursive and source pinned")
+        fresh, reused = r.partition_groups(groups, "")
+        assert len(fresh) == 4 and reused == []
+        passed("all 15 font MIME cases execute freshly")
+        rejects("old P2 reuse is incompatible with the font MIME repair", lambda: r.partition_groups(groups, r.P2_RUN_ID))
 
     wf_status = "skipped_workflow_not_wired_yet"
     wf_text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding="utf-8")

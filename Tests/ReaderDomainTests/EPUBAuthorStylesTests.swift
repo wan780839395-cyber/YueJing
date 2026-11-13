@@ -143,6 +143,12 @@ struct EPUBAuthorStylesTests {
         #expect(try EPUBAuthorStyles.verifyFontData(ttfData, declaredMediaType: "application/font-sfnt") == "font/ttf")
         #expect(try EPUBAuthorStyles.verifyFontData(otfData, declaredMediaType: "font/otf") == "font/otf")
         #expect(try EPUBAuthorStyles.verifyFontData(otfData, declaredMediaType: "application/vnd.ms-opentype") == "font/otf")
+        // Every already-supported SFNT declaration is only a hint; serve the verified byte format.
+        for declared in EPUBAuthorStyles.supportedFontManifestMediaTypes {
+            #expect(try EPUBAuthorStyles.verifyFontData(ttfData, declaredMediaType: declared) == "font/ttf")
+            #expect(try EPUBAuthorStyles.verifyFontData(otfData, declaredMediaType: declared) == "font/otf")
+        }
+        #expect(try EPUBAuthorStyles.verifyFontData(ttfData, declaredMediaType: " FONT/OTF \n") == "font/ttf")
         #expect(EPUBAuthorStyles.allowedFontMediaTypes == ["font/ttf", "font/otf"])
         #expect(EPUBAuthorStyles.maximumServedBytes(forMediaType: "font/ttf") == 8 * 1024 * 1024)
         #expect(EPUBAuthorStyles.maximumServedBytes(forMediaType: "font/otf") == 8 * 1024 * 1024)
@@ -188,8 +194,8 @@ struct EPUBAuthorStylesTests {
             ],
             manifestExtra: """
             <item id="css1" href="Styles/ch1.css" media-type="text/css"/>
-            <item id="font1" href="Fonts/Book%20A.ttf" media-type="application/font-sfnt"/>
-            <item id="font2" href="Fonts/BookB.otf" media-type="font/otf"/>
+            <item id="font1" href="Fonts/Book%20A.ttf" media-type="font/otf"/>
+            <item id="font2" href="Fonts/BookB.otf" media-type="font/ttf"/>
             """,
             extraEntries: [
                 ("OPS/Styles/ch1.css", Data(ch1CSS.utf8)),
@@ -499,7 +505,7 @@ struct EPUBAuthorStylesTests {
         let validTTF = makeMinimalSFNT(flavor: .ttf)
         let validOTF = makeMinimalSFNT(flavor: .otf)
 
-        // 1. Unsupported font formats & SFNT signature/MIME mismatches
+        // 1. Unsupported containers stay rejected; supported SFNT MIME hints may be corrected.
         var woffHeader = validTTF
         woffHeader.replaceSubrange(0..<4, with: Data("wOFF".utf8))
         var woff2Header = validTTF
@@ -512,11 +518,12 @@ struct EPUBAuthorStylesTests {
                 _ = try EPUBAuthorStyles.verifyFontData(badFormat, declaredMediaType: "font/ttf")
             }
         }
-        #expect(throws: EPUBError.corruptResource) {
-            _ = try EPUBAuthorStyles.verifyFontData(validOTF, declaredMediaType: "font/ttf")
-        }
-        #expect(throws: EPUBError.corruptResource) {
-            _ = try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: "font/otf")
+        #expect(try EPUBAuthorStyles.verifyFontData(validOTF, declaredMediaType: "font/ttf") == "font/otf")
+        #expect(try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: "font/otf") == "font/ttf")
+        for unsupported in ["application/octet-stream", "image/png", "font/woff", "font/woff2"] {
+            #expect(throws: EPUBError.unsupportedContent) {
+                _ = try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: unsupported)
+            }
         }
 
         // 2. Single font > 8 MiB -> limitExceeded
@@ -592,8 +599,10 @@ struct EPUBAuthorStylesTests {
             ], bodySize: 120, patchHeadMagicAt: 44)
         ]
         for bad in malformedSFNTs {
-            #expect(throws: EPUBError.corruptResource) {
-                _ = try EPUBAuthorStyles.verifyFontData(bad, declaredMediaType: bad.starts(with: Data("OTTO".utf8)) ? "font/otf" : "font/ttf")
+            for declared in ["font/ttf", "font/otf"] {
+                #expect(throws: EPUBError.corruptResource) {
+                    _ = try EPUBAuthorStyles.verifyFontData(bad, declaredMediaType: declared)
+                }
             }
         }
 

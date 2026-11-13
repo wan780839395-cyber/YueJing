@@ -140,6 +140,13 @@ struct EPUBAuthorStyleMigrationTests {
             #expect(try Data(contentsOf: storedSource) == originalArchiveBytes)
             try await opened.abandon()
 
+            // Duplicate import reparses the mislabeled font, but cannot replace metadata or progress.
+            let beforeDuplicate = try await f.store.storedEPUBSnapshot(bookID: bookID)
+            let duplicate = try await f.install(archive)
+            #expect(duplicate.duplicate && duplicate.book.id == bookID)
+            #expect(try await f.store.storedEPUBSnapshot(bookID: bookID).metadataSHA256 == beforeDuplicate.metadataSHA256)
+            #expect(try Data(contentsOf: storedSource) == originalArchiveBytes)
+
             // Second open reuses migrated Ready directory without rebuilding.
             let reopened = try await freshService.openEPUB(id: bookID)
             #expect(reopened.reusedResources)
@@ -641,6 +648,7 @@ struct EPUBAuthorStyleMigrationTests {
     // MARK: - Helpers
 
     private func writeStyledFontEPUB(at url: URL, unavailableOptionalStyles: Bool = false) throws -> URL {
+        // Reproduce a TrueType resource mislabeled as OpenType without modifying archive bytes on upgrade.
         let ttf = makeMinimalTTF()
         let png = try EPUBLibraryFixture.image(width: 32, height: 32)
         let css = """
@@ -690,7 +698,7 @@ struct EPUBAuthorStyleMigrationTests {
             coverMediaType: "image/png",
             manifestExtra: """
             <item id="css1" href="Styles/book.css" media-type="text/css"/>
-            <item id="font1" href="Fonts/book.ttf" media-type="font/ttf"/>
+            <item id="font1" href="Fonts/book.ttf" media-type="font/otf"/>
             <item id="pic1" href="Images/pic.png" media-type="image/png"/>
             """,
             extraEntries: [

@@ -98,19 +98,13 @@ public enum EPUBAuthorStyles {
             throw EPUBError.corruptResource
         }
 
-        let canonicalMediaType: String
-        switch declared {
-        case "font/ttf", "application/x-font-ttf", "application/x-font-truetype", "font/truetype":
-            guard isTTF else { throw EPUBError.corruptResource }
-            canonicalMediaType = "font/ttf"
-        case "font/otf", "application/x-font-opentype", "application/font-opentype", "font/opentype":
-            guard isOTF else { throw EPUBError.corruptResource }
-            canonicalMediaType = "font/otf"
-        case "application/font-sfnt", "application/vnd.ms-opentype":
-            canonicalMediaType = isOTF ? "font/otf" : "font/ttf"
-        default:
+        // The manifest is a type hint, not proof of the SFNT outline format.
+        // Normalize mislabeled TTF/OTF only within the existing font whitelist;
+        // all byte/structure/budget checks below still have to pass before return.
+        guard supportedFontManifestMediaTypes.contains(declared) else {
             throw EPUBError.unsupportedContent
         }
+        let canonicalMediaType = isOTF ? "font/otf" : "font/ttf"
 
         let numTables = Int(uint16BE(data, at: 4))
         guard numTables > 0, numTables <= 256 else {
