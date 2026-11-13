@@ -7,9 +7,9 @@ import sys
 
 import validate_task3 as v
 
-BASE = "47ec79d5c7c79e2cd173b66a60e45c4605e82c9f"
-SCOPE = "epub-diagnostic-47ec79d"
-VERSION, BUILD = "0.2.19", "21"
+BASE = "a0fbb605514759286e61cdeb5cd14f85d595697d"
+SCOPE = "epub-diagnostic-a0fbb60"
+VERSION, BUILD = "0.2.21", "23"
 ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/validate_task3.py",
                      "scripts/epub_diagnostic_package.py", "docs/EPUB_DIAGNOSTIC_PACKAGE.md"))
 
@@ -56,8 +56,12 @@ def scope_receipt():
                 qualification="DEVICE_DIAGNOSTIC_ONLY", coverage="UI_NOT_QUALIFIED",
                 native_tests_executed_this_run=0, full_regression_passed=False,
                 allow_unqualified_ipa=True, build_ipa=True,
-                unresolved_cases=["epubOpeningRouteStartsOnceAndObservesMountedPresentation",
-                                  "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position"],
+                unresolved_cases=["testEPUBShelfCoverAndDirectoryCrossChapterNavigation"],
+                validation_reference=dict(run_id="43427854507", source_commit=BASE,
+                    artifact_id=14040301098,
+                    artifact_sha256="c049599ff0bd06d5f4fc672c5ea3ffa16af0f00e823130f0f6617d13c6b4e08e",
+                    reported_passed=24, reported_failed=1,
+                    evidence_kind="SEPARATE_RUN_REFERENCE_NOT_CURRENT_NATIVE_GATE"),
                 physical_acceptance="not performed", files=v.candidate_files())
 
 
@@ -78,8 +82,8 @@ if __name__ == "__main__":
         v.report("epub-diagnostic-scope.json", scope_receipt())
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
             output.write("## DIAGNOSTIC ONLY — TESTS NOT RUN / UI NOT QUALIFIED\n\n"
-                         "User requested a device package after repeated UI failures. "
-                         "No simulator, Domain, Host or UI execution. Product source unchanged from 47ec79d. "
+                         "User requested a device package after complete targeted validation and unified triage. "
+                         "No simulator, Domain, Host or UI execution in this packaging run. Product source unchanged from a0fbb60. "
                          "Device Release, dependency, unsigned and payload byte checks remain required.\n")
     else:
         raise SystemExit("Expected freeze")

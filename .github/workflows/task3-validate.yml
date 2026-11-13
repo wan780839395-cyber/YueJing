@@ -16,7 +16,7 @@ on:
           - epub-compat-33
           - epub-paging-6
           - epub-reading-15
-          - epub-diagnostic-47ec79d
+          - epub-diagnostic-a0fbb60
           - epub-opening-followup-3
           - epub-author-layout
       allow_unqualified_ipa:
@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-47ec79d' && inputs.validation_scope != 'epub-opening-followup-3' && inputs.validation_scope != 'epub-author-layout' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-a0fbb60' && inputs.validation_scope != 'epub-opening-followup-3' && inputs.validation_scope != 'epub-author-layout' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1045,7 +1045,7 @@ jobs:
           if-no-files-found: error
 
   epub_diagnostic:
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-47ec79d' }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -1055,7 +1055,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      VALIDATION_SCOPE: epub-diagnostic-47ec79d
+      VALIDATION_SCOPE: epub-diagnostic-a0fbb60
     defaults:
       run:
         shell: bash

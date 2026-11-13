@@ -640,6 +640,7 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=0, coverage="UI_NOT_QUALIFIED",
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,
+               separate_validation_reference=qualification["validation_reference"],
                dependency_gate="app-dependency-gate.json"))
     elif epub_author_layout:
         from run_epub_author_layout_validation import complete_delivery, VERSION, BUILD
