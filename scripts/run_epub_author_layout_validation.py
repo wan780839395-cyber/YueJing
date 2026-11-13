@@ -39,8 +39,8 @@ _DEFAULT_OUT = OUT
 SCOPE_CONFIG_JSON = SCRIPT_DIR / "epub_author_layout_scope.json"
 
 SCOPE = "epub-author-layout"
-BASE = "aa834090c73e15bf282c61f3121be30bffb5b4df"
-VERSION, BUILD = "0.2.20", "22"
+BASE = "7388e938db9363f2473f2a5820f4ecc1adf92c5f"
+VERSION, BUILD = "0.2.21", "23"
 REPO = "wan780839395-cyber/YueJing"
 WORKFLOW_ID = 398234793
 WORKFLOW_PATH = ".github/workflows/task3-validate.yml"

@@ -3313,9 +3313,9 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "aa834090c73e15bf282c61f3121be30bffb5b4df",
-        "0.2.20",
-        "22",
+        "7388e938db9363f2473f2a5820f4ecc1adf92c5f",
+        "0.2.21",
+        "23",
     )
     assert r.WORKFLOW_ID == 398234793 and r.REPO == "wan780839395-cyber/YueJing"
 

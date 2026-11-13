@@ -52,8 +52,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["reader.directory.total"].label.contains("4"))
             XCTAssertFalse(app.buttons["reader.contents.bookmarks"].exists)
             XCTAssertEqual(app.buttons["reader.chapter.0"].value as? String, "当前章节")
-            exerciseDirectoryFilterClearAndLocate(app)
-            filterDirectory("3", expectedIndex: 2, app)
+            // Full filter/clear/locate coverage belongs to the independent directory recovery test.
 
             let midAnchorChapter = app.buttons["reader.chapter.2"]
             waitHittable(midAnchorChapter)
