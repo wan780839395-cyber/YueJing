@@ -1,13 +1,11 @@
 # 目录交互与呈现定向验证：0.2.20 / build22
 
 ## 本批范围
-基线 `fc9ab9f93f17329093eaa7586988dfe9d92f1a51`。仅修复目录跳章的工具/反馈显隐、业务ready前的呈现撤帧、错误晚回，以及目录会话/权限输入与筛选操作；补相关原生回归。保留原书、旧库、完整位置、session/epoch/ready、资源路径/CRC/SHA与取消晚回防护。
-
+首轮产品基线 `fc9ab9f93f17329093eaa7586988dfe9d92f1a51`；修复范围仅目录跳章的工具/反馈显隐、业务ready前的呈现撤帧、错误晚回，以及目录会话/权限输入与筛选操作。当前复验基线为 `aa834090c73e15bf282c61f3121be30bffb5b4df`，产品与版本不变，仅修复测试宏中的mutating调用写法。保留原书、旧库、完整位置、session/epoch/ready、资源路径/CRC/SHA与取消晚回防护。
 源码候选与本地静检不代表Swift编译、WKWebView或手机无闪已验收。目录偶发失效的唯一触发条件尚未证实，失效状态仅输出固定布尔而非正文/书名/路径。没有新增字体、背景图、页边距等自定义变量，没有修改生产JS/CSS或数据库结构。
 
 ## 固定入口与精确范围
-复用现有Task3 `validation_scope=epub-author-layout`，由 `scripts/epub_author_layout_scope.json` 绑定本批基线、版本、17路径白名单和候选字节摘要。其余工作流不触发，不沿用历史两项打开等待scope或旧诊断包资格。
-
+复用现有Task3 `validation_scope=epub-author-layout`，由 `scripts/epub_author_layout_scope.json` 绑定本批基线、版本、5路径白名单和候选字节摘要。白名单仅目录测试与scope/runner/self-check/本文；产品不重新修改。其余工作流不触发，不沿用旧诊断包资格。
 本批25项新执行，无历史复用：
 - `EPUBContentsNavigationTests`：9项，包含原始索引/筛选/定位/取消，以及全部权限门、旧会话/前后台、切章反馈。
 - `EPUBReaderHostTests`：10项，首次打开、校验资源与UTF16位置、重排旧回调、图片页、冷暖复用、失败恢复/截止、跨章边界、作者CSS以及字体完整性撤权。
@@ -18,8 +16,8 @@
 
 ## 执行、失败与交付
 - 执行前按本批实际范围取得公开提交/push与Actions批准，仅现有认证、普通提交推送；不发布保护文件、内部报告或私人内容。
-- 首次执行现有工作流attempt1，`build_ipa=true`、`allow_unqualified_ipa=false`、`prior_validation_run`为空。不自动rerun、换规格或全量重测。
 - 固定macos-15、Xcode16.4/16F6、Swift6.1.2/语言6、XcodeGen2.46.0、最低iOS16.6和既有锁定依赖；不升级/安装运行时。
+- 首轮43409469742/attempt1因`#require(tools.beginExit())`宏展开编译失败，25项均未执行；设备Release独立成功，严格IPA未放行。当前明确批准一次新workflow_dispatch/attempt1复验，仍为`build_ipa=true`、`allow_unqualified_ipa=false`、`prior_validation_run`为空。先执行一次beginExit再断言非空，原断言保持；不自动rerun、换规格或全量重测。
 - 逐用例保留真实失败、超时和未完成状态，独立后续用例继续；仅实际共享前置失败阻塞依赖分支。保留480秒外层/180秒用例/120秒启动/60分钟作业预算，不靠加时刷绿。
 - 设备Release在公共前置通过后独立执行，不由UI全绿决定是否编译。正式IPA仍要求本批严格原生资格、设备构建及链接/架构/最低系统/资源许可证/签名/逐文件字节完整性门全部成立。
 - 未全绿不交付“正式合格IPA”；若需要诊断交付，另按实际源码和明确许可绑定现有诊断路径，不改失败为通过、不复用旧IPA冒充本批。

@@ -3313,7 +3313,7 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "fc9ab9f93f17329093eaa7586988dfe9d92f1a51",
+        "aa834090c73e15bf282c61f3121be30bffb5b4df",
         "0.2.20",
         "22",
     )

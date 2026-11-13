@@ -39,7 +39,7 @@ _DEFAULT_OUT = OUT
 SCOPE_CONFIG_JSON = SCRIPT_DIR / "epub_author_layout_scope.json"
 
 SCOPE = "epub-author-layout"
-BASE = "fc9ab9f93f17329093eaa7586988dfe9d92f1a51"
+BASE = "aa834090c73e15bf282c61f3121be30bffb5b4df"
 VERSION, BUILD = "0.2.20", "22"
 REPO = "wan780839395-cyber/YueJing"
 WORKFLOW_ID = 398234793
