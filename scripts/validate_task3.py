@@ -634,9 +634,9 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                native_tests_executed_this_run=15, coverage="EPUB_READING_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
     elif diagnostic:
-        from epub_diagnostic_package import validate_saved
+        from epub_diagnostic_package import validate_saved, VERSION, BUILD
         qualification = validate_saved()
-        require(version == "0.2.4" and build == "6", "Diagnostic package identity differs")
+        require(version == VERSION and build == BUILD, "Diagnostic package identity differs")
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                native_tests_executed_this_run=0, coverage="UI_NOT_QUALIFIED",
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,

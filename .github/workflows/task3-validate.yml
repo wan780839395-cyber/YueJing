@@ -16,7 +16,7 @@ on:
           - epub-compat-33
           - epub-paging-6
           - epub-reading-15
-          - epub-diagnostic-e8112fb
+          - epub-diagnostic-47ec79d
           - epub-opening-followup-3
           - epub-author-layout
       allow_unqualified_ipa:
@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-e8112fb' && inputs.validation_scope != 'epub-opening-followup-3' && inputs.validation_scope != 'epub-author-layout' }}
+    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-47ec79d' && inputs.validation_scope != 'epub-opening-followup-3' && inputs.validation_scope != 'epub-author-layout' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1045,14 +1045,17 @@ jobs:
           if-no-files-found: error
 
   epub_diagnostic:
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-e8112fb' }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-47ec79d' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
+      GH_TOKEN: ${{ github.token }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa && 'true' || 'false' }}
+      BUILD_IPA: ${{ inputs.build_ipa && 'true' || 'false' }}
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      VALIDATION_SCOPE: epub-diagnostic-e8112fb
+      VALIDATION_SCOPE: epub-diagnostic-47ec79d
     defaults:
       run:
         shell: bash
@@ -1079,8 +1082,9 @@ jobs:
           grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
           test "$(uname -m)" = arm64
           mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
+          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 120 \
+            -H 'Accept: application/octet-stream' -H "Authorization: Bearer ${GH_TOKEN}" \
+            'https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069' --output _tooling/xcodegen.zip
           printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
           ditto -x -k _tooling/xcodegen.zip _tooling
           _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log

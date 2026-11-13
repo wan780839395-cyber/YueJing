@@ -1,3 +1,21 @@
+# 当前：0.2.19/build21 真机诊断交付
+
+用户本次明确要求：先排查并尝试修复；若无法查明根因且无法修复，则编译可供真机测试的IPA并提供产物位置。本轮有界核查未确认剩余两项打开等待失败的唯一根因，不再猜测性修改产品或重复模拟器回归。
+
+产品/测试冻结于 `47ec79d5c7c79e2cd173b66a60e45c4605e82c9f`（与a493a37产品字节一致），版本0.2.19/build21。已修复的目录ready早报、字号漂移及精确锚点保留通过定向原生检查；尚未完成成功复验的两项为 `epubOpeningRouteStartsOnceAndObservesMountedPresentation`、`epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position`。前两轮逐项10通过/3失败、11通过/2失败；第三轮工具查询超时，原生0。
+
+复用现有设备专用入口 `validation_scope=epub-diagnostic-47ec79d`，要求显式 `allow_unqualified_ipa=true`、`build_ipa=true`、prior为空。只执行epub_diagnostic，不启动模拟器或Domain/Host/UI。回执写 `DEVICE_DIAGNOSTIC_ONLY`、`UI_NOT_QUALIFIED`、新原生执行0，不将旧11项观察填成当前资格；这些标签表示整体尚未完整验收，不抹掉前轮3项UI通过事实。
+
+仅允许 `.github/workflows/task3-validate.yml`、`scripts/epub_diagnostic_package.py`、`scripts/validate_task3.py`、本说明四个发布文件相对父提交变化。App/Sources/Tests/project/resources保持原字节，不读取/上传用户原书，不改旧库和已保存位置。普通白名单提交/push，不发布用户状态、私有文件或内部证据。
+
+固定原macOS15、Xcode16.4/16F6、Swift6.1.2、XcodeGen2.46.0及其摘要、GRDB7.0.0、ZIPFoundation0.9.19、iOS16.6。XcodeGen使用既有成功分支的同一官方API资产与摘要，不换版本或镜像。设备Release、依赖图、资源/许可/图标、arm64、最低系统、unsigned及IPA对实际App逐文件字节校验全部保留；正式测试资格门不变。
+
+下载后核对artifact SHA/CRC、源码/run/attempt与IPA字节再交付，文件名和说明标记诊断用途。用TrollStore覆盖安装，不卸载清库；先检查版本、原书架与旧位置，再测作者字号、目录、跨章、退出/重开。若卡住，记录步骤、等待时长、错误和本地诊断摘要，不必上传私人正文。交付完成即停止追加构建，等待用户真机反馈。
+
+---
+
+以下为历史批次说明，不是本轮构建身份或通过证据。
+
 # EPUB 0.2.4/build6 真机诊断包
 
 用户明确要求在多次 UI 修复失败后停止重复修复和测试，直接编译 IPA 供真机测验。本批只增加诊断发布入口，产品与测试源码冻结于 e8112fb89a5704efcd4e09d15341264e22c5c9b5。
