@@ -41,11 +41,26 @@ private struct EPUBContentsLayoutKey: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
 }
 
+/// Fixed, non-book diagnostics; a render snapshot never replaces the live authority check.
+enum EPUBContentsAccess: String {
+    case active, notPresented, sceneInactive, ownerInactive
+
+    static func resolve(presented: Bool, sceneActive: Bool, ownerActive: Bool, liveOwnerActive: Bool) -> Self {
+        guard presented else { return .notPresented }
+        guard sceneActive else { return .sceneInactive }
+        guard ownerActive && liveOwnerActive else { return .ownerInactive }
+        return .active
+    }
+}
+
 @MainActor
 struct EPUBContentsView: View {
+    let sessionID: UUID
     let items: [EPUBNavigationItem]
     let currentPath: String?
     let currentFragment: String?
+    // Explicit value dependency makes owner changes invalidate the sheet's controls.
+    let ownerActive: Bool
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
     let appearance: ReaderToolAppearance
@@ -55,6 +70,7 @@ struct EPUBContentsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var query = ""
     @State private var presented = false
+    @State private var initializedSessionID: UUID?
     @State private var laidOut = false
     @State private var reveal = EPUBContentsRevealState()
     @FocusState private var searchFocused: Bool
@@ -78,7 +94,11 @@ struct EPUBContentsView: View {
         }
     }
 
-    private var active: Bool { presented && scenePhase == .active && isActive() }
+    private var access: EPUBContentsAccess {
+        EPUBContentsAccess.resolve(presented: presented, sceneActive: scenePhase == .active,
+                                   ownerActive: ownerActive, liveOwnerActive: isActive())
+    }
+    private var active: Bool { access == .active }
     private var revealKey: EPUBContentsRevealKey {
         EPUBContentsRevealKey(requestID: reveal.requestID, active: active, laidOut: laidOut)
     }
@@ -106,6 +126,7 @@ struct EPUBContentsView: View {
                 .accessibilityIdentifier("reader.panel.close")
             }
             summaryHeader(currentIndex: selectedIndex)
+            availabilityStatus
             searchControls(currentIndex: selectedIndex)
             ScrollViewReader { proxy in
                 List {
@@ -136,6 +157,7 @@ struct EPUBContentsView: View {
                             .accessibilityValue(isCurrent ? "当前章节" : "")
                             .accessibilityHint("阅读本章")
                             .buttonStyle(.plain)
+                            .disabled(!active)
                             .listRowBackground(isCurrent ? appearance.selection : appearance.surface)
                             .listRowSeparator(.hidden)
                             .task(id: reveal.initialIssued ? revealKey : nil) {
@@ -185,10 +207,12 @@ struct EPUBContentsView: View {
         }
         .onAppear {
             presented = true
-            query = ""
-            reveal.request(scenePhase == .active && isActive() ? selectedIndex : nil)
+            initializeSession(currentIndex: selectedIndex)
         }
-        .onChange(of: active) { if !$0 { reveal.cancel(); searchFocused = false } }
+        .onChange(of: active) { available in
+            if available { initializeSession(currentIndex: selectedIndex) }
+            else { reveal.cancel(); searchFocused = false }
+        }
         .onDisappear {
             presented = false
             laidOut = false
@@ -202,6 +226,39 @@ struct EPUBContentsView: View {
             if !Task.isCancelled, active { closeFocused = true }
         }
         .accessibilityAction(.escape) { dismiss() }
+    }
+
+    private func initializeSession(currentIndex: Int?) {
+        guard active, initializedSessionID != sessionID else { return }
+        initializedSessionID = sessionID
+        query = ""
+        reveal.request(currentIndex)
+    }
+
+    private var availabilityStatus: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(active ? "目录可操作" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
+                .font(.caption)
+                .foregroundStyle(appearance.secondary)
+                .accessibilityIdentifier("epub.directory.availability")
+                .accessibilityValue("state=\(access.rawValue);presented=\(presented);scene=\(scenePhase == .active);owner=\(ownerActive);live=\(isActive())")
+            if !active {
+                Button("关闭目录后重开") {
+                    reveal.cancel()
+                    searchFocused = false
+                    // Closing is not a grant: the parent rechecks canInteract + session ID.
+                    // In background or after replacement this remains a safe no-op.
+                    close()
+                }
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+                .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+                .accessibilityIdentifier("epub.directory.recover")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+        .padding(.vertical, 4)
+        .background(appearance.surface)
     }
 
     private func dismiss() {
@@ -224,7 +281,11 @@ struct EPUBContentsView: View {
                 Image(systemName: "magnifyingglass").accessibilityHidden(true)
                 TextField("筛选标题或章节序号", text: Binding(
                     get: { query },
-                    set: { query = $0; reveal.cancel() }
+                    set: {
+                        guard active else { return }
+                        query = $0
+                        reveal.cancel()
+                    }
                 ))
                 .focused($searchFocused)
                 .autocorrectionDisabled()
@@ -232,6 +293,7 @@ struct EPUBContentsView: View {
                 .accessibilityIdentifier("epub.directory.search")
                 if !query.isEmpty {
                     Button {
+                        guard active else { return }
                         query = ""
                         reveal.cancel()
                     } label: {

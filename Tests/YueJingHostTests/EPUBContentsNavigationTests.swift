@@ -113,4 +113,73 @@ struct EPUBContentsNavigationTests {
         reveal.cancel()
         #expect(reveal.targetIndex == nil && !reveal.initialIssued)
     }
+
+    @Test func directoryAccessRequiresEveryLiveAndRenderedPermission() {
+        for presented in [false, true] {
+            for sceneActive in [false, true] {
+                for ownerActive in [false, true] {
+                    for liveOwnerActive in [false, true] {
+                        let state = EPUBContentsAccess.resolve(
+                            presented: presented, sceneActive: sceneActive,
+                            ownerActive: ownerActive, liveOwnerActive: liveOwnerActive
+                        )
+                        #expect((state == .active) == (presented && sceneActive && ownerActive && liveOwnerActive))
+                        if !presented { #expect(state == .notPresented) }
+                        else if !sceneActive { #expect(state == .sceneInactive) }
+                        else if !ownerActive || !liveOwnerActive { #expect(state == .ownerInactive) }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test func directoryReopenAndForegroundNeverRestoreOldSessionAuthority() throws {
+        var tools = ReadingToolsPresentation()
+        tools.open(.directory)
+        let first = try #require(tools.panelID)
+        let closed = tools.closePanel(id: first)
+        #expect(closed)
+        tools.open(.directory)
+        let second = try #require(tools.panelID)
+        #expect(second != first && tools.owns(.directory, id: second))
+        let staleClose = tools.closePanel(id: first)
+        let staleSelection = tools.chapterSelected(id: first)
+        #expect(!staleClose && !staleSelection && tools.panelID == second)
+        tools.suspend()
+        #expect(!tools.owns(.directory, id: second))
+        let backgroundClose = tools.closePanel(id: second)
+        #expect(!backgroundClose)
+        tools.resume()
+        #expect(!tools.owns(.directory, id: second))
+        tools.open(.directory)
+        let third = try #require(tools.panelID)
+        #expect(third != second && tools.owns(.directory, id: third))
+        let exit = try #require(tools.beginExit())
+        #expect(!tools.owns(.directory, id: third))
+        let lateSelection = tools.chapterSelected(id: third)
+        #expect(!lateSelection)
+        let finished = tools.finishExit(exit, succeeded: true)
+        #expect(finished && !tools.valid)
+        tools.resume()
+        #expect(!tools.canInteract)
+    }
+
+    @Test func chapterLoadingKeepsHiddenToolsAndDefersOnlyChapterFeedback() throws {
+        for phase in [EPUBOpeningFeedback.quiet, .compact, .detailed] {
+            #expect(EPUBReaderLoadingPresentation.showsFeedback(initialOpening: true, phase: phase))
+            #expect(EPUBReaderLoadingPresentation.showsFeedback(initialOpening: false, phase: phase) == (phase != .quiet))
+        }
+        #expect(EPUBReaderLoadingPresentation.restoresTools(initialOpening: true))
+        #expect(!EPUBReaderLoadingPresentation.restoresTools(initialOpening: false))
+        var tools = ReadingToolsPresentation()
+        tools.open(.directory)
+        let session = try #require(tools.panelID)
+        let selected = tools.chapterSelected(id: session)
+        #expect(selected && tools.mode == .hidden)
+        if EPUBReaderLoadingPresentation.restoresTools(initialOpening: false) { tools.forceCompact() }
+        #expect(tools.mode == .hidden && !tools.owns(.directory, id: session))
+        // Delayed feedback's cancel action uses the same exit gate, not forceCompact.
+        let exit = tools.beginExit()
+        #expect(exit != nil && tools.exitRequest == exit)
+    }
 }

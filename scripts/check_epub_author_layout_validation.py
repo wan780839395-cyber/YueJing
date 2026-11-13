@@ -3313,9 +3313,9 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "e98fb9f609a37f37ec646a3d8be41ccc467cd9c1",
-        "0.2.19",
-        "21",
+        "fc9ab9f93f17329093eaa7586988dfe9d92f1a51",
+        "0.2.20",
+        "22",
     )
     assert r.WORKFLOW_ID == 398234793 and r.REPO == "wan780839395-cyber/YueJing"
 
@@ -3325,19 +3325,45 @@ def run_checks(root):
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
         selection = src["selected_summary"]
-        assert selection["selected_declarations"] == 2 and selection["planned_executions"] == 2
-        assert selection["kind_declarations"] == {"domain": 0, "host": 2, "ui": 0}
+        assert selection["selected_declarations"] == 25 and selection["planned_executions"] == 25
+        assert selection["kind_declarations"] == {"domain": 0, "host": 21, "ui": 4}
         expected = {
+            "YueJingHostTests/EPUBContentsNavigationTests.swift": [
+                "largeDirectoryResolvesFirstMiddleAndLast",
+                "samePathPrefersFragmentThenFallsBackToFirstPath",
+                "filteringKeepsOriginalIndicesOrdinalsAndItems",
+                "emptyAndUnmatchedDirectoriesHaveNoInventedTarget",
+                "lazyMountCorrectionIsBoundedAndOnlyForTheTarget",
+                "cancellationAndNewRequestsInvalidateLateWork",
+                "directoryAccessRequiresEveryLiveAndRenderedPermission",
+                "directoryReopenAndForegroundNeverRestoreOldSessionAuthority",
+                "chapterLoadingKeepsHiddenToolsAndDefersOnlyChapterFeedback"],
             "YueJingHostTests/EPUBReaderHostTests.swift": [
+                "epubFontIntegrityFailureRevokesReadyAndRejectsStaleFailureSignals",
                 "epubOpeningRouteStartsOnceAndObservesMountedPresentation",
-                "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position"],
+                "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
+                "epubSecurityRejectsScriptsFormsExternalResourcesAndKeepsIsolatedLocatorWorking",
+                "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
+                "epubCompatibilityWebKitLoadsStaticImagePageAndRestoresAnchor",
+                "epubRecentBooksReusePagesAcrossSwitchesAndEvictOnlyIdleLRU",
+                "epubFailedRestorationRejectsLateReadyAndPendingContinuation",
+                "epubBoundaryViewportRestoresInFreshControllerAfterCloseOrSuspend",
+                "epubWebKitAppliesAuthorCSSPerChapterSwitchesLayoutModesAndReopensColdAndWarm"],
+            "YueJingHostTests/EPUBFontLoadingHostTests.swift": [
+                "epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics",
+                "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"],
+            "YueJingEPUBUITests/EPUBFlowUITests.swift": [
+                "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
+                "testEPUBProgressSurvivesExitAndProcessRelaunch",
+                "testEPUBTypographyNoCoverFallbackAndTXTIsolation",
+                "testEPUBDirectoryControlsRecoverAfterCancelReopenAndForeground"],
         }
-        assert selection["selected_files"] == expected, "Unexpected opening retry selection"
-        passed("bounded opening retry: exact 2 failed Host cases; product and test code unchanged")
+        assert selection["selected_files"] == expected, "Unexpected directory interaction selection"
+        passed("directory interaction: exact 21 Host and 4 UI cases; no unrelated full regression")
         groups = r.build_groups(r.load_scope_config())
         fresh, reused = r.partition_groups(groups, "")
-        assert len(fresh) == 1 and reused == []
-        passed("2 cases execute freshly; prior 11 passes remain separate, not machine-reused qualification")
+        assert len(fresh) == 7 and reused == []
+        passed("25 cases execute freshly in 3 Host files and 4 UI groups; no prior qualification reused")
         rejects("old P2 reuse is incompatible with reader interaction", lambda: r.partition_groups(groups, r.P2_RUN_ID))
 
     wf_status = "skipped_workflow_not_wired_yet"

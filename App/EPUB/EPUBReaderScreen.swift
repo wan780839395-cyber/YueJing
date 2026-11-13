@@ -2,6 +2,15 @@ import ReaderDomain
 import SwiftUI
 import UIKit
 
+/// Presentation only: short chapter transitions must not revive opening chrome.
+enum EPUBReaderLoadingPresentation {
+    static func showsFeedback(initialOpening: Bool, phase: EPUBOpeningFeedback) -> Bool {
+        initialOpening || phase != .quiet
+    }
+
+    static func restoresTools(initialOpening: Bool) -> Bool { initialOpening }
+}
+
 @MainActor
 struct EPUBReaderScreen: View {
     @ObservedObject var model: EPUBReaderViewModel
@@ -63,28 +72,40 @@ struct EPUBReaderScreen: View {
                     }
                 }
 
-                if model.loading && tools.exitRequest == nil && tools.valid {
+                if model.loading && tools.exitRequest == nil && tools.valid &&
+                    EPUBReaderLoadingPresentation.showsFeedback(
+                        initialOpening: model.openingPerformanceSummary == nil, phase: loadingFeedback
+                    ) {
                     VStack(spacing: 12) {
                         Text(model.title).font(.headline).multilineTextAlignment(.center)
                         Group {
                             if loadingFeedback == .quiet {
                                 Text("正在打开").font(.subheadline)
                             } else {
-                                ProgressView(loadingFeedback == .detailed ? model.loadingStage : "正在打开")
+                                ProgressView(loadingFeedback == .detailed ? model.loadingStage :
+                                    (model.openingPerformanceSummary == nil ? "正在打开" : "正在切换章节"))
                             }
                         }
                         .foregroundStyle(.secondary)
                         .frame(minHeight: 24)
                         if loadingFeedback == .detailed {
-                            Text("正在校验书籍并恢复阅读位置。可返回书架停止，已保存记录保留。")
+                            Text(model.openingPerformanceSummary == nil
+                                ? "正在校验书籍并恢复阅读位置。可返回书架停止，已保存记录保留。"
+                                : "正在定位目标章节。可返回书架停止，已保存记录保留。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        if model.openingPerformanceSummary != nil {
+                            Button("返回书架，停止切换") { exitReader() }
+                                .frame(minHeight: 44)
+                                .disabled(!tools.canInteract)
+                                .accessibilityIdentifier("epub.navigation.cancel")
+                        }
                     }
                     .padding(.horizontal, 32)
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: model.openingPerformanceSummary == nil ? .combine : .contain)
                     .accessibilityIdentifier("epub.opening.feedback")
                     .accessibilityHidden(tools.panel != nil)
                     .transaction { $0.animation = nil }
@@ -170,7 +191,9 @@ struct EPUBReaderScreen: View {
             }
         }
         .onChange(of: model.loading) { loading in
-            if loading { mutateTools { $0.forceCompact() } }
+            if loading, EPUBReaderLoadingPresentation.restoresTools(
+                initialOpening: model.openingPerformanceSummary == nil
+            ) { mutateTools { $0.forceCompact() } }
         }
         .onChange(of: model.exitSaveFailed) { failed in
             if failed { mutateTools { $0.forceCompact() } }
@@ -209,14 +232,17 @@ struct EPUBReaderScreen: View {
         Group {
             if session.panel == .directory {
                 EPUBContentsView(
+                    sessionID: session.id,
                     items: model.navigationItems,
                     currentPath: model.currentPath,
                     currentFragment: model.currentFragment,
+                    ownerActive: panelActive(.directory, session.id),
                     isActive: { panelActive(.directory, session.id) },
                     close: { closePanel(session.id) },
                     appearance: appearance,
                     selected: { item in selectNavigationItem(item, session.id) }
                 )
+                .id(session.id) // No query/presented/reveal state shared by quick reopens.
             } else {
                 EPUBSettingsView(
                     preferences: settingsBinding(for: session.id),

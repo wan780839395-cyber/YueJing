@@ -162,9 +162,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var interactionGeneration = UUID()
     private var scrollDirection: EPUBPageDirection?
     private var transitionSnapshot: UIView?
+    private var pendingPresentationToken: EPUBNavigationToken?
     var hasTransitionSnapshot: Bool { transitionSnapshot != nil }
     private enum ReadinessPhase: String {
-        case preparing, navigating, rebasing, configuring, restoringWindow, ready
+        case preparing, navigating, rebasing, configuring, restoringWindow, awaitingPresentation, ready
     }
     private var readinessPhase = ReadinessPhase.preparing
     private(set) var lastReadinessFailure: String?
@@ -367,6 +368,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         loadingNavigation = nil
         if !reuseDOM { webView.stopLoading() }
         activeRequest = request
+        pendingPresentationToken = request.token
         readinessPhase = .preparing
         parkDiagnostics = EPUBReopenDiagnostics() // A new document/session attempt starts a new controller trace.
         readyToken = nil
@@ -429,16 +431,35 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
     }
 
+    /// Locator readiness is not the model's markReady acknowledgement. Keep the last
+    /// frame until that current-token transaction succeeds; never add a visual delay.
+    @discardableResult
+    func acknowledgePresentation(for token: EPUBNavigationToken) -> Bool {
+        guard activeRequest?.token == token, readyToken == token else { return false }
+        readinessTask?.cancel()
+        pendingPresentationToken = nil
+        readinessTask = nil
+        readinessPhase = .ready
+        transitionSnapshot?.removeFromSuperview()
+        transitionSnapshot = nil
+        return true
+    }
+
+    /// Reject a current presentation without leaving a stale frame or resource authority.
+    func rejectPresentation(for token: EPUBNavigationToken) {
+        failReadiness(for: token, error: EPUBError.invalidPosition, revokeReady: true)
+    }
+
     /// A missing didFinish/JS-ready callback must not leave the reader loading forever.
     /// The deadline starts before content rules/navigation; stale deadlines cannot cancel a retry.
     func expireReadiness(for token: EPUBNavigationToken) {
-        guard activeRequest?.token == token, readyToken != token else { return }
+        guard activeRequest?.token == token, readyToken != token || pendingPresentationToken == token else { return }
         lastReadinessFailure = "就绪截止阶段：\(readinessPhase.rawValue)；邻章任务：\(windowInFlight)；运动中：\(nativeScrollActive)。预算未延长，原记录保留。"
         failReadiness(for: token, error: URLError(.timedOut))
     }
 
     private func failReadiness(for token: EPUBNavigationToken, error: Error, revokeReady: Bool = false) {
-        guard activeRequest?.token == token, revokeReady || readyToken != token else { return }
+        guard activeRequest?.token == token, revokeReady || readyToken != token || pendingPresentationToken == token else { return }
         readinessTask?.cancel()
         readinessTask = nil
         loadTask?.cancel()
@@ -449,6 +470,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         windowInFlight = false
         pendingViewportRestoreToken = nil
         readyToken = nil
+        pendingPresentationToken = nil
         activeRequest = nil
         loadingNavigation = nil
         loadedDocumentToken = nil
@@ -556,6 +578,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         activeRequest = nil
         pendingViewportRestoreToken = nil
         readyToken = nil
+        pendingPresentationToken = nil
         pageAnimationToken = nil
         dragOrigin = nil
         pagePanToken = nil
@@ -832,20 +855,19 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 pendingClosedReuseToken = nil
             }
             runtimeTrace.record(.locatorReady)
-            readinessTask?.cancel()
-            readinessTask = nil
+            // DOM readiness never cancels the original business/presentation deadline,
+            // even when snapshot creation returned nil. Only the current owner can acknowledge.
             readyToken = current.token
-            readinessPhase = .ready
+            readinessPhase = .awaitingPresentation
             applyReadingGesturePolicy()
             renderedChapterPaths.insert(current.token.path)
-            transitionSnapshot?.removeFromSuperview()
-            transitionSnapshot = nil
             refreshChapterWindow()
         }
         if payload.kind == .error {
             readinessTask?.cancel()
             readinessTask = nil
             readyToken = nil
+            pendingPresentationToken = nil
             transitionSnapshot?.removeFromSuperview()
             transitionSnapshot = nil
         }
@@ -1090,6 +1112,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         renderedChapterPaths.removeAll()
         pendingViewportRestoreToken = nil
         readyToken = nil
+        pendingPresentationToken = nil
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
         onLoadFailure?(error, current.token)

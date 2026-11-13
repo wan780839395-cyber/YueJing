@@ -52,6 +52,8 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["reader.directory.total"].label.contains("4"))
             XCTAssertFalse(app.buttons["reader.contents.bookmarks"].exists)
             XCTAssertEqual(app.buttons["reader.chapter.0"].value as? String, "当前章节")
+            exerciseDirectoryFilterClearAndLocate(app)
+            filterDirectory("3", expectedIndex: 2, app)
 
             let midAnchorChapter = app.buttons["reader.chapter.2"]
             waitHittable(midAnchorChapter)
@@ -68,6 +70,9 @@ final class EPUBFlowUITests: XCTestCase {
                 object: nil
             )
             XCTAssertEqual(waitForPredicates([movedToChapter2Mid], timeout: 15), .completed)
+            // Tools must remain hidden after chapter selection, not be revived by loading.
+            XCTAssertFalse(app.buttons["reader.exit"].isHittable)
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
             Self.captureEvidence(app, testName: name, stage: "after-chapter-jump", expectedBook: "EPUBTest-Illustrated-A")
 
             showTools(app)
@@ -247,6 +252,52 @@ final class EPUBFlowUITests: XCTestCase {
         }
     }
 
+    @MainActor func testEPUBDirectoryControlsRecoverAfterCancelReopenAndForeground() {
+        withEPUBFixture { app in
+            openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open", app)
+            // Close/reopen without a timed pause. A new sheet must not inherit query or presented=false.
+            for _ in 0..<2 {
+                openDirectory(app)
+                waitDirectoryActive(app)
+                XCTAssertFalse(app.buttons["epub.directory.clear"].exists)
+                exerciseDirectoryFilterClearAndLocate(app)
+                filterDirectory("3", expectedIndex: 2, app)
+                closePanel(app)
+                XCTAssertTrue(readerCanvas(app).label.contains("EPUB_CH1_START"), "Cancel must not select the filtered chapter")
+            }
+            openDirectory(app)
+            filterDirectory("3", expectedIndex: 2, app)
+            Self.captureEvidence(app, testName: name, stage: "directory-before-background")
+            XCUIDevice.shared.press(.home)
+            app.activate()
+            // suspend revokes the old panel; foreground must not resurrect its authority.
+            let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                !app.textFields["epub.directory.search"].exists
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([dismissed], timeout: 10), .completed)
+            let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                self.readerCanvas(app).exists && self.readerCanvas(app).label.contains("EPUB_CH1_START")
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([restored], timeout: 15), .completed)
+            viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            waitHittable(app.buttons["reader.exit"])
+            openDirectory(app)
+            waitDirectoryActive(app)
+            XCTAssertFalse(app.buttons["epub.directory.clear"].exists)
+            exerciseDirectoryFilterClearAndLocate(app)
+            filterDirectory("3", expectedIndex: 2, app)
+            app.buttons["reader.chapter.2"].tap()
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let canvas = self.readerCanvas(app)
+                return canvas.exists && canvas.label.contains("EPUB_CH2_MID_ANCHOR") &&
+                    (canvas.value as? String ?? "").contains("path=OEBPS/text/ch2.xhtml")
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([selected], timeout: 15), .completed)
+            XCTAssertFalse(app.buttons["reader.exit"].isHittable)
+            Self.captureEvidence(app, testName: name, stage: "directory-controls-recovered")
+        }
+    }
+
     // MARK: - Helpers (no helper method name may start with "test")
 
     @MainActor private func withEPUBFixture(
@@ -397,6 +448,53 @@ final class EPUBFlowUITests: XCTestCase {
         revealDockControl(button, app, deadline: deadline)
         button.tap()
         waitHittable(app.buttons["reader.panel.close"])
+    }
+
+    @MainActor private func waitDirectoryActive(_ app: XCUIApplication) {
+        let status = app.staticTexts["epub.directory.availability"]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            status.exists && (status.value as? String ?? "").contains("state=active;") &&
+                app.textFields["epub.directory.search"].isEnabled &&
+                app.buttons["epub.directory.current"].isEnabled
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([ready], timeout: 5), .completed,
+                       "Directory permission state: \(status.exists ? String(describing: status.value) : "missing")")
+        XCTAssertFalse(app.buttons["epub.directory.recover"].exists)
+    }
+
+    @MainActor private func filterDirectory(_ query: String, expectedIndex: Int, _ app: XCUIApplication) {
+        waitDirectoryActive(app)
+        let search = app.textFields["epub.directory.search"]
+        waitHittable(search)
+        search.tap()
+        search.typeText(query)
+        let filtered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (search.value as? String) == query && app.buttons["epub.directory.clear"].isEnabled &&
+                app.buttons["reader.chapter.\(expectedIndex)"].isHittable &&
+                !app.buttons["reader.chapter.0"].exists
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([filtered], timeout: 5), .completed)
+    }
+
+    @MainActor private func exerciseDirectoryFilterClearAndLocate(_ app: XCUIApplication) {
+        filterDirectory("3", expectedIndex: 2, app)
+        app.buttons["epub.directory.clear"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !app.buttons["epub.directory.clear"].exists && app.buttons["reader.chapter.0"].exists &&
+                (app.textFields["epub.directory.search"].value as? String) != "3"
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([cleared], timeout: 5), .completed)
+        // Locate must really clear an active filter and reveal the current row, without navigation.
+        filterDirectory("3", expectedIndex: 2, app)
+        let locate = app.buttons["epub.directory.current"]
+        waitHittable(locate)
+        locate.tap()
+        let located = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let current = app.buttons["reader.chapter.0"]
+            return current.isHittable && (current.value as? String) == "当前章节" &&
+                !app.buttons["epub.directory.clear"].exists && !app.keyboards.firstMatch.exists
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([located], timeout: 5), .completed)
     }
 
     @MainActor private func openDirectory(_ app: XCUIApplication) {

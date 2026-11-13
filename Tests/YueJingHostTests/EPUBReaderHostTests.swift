@@ -346,6 +346,23 @@ struct EPUBReaderHostTests {
                 #expect(restoredPayload.visibleText.contains("EPUB_A_C1_P18"))
                 #expect(reopenController.webView.scrollView.pinchGestureRecognizer?.isEnabled != true)
                 #expect(reopenController.webView.scrollView.zoomScale == 1)
+                _ = try await loadAndAwaitReady(
+                    controller: reopenController,
+                    request: EPUBNavigationRequest(id: UUID(), token: reopenToken,
+                        publication: reopened.publication, targetPosition: saved, fragment: nil,
+                        preferences: reopened.preferences, preserveTargetAnchor: true, reloadDocument: false),
+                    expectTransitionSnapshot: true, acknowledge: false
+                )
+                var expiredToken: EPUBNavigationToken?
+                reopenController.onLoadFailure = { error, failedToken in
+                    #expect((error as? URLError)?.code == .timedOut)
+                    expiredToken = failedToken
+                }
+                reopenController.expireReadiness(for: reopenToken)
+                #expect(expiredToken == reopenToken)
+                #expect(reopenController.activeRequest == nil && !reopenController.hasTransitionSnapshot)
+                #expect(reopenController.lastReadinessFailure?.contains("awaitingPresentation") == true)
+                #expect(!reopenController.acknowledgePresentation(for: reopenToken))
             }
             try await reopened.close(position: saved, sequence: 1, token: reopenToken, preferences: reopened.preferences)
         }
@@ -1117,14 +1134,15 @@ struct EPUBReaderHostTests {
     private func loadAndAwaitReady(
         controller: EPUBWebViewController,
         request: EPUBNavigationRequest,
-        expectTransitionSnapshot: Bool? = nil
+        expectTransitionSnapshot: Bool? = nil,
+        acknowledge: Bool = true
     ) async throws -> EPUBLocatorPayload {
         let readyExpectation = XCTestExpectation(description: "EPUB WebKit locator ready")
         var capturedPayload: EPUBLocatorPayload?
         var capturedError: Error?
         controller.onLocatorEvent = { payload in
             guard payload.epoch == request.token.epoch else { return }
-            if payload.kind == .ready {
+            if payload.kind == .ready, !payload.restorationPending {
                 capturedPayload = payload
                 readyExpectation.fulfill()
             } else if payload.kind == .error {
@@ -1140,12 +1158,30 @@ struct EPUBReaderHostTests {
         controller.apply(request)
         if let expectTransitionSnapshot {
             #expect(controller.hasTransitionSnapshot == expectTransitionSnapshot)
+            if expectTransitionSnapshot {
+                let premature = controller.acknowledgePresentation(for: request.token)
+                #expect(!premature && controller.hasTransitionSnapshot)
+            }
         }
         let waitResult = await XCTWaiter.fulfillment(of: [readyExpectation], timeout: 15)
         try #require(waitResult == .completed)
         if let capturedError {
             throw capturedError
         }
+        if expectTransitionSnapshot == true {
+            // JS final ready alone must not uncover the asynchronous business-ready gap.
+            #expect(controller.hasTransitionSnapshot)
+            let stale = EPUBNavigationToken(sessionID: request.token.sessionID, epoch: UUID(), path: request.token.path)
+            let staleAccepted = controller.acknowledgePresentation(for: stale)
+            #expect(!staleAccepted && controller.hasTransitionSnapshot)
+            controller.expireReadiness(for: stale)
+            #expect(controller.hasTransitionSnapshot && controller.activeRequest?.token == request.token)
+        }
+        // Standalone controller fixtures explicitly act as the presentation owner.
+        if !acknowledge { return try #require(capturedPayload) }
+        // Model-backed fixtures exercise the real markReady -> acknowledgement path.
+        let acknowledged = controller.acknowledgePresentation(for: request.token)
+        #expect(acknowledged)
         #expect(!controller.hasTransitionSnapshot)
         return try #require(capturedPayload)
     }
@@ -1730,6 +1766,7 @@ struct EPUBReaderHostTests {
     }
 
     @Test func epubFailedRestorationRejectsLateReadyAndPendingContinuation() async throws {
+        for useLocatorError in [false, true] {
         try await withHostFixture { fixture in
             let archive = fixture.root.appendingPathComponent("FailedRestore.epub")
             try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Failed Restore")
@@ -1745,17 +1782,27 @@ struct EPUBReaderHostTests {
                 scrollY: 0, viewportHeight: 700, contentHeight: 2000, visibleText: "fixture", reason: nil)
             // Queue the async markReady continuation, then revoke before it can publish.
             model.handleLocatorEvent(payload)
-            controller.expireReadiness(for: token)
+            if useLocatorError {
+                let error = EPUBLocatorPayload(kind: .error, sessionID: token.sessionID, epoch: token.epoch,
+                    path: token.path, node: 0, utf16Offset: 0, restoredNode: 0, restoredOffset: 0,
+                    scrollY: 0, viewportHeight: 700, contentHeight: 2000, visibleText: "", reason: "fixture")
+                model.handleLocatorEvent(error)
+            } else {
+                controller.expireReadiness(for: token)
+            }
             model.handleLocatorEvent(payload)
             await Task.yield()
             #expect(controller.activeRequest == nil)
             #expect(model.currentToken == nil && model.navigationRequest == nil)
             #expect(!model.ready && !model.loading && model.currentPosition == nil)
             #expect(!model.acceptsCanvasTouch && !model.promotingVisibleChapter)
+            if !useLocatorError {
             #expect(model.diagnosticOpeningSummary?.contains("就绪截止阶段") == true)
+            }
             let closed = await model.close()
             #expect(closed)
             controller.detachCallbacks()
+        }
         }
     }
 

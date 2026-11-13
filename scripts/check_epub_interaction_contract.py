@@ -42,8 +42,8 @@ check('deadlines and bounded window unchanged',
       'Task.sleep(for: .seconds(15))' in web and 'Task.sleep(for: .seconds(12))' in web and
       read('App/EPUB/EPUBChapterWindow.swift') == baseline('App/EPUB/EPUBChapterWindow.swift'))
 check('timeout phase is fixed data and stale deadline cannot overwrite it',
-      'case preparing, navigating, rebasing, configuring, restoringWindow, ready' in web and
-      'guard activeRequest?.token == token, readyToken != token else { return }\n        lastReadinessFailure' in web)
+      'case preparing, navigating, rebasing, configuring, restoringWindow, awaitingPresentation, ready' in web and
+      'guard activeRequest?.token == token, readyToken != token || pendingPresentationToken == token else { return }\n        lastReadinessFailure' in web)
 check('font retention needs unchanged CSS, live identity and loaded status',
       'style.__yjRetainedCSS === style.__yjCSS' in js and 'style.__yjRetainedText === style.textContent' in js and
       'face.status === "loaded" && liveFaces.has(face)' in js)

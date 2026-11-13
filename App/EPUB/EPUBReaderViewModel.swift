@@ -453,6 +453,9 @@ final class EPUBReaderViewModel: ObservableObject {
         webView.recordPayload(payload)
         switch payload.kind {
         case .error:
+            generation = UUID()
+            currentToken = nil
+            webView.controller?.rejectPresentation(for: token)
             promotingVisibleChapter = false
             loading = false
             ready = false
@@ -464,6 +467,10 @@ final class EPUBReaderViewModel: ObservableObject {
             // A seamless promotion was already marked ready before publishing the request.
             // Do not replace its real observed position with a synthetic ready fallback.
             if navigationRequest?.preserveViewport == true {
+                guard webView.controller?.acknowledgePresentation(for: token) != false else {
+                    handleLoadFailure(EPUBError.invalidPosition, token: token)
+                    return
+                }
                 ready = true
                 loading = false
                 runtimeFontFallback = runtimeFontFallback || payload.authorStyleFallback
@@ -480,6 +487,9 @@ final class EPUBReaderViewModel: ObservableObject {
                 viewportOffset: navigationRequest?.preserveTargetAnchor == true
                     ? navigationRequest?.targetPosition?.viewportOffset : payload.viewportOffset
             ) else {
+                generation = UUID()
+                currentToken = nil
+                webView.controller?.rejectPresentation(for: token)
                 loading = false
                 ready = false
                 navigationRequest = nil
@@ -506,8 +516,16 @@ final class EPUBReaderViewModel: ObservableObject {
                           self.generation == gen,
                           !self.closing,
                           !self.suspended,
-                          self.currentToken == expectedToken,
-                          marked else {
+                          self.currentToken == expectedToken else {
+                        return
+                    }
+                    guard marked else {
+                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                        return
+                    }
+                    // No suspension between the accepted presentation and publishing ready.
+                    guard self.webView.controller?.acknowledgePresentation(for: expectedToken) != false else {
+                        self.handleLoadFailure(EPUBError.invalidPosition, token: expectedToken)
                         return
                     }
                     self.currentPosition = position
@@ -540,7 +558,15 @@ final class EPUBReaderViewModel: ObservableObject {
                         _ = try await activeReader.save(position, sequence: serial, token: expectedToken)
                     }
                 } catch is CancellationError {
+                    if self.lifecycle == life, self.generation == gen,
+                       self.currentToken == expectedToken, !self.ready {
+                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                    }
                 } catch {
+                    if self.lifecycle == life, self.generation == gen,
+                       self.currentToken == expectedToken, !self.ready {
+                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                    }
                     if self.lifecycle == life, !self.closing {
                         self.message = Self.safeFailureMessage(error)
                     }

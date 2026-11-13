@@ -590,6 +590,10 @@ struct EPUBFontLoadingHostTests {
         controller.apply(request)
         let waitResult = await XCTWaiter.fulfillment(of: [settledExpectation], timeout: Self.waitTimeoutSeconds)
         try #require(waitResult == .completed)
+        if let outcome, case .ready = outcome {
+            let acknowledged = controller.acknowledgePresentation(for: request.token)
+            #expect(acknowledged)
+        }
         return try #require(outcome)
     }
 
