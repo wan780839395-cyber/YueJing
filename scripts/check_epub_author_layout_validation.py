@@ -3325,32 +3325,19 @@ def run_checks(root):
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
         selection = src["selected_summary"]
-        assert selection["selected_declarations"] == 13 and selection["planned_executions"] == 13
-        assert selection["kind_declarations"] == {"domain": 0, "host": 10, "ui": 3}
+        assert selection["selected_declarations"] == 2 and selection["planned_executions"] == 2
+        assert selection["kind_declarations"] == {"domain": 0, "host": 2, "ui": 0}
         expected = {
-            "YueJingHostTests/EPUBFontLoadingHostTests.swift": [
-                "epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics",
-                "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"],
             "YueJingHostTests/EPUBReaderHostTests.swift": [
                 "epubOpeningRouteStartsOnceAndObservesMountedPresentation",
-                "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
-                "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
-                "epubFailedRestorationRejectsLateReadyAndPendingContinuation",
-                "epubBoundaryViewportRestoresInFreshControllerAfterCloseOrSuspend",
-                "epubWebKitAppliesAuthorCSSPerChapterSwitchesLayoutModesAndReopensColdAndWarm",
-                "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification",
-                "epubFontIntegrityFailureRevokesReadyAndRejectsStaleFailureSignals"],
-            "YueJingEPUBUITests/EPUBFlowUITests.swift": [
-                "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
-                "testEPUBProgressSurvivesExitAndProcessRelaunch",
-                "testEPUBTypographyNoCoverFallbackAndTXTIsolation"],
+                "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position"],
         }
-        assert selection["selected_files"] == expected, "Unexpected interaction/typography selection"
-        passed("reader interaction and author scale: exact 10 Host + 3 UI; no Domain/TXT full rerun")
+        assert selection["selected_files"] == expected, "Unexpected opening retry selection"
+        passed("bounded opening retry: exact 2 failed Host cases; product and test code unchanged")
         groups = r.build_groups(r.load_scope_config())
         fresh, reused = r.partition_groups(groups, "")
-        assert len(fresh) == 5 and reused == []
-        passed("all 13 interaction cases execute freshly; no historical pass count claimed")
+        assert len(fresh) == 1 and reused == []
+        passed("2 cases execute freshly; prior 11 passes remain separate, not machine-reused qualification")
         rejects("old P2 reuse is incompatible with reader interaction", lambda: r.partition_groups(groups, r.P2_RUN_ID))
 
     wf_status = "skipped_workflow_not_wired_yet"

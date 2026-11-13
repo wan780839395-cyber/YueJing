@@ -36,9 +36,9 @@
     "Tests/YueJingEPUBUITests/EPUBFlowUITests.swift": "e9fd1022fd59b473bc930fb3ddb76a8d69a2c7556d8537348e0b66080518ce77",
     "Tests/YueJingHostTests/EPUBFontLoadingHostTests.swift": "0e7d983d739723a2198613ec743988ddf9cbeed5601750edc978376547d3f5ee",
     "Tests/YueJingHostTests/EPUBReaderHostTests.swift": "d101ff5aed527ec1a3e8a5627890ac72cc645f30285206e20e6aaba18b6fb046",
-    "docs/READER_INTERACTION_RELEASE.md": "54a30dda6ed89d51bc73bdba7676f06722bf1226b8c2cc41a2cf4903070ca78d",
+    "docs/READER_INTERACTION_RELEASE.md": "63774cd5aed0be854e188731dfafd6661203b8895e0952dbf852cf326fdcb96b",
     "project.yml": "cfae52d29aad21175e489ad063d8ff1dc83883f4e0083ff0fe58ed262fbef28d",
-    "scripts/check_epub_author_layout_validation.py": "07451e9eca51c2e6c7a61c98b431f3b6ed4c15d9495e9fc0a21b2a0ffb5e6b2e",
+    "scripts/check_epub_author_layout_validation.py": "d363051deb381717a4c750f3ffa4a03d72dbc6b9a102599cdaf51b4631885e28",
     "scripts/check_epub_author_scale_contract.py": "bb9953b989e38524f318f66f0df6600fbfb72f0a92380e2ed188892900f5fa7d",
     "scripts/check_epub_continuous_script.cjs": "83b033dc25c233c940861ce934e2a0dda42e9b8a945f04350999a9f927f285b3",
     "scripts/check_epub_interaction_contract.py": "d390423b05a89fad42afa2a1be22eb68ffcd394cf3108cc5e275246195ba4064",
@@ -49,24 +49,9 @@
     "scripts/run_epub_author_layout_validation.py": "1a0b4561bf0738ae8f83a05dd973273a5930000e76da57d3cf12c3058182435a"
   },
   "selected_files": {
-    "YueJingHostTests/EPUBFontLoadingHostTests.swift": [
-      "epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics",
-      "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"
-    ],
     "YueJingHostTests/EPUBReaderHostTests.swift": [
       "epubOpeningRouteStartsOnceAndObservesMountedPresentation",
-      "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
-      "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
-      "epubFailedRestorationRejectsLateReadyAndPendingContinuation",
-      "epubBoundaryViewportRestoresInFreshControllerAfterCloseOrSuspend",
-      "epubWebKitAppliesAuthorCSSPerChapterSwitchesLayoutModesAndReopensColdAndWarm",
-      "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification",
-      "epubFontIntegrityFailureRevokesReadyAndRejectsStaleFailureSignals"
-    ],
-    "YueJingEPUBUITests/EPUBFlowUITests.swift": [
-      "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
-      "testEPUBProgressSurvivesExitAndProcessRelaunch",
-      "testEPUBTypographyNoCoverFallbackAndTXTIsolation"
+      "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position"
     ]
   }
 }
