@@ -162,6 +162,12 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var interactionGeneration = UUID()
     private var scrollDirection: EPUBPageDirection?
     private var transitionSnapshot: UIView?
+    var hasTransitionSnapshot: Bool { transitionSnapshot != nil }
+    private enum ReadinessPhase: String {
+        case preparing, navigating, rebasing, configuring, restoringWindow, ready
+    }
+    private var readinessPhase = ReadinessPhase.preparing
+    private(set) var lastReadinessFailure: String?
     private(set) var documentLoadCount = 0
     private(set) var renderedChapterPaths: Set<String> = []
     private var windowTask: Task<Void, Never>?
@@ -361,6 +367,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         loadingNavigation = nil
         if !reuseDOM { webView.stopLoading() }
         activeRequest = request
+        readinessPhase = .preparing
         parkDiagnostics = EPUBReopenDiagnostics() // A new document/session attempt starts a new controller trace.
         readyToken = nil
         pageAnimationToken = nil
@@ -385,13 +392,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
         loadTask?.cancel()
         loadTask = nil
-        if reuseDOM, let previous {
-            // The DOM is verified already. Move resource/link URLs to the new capability
-            // without admitting the old epoch's URLs or downloading the XHTML again.
-            rebaseLoadedDOM(from: previous.token, to: request, reopening: reuseClosed)
-            return
-        }
-        if loadedDocumentPath != nil, transitionSnapshot == nil {
+        // Explicit jumps/reflow can reuse the DOM too. Preserve the last frame
+        // before any CSS/font/anchor mutation, not only before a full reload.
+        if !request.preserveViewport, loadedDocumentPath != nil, transitionSnapshot == nil {
             transitionSnapshot = webView.snapshotView(afterScreenUpdates: false)
             if let transitionSnapshot {
                 transitionSnapshot.frame = webView.frame
@@ -399,6 +402,12 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 transitionSnapshot.accessibilityElementsHidden = true
                 view.addSubview(transitionSnapshot)
             }
+        }
+        if reuseDOM, let previous {
+            // The DOM is verified already. Move resource/link URLs to the new capability
+            // without admitting the old epoch's URLs or downloading the XHTML again.
+            rebaseLoadedDOM(from: previous.token, to: request, reopening: reuseClosed)
+            return
         }
         clearAccessibilityCanvas()
         loadedDocumentPath = nil
@@ -411,12 +420,11 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 guard let url = EPUBResourceCapability.url(for: request.token) else { throw EPUBError.invalidPackage }
                 self.documentLoadCount += 1
                 self.runtimeTrace.record(.documentLoad)
+                self.readinessPhase = .navigating
                 self.loadingNavigation = self.webView.load(URLRequest(url: url))
             } catch {
                 guard !Task.isCancelled, self.activeRequest == request else { return }
-                self.readinessTask?.cancel()
-                self.readinessTask = nil
-                self.onLoadFailure?(error, request.token)
+                self.failReadiness(for: request.token, error: error)
             }
         }
     }
@@ -424,6 +432,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     /// A missing didFinish/JS-ready callback must not leave the reader loading forever.
     /// The deadline starts before content rules/navigation; stale deadlines cannot cancel a retry.
     func expireReadiness(for token: EPUBNavigationToken) {
+        guard activeRequest?.token == token, readyToken != token else { return }
+        lastReadinessFailure = "就绪截止阶段：\(readinessPhase.rawValue)；邻章任务：\(windowInFlight)；运动中：\(nativeScrollActive)。预算未延长，原记录保留。"
         failReadiness(for: token, error: URLError(.timedOut))
     }
 
@@ -596,6 +606,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     private func rebaseLoadedDOM(from oldToken: EPUBNavigationToken, to request: EPUBNavigationRequest, reopening: Bool = false) {
+        readinessPhase = .rebasing
         let oldHost = EPUBResourceCapability.host(for: oldToken)
         let prefix = oldHost.components(separatedBy: "--e-")[0] + "--e-"
         let hosts = [prefix, EPUBResourceCapability.host(for: request.token)]
@@ -630,11 +641,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 return
             }
             if let error {
-                self.loadedDocumentPath = nil
-                self.loadedDocumentToken = nil
-                self.readinessTask?.cancel()
-                self.readinessTask = nil
-                self.onLoadFailure?(error, request.token)
+                self.failReadiness(for: request.token, error: error)
                 return
             }
             self.loadedDocumentToken = request.token
@@ -644,6 +651,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     private func configureLoadedDOM(for request: EPUBNavigationRequest, installBootstrap: Bool = false) {
+        readinessPhase = .configuring
         do {
             let invoke = try EPUBLocationScript.configurationInvokeScript(
                 token: request.token,
@@ -663,15 +671,11 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 guard let error else { return }
                 Task { @MainActor [weak self] in
                     guard let self, self.activeRequest?.token == request.token else { return }
-                    self.readinessTask?.cancel()
-                    self.readinessTask = nil
-                    self.onLoadFailure?(error, request.token)
+                    self.failReadiness(for: request.token, error: error)
                 }
             }
         } catch {
-            readinessTask?.cancel()
-            readinessTask = nil
-            onLoadFailure?(error, request.token)
+            failReadiness(for: request.token, error: error)
         }
     }
 
@@ -806,6 +810,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 guard current.readingMode == .scroll, current.targetPosition != nil,
                       !current.preserveViewport else { return }
                 pendingViewportRestoreToken = current.token
+                readinessPhase = .restoringWindow
                 renderedChapterPaths.insert(current.token.path)
                 var desired = EPUBChapterWindow.paths(in: current.publication.package, around: current.token.path, count: windowChapterCount)
                 if Set(desired).isSubset(of: renderedChapterPaths) {
@@ -830,6 +835,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             readinessTask?.cancel()
             readinessTask = nil
             readyToken = current.token
+            readinessPhase = .ready
             applyReadingGesturePolicy()
             renderedChapterPaths.insert(current.token.path)
             transitionSnapshot?.removeFromSuperview()

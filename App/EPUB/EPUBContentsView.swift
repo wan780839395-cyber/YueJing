@@ -219,7 +219,7 @@ struct EPUBContentsView: View {
     }
 
     private func searchControls(currentIndex: Int?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "magnifyingglass").accessibilityHidden(true)
                 TextField("筛选标题或章节序号", text: Binding(
@@ -237,21 +237,32 @@ struct EPUBContentsView: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
                     .accessibilityLabel("清空筛选")
                     .accessibilityIdentifier("epub.directory.clear")
                 }
             }
             .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
-            Button(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节") {
+            Button {
                 guard active else { return }
                 query = ""
                 searchFocused = false
                 reveal.request(currentIndex)
+            } label: {
+                Label(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节", systemImage: "location")
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
-            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
             .disabled(currentIndex == nil)
+            .accessibilityHint(query.isEmpty ? "滚动目录至当前章节，不切换正文" : "先清空筛选，再滚动目录至当前章节，不切换正文")
             .accessibilityIdentifier("epub.directory.current")
         }
         .foregroundStyle(appearance.foreground)

@@ -3313,9 +3313,9 @@ def check_processes(root):
 def run_checks(root):
     assert (r.SCOPE, r.BASE, r.VERSION, r.BUILD) == (
         "epub-author-layout",
-        "b890588f43870bf6f91ef4f0729ee42a6b520b28",
-        "0.2.18",
-        "20",
+        "e98fb9f609a37f37ec646a3d8be41ccc467cd9c1",
+        "0.2.19",
+        "21",
     )
     assert r.WORKFLOW_ID == 398234793 and r.REPO == "wan780839395-cyber/YueJing"
 
@@ -3325,23 +3325,33 @@ def run_checks(root):
         live_source_status = src["source_status"]
         passed("live scope source check: " + live_source_status)
         selection = src["selected_summary"]
-        assert selection["selected_declarations"] == 20 and selection["planned_executions"] == 20
-        assert selection["kind_declarations"] == {"domain": 19, "host": 1, "ui": 0}
-        assert len(selection["selected_files"]) == 6
-        partial = {
-            "ReaderDomainTests/EPUBDegradationTests.swift": ["optionalStylesRollbackEarlierRulesAndNeverHideIntegrityFailure"],
-            "ReaderDomainTests/EPUBPackageTests.swift": ["epubPackageRejectsEncryptedFixedLayoutAndActiveContent"],
-            "ReaderDomainTests/EPUBStyleCompatibilityTests.swift": r.inventory.FILES["ReaderDomainTests/EPUBStyleCompatibilityTests.swift"].split()[:-1],
-            "YueJingHostTests/EPUBReaderHostTests.swift": ["epubOpeningRouteStartsOnceAndObservesMountedPresentation"],
+        assert selection["selected_declarations"] == 13 and selection["planned_executions"] == 13
+        assert selection["kind_declarations"] == {"domain": 0, "host": 10, "ui": 3}
+        expected = {
+            "YueJingHostTests/EPUBFontLoadingHostTests.swift": [
+                "epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics",
+                "epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs"],
+            "YueJingHostTests/EPUBReaderHostTests.swift": [
+                "epubOpeningRouteStartsOnceAndObservesMountedPresentation",
+                "epubWebKitLoadsValidatedLocalResourcesAndRestoresTextNodeUTF16Position",
+                "epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks",
+                "epubFailedRestorationRejectsLateReadyAndPendingContinuation",
+                "epubBoundaryViewportRestoresInFreshControllerAfterCloseOrSuspend",
+                "epubWebKitAppliesAuthorCSSPerChapterSwitchesLayoutModesAndReopensColdAndWarm",
+                "epubResourceHandlerEnforcesFontCapabilityMediaTypeAndHashVerification",
+                "epubFontIntegrityFailureRevokesReadyAndRejectsStaleFailureSignals"],
+            "YueJingEPUBUITests/EPUBFlowUITests.swift": [
+                "testEPUBShelfCoverAndDirectoryCrossChapterNavigation",
+                "testEPUBProgressSurvivesExitAndProcessRelaunch",
+                "testEPUBTypographyNoCoverFallbackAndTXTIsolation"],
         }
-        for rel, cases in selection["selected_files"].items():
-            assert cases == partial.get(rel, r.inventory.FILES[rel].split()), "Unexpected selected identities: " + rel
-        passed("preparation repair retry: 19 Domain + 1 Host; unchanged 46 cases not re-executed")
+        assert selection["selected_files"] == expected, "Unexpected interaction/typography selection"
+        passed("reader interaction and author scale: exact 10 Host + 3 UI; no Domain/TXT full rerun")
         groups = r.build_groups(r.load_scope_config())
         fresh, reused = r.partition_groups(groups, "")
-        assert len(fresh) == 6 and reused == []
-        passed("all 20 retry cases execute freshly; no historical pass count claimed")
-        rejects("old P2 reuse is incompatible with preparation repair", lambda: r.partition_groups(groups, r.P2_RUN_ID))
+        assert len(fresh) == 5 and reused == []
+        passed("all 13 interaction cases execute freshly; no historical pass count claimed")
+        rejects("old P2 reuse is incompatible with reader interaction", lambda: r.partition_groups(groups, r.P2_RUN_ID))
 
     wf_status = "skipped_workflow_not_wired_yet"
     wf_text = (r.ROOT / r.WORKFLOW_PATH).read_text(encoding="utf-8")

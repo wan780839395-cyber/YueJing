@@ -503,10 +503,12 @@ async function fixture(source, css, pagedCSS) {
         expectedNodeCount:8,expectedNodeLengths:first.lengths,targetNode:-1,readingMode:'scroll',css});
     await settle(); refreshRolling(); await settle();
     const sameDocument = rd;
-    for (let n=0;n<240 && current<9;n++) { rw.scrollBy(0,180); await tick(); }
+    // Stay below one chapter per 90ms sample even after typography/gutter changes.
+    const rollingStep = Math.min(...Array.from(rd.querySelectorAll('[data-yj-chapter]'), el=>el.getBoundingClientRect().height)) / 16;
+    for (let n=0;n<240 && current<9;n++) { rw.scrollBy(0,rollingStep); await tick(); }
     await settle();
     ok(current >= 9 && observed.has(6), 'continuous scrolling must advance beyond initial five-chapter window: ' + JSON.stringify({current,observed:[...observed],paths:rw.__yjEpub.windowPaths(),errors:rollingErrors,status:rw.__yjEpub.sampleStatus()}));
-    for (let n=0;n<240 && current>0;n++) { rw.scrollBy(0,-180); await tick(); }
+    for (let n=0;n<240 && current>0;n++) { rw.scrollBy(0,-rollingStep); await tick(); }
     await settle();
     ok(current === 0 && rw.__yjEpub.windowPaths().length <= 5 && rw.document === sameDocument,
         'continuous reverse scrolling returns to first chapter without reload or unbounded residency');
@@ -637,12 +639,28 @@ async function fixture(source, css, pagedCSS) {
         let next=0; const pending = new Map();
         ws.onmessage = e => { const m=JSON.parse(e.data); if(m.id && pending.has(m.id)) { const [resolve,reject]=pending.get(m.id); pending.delete(m.id); m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result); } };
         const send = (method,params={}) => new Promise((resolve,reject)=>{const id=++next;pending.set(id,[resolve,reject]);ws.send(JSON.stringify({id,method,params}));});
+        const fixtureURL = `http://127.0.0.1:${server.address().port}/`;
+        let pageReady = false;
+        for (let i=0;i<50;i++) {
+            try {
+                const state = await send('Runtime.evaluate', {expression:`location.href === ${JSON.stringify(fixtureURL)} && document.readyState === 'complete'`,returnByValue:true});
+                if (state.result?.value === true) { pageReady = true; break; }
+            } catch (error) {
+                if (!/context.*destroyed|Cannot find context/i.test(error.message)) throw error;
+            }
+            await sleep(100);
+        }
+        assert.ok(pageReady, 'fixture page must finish initial navigation before tests');
         await send('Emulation.setDeviceMetricsOverride',{width:520,height:420,deviceScaleFactor:1,mobile:false});
         const authorFixture = require('./epub_author_layout_fixture.cjs');
         const failures = []; let passed = 0;
-        for (const [name, fn, css] of [['continuous', fixture, paged], ['author-layout', authorFixture, author]]) {
+        const interactionFixture = require('./epub_interaction_fixture.cjs');
+        const scaleFixture = require('./epub_author_scale_fixture.cjs');
+        const groups = [['continuous', fixture, paged], ['author-layout', authorFixture, author], ['interaction', interactionFixture, author], ['author-scale', scaleFixture, author]];
+        assert.ok(!process.env.EPUB_SCRIPT_GROUP || groups.some(g=>g[0]===process.env.EPUB_SCRIPT_GROUP), 'unknown script group');
+        for (const [name, fn, css] of groups.filter(g => !process.env.EPUB_SCRIPT_GROUP || g[0] === process.env.EPUB_SCRIPT_GROUP)) {
             try {
-                const result = await send('Runtime.evaluate',{expression:`(${fn.toString()})(${JSON.stringify(source)},${JSON.stringify(base)},${JSON.stringify(css)})`,awaitPromise:true,returnByValue:true,timeout:45000});
+                const result = await send('Runtime.evaluate',{expression:`(${fn.toString()})(${JSON.stringify(source)},${JSON.stringify(base)},${JSON.stringify(css)},${JSON.stringify(paged)})`,awaitPromise:true,returnByValue:true,timeout:45000});
                 if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || JSON.stringify(result.exceptionDetails));
                 for (const group of result.result.value) console.log('PASS ' + group);
                 passed += result.result.value.length;

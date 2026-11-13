@@ -333,8 +333,8 @@ struct EPUBFontLoadingHostTests {
                 #expect((await brokenController.sampleVisibleNow())?.epoch == brokenEpoch2.epoch)
             }
             try await brokenReader.close(position: nil, sequence: 1, token: nil, preferences: brokenReader.preferences)
-            // 2. With a real decodable font, minting a new epoch on the same controller rebinds @font-face
-            //    to the new capability URL, serves the font under the new capability, and keeps metrics.
+            // 2. A fresh epoch retains decoded fonts in the same DOM without another
+            //    request. Retained bytes never grant request authority to the old URL.
             let fontData = try Self.makeSyntheticGeometricFontData()
             let validArchiveURL = fixture.root.appendingPathComponent("ValidEpochRebind.epub")
             let validFontPath = "OEBPS/Fonts/SyntheticGeometric.ttf"
@@ -386,7 +386,7 @@ struct EPUBFontLoadingHostTests {
                         publication: reader.publication,
                         targetPosition: nil,
                         fragment: nil,
-                        preferences: ReaderPreferences(fontSize: 22, lineSpacing: 10, theme: .dark),
+                        preferences: ReaderPreferences(fontSize: 20, lineSpacing: 10, theme: .dark),
                         preserveTargetAnchor: false,
                         reloadDocument: false,
                         layoutMode: .original
@@ -402,15 +402,38 @@ struct EPUBFontLoadingHostTests {
                 #expect(controller.documentLoadCount == 1)
                 #expect(rejected2.isEmpty)
                 let servedFontCount2 = served2.filter { $0 == validFontPath }.count
-                #expect(servedFontCount2 > servedFontCount1)
+                #expect(servedFontCount2 == servedFontCount1)
 
                 let snapshot2 = try await inspectLoadedFontsAndMetrics(in: controller)
                 try verifyLoadedFontAndMetrics(
                     snapshot: snapshot2,
                     expectedScopedFamily: expectedScopedFamily,
-                    expectedCapabilityHost: EPUBResourceCapability.host(for: epoch2),
+                    expectedCapabilityHost: EPUBResourceCapability.host(for: epoch1),
                     fontPath: validFontPath
                 )
+
+                let scaledToken = try await reader.beginNavigation(path: chapterPath)
+                let scaledOutcome = try await loadAndAwaitOutcome(
+                    controller: controller,
+                    request: EPUBNavigationRequest(id: UUID(), token: scaledToken, publication: reader.publication,
+                        targetPosition: nil, fragment: nil,
+                        preferences: ReaderPreferences(fontSize: 22, lineSpacing: 10, theme: .dark),
+                        preserveTargetAnchor: false, reloadDocument: false, layoutMode: .original)
+                )
+                guard case .ready(let scaledPayload, let scaledCount, let scaledServed, let scaledRejected) = scaledOutcome else {
+                    Issue.record("Expected ready with actual 110% author text scale")
+                    return
+                }
+                #expect(scaledCount == 1 && !scaledPayload.authorStyleFallback && scaledRejected.isEmpty)
+                #expect(scaledServed.filter { $0 == validFontPath }.count == servedFontCount1)
+                let scaledSnapshot = try await inspectLoadedFontsAndMetrics(in: controller)
+                let scaledGlyphs = try #require(scaledSnapshot["customAAAA"] as? [String: Any])
+                let scaledWidth = try #require((scaledGlyphs["rangeWidth"] as? NSNumber)?.doubleValue)
+                #expect(abs(scaledWidth - 264.0) <= 3.0)
+                let scaledSize = Double((scaledGlyphs["fontSize"] as? String ?? "").replacingOccurrences(of: "px", with: ""))
+                #expect(scaledSize != nil && abs((scaledSize ?? 0) - 26.4) < 0.1)
+                #expect((scaledGlyphs["fontFamily"] as? String)?.contains(expectedScopedFamily) == true)
+                #expect(controller.documentLoadCount == 1)
             }
 
             // 3. Corrupted SHA transport on disk must trigger native failReadiness (loadFailure),

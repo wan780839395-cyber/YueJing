@@ -76,7 +76,11 @@ struct EPUBSettingsView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                    if usesAuthorTypography {
+                        authorScaleSummary
+                    } else {
+                        ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                    }
                     ReaderSettingsSection(title: "排版来源", detail: "默认尊重书籍排版；切换保留当前文本位置", appearance: appearance) {
                         Picker("排版来源", selection: $layoutMode) {
                             ForEach(EPUBLayoutMode.allCases, id: \.self) { mode in
@@ -104,9 +108,9 @@ struct EPUBSettingsView: View {
                         .disabled(!isActive())
                         .accessibilityIdentifier("epub.readingMode")
                     }
-                    typographySection.disabled((effectiveLayoutMode ?? layoutMode) == .original)
+                    typographySection
                     themeSection
-                    presetsSection.disabled((effectiveLayoutMode ?? layoutMode) == .original)
+                    presetsSection
                     epubScopeSection
                     moreSection
                     Text("当前版本：\(AppVersion.current.displayText)")
@@ -129,11 +133,13 @@ struct EPUBSettingsView: View {
                 closeFocused = true
             }
         }
-        .confirmationDialog("恢复默认排版？", isPresented: $showRestore, titleVisibility: .visible) {
-            Button("恢复字号与行距") { apply(.standard) }
+        .confirmationDialog(usesAuthorTypography ? "恢复作者原字号？" : "恢复默认排版？", isPresented: $showRestore, titleVisibility: .visible) {
+            Button(usesAuthorTypography ? "恢复至 100%" : "恢复字号与行距") { apply(.standard) }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("恢复为字号 20、行距 7。保留当前阅读背景，不改变阅读位置。")
+            Text(usesAuthorTypography
+                ? "只恢复作者文字比例至 100%。保留阅读器行距偏好、当前背景和阅读位置。"
+                : "恢复为字号 20、行距 7。保留当前阅读背景，不改变阅读位置。")
         }
         .sheet(item: $info, onDismiss: {
             if voiceOver, isActive() { closeFocused = true }
@@ -179,28 +185,59 @@ struct EPUBSettingsView: View {
         .onDisappear { draft = preferences.validated }
     }
 
+    private var usesAuthorTypography: Bool { (effectiveLayoutMode ?? layoutMode) == .original }
+
+    private var authorScaleSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("作者文字比例").font(.caption.weight(.medium))
+                .foregroundStyle(appearance.secondary)
+            Text("\(Int((draft.fontSize * 5).rounded()))%")
+                .font(.system(.title, design: .serif).weight(.medium).monospacedDigit())
+            Text("100% 为作者原字号。这里只显示比例，不预览书内字体或版式。")
+                .font(.footnote).foregroundStyle(appearance.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("epub.authorScale.summary")
+    }
+
     private var typographySection: some View {
-        ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并按文本锚点恢复", appearance: appearance) {
+        ReaderSettingsSection(
+            title: usesAuthorTypography ? "作者文字" : "文字",
+            detail: usesAuthorTypography ? "调整文字比例，松手应用并恢复文本位置" : "滑动预览，松手应用并按文本锚点恢复",
+            appearance: appearance
+        ) {
             VStack(alignment: .leading, spacing: 8) {
-                ReaderSettingAdjustment(
-                    title: "字号",
-                    key: "font",
-                    value: $draft.fontSize,
-                    range: 14...36,
-                    accent: appearance.foreground,
-                    isActive: isActive,
-                    commit: commitDraft
-                )
-                Divider().overlay(appearance.edge)
-                ReaderSettingAdjustment(
-                    title: "行距",
-                    key: "spacing",
-                    value: $draft.lineSpacing,
-                    range: 0...20,
-                    accent: appearance.foreground,
-                    isActive: isActive,
-                    commit: commitDraft
-                )
+                if usesAuthorTypography {
+                    EPUBAuthorScaleAdjustment(value: $draft.fontSize, appearance: appearance,
+                                              isActive: isActive, commit: commitDraft)
+                    Text("70%–180%，100% 为作者原字号。保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
+                        .font(.caption).foregroundStyle(appearance.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ReaderSettingAdjustment(
+                        title: "字号",
+                        key: "font",
+                        value: $draft.fontSize,
+                        range: 14...36,
+                        accent: appearance.foreground,
+                        isActive: isActive,
+                        commit: commitDraft
+                    )
+                    Divider().overlay(appearance.edge)
+                    ReaderSettingAdjustment(
+                        title: "行距",
+                        key: "spacing",
+                        value: $draft.lineSpacing,
+                        range: 0...20,
+                        accent: appearance.foreground,
+                        isActive: isActive,
+                        commit: commitDraft
+                    )
+                }
             }
         }
     }
@@ -214,7 +251,11 @@ struct EPUBSettingsView: View {
     }
 
     private var presetsSection: some View {
-        ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", appearance: appearance) {
+        ReaderSettingsSection(
+            title: usesAuthorTypography ? "快捷比例" : "快捷排版",
+            detail: usesAuthorTypography ? "只调整文字比例，保留阅读器行距偏好与背景" : "只调整字号和行距，保留当前背景",
+            appearance: appearance
+        ) {
             VStack(spacing: 8) {
                 threeOptionLayout(ReaderTypographyPreset.allCases) { preset in
                     presetButton(preset)
@@ -228,7 +269,7 @@ struct EPUBSettingsView: View {
 
     private var epubScopeSection: some View {
         ReaderSettingsSection(title: "EPUB 首版范围", detail: "可重排阅读与安全限制", appearance: appearance) {
-            Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版优先使用书中字号与行距；切换阅读器排版可自定义。暂不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
+            Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
                 .font(.caption)
                 .foregroundStyle(appearance.foreground.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
@@ -258,16 +299,16 @@ struct EPUBSettingsView: View {
     }
 
     private func presetButton(_ preset: ReaderTypographyPreset) -> some View {
-        let selected = preset.matches(draft)
+        let selected = usesAuthorTypography ? draft.fontSize == preset.fontSize : preset.matches(draft)
         let selectionMotionKey = reduceMotion ? 0 : (selected ? 1 : 2)
         let selectionAnimation = reduceMotion ? nil : ReaderMotion.selectionFeedback
         return Button { apply(preset) } label: {
             VStack(spacing: 4) {
-                Text(preset.title)
+                Text(presetTitle(preset))
                     .font(.subheadline.weight(selected ? .semibold : .regular))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
+                Text(usesAuthorTypography ? "\(Int(preset.fontSize * 5))%" : "\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(appearance.foreground.opacity(selected ? 0.92 : 0.72))
                     .multilineTextAlignment(.center)
@@ -290,7 +331,9 @@ struct EPUBSettingsView: View {
                 .opacity(isActive() ? 1 : 0.4)
         }
         .disabled(!isActive())
-        .accessibilityLabel("\(preset.title)排版，字号 \(Int(preset.fontSize))，行距 \(Int(preset.lineSpacing))")
+        .accessibilityLabel(usesAuthorTypography
+            ? "\(presetTitle(preset))，作者文字比例 \(Int(preset.fontSize * 5))%"
+            : "\(preset.title)排版，字号 \(Int(preset.fontSize))，行距 \(Int(preset.lineSpacing))")
         .accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("reader.preset.\(preset.rawValue)")
@@ -300,7 +343,7 @@ struct EPUBSettingsView: View {
         Button {
             if isActive() { showRestore = true }
         } label: {
-            Label("恢复默认字号与行距", systemImage: "arrow.counterclockwise")
+            Label(usesAuthorTypography ? "恢复作者原字号（100%）" : "恢复默认字号与行距", systemImage: "arrow.counterclockwise")
                 .font(.subheadline.weight(.medium))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -309,7 +352,7 @@ struct EPUBSettingsView: View {
                 .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
-        .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
+        .disabled(!isActive() || (usesAuthorTypography ? draft.fontSize == 20 : ReaderTypographyPreset.standard.matches(draft)))
         .accessibilityIdentifier("reader.typography.restore")
     }
 
@@ -396,9 +439,23 @@ struct EPUBSettingsView: View {
         .accessibilityIdentifier("reader.theme.\(theme.rawValue)")
     }
 
+    private func presetTitle(_ preset: ReaderTypographyPreset) -> String {
+        guard usesAuthorTypography else { return preset.title }
+        switch preset {
+        case .compact: return "较小"
+        case .standard: return "原字号"
+        case .relaxed: return "较大"
+        }
+    }
+
     private func apply(_ preset: ReaderTypographyPreset) {
         guard isActive() else { return }
-        draft = preset.applying(to: draft)
+        if usesAuthorTypography {
+            // The existing preference is the scale contract; do not change reader line spacing.
+            draft.fontSize = preset.fontSize
+        } else {
+            draft = preset.applying(to: draft)
+        }
         commitDraft()
     }
 
@@ -414,5 +471,94 @@ struct EPUBSettingsView: View {
         guard isActive() else { return }
         commitDraft()
         close()
+    }
+}
+
+/// Author-mode presentation only; the WebView owns proportional text/line-height scaling.
+@MainActor
+private struct EPUBAuthorScaleAdjustment: View {
+    @Binding var value: Double
+    let appearance: ReaderToolAppearance
+    let isActive: @MainActor () -> Bool
+    let commit: @MainActor () -> Void
+    @State private var dragging = false
+    @Environment(\.dynamicTypeSize) private var dynamicType
+
+    private var percentage: String { "\(Int((value * 5).rounded()))%" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if dynamicType.isAccessibilitySize {
+                title
+                controls.frame(maxWidth: .infinity)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        title.fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 8)
+                        controls
+                    }
+                    VStack(alignment: .leading, spacing: 8) { title; controls }
+                }
+            }
+            Slider(value: sliderValue, in: 14...36, step: 1, onEditingChanged: { editing in
+                dragging = editing
+                if !editing, isActive() { commit() }
+            })
+            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+            .disabled(!isActive())
+            .accessibilityLabel("作者文字比例")
+            .accessibilityValue(percentage)
+            .accessibilityHint("100% 为作者原字号，每次调整 5 个百分点")
+            .accessibilityIdentifier("reader.font.slider")
+        }
+    }
+
+    private var title: some View {
+        Text("文字比例").font(.subheadline.weight(.medium))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var controls: some View {
+        HStack(spacing: 0) {
+            Button { step(-1) } label: {
+                Image(systemName: "minus").font(.body.weight(.medium))
+                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+            .disabled(!isActive() || value <= 14)
+            .accessibilityLabel("减小作者文字比例")
+            .accessibilityIdentifier("reader.font.decrease")
+            Text(percentage).font(.body.monospacedDigit())
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 64)
+                .accessibilityLabel("作者文字比例，\(percentage)")
+                .accessibilityIdentifier("reader.font.value")
+            Button { step(1) } label: {
+                Image(systemName: "plus").font(.body.weight(.medium))
+                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+            .disabled(!isActive() || value >= 36)
+            .accessibilityLabel("增大作者文字比例")
+            .accessibilityIdentifier("reader.font.increase")
+        }
+        .padding(2)
+        .background(appearance.selection, in: Capsule())
+    }
+
+    private var sliderValue: Binding<Double> {
+        Binding(get: { value }, set: { proposed in
+            guard isActive(), proposed.isFinite else { return }
+            value = min(36, max(14, proposed.rounded()))
+            // Keep the existing slider contract for keyboard and VoiceOver adjustments.
+            if !dragging { commit() }
+        })
+    }
+
+    private func step(_ delta: Double) {
+        guard isActive() else { return }
+        value = min(36, max(14, value + delta))
+        commit()
     }
 }

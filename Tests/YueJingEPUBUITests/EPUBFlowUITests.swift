@@ -215,6 +215,28 @@ final class EPUBFlowUITests: XCTestCase {
                 object: nil
             )
             XCTAssertEqual(waitForPredicates([updatedTypography], timeout: 10), .completed)
+
+            // Original mode must offer a real proportional control, not a disabled reader slider.
+            selectLayoutMode("原始排版", rawValue: "original", app)
+            openSettings(app)
+            let authorIncrease = app.buttons["reader.font.increase"]
+            revealSetting(authorIncrease, app)
+            XCTAssertTrue(authorIncrease.isEnabled)
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("120%"))
+            XCTAssertFalse(app.staticTexts["reader.spacing.value"].exists)
+            authorIncrease.tap()
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("125%"))
+            let originalSize = app.buttons["reader.preset.standard"]
+            revealSetting(originalSize, app)
+            originalSize.tap()
+            XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("100%"))
+            closePanel(app)
+            selectLayoutMode("阅读器排版", rawValue: "reader", app)
+            openSettings(app)
+            let retainedSpacing = app.staticTexts["reader.spacing.value"]
+            revealSetting(retainedSpacing, app)
+            XCTAssertTrue(retainedSpacing.label.contains("10"))
+            closePanel(app)
             exitReader(app, shelfBook: "EPUBTest-NoCover-B")
 
             openTXT("TXTTest-Companion-C", expectedMarker: "TXT_COMPANION_START", stage: "open-txt", app)

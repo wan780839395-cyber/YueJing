@@ -37,6 +37,12 @@ final class EPUBReaderViewModel: ObservableObject {
     func dismissCompatibilityNotice() { compatibilityNoticeDismissed = true }
     @Published private(set) var loading = true
     @Published private(set) var ready = false
+    @Published private(set) var promotingVisibleChapter = false
+    // Native motion is not a save/navigation permission. Keep the same touch
+    // target while a resident chapter receives its new authority asynchronously.
+    var acceptsCanvasTouch: Bool {
+        !loading && !closing && !suspended && !exitSaveFailed && (ready || promotingVisibleChapter)
+    }
     @Published private(set) var exitSaveFailed = false
     @Published var message: String?
     @Published private(set) var openingPerformanceSummary: String?
@@ -76,7 +82,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     var diagnosticOpeningSummary: String? {
-        let parts = [openingPerformanceSummary, openingPresentationSummary].compactMap { $0 }
+        let parts = [openingPerformanceSummary, openingPresentationSummary, webView.controller?.lastReadinessFailure].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
@@ -395,6 +401,7 @@ final class EPUBReaderViewModel: ObservableObject {
         generation = UUID()
         let gen = generation
         let life = lifecycle
+        promotingVisibleChapter = false
         ready = false
         currentToken = nil
         // Reflow stays inside the settings panel. Global loading compacts tools and
@@ -446,12 +453,14 @@ final class EPUBReaderViewModel: ObservableObject {
         webView.recordPayload(payload)
         switch payload.kind {
         case .error:
+            promotingVisibleChapter = false
             loading = false
             ready = false
             navigationRequest = nil
             message = "章节内容校验或定位未通过，原阅读位置已保留。"
         case .ready:
             guard !payload.restorationPending else { return }
+            promotingVisibleChapter = false
             // A seamless promotion was already marked ready before publishing the request.
             // Do not replace its real observed position with a synthetic ready fallback.
             if navigationRequest?.preserveViewport == true {
@@ -595,6 +604,7 @@ final class EPUBReaderViewModel: ObservableObject {
         let gen = generation
         let life = lifecycle
         // Revoke old UI admission synchronously; the scroll view and its DOM stay alive.
+        promotingVisibleChapter = true
         currentToken = nil
         ready = false
         promotionTask = Task { @MainActor [weak self] in
@@ -625,6 +635,7 @@ final class EPUBReaderViewModel: ObservableObject {
             } catch is CancellationError {
             } catch {
                 guard let self, self.lifecycle == life, self.generation == gen else { return }
+                self.promotingVisibleChapter = false
                 self.ready = false
                 self.message = "跨章位置交接未完成，已保存记录保留。请重试打开。"
             }
@@ -656,6 +667,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func handleLoadFailure(_ error: Error, token: EPUBNavigationToken) {
         guard !closing, !suspended, currentToken == token else { return }
+        promotingVisibleChapter = false
         // Revoke callback ownership before any suspended markReady/save continuation resumes.
         generation = UUID()
         currentToken = nil

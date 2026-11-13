@@ -47,7 +47,7 @@ struct EPUBReaderScreen: View {
                     onToolsInteraction: handleToolsInteraction
                 )
                 .ignoresSafeArea(.container, edges: .bottom)
-                .allowsHitTesting(model.ready && !model.loading && !model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
+                .allowsHitTesting(model.acceptsCanvasTouch && tools.exitRequest == nil && tools.panel == nil)
                 .accessibilityHidden(!model.ready || model.loading || tools.panel != nil || tools.exitRequest != nil)
                 .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
                 .accessibilityAction(named: Text("退出阅读")) { exitReader() }
@@ -108,18 +108,7 @@ struct EPUBReaderScreen: View {
                     titleBar(metrics: metrics, appearance: appearance)
                     if model.ready && !model.loading && tools.valid && tools.panel == nil,
                        let notice = model.compatibilityNotice {
-                        HStack(alignment: .top, spacing: 8) {
-                            Text(notice).font(.footnote).fixedSize(horizontal: false, vertical: true)
-                            Button(action: model.dismissCompatibilityNotice) {
-                                Image(systemName: "xmark").frame(width: 44, height: 44)
-                            }
-                            .accessibilityLabel("关闭兼容排版提示")
-                        }
-                        .padding(.leading, 12)
-                        .background(appearance.surface, in: RoundedRectangle(cornerRadius: 12))
-                        .padding(.horizontal, 12)
-                        .padding(.top, 6)
-                        .accessibilityIdentifier("epub.compatibility.notice")
+                        compatibilityBanner(notice, appearance: appearance)
                     }
                     Spacer(minLength: 0)
                 }
@@ -280,6 +269,41 @@ struct EPUBReaderScreen: View {
                 model.preferences = value
             }
         )
+    }
+
+    private func compatibilityBanner(_ notice: String, appearance: ReaderToolAppearance) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(notice)
+                .font(.footnote)
+                .foregroundStyle(appearance.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            Button(action: model.dismissCompatibilityNotice) {
+                Image(systemName: "xmark")
+                    .font(.body.weight(.medium))
+                    .frame(minWidth: 44, minHeight: ReaderVisualStyle.minimumControlHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
+            .accessibilityLabel("关闭兼容排版提示")
+            .accessibilityHint("关闭后仍可在排版设置查看兼容说明")
+            .accessibilityIdentifier("epub.compatibility.dismiss")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(appearance.edge, lineWidth: ReaderVisualStyle.panelDividerHeight)
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        // Stay in the existing safe-area overlay; never inset or resize the reading canvas.
+        .transition(.identity)
+        .accessibilityIdentifier("epub.compatibility.notice")
     }
 
     private func titleBar(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {

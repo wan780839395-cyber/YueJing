@@ -79,6 +79,7 @@ enum EPUBLocationScript {
             overflow-wrap: break-word !important;
             -webkit-text-size-adjust: none !important;
         }
+        html { padding: 0 !important; }
         p {
             margin: 0 0 \(max(8, spacing + 6))px 0 !important;
             line-height: \(lineHeight)px !important;
@@ -120,6 +121,7 @@ enum EPUBLocationScript {
             overflow-wrap: break-word; -webkit-text-size-adjust: none;
             overflow-anchor: none !important;
         }
+        html { padding: 0 !important; }
         body > section[data-yj-chapter] { display: flow-root !important; }
         span[id^="yj-t"], span[data-yj-original-id^="yj-t"] { display: inline !important; }
         img { max-width: 100% !important; height: auto; }
@@ -257,6 +259,7 @@ enum EPUBLocationScript {
             "startAtEnd": startAtEnd && targetPosition == nil && fragment == nil,
             "readingMode": readingMode.rawValue,
             "layoutMode": layoutMode.rawValue,
+            "authorTextScale": preferences.validated.fontSize / 20,
             "css": trustedStyleSheet(for: preferences, readingMode: readingMode, layoutMode: layoutMode)
         ]
         if readingMode == .scroll, targetPosition?.path == token.path,
@@ -347,6 +350,7 @@ enum EPUBLocationScript {
             restoredScrollY: 0,
             restoredScrollX: 0,
             paginated: false,
+            authorTextScale: 1,
             lastAnchor: null,
             reflowRevision: 0,
             layoutWidth: 0,
@@ -446,8 +450,66 @@ enum EPUBLocationScript {
             return Array.prototype.slice.call(root.querySelectorAll("style[data-yj-author-style]"));
         }
 
+        // Transient presentation only: no text nodes, author stylesheet, font family,
+        // storage coordinates or image geometry are replaced by reader typography.
+        function resetAuthorTextScale() {
+            state.chapters.forEach(function(chapter) {
+                (chapter.textScaleRecords || []).forEach(function(record) {
+                    ["font-size", "line-height"].forEach(function(property, index) {
+                        var original = record.original[index];
+                        if (original.value) { record.element.style.setProperty(property, original.value, original.priority); }
+                        else { record.element.style.removeProperty(property); }
+                    });
+                    if (record.element.style.length === 0) { record.element.removeAttribute("style"); }
+                });
+                chapter.textScaleRecords = null;
+            });
+        }
+
+        function applyAuthorTextScale() {
+            if (state.authorTextScale === 1 || document.documentElement.getAttribute("data-yj-layout") !== "original") { return; }
+            // Read every unscaled computed value before writing any parent value.
+            // Otherwise nested em/% declarations would be multiplied repeatedly.
+            var pending = [];
+            state.chapters.forEach(function(chapter) {
+                if (chapter.textScaleRecords) { return; }
+                var elements = [chapter.element].concat(Array.prototype.slice.call(chapter.element.querySelectorAll("*")));
+                var records = [];
+                elements.forEach(function(element) {
+                    if (!element.style || ["style", "img", "svg", "path", "br", "hr"].indexOf(element.localName) >= 0) { return; }
+                    var computed = window.getComputedStyle(element);
+                    var size = parseFloat(computed.fontSize), line = parseFloat(computed.lineHeight);
+                    if (!Number.isFinite(size) || size < 0) { return; }
+                    records.push({element: element,
+                        size: size, line: Number.isFinite(line) ? line : null,
+                        original: ["font-size", "line-height"].map(function(property) {
+                            return {value: element.style.getPropertyValue(property), priority: element.style.getPropertyPriority(property)};
+                        })});
+                });
+                chapter.textScaleRecords = records;
+                pending = pending.concat(records);
+            });
+            pending.forEach(function(record) {
+                record.element.style.setProperty("font-size", (record.size * state.authorTextScale) + "px", "important");
+                if (record.line !== null) {
+                    record.element.style.setProperty("line-height", (record.line * state.authorTextScale) + "px", "important");
+                }
+            });
+        }
+
         function rebaseAuthorStyle(style) {
             if (typeof style.__yjCSS !== "string") { style.__yjCSS = style.textContent; }
+            // Retain decoded fonts just like decoded images. A new epoch must not
+            // replace an unchanged live stylesheet and restart every FontFace load.
+            // This retains bytes only: resourceHandler still rejects every old URL.
+            var retained = style.__yjLoadedFaces;
+            if (style.isConnected && style.__yjRetainedCSS === style.__yjCSS &&
+                style.__yjRetainedText === style.textContent && retained && retained.length && document.fonts) {
+                var liveFaces = new Set();
+                document.fonts.forEach(function(face) { liveFaces.add(face); });
+                if (retained.every(function(face) { return face.status === "loaded" && liveFaces.has(face); })) { return; }
+            }
+            style.__yjLoadedFaces = null;
             var host = "s-" + state.sessionID.toLowerCase().replace(/[^a-z0-9-]/g, "-") + "--e-" + state.epoch.toLowerCase();
             // Only canonical root-relative URLs emitted by the native CSS parser are admitted.
             var css = style.__yjCSS.replace(/url\\(["']?(\\/[^"'()\\s]+)["']?\\)/g, function(_, path) {
@@ -661,6 +723,12 @@ enum EPUBLocationScript {
                 if (missingFamilies.size === 0 && failedResults.length === 0 && unparsedFontStyles.length === 0) {
                     return Promise.resolve(document.fonts.ready).then(function() {
                         if (!stillActive()) { throw new Error("font-wait-cancelled"); }
+                        authorStyles(root).forEach(function(style) {
+                            if (!style.isConnected || !(styleRuleCounts.get(style) > 0)) { return; }
+                            style.__yjRetainedCSS = style.__yjCSS;
+                            style.__yjRetainedText = style.textContent;
+                            style.__yjLoadedFaces = faces.map(function(entry) { return entry.font; });
+                        });
                         return {fallback: false};
                     });
                 }
@@ -1234,6 +1302,7 @@ enum EPUBLocationScript {
                 var committedScrollX = window.scrollX || 0, committedScrollY = window.scrollY || 0;
                 function completeCommit() {
                 if (!live()) { return; }
+                applyAuthorTextScale();
                 updatePageMetrics();
                 var after = anchor && anchorRect(anchor);
                 // Exclude only movement during the font wait; synchronous DOM removal
@@ -1351,6 +1420,13 @@ enum EPUBLocationScript {
                 ? config.targetViewportOffset : null;
             state.targetPath = state.path;
             state.paginated = config.readingMode === "paged";
+            var nextScale = config.layoutMode !== "reader" && Number.isFinite(config.authorTextScale)
+                ? Math.max(0.7, Math.min(1.8, config.authorTextScale)) : 1;
+            if (nextScale !== state.authorTextScale ||
+                (document.documentElement.getAttribute("data-yj-layout") === "reader") !== (config.layoutMode === "reader")) {
+                resetAuthorTextScale();
+            }
+            state.authorTextScale = nextScale;
             document.documentElement.setAttribute("data-yj-layout", config.layoutMode === "reader" ? "reader" : "original");
             state.lastAnchor = null;
             state.reflowRevision += 1;
@@ -1391,6 +1467,7 @@ enum EPUBLocationScript {
             function restoreAndConfirm() {
                 if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
                 state.suppressingReflow = true;
+                applyAuthorTextScale();
                 updatePageMetrics();
                 var ok = config.startAtEnd === true && state.targetNode < 0 && !config.fragment
                     ? scrollToChapterEnd()

@@ -307,6 +307,16 @@ struct EPUBReaderHostTests {
                     node: targetNode,
                     rawUTF16Offset: 0
                 )
+                let loadsBeforeReflow = controller.documentLoadCount
+                let sameDOMRestore = try await loadAndAwaitReady(
+                    controller: controller,
+                    request: EPUBNavigationRequest(id: UUID(), token: token, publication: reader.publication,
+                        targetPosition: targetPosition, fragment: nil, preferences: reader.preferences,
+                        preserveTargetAnchor: true, reloadDocument: false),
+                    expectTransitionSnapshot: true
+                )
+                #expect(sameDOMRestore.restoredNode == targetPosition.node)
+                #expect(controller.documentLoadCount == loadsBeforeReflow)
                 #expect(try await reader.save(targetPosition, sequence: 1, token: token))
                 try await reader.close(position: targetPosition, sequence: 2, token: token, preferences: reader.preferences)
             }
@@ -1106,7 +1116,8 @@ struct EPUBReaderHostTests {
 
     private func loadAndAwaitReady(
         controller: EPUBWebViewController,
-        request: EPUBNavigationRequest
+        request: EPUBNavigationRequest,
+        expectTransitionSnapshot: Bool? = nil
     ) async throws -> EPUBLocatorPayload {
         let readyExpectation = XCTestExpectation(description: "EPUB WebKit locator ready")
         var capturedPayload: EPUBLocatorPayload?
@@ -1127,11 +1138,15 @@ struct EPUBReaderHostTests {
             readyExpectation.fulfill()
         }
         controller.apply(request)
+        if let expectTransitionSnapshot {
+            #expect(controller.hasTransitionSnapshot == expectTransitionSnapshot)
+        }
         let waitResult = await XCTWaiter.fulfillment(of: [readyExpectation], timeout: 15)
         try #require(waitResult == .completed)
         if let capturedError {
             throw capturedError
         }
+        #expect(!controller.hasTransitionSnapshot)
         return try #require(capturedPayload)
     }
 
@@ -1185,11 +1200,15 @@ struct EPUBReaderHostTests {
         let next = EPUBNavigationToken(sessionID: token.sessionID, path: token.path)
         controller.expireReadiness(for: next)
         #expect(controller.activeRequest?.token == token && failed.isEmpty)
+        #expect(controller.lastReadinessFailure == nil)
         controller.expireReadiness(for: token)
         #expect(controller.activeRequest == nil && failed == [token])
+        #expect(controller.lastReadinessFailure?.contains("preparing") == true)
+        let failureSummary = controller.lastReadinessFailure
         controller.apply(request(next))
         controller.expireReadiness(for: token)
         #expect(controller.activeRequest?.token == next && failed == [token])
+        #expect(controller.lastReadinessFailure == failureSummary)
         controller.detachCallbacks()
         controller.expireReadiness(for: next)
         #expect(failed == [token])
@@ -1504,6 +1523,9 @@ struct EPUBReaderHostTests {
                 #expect(draggingProtected == true)
                 let crossed = try await scrollToBoundary(20)
                 model.handleLocatorEvent(crossed)
+                // Synchronous authority revocation must not remove the touch target.
+                #expect(model.acceptsCanvasTouch)
+                #expect(model.ready || model.promotingVisibleChapter)
                 controller.scrollViewDidEndDragging(scroll, willDecelerate: true)
                 let decelerationProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
                 #expect(decelerationProtected == true)
@@ -1514,6 +1536,8 @@ struct EPUBReaderHostTests {
                 try await waitUntilReady(model: model, expectedToken: ch2Request.token)
                 let promotionProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
                 #expect(promotionProtected == true)
+                #expect(model.acceptsCanvasTouch && !model.promotingVisibleChapter)
+                #expect(!controller.hasTransitionSnapshot)
                 controller.scrollViewDidEndDecelerating(scroll)
                 let idleProtected = try await controller.evaluateLocatorJavaScriptForTesting("window.__yjEpub.sampleStatus().scrollActive") as? Bool
                 #expect(idleProtected == false)
@@ -1586,6 +1610,7 @@ struct EPUBReaderHostTests {
                 let loadsBeforeJump = controller.documentLoadCount
                 model.go(to: ch3Item)
                 #expect(model.currentToken == nil && !model.ready && model.loading)
+                #expect(!model.acceptsCanvasTouch)
                 model.handleLocatorEvent(obsoleteScroll) // no await: the previously unguarded race window
                 model.handleLoadFailure(EPUBError.corruptResource, token: backToken)
                 #expect(model.currentPosition == positionBeforeJump)
@@ -1596,6 +1621,7 @@ struct EPUBReaderHostTests {
                 controller.apply(ch3Request)
                 try await waitUntilReady(model: model, expectedToken: ch3Request.token)
                 try await waitForChapterWindow(controller, count: 3)
+                #expect(!controller.hasTransitionSnapshot)
                 let ch3Token = try #require(model.currentToken)
                 #expect(ch3Token.path == "OEBPS/text/ch3.xhtml")
                 #expect(controller.documentLoadCount == loadsBeforeJump)
@@ -1725,6 +1751,8 @@ struct EPUBReaderHostTests {
             #expect(controller.activeRequest == nil)
             #expect(model.currentToken == nil && model.navigationRequest == nil)
             #expect(!model.ready && !model.loading && model.currentPosition == nil)
+            #expect(!model.acceptsCanvasTouch && !model.promotingVisibleChapter)
+            #expect(model.diagnosticOpeningSummary?.contains("就绪截止阶段") == true)
             let closed = await model.close()
             #expect(closed)
             controller.detachCallbacks()
@@ -2020,6 +2048,18 @@ struct EPUBReaderHostTests {
             }
 
             @MainActor
+            func expectScaledAuthorStyles(_ styles: [String: String], scale: Double) {
+                #expect(styles["layout"] == "original")
+                for (key, base) in [("inlineFont", 31.0), ("ch1Font", 26.0), ("ch1Line", 42.0),
+                                    ("ch2Font", 34.0), ("ch2Line", 48.0)] {
+                    let value = Double((styles[key] ?? "").replacingOccurrences(of: "px", with: ""))
+                    #expect(value != nil && abs((value ?? -1) - base * scale) < 0.12)
+                }
+                #expect(styles["ch1Indent"] == "32px" && styles["ch2Indent"] == "16px")
+                #expect(styles["ch1LeadColor"] == "rgb(80, 20, 40)" && styles["ch2LeadColor"] == "rgb(20, 80, 40)")
+            }
+
+            @MainActor
             func bind(_ model: EPUBReaderViewModel, _ controller: EPUBWebViewController) {
                 controller.onLocatorEvent = { [weak model] payload in model?.handleLocatorEvent(payload) }
                 controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
@@ -2064,10 +2104,25 @@ struct EPUBReaderHostTests {
                 #expect(savedAnchor.path == sampled.path && savedAnchor.node == sampled.node && savedAnchor.utf16Offset == sampled.utf16Offset)
                 beforeSample = sampled
 
+                var scaleToken = initialToken
+                for size in [28.0, 36.0, 14.0, 20.0] {
+                    first.preferences.fontSize = size
+                    first.settingsChanged()
+                    try await waitForNewToken(model: first, previous: scaleToken)
+                    scaleToken = try #require(first.currentToken)
+                    try await waitUntilReady(model: first, expectedToken: scaleToken)
+                    expectScaledAuthorStyles(try await readComputedStyles(in: controller), scale: size / 20)
+                    let scaled = try #require(await controller.sampleVisibleNow())
+                    #expect(scaled.node == sampled.node && scaled.utf16Offset == sampled.utf16Offset)
+                    #expect(abs((scaled.viewportOffset ?? -9999) - beforeY) <= 1)
+                    #expect(controller.documentLoadCount == 1)
+                }
+                expectOriginalAuthorStyles(try await readComputedStyles(in: controller))
+
                 // Switch to reader layout with custom font size/line spacing.
                 first.preferences = ReaderPreferences(fontSize: 28, lineSpacing: 10, theme: .paper)
                 first.setLayoutMode(.reader)
-                try await waitForNewToken(model: first, previous: initialToken)
+                try await waitForNewToken(model: first, previous: scaleToken)
                 let readerToken = try #require(first.currentToken)
                 try await waitUntilReady(model: first, expectedToken: readerToken)
 
@@ -2110,7 +2165,7 @@ struct EPUBReaderHostTests {
                 roundtripSample = restored
 
                 let roundtripStyles = try await readComputedStyles(in: controller)
-                expectOriginalAuthorStyles(roundtripStyles)
+                expectScaledAuthorStyles(roundtripStyles, scale: 1.4)
 
                 #expect(await first.close())
                 #expect(controller.hasParkedDocument)
@@ -2140,7 +2195,7 @@ struct EPUBReaderHostTests {
                 #expect(warmVisible.path == expectedBefore.path && warmVisible.node == expectedBefore.node && warmVisible.utf16Offset == expectedBefore.utf16Offset)
                 let warmY = try #require(warmVisible.viewportOffset)
                 #expect(abs(warmY - expectedRoundtripY) <= 1)
-                expectOriginalAuthorStyles(try await readComputedStyles(in: warmController))
+                expectScaledAuthorStyles(try await readComputedStyles(in: warmController), scale: 1.4)
                 #expect(await warm.close())
             }
             cache.discard()
@@ -2164,7 +2219,7 @@ struct EPUBReaderHostTests {
                 #expect(coldVisible.path == expectedBefore.path && coldVisible.node == expectedBefore.node && coldVisible.utf16Offset == expectedBefore.utf16Offset)
                 let coldY = try #require(coldVisible.viewportOffset)
                 #expect(abs(coldY - expectedRoundtripY) <= 1)
-                expectOriginalAuthorStyles(try await readComputedStyles(in: coldController))
+                expectScaledAuthorStyles(try await readComputedStyles(in: coldController), scale: 1.4)
                 #expect(await cold.close())
             }
         }

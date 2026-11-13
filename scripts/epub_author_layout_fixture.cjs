@@ -195,6 +195,15 @@ ${prefix} [data-yj-original-id="original"] {color:rgb(${i ? '20, 80, 40' : '80, 
                 ok(Math.abs(wCustom - 240) <= 5, 'valid SFNT renders 240px AAAA width: ' + wCustom);
                 ok(wSys > 20 && wSys < 110, 'system serif fallback width < 110: ' + wSys);
                 ok(d.querySelector('style[data-yj-author-style]').textContent.includes('@font-face'), 'valid SFNT retains @font-face');
+                const fontFamily = w.getComputedStyle(span0).fontFamily;
+                w.__yjEpub.configure({...cfg, epoch:'geom-scaled', authorTextScale:1.4});
+                for (let i=0;i<120 && !msgs.some(m=>m.kind==='ready'&&m.epoch==='geom-scaled');i++) await tick();
+                ok(msgs.some(m=>m.kind==='ready'&&m.epoch==='geom-scaled'&&!m.authorStyleFallback), 'scaled embedded font ready without fallback');
+                ok(Math.abs(r0.getBoundingClientRect().width - 336) <= 5, 'actual embedded glyphs scale 240 to 336px, not system fallback');
+                ok(w.getComputedStyle(span0).fontFamily===fontFamily && realFace.status==='loaded', 'embedded family and loaded face retained');
+                w.__yjEpub.configure({...cfg, epoch:'geom-reset', authorTextScale:1});
+                for (let i=0;i<120 && !msgs.some(m=>m.kind==='ready'&&m.epoch==='geom-reset');i++) await tick();
+                ok(Math.abs(r0.getBoundingClientRect().width - 240) <= 5, '100% restores original embedded glyph width');
             } else {
                 ok(rdy.authorStyleFallback === true, 'broken SFNT emits ready with authorStyleFallback=true');
                 ok(rdy.restoredNode === 4 && rdy.restoredOffset === 6, 'broken SFNT fallback preserves target anchor');
@@ -230,8 +239,8 @@ ${prefix} [data-yj-original-id="original"] {color:rgb(${i ? '20, 80, 40' : '80, 
         f.api.configure(f.config('font-new-session', {sessionID:'fresh-session',preserveViewport:true}));
         const promoReady = await f.ready('font-new-session');
         ok(promoReady.authorStyleFallback !== true, 'successful promotion has authorStyleFallback falsy');
-        ok(style.textContent.includes('yjepub://s-fresh-session--e-font-new-session/OPS/font.ttf') && !style.textContent.includes('--e-fonts/'), 'promotion font URL uses new capability');
-        results.push('controlled FontFace delay gates all variants and rebinds promotion capability');
+        ok(style.textContent.includes('yjepub://s-author-session--e-fonts/OPS/font.ttf') && !style.textContent.includes('--e-font-new-session/'), 'loaded font bytes survive capability change without stylesheet replacement');
+        results.push('controlled FontFace delay gates all variants; loaded fonts survive promotion without reloading');
         const mountedReleases = [];
         faces.forEach(face => {face.load=()=> f.d.querySelector('[data-yj-author-scope="scope1"]')
             ? new Promise(resolve=>mountedReleases.push(()=>resolve(face))) : Promise.resolve(face);});
