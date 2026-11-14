@@ -125,6 +125,47 @@ def tree_fingerprints(folder):
     return result
 
 
+def dependency_link_identity(folder, path):
+    relative = path.relative_to(folder).as_posix()
+    rows = [row for row in git(folder, 'ls-tree', '-z', 'HEAD', '--', relative).split('\0') if row]
+    require(len(rows) == 1, 'Dependency link is not uniquely tracked: '+relative)
+    meta, recorded_path = rows[0].split('\t', 1)
+    fields = meta.split()
+    require(len(fields) == 3 and fields[:2] == ['120000', 'blob'] and recorded_path == relative
+            and re.fullmatch('[0-9a-f]{40}', fields[2]), 'Dependency link mode/identity differs: '+relative)
+    raw = subprocess.check_output(['git', '-C', str(folder), 'cat-file', 'blob', fields[2]], timeout=30)
+    require(len(raw) <= 4096 and hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest() == fields[2],
+            'Dependency link blob differs: '+relative)
+    target = os.readlink(path)
+    require(target.encode('utf-8') == raw and not Path(target).is_absolute(), 'Dependency link target differs: '+relative)
+    resolved = (path.parent/target).resolve(strict=True)
+    base = folder.resolve(strict=True)
+    require(resolved.is_relative_to(base) and '.git' not in resolved.relative_to(base).parts,
+            'Dependency link escapes source: '+relative)
+    require(resolved.is_file() or resolved.is_dir(), 'Invalid dependency link destination')
+    return dict(link=target, git_blob=fields[2], resolved=resolved.relative_to(base).as_posix())
+
+
+def dependency_entries(folder):
+    # GRDB's official Tests/CustomSQLite/GRDB points to ../.. . Never follow it.
+    stack = [folder]
+    while stack:
+        parent = stack.pop()
+        require(not parent.is_symlink() and not getattr(parent, 'is_junction', lambda: False)(),
+                'Linked dependency directory during traversal')
+        for path in sorted(parent.iterdir()):
+            if path.name == '.git':
+                continue
+            require(not getattr(path, 'is_junction', lambda: False)(), 'Dependency junction refused')
+            if path.is_symlink():
+                yield path
+            elif path.is_dir():
+                stack.append(path)
+            else:
+                require(path.is_file(), 'Nonregular dependency input: '+str(path))
+                yield path
+
+
 def dependency_fingerprints(root):
     checkouts = root/'build/SourcePackages/checkouts'
     require(checkouts.is_dir() and not checkouts.is_symlink(), 'Missing dependency checkouts')
@@ -134,13 +175,9 @@ def dependency_fingerprints(root):
     for folder in folders:
         require(folder.is_dir() and not folder.is_symlink(), 'Nonregular dependency checkout')
         files = {}
-        for path in sorted(folder.rglob('*')):
-            rel = path.relative_to(folder)
-            if '.git' in rel.parts:
-                continue
-            require(not path.is_symlink(), 'Symlink in dependency inputs: '+str(rel))
-            if path.is_file():
-                files[rel.as_posix()] = sha(path)
+        for path in dependency_entries(folder):
+            rel = path.relative_to(folder).as_posix()
+            files[rel] = dependency_link_identity(folder, path) if path.is_symlink() else sha(path)
         require(files, 'Empty dependency checkout')
         result[folder.name.lower()] = dict(head=git(folder,'rev-parse','HEAD'),files=files)
     return result

@@ -135,7 +135,9 @@ def validate_toolchain(values, *, allowed_architectures=(ARCHITECTURE,)):
     require(values["architecture"] in allowed_architectures, "Host architecture not authorized by caller")
     require(values["xcode"].splitlines() == [f"Xcode {XCODE_VERSION}", f"Build version {XCODE_BUILD}"],
             "Xcode version/build mismatch")
-    versions = re.findall(r"^Apple Swift version (\d+\.\d+\.\d+)\b", values["swift"], re.M)
+    # Xcode16.4 may prefix the compiler line with its swift-driver version.
+    versions = re.findall(r"^(?:swift-driver version: \d+\.\d+\.\d+ )?Apple Swift version "
+                          r"(\d+\.\d+\.\d+)(?=\s|$)", values["swift"], re.M)
     require(versions == [SWIFT_VERSION], "Swift version mismatch")
     targets = re.findall(r"^Target: (.*)$", values["swift"], re.M)
     require(len(targets) == 1 and re.fullmatch(
@@ -238,7 +240,8 @@ def verify_archive(path):
 
 
 def validate_xcodegen(output):
-    require(re.findall(r"\b\d+\.\d+\.\d+\b", output) == [XCODEGEN_VERSION], "XcodeGen version mismatch")
+    match = re.fullmatch(r"Version: (\d+\.\d+\.\d+)", output.strip())
+    require(match is not None and match[1] == XCODEGEN_VERSION, "XcodeGen version mismatch")
     return dict(version=XCODEGEN_VERSION)
 
 
