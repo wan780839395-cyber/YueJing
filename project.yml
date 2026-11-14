@@ -257,6 +257,46 @@ schemes:
         - name: YueJingEPUBUITests
           parallelizable: false
 
+  # Development isolation; retain YueJingUI above for historical/full acceptance.
+  YueJingHost:
+    build:
+      targets:
+        YueJing: all
+        YueJingHostTests: [test]
+    test:
+      config: Debug
+      environmentVariables:
+        YUEJING_UI_TEST_SESSION: "D052AE4B-7823-447E-BE63-986028A7F54C"
+      targets:
+        - name: YueJingHostTests
+          parallelizable: false
+
+  YueJingReadingUI:
+    build:
+      targets:
+        YueJing: all
+        YueJingUITests: [test]
+    test:
+      config: Debug
+      environmentVariables:
+        YUEJING_UI_TEST_SESSION: "D052AE4B-7823-447E-BE63-986028A7F54C"
+      targets:
+        - name: YueJingUITests
+          parallelizable: false
+
+  YueJingEPUBUI:
+    build:
+      targets:
+        YueJing: all
+        YueJingEPUBUITests: [test]
+    test:
+      config: Debug
+      environmentVariables:
+        YUEJING_UI_TEST_SESSION: "D052AE4B-7823-447E-BE63-986028A7F54C"
+      targets:
+        - name: YueJingEPUBUITests
+          parallelizable: false
+
   TXTCorePerformance:
     build:
       targets:

@@ -21,3 +21,8 @@ xcuserdata/
 *.xcuserstate
 __pycache__/
 *.pyc
+
+# Private local collaboration files; ignore rules do not replace staged review.
+/.architect_memory.json
+/PROJECT_STATE.md
+/ask_architect.py

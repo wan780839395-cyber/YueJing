@@ -3103,12 +3103,19 @@ def _summarize_prior_reuse(prior_id, scope):
 
 def summarize(*, publish=False):
     """Diagnostic per-case & inventory summary; qualification() independently validates everything."""
+    from workflow_failure_details import group_failure_details, failure_details, failure_markdown
+
+    def display_json(path):
+        value = _optional_json(path)
+        require(value is None or isinstance(value, dict), f"Invalid display receipt object: {path}")
+        return value
+
     config = load_scope_config()
     groups = build_groups(config)
     native_out = _out_path(NATIVE_OUT, "epub-author-layout")
     scope = None
     try:
-        scope = _optional_json(_out_path(SCOPE_JSON, "author-layout-scope.json"))
+        scope = display_json(_out_path(SCOPE_JSON, "author-layout-scope.json"))
     except (ValueError, OSError):
         scope = None
 
@@ -3142,7 +3149,7 @@ def summarize(*, publish=False):
 
     scheduling = None
     try:
-        scheduling = _optional_json(OUT / "case-scheduling-error.json")
+        scheduling = display_json(OUT / "case-scheduling-error.json")
     except (ValueError, OSError) as error:
         scheduling = {"error": str(error)}
 
@@ -3151,6 +3158,7 @@ def summarize(*, publish=False):
 
     case_rows = []
     group_rows = []
+    details = []
     for group, spec in groups.items():
         target = spec["target"]
         cases = list(spec["cases"])
@@ -3215,16 +3223,22 @@ def summarize(*, publish=False):
         execution = failure = counts_doc = None
         raw_bytes = None
         read_error = None
+        details.append(group_failure_details(folder, target, group=group, provenance=scope))
+        receipts = []
+        for name in ("execution.json", "failure.json", "counts.json"):
+            try:
+                receipts.append(display_json(folder / name))
+            except (ValueError, OSError, RecursionError) as error:
+                receipts.append(None)
+                read_error = (read_error + "; " if read_error else "") + str(error)
+        execution, failure, counts_doc = receipts
         try:
-            execution = _optional_json(folder / "execution.json")
-            failure = _optional_json(folder / "failure.json")
-            counts_doc = _optional_json(folder / "counts.json")
             log_path = folder / f"{target}.log"
             if log_path.exists() or log_path.is_symlink():
                 require(log_path.is_file() and not log_path.is_symlink(), f"Invalid raw log: {target}.log")
                 raw_bytes = log_path.read_bytes()
         except (ValueError, OSError) as error:
-            read_error = str(error)
+            read_error = (read_error + "; " if read_error else "") + str(error)
 
         raw_statuses, arg_rows = _inspect_group_raw_events(spec, raw_bytes)
         group_counts_valid = False
@@ -3407,6 +3421,9 @@ def summarize(*, publish=False):
         if prior_id in AUTHORIZED_PRIOR_RUNS
         else []
     )
+    scheduling_path = OUT / "case-scheduling-error.json"
+    if scheduling_path.exists() or scheduling_path.is_symlink():
+        details.append(failure_details("scheduling", receipts=[scheduling_path], provenance=scope))
     report = {
         "scope": SCOPE,
         "phase": "validation",
@@ -3441,6 +3458,7 @@ def summarize(*, publish=False):
         "full_regression_passed": False,
         "scheduling_error": scheduling,
         "qualification": "DISPLAY_ONLY_NOT_RELEASE_QUALIFICATION",
+        "failure_details": details,
     }
 
     def cell(val):
@@ -3500,6 +3518,7 @@ def summarize(*, publish=False):
             )
     if scheduling:
         lines += ["", "Scheduling/shared error: " + cell(scheduling["error"])]
+    lines.append(failure_markdown(details))
     markdown = "\n".join(lines) + "\n"
 
     OUT.mkdir(parents=True, exist_ok=True)

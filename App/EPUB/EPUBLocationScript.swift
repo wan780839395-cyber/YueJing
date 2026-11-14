@@ -451,6 +451,25 @@ enum EPUBLocationScript {
             return Array.prototype.slice.call(root.querySelectorAll("style[data-yj-author-style]"));
         }
 
+        // On-demand observation only: no source strings, identities or locator sampling.
+        function fontDiagnosticSnapshot() {
+            var chapter = chapterFor(state.path), count = 0;
+            var failures = {timeout: 0, "decode-failure": 0, "missing-face": 0, unavailable: 0};
+            var rows = [];
+            if (chapter) {
+                authorStyles(chapter.element).forEach(function(style) {
+                    if (!style.__yjFontFailures) { return; }
+                    style.__yjFontFailures.forEach(function(reason) {
+                        var category = Object.prototype.hasOwnProperty.call(failures, reason) ? reason : "unavailable";
+                        failures[category] += 1;
+                        if (rows.length < 128) { rows.push({face: ++count, reason: category}); }
+                    });
+                });
+            }
+            return {scope: "current-chapter", authorMode: document.documentElement.getAttribute("data-yj-layout") === "original",
+                ready: state.ready === true, failures: failures, rows: rows};
+        }
+
         // Transient presentation only: no text nodes, author stylesheet, font family,
         // storage coordinates or image geometry are replaced by reader typography.
         function resetAuthorTextScale() {
@@ -578,43 +597,104 @@ enum EPUBLocationScript {
             }
             return blocks;
         }
-        function extractFontFamilyFromBlock(block) {
-            var match = block.match(/font-family\\s*:\\s*([^;}]+)/i);
-            if (!match) { return ""; }
-            return String(match[1]).trim().replace(/^["']|["']$/g, "");
+        function rebuildAuthorFontCSS(style) {
+            var original = style.__yjOriginalCSS, failures = style.__yjFontFailures;
+            var out = "", cursor = 0;
+            extractTopLevelFontFaceBlocks(original).forEach(function(block) {
+                if (!failures.has(block.start)) { return; }
+                out += original.slice(cursor, block.start);
+                cursor = block.end;
+            });
+            style.__yjCSS = out + original.slice(cursor);
+            style.__yjFontFallback = failures.size > 0;
         }
-        function removeFailedFontFaceRules(style, failedIndices, failedFamSet, styleRuleCount) {
+        function retryTimedOutAuthorFonts() {
+            authorStyles(document).forEach(function(style) {
+                if (!style.__yjFontFailures) { return; }
+                var changed = false;
+                style.__yjFontFailures.forEach(function(reason, key) {
+                    if (reason === "timeout") { style.__yjFontFailures.delete(key); changed = true; }
+                });
+                if (changed) { rebuildAuthorFontCSS(style); }
+            });
+        }
+        function removeFailedFontFaceRules(style, failedIndices, styleRuleCount, reasons) {
             if (typeof style.__yjCSS !== "string") { style.__yjCSS = style.textContent; }
-            var css = style.__yjCSS;
-            var blocks = extractTopLevelFontFaceBlocks(css);
-            if (blocks.length === 0) { return 0; }
-            var useIndexMatch = blocks.length === styleRuleCount;
-            var out = "", cursor = 0, removed = 0;
-            for (var b = 0; b < blocks.length; b++) {
-                var blk = blocks[b];
-                var drop = useIndexMatch
-                    ? failedIndices.has(b)
-                    : (function() {
-                        var fam = extractFontFamilyFromBlock(blk.block);
-                        return !fam || failedFamSet.has(fam);
-                    })();
-                if (drop) {
-                    out += css.slice(cursor, blk.start);
-                    cursor = blk.end;
-                    removed += 1;
-                }
+            if (typeof style.__yjOriginalCSS !== "string") {
+                // Immutable sanitized input; never resurrect permanent failures on a warm retry.
+                style.__yjOriginalCSS = style.__yjCSS;
+                style.__yjFontFailures = new Map();
             }
-            if (removed > 0) {
-                out += css.slice(cursor);
-                style.__yjCSS = out;
-                style.__yjFontFallback = true;
-                rebaseAuthorStyle(style);
-            }
+            var blocks = extractTopLevelFontFaceBlocks(style.__yjOriginalCSS).filter(function(block) {
+                return !style.__yjFontFailures.has(block.start);
+            });
+            // A mismatched parse cannot safely identify a rule: fail this transaction,
+            // rather than deleting every face with a shared family.
+            if (blocks.length !== styleRuleCount) { throw new Error("font-rule-identity-mismatch"); }
+            var removed = 0;
+            failedIndices.forEach(function(index) {
+                if (!blocks[index]) { throw new Error("font-rule-identity-mismatch"); }
+                style.__yjFontFailures.set(blocks[index].start, reasons.get(index) || "unavailable");
+                removed += 1;
+            });
+            if (removed > 0) { rebuildAuthorFontCSS(style); rebaseAuthorStyle(style); }
             return removed;
         }
 
 
-        function waitForAuthorFonts(root) {
+        function normalizedFontRange(value) {
+            var raw = String(value || "U+0-10FFFF").trim().toUpperCase();
+            if (raw.length > 4096) { throw new Error("font-range-invalid"); }
+            var parts = raw.split(",");
+            if (parts.length > 128) { throw new Error("font-range-invalid"); }
+            var ranges = parts.map(function(part) {
+                var match = /^U\\+([0-9A-F]{1,6})(?:-([0-9A-F]{1,6}))?$/.exec(part.trim());
+                if (!match) { throw new Error("font-range-invalid"); }
+                var low = parseInt(match[1], 16), high = parseInt(match[2] || match[1], 16);
+                if (low > high || high > 0x10FFFF) { throw new Error("font-range-invalid"); }
+                return [low, high];
+            }).sort(function(a, b) { return a[0] - b[0] || a[1] - b[1]; });
+            var merged = [];
+            ranges.forEach(function(range) {
+                var last = merged[merged.length - 1];
+                if (last && range[0] <= last[1] + 1) { last[1] = Math.max(last[1], range[1]); }
+                else { merged.push(range); }
+            });
+            return {key: JSON.stringify(merged), ranges: merged};
+        }
+        function authorFontCharacterCoverage(root) {
+            // Fixed 272 KiB bitmap + prefix counts; never retain/copy chapter text.
+            var bits = new Uint32Array(34816), prefix = new Uint32Array(34817);
+            var nodeRoot = root === document ? document.body : root;
+            var walker = document.createTreeWalker(nodeRoot, NodeFilter.SHOW_TEXT, {
+                acceptNode: function(node) {
+                    return node.parentElement && node.parentElement.closest("style,script,head") ?
+                        NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+                }
+            });
+            var node;
+            while ((node = walker.nextNode())) {
+                var text = node.nodeValue || "";
+                for (var i = 0; i < text.length; i++) {
+                    var cp = text.codePointAt(i);
+                    bits[cp >>> 5] |= (1 << (cp & 31));
+                    if (cp > 0xFFFF) { i += 1; }
+                }
+            }
+            for (var w = 0; w < bits.length; w++) { prefix[w + 1] = prefix[w] + (bits[w] ? 1 : 0); }
+            return function(range) {
+                return range.ranges.some(function(pair) {
+                    var first = pair[0] >>> 5, last = pair[1] >>> 5;
+                    var lowMask = 0xFFFFFFFF << (pair[0] & 31);
+                    var highMask = 0xFFFFFFFF >>> (31 - (pair[1] & 31));
+                    if (first === last) { return Boolean(bits[first] & lowMask & highMask); }
+                    return Boolean((bits[first] & lowMask) || (bits[last] & highMask) ||
+                        prefix[last] > prefix[first + 1]);
+                });
+            };
+        }
+
+        function waitForAuthorFonts(root, finalFontPass) {
             if (!document.fonts || document.documentElement.getAttribute("data-yj-layout") !== "original") {
                 return Promise.resolve({fallback: false});
             }
@@ -634,8 +714,20 @@ enum EPUBLocationScript {
                 var s = String(value || "").trim().toLowerCase();
                 return s || "normal";
             }
+            function normalizeStretch(value) {
+                var s = String(value || "normal").trim().toLowerCase();
+                var percentages = {"ultra-condensed":"50%", "extra-condensed":"62.5%", "condensed":"75%",
+                    "semi-condensed":"87.5%", "normal":"100%", "semi-expanded":"112.5%",
+                    "expanded":"125%", "extra-expanded":"150%", "ultra-expanded":"200%"};
+                return percentages[s] || s;
+            }
+            function sameFace(rule, entry) {
+                return rule.family === entry.family && rule.weight === entry.weight &&
+                    rule.fontStyle === entry.fontStyle && rule.stretch === entry.stretch && rule.range.key === entry.range.key;
+            }
             try {
                 authorStyles(root).forEach(function(style) {
+                    var rangeIsUsed = authorFontCharacterCoverage(style.closest("[data-yj-chapter]") || root);
                     rebaseAuthorStyle(style);
                     var installed = style;
                     if (!style.isConnected) {
@@ -649,12 +741,17 @@ enum EPUBLocationScript {
                         var rule = cssRules[r];
                         if (rule.type === 5) {
                             var family = familyKey(rule.style.getPropertyValue("font-family"));
-                            families.add(family);
+                            var range = normalizedFontRange(rule.style.getPropertyValue("unicode-range"));
+                            var active = rangeIsUsed(range);
+                            if (active) { families.add(family); }
                             ruleEntries.push({
                                 style: style,
+                                cssRule: rule,
                                 family: family,
                                 weight: normalizeWeight(rule.style.getPropertyValue("font-weight")),
                                 fontStyle: normalizeFontStyle(rule.style.getPropertyValue("font-style")),
+                                stretch: normalizeStretch(rule.style.getPropertyValue("font-stretch")),
+                                range: range, active: active,
                                 sheetFontIndex: count
                             });
                             count += 1;
@@ -684,16 +781,26 @@ enum EPUBLocationScript {
             });
             state.imageCancels = state.imageCancels || [];
             state.imageCancels.push(cancelFontWait);
-            var faces = [], matched = new Set();
+            // CSS-connected faces iterate in document rule order (CSS Font Loading 3).
+            // Bind actual rule identity, including duplicate descriptors with different src.
+            var orderedRules = [];
+            Array.prototype.forEach.call(document.styleSheets, function(sheet) {
+                Array.prototype.forEach.call(sheet.cssRules, function(rule) {
+                    if (rule.type === 5) { orderedRules.push(rule); }
+                });
+            });
+            var faces = [], matched = new Set(), faceIndex = 0;
             document.fonts.forEach(function(font) {
+                var cssRule = orderedRules[faceIndex++];
                 var family = familyKey(font.family);
                 if (families.has(family)) {
-                    faces.push({
-                        font: font,
-                        family: family,
-                        weight: normalizeWeight(font.weight),
-                        fontStyle: normalizeFontStyle(font.style)
-                    });
+                    var entry = {font: font, family: family, weight: normalizeWeight(font.weight),
+                        fontStyle: normalizeFontStyle(font.style), stretch: normalizeStretch(font.stretch),
+                        range: normalizedFontRange(font.unicodeRange)};
+                    var bound = ruleEntries.find(function(rule) { return rule.cssRule === cssRule && sameFace(rule, entry); });
+                    if (bound) { entry.rule = bound; }
+                    if (bound ? !bound.active : !ruleEntries.some(function(rule) { return rule.active && sameFace(rule, entry); })) { return; }
+                    faces.push(entry);
                     matched.add(family);
                 }
             });
@@ -701,84 +808,118 @@ enum EPUBLocationScript {
             families.forEach(function(family) {
                 if (!matched.has(family)) { missingFamilies.add(family); }
             });
-            // Loading FontFace objects covers weight/style and unicode-range subsets;
-            // FontFaceSet.load("16px family") only probes a normal face for a space.
-            var fallbackApplied = false;
-            var loaded = Promise.resolve().then(function() {
-                return Promise.all(faces.map(function(entry) {
-                    return Promise.resolve().then(function() {
-                        return entry.font.load();
-                    }).then(function(loadedFont) {
-                        var target = loadedFont || entry.font;
-                        if (target.status !== "loaded") {
-                            return {ok: false, entry: entry};
-                        }
-                        return {ok: true, entry: entry};
-                    }, function() {
-                        return {ok: false, entry: entry};
-                    });
-                }));
-            }).then(function(results) {
+            // Load exact CSS-connected identities only when their range intersects
+            // this chapter's characters; unused subsets cannot cause fallback/waits.
+            var fallbackApplied = false, fontTimer = null;
+            // Optional local fonts have a smaller budget than chapter readiness.
+            // Snapshot settled faces at the deadline; late loads cannot reinstall
+            // removed rules or change the result of this transaction.
+            var settled = new Map();
+            var deadline = new Promise(function(resolve) {
+                fontTimer = window.setTimeout(function() {
+                    recordDiagnostic("font-deadline", faces.length - settled.size);
+                    resolve(faces.map(function(entry) {
+                        return settled.get(entry) || {ok: false, entry: entry, reason: "timeout"};
+                    }));
+                }, 1500);
+            });
+            var loads = Promise.all(faces.map(function(entry) {
+                return Promise.resolve().then(function() {
+                    return entry.font.load();
+                }).then(function(loadedFont) {
+                    return {ok: (loadedFont || entry.font).status === "loaded", entry: entry, reason: "decode-failure"};
+                }, function() {
+                    return {ok: false, entry: entry, reason: "decode-failure"};
+                }).then(function(result) { settled.set(entry, result); return result; });
+            }));
+            var loaded = Promise.race([loads, deadline]).then(function(results) {
                 if (!stillActive()) { throw new Error("font-wait-cancelled"); }
+                window.clearTimeout(fontTimer);
                 var failedResults = results.filter(function(item) { return !item.ok; });
                 if (missingFamilies.size === 0 && failedResults.length === 0 && unparsedFontStyles.length === 0) {
-                    return Promise.resolve(document.fonts.ready).then(function() {
-                        if (!stillActive()) { throw new Error("font-wait-cancelled"); }
-                        authorStyles(root).forEach(function(style) {
-                            if (!style.isConnected || !(styleRuleCounts.get(style) > 0)) { return; }
-                            style.__yjRetainedCSS = style.__yjCSS;
-                            style.__yjRetainedText = style.textContent;
-                            style.__yjLoadedFaces = faces.map(function(entry) { return entry.font; });
-                        });
-                        return {fallback: false};
+                    // Global FontFaceSet.ready can wait for unrelated/stale faces.
+                    // These matched faces are loaded; callers settle layout/restore
+                    // after this result instead of awaiting the whole document set.
+                    authorStyles(root).forEach(function(style) {
+                        if (!style.isConnected || !(styleRuleCounts.get(style) > 0)) { return; }
+                        style.__yjRetainedCSS = style.__yjCSS;
+                        style.__yjRetainedText = style.textContent;
+                        style.__yjLoadedFaces = faces.map(function(entry) { return entry.font; });
                     });
+                    return {fallback: false};
                 }
                 if (fallbackApplied) { throw new Error("font-not-ready"); }
                 fallbackApplied = true;
-                var failedRuleSet = new Set();
-                var failedFamilies = new Set();
-                missingFamilies.forEach(function(family) { failedFamilies.add(family); });
+                var failedRuleSet = new Map();
                 failedResults.forEach(function(item) {
                     var entry = item.entry;
                     var exactMatches = ruleEntries.filter(function(rule) {
-                        return rule.family === entry.family && rule.weight === entry.weight && rule.fontStyle === entry.fontStyle;
+                        return rule.active && sameFace(rule, entry) && (!entry.rule ||
+                            rule.cssRule.style.getPropertyValue("src") === entry.rule.cssRule.style.getPropertyValue("src"));
                     });
-                    if (exactMatches.length > 0) {
-                        exactMatches.forEach(function(rule) { failedRuleSet.add(rule); });
-                    } else {
-                        failedFamilies.add(entry.family);
-                    }
+                    if (!entry.rule && exactMatches.length > 1) { throw new Error("font-rule-identity-ambiguous"); }
+                    exactMatches.forEach(function(rule) { failedRuleSet.set(rule, item.reason); });
                 });
                 ruleEntries.forEach(function(rule) {
-                    if (failedFamilies.has(rule.family)) { failedRuleSet.add(rule); }
+                    if (rule.active && missingFamilies.has(rule.family)) { failedRuleSet.set(rule, "missing-face"); }
                 });
-                var perStyleIndices = new Map();
-                var perStyleFamilies = new Map();
-                failedRuleSet.forEach(function(rule) {
-                    if (!perStyleIndices.has(rule.style)) { perStyleIndices.set(rule.style, new Set()); }
+                var perStyleIndices = new Map(), perStyleReasons = new Map();
+                failedRuleSet.forEach(function(reason, rule) {
+                    if (!perStyleIndices.has(rule.style)) {
+                        perStyleIndices.set(rule.style, new Set()); perStyleReasons.set(rule.style, new Map());
+                    }
                     perStyleIndices.get(rule.style).add(rule.sheetFontIndex);
-                    if (!perStyleFamilies.has(rule.style)) { perStyleFamilies.set(rule.style, new Set()); }
-                    perStyleFamilies.get(rule.style).add(rule.family);
+                    perStyleReasons.get(rule.style).set(rule.sheetFontIndex, reason);
                 });
                 var removedTotal = 0;
                 perStyleIndices.forEach(function(indices, style) {
-                    removedTotal += removeFailedFontFaceRules(style, indices, perStyleFamilies.get(style), styleRuleCounts.get(style) || 0);
+                    removedTotal += removeFailedFontFaceRules(style, indices, styleRuleCounts.get(style) || 0, perStyleReasons.get(style));
                 });
                 unparsedFontStyles.forEach(function(style) {
                     var allBlocks = extractTopLevelFontFaceBlocks(style.__yjCSS);
                     if (allBlocks.length > 0) {
                         var allSet = new Set();
                         for (var idx = 0; idx < allBlocks.length; idx++) { allSet.add(idx); }
-                        removedTotal += removeFailedFontFaceRules(style, allSet, families, allBlocks.length);
+                        removedTotal += removeFailedFontFaceRules(style, allSet, allBlocks.length, new Map());
                     }
                 });
                 recordDiagnostic("font-fallback", removedTotal);
-                return Promise.resolve(document.fonts.ready).then(function() {
-                    if (!stillActive()) { throw new Error("font-wait-cancelled"); }
-                    return {fallback: true};
+                // Replacing CSS text can recreate surviving FontFace objects.
+                // Confirm surviving recreated faces once; isolate failures even on
+                // that last pass. Late loads must never move a ready anchor.
+                var remainingRules = [], needsReload = false;
+                authorStyles(root).forEach(function(style) {
+                    if (!style.isConnected || !style.sheet) { return; }
+                    var rangeIsUsed = authorFontCharacterCoverage(style.closest("[data-yj-chapter]") || root);
+                    Array.prototype.forEach.call(style.sheet.cssRules, function(rule) {
+                        if (rule.type !== 5) { return; }
+                        var remainingRange = normalizedFontRange(rule.style.getPropertyValue("unicode-range"));
+                        if (!rangeIsUsed(remainingRange)) { return; }
+                        remainingRules.push({family: familyKey(rule.style.getPropertyValue("font-family")),
+                            weight: normalizeWeight(rule.style.getPropertyValue("font-weight")),
+                            fontStyle: normalizeFontStyle(rule.style.getPropertyValue("font-style")),
+                            stretch: normalizeStretch(rule.style.getPropertyValue("font-stretch")), range: remainingRange});
+                    });
                 });
+                document.fonts.forEach(function(font) {
+                    var entry = {family: familyKey(font.family), weight: normalizeWeight(font.weight),
+                        fontStyle: normalizeFontStyle(font.style), stretch: normalizeStretch(font.stretch),
+                        range: normalizedFontRange(font.unicodeRange)};
+                    if (font.status !== "loaded" && remainingRules.some(function(rule) { return sameFace(rule, entry); })) { needsReload = true; }
+                });
+                if (needsReload && finalFontPass) { throw new Error("font-not-ready"); }
+                if (!finalFontPass) {
+                    if (needsReload) {
+                        return waitForAuthorFonts(root, true).then(function() {
+                            if (!stillActive()) { throw new Error("font-wait-cancelled"); }
+                            return {fallback: true};
+                        });
+                    }
+                }
+                return {fallback: true};
             });
             return Promise.race([loaded, cancelled]).finally(function() {
+                window.clearTimeout(fontTimer);
                 temporary.forEach(function(style) { style.remove(); });
                 var index = (state.imageCancels || []).indexOf(cancelFontWait);
                 if (index >= 0) { state.imageCancels.splice(index, 1); }
@@ -1018,51 +1159,30 @@ enum EPUBLocationScript {
         }
 
         function waitForImagesAndTwoFrames(expectedSession, expectedEpoch, done) {
-            var imagesStarted = diagnosticNow();
+            var imagesStarted = diagnosticNow(), expectedGeneration = state.syncGeneration;
             recordDiagnostic("initial-images-start");
-            var images = Array.prototype.slice.call(document.images || []);
-            var pending = [];
-            for (var i = 0; i < images.length; i++) {
-                if (!images[i].complete) {
-                    pending.push(images[i]);
-                }
+            function live() {
+                return state.sessionID === expectedSession && state.epoch === expectedEpoch &&
+                    state.syncGeneration === expectedGeneration;
             }
-            var finished = false;
             function proceed() {
-                if (finished) { return; }
-                finished = true;
-                if (state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
+                if (!live()) { return; }
                 recordDiagnostic("initial-images-settled", diagnosticNow() - imagesStarted);
                 window.requestAnimationFrame(function() {
-                    if (state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
-                    window.requestAnimationFrame(function() {
-                        if (state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
-                        done();
-                    });
+                    if (!live()) { return; }
+                    window.requestAnimationFrame(function() { if (live()) { done(); } });
                 });
             }
-            if (pending.length === 0) {
-                proceed();
-                return;
-            }
-            var remaining = pending.length;
-            var timer = window.setTimeout(function() {
-                if (finished || state.sessionID !== expectedSession || state.epoch !== expectedEpoch) { return; }
-                finished = true;
-                post({kind: "error", reason: "image-layout-not-ready", sessionID: state.sessionID,
-                      epoch: state.epoch, path: state.path});
-            }, 10000);
-            function onSettled() {
-                remaining -= 1;
-                if (remaining <= 0) {
-                    window.clearTimeout(timer);
-                    proceed();
-                }
-            }
-            for (var k = 0; k < pending.length; k++) {
-                pending[k].addEventListener("load", onSettled, { once: true });
-                pending[k].addEventListener("error", onSettled, { once: true });
-            }
+            var images = Array.prototype.slice.call(document.images || []);
+            if (images.length === 0) { proceed(); return; }
+            Promise.all(images.map(function(img) {
+                return waitForImage(img, 10000, false);
+            })).then(proceed).catch(function() {
+                if (!live()) { return; }
+                cancelImagePreloads();
+                post({kind: "error", reason: "image-layout-not-ready", sessionID: expectedSession,
+                      epoch: expectedEpoch, path: state.path});
+            });
         }
 
         function validLengths(spans, lengths) {
@@ -1174,35 +1294,49 @@ enum EPUBLocationScript {
             cancels.forEach(function(cancel) { cancel(); });
         }
 
+        function waitForImage(img, budget, removeSourceOnCancel) {
+            return new Promise(function(resolve, reject) {
+                var imageStarted = diagnosticNow(), finished = false, decoding = false;
+                recordDiagnostic("image-start");
+                var timer = window.setTimeout(function() { finish(false); }, budget);
+                function cancel() {
+                    if (finished) { return; }
+                    finish(false, true);
+                    // Initial DOM is reused on retry; only detached preload sources are disposable.
+                    if (removeSourceOnCancel) { img.removeAttribute("src"); }
+                }
+                function finish(ok, cancelled) {
+                    if (finished) { return; }
+                    finished = true;
+                    recordDiagnostic(cancelled ? "image-cancelled" : ok ? "image-ready" : "image-failed", diagnosticNow() - imageStarted);
+                    window.clearTimeout(timer);
+                    img.removeEventListener("load", loaded);
+                    img.removeEventListener("error", failed);
+                    var index = (state.imageCancels || []).indexOf(cancel);
+                    if (index >= 0) { state.imageCancels.splice(index, 1); }
+                    if (ok) { resolve(); } else { reject(new Error("image-not-ready")); }
+                }
+                function failed() { finish(false); }
+                function loaded() {
+                    if (finished || decoding) { return; }
+                    if (!img.naturalWidth) { finish(false); return; }
+                    decoding = true;
+                    if (typeof img.decode === "function") {
+                        Promise.resolve().then(function() { return img.decode(); }).then(function() {
+                            finish(img.complete && img.naturalWidth > 0);
+                        }, failed);
+                    } else { finish(true); }
+                }
+                state.imageCancels = state.imageCancels || [];
+                state.imageCancels.push(cancel);
+                img.addEventListener("load", loaded);
+                img.addEventListener("error", failed);
+                if (img.complete) { loaded(); }
+            });
+        }
         function preloadChapter(chapter) {
             return Promise.all(Array.prototype.map.call(chapter.element.querySelectorAll("img"), function(img) {
-                return new Promise(function(resolve, reject) {
-                    var imageStarted = diagnosticNow();
-                    recordDiagnostic("image-start");
-                    var finished = false;
-                    var timer = window.setTimeout(function() { finish(false); }, 8000);
-                    function finish(ok, cancelled) {
-                        if (finished) { return; }
-                        finished = true;
-                        recordDiagnostic(cancelled ? "image-cancelled" : ok ? "image-ready" : "image-failed", diagnosticNow() - imageStarted);
-                        window.clearTimeout(timer);
-                        img.removeEventListener("load", loaded);
-                        img.removeEventListener("error", failed);
-                        if (ok) { resolve(); } else { reject(new Error("image-not-ready")); }
-                    }
-                    state.imageCancels.push(function() {
-                        if (!finished) { finish(false, true); img.removeAttribute("src"); }
-                    });
-                    function failed() { finish(false); }
-                    function loaded() {
-                        if (!img.naturalWidth) { finish(false); return; }
-                        if (typeof img.decode === "function") { img.decode().then(function() { finish(true); }, failed); }
-                        else { finish(true); }
-                    }
-                    img.addEventListener("load", loaded);
-                    img.addEventListener("error", failed);
-                    if (img.complete) { loaded(); }
-                });
+                return waitForImage(img, 8000, true);
             }));
         }
 
@@ -1428,6 +1562,8 @@ enum EPUBLocationScript {
             state.sessionID = String(config.sessionID || "");
             state.epoch = String(config.epoch || "");
             state.path = String(config.path || "");
+            // Explicit navigation/reopen is a new restore transaction; promotion is not.
+            if (config.layoutMode !== "reader") { retryTimedOutAuthorFonts(); }
             refreshChapterLinks();
             state.ready = false;
             state.suppressingReflow = true;
@@ -1746,9 +1882,10 @@ enum EPUBLocationScript {
                 state.scrollActive = active === true;
             },
             diagnostics: function() {
+                var fonts = fontDiagnosticSnapshot();
                 return {events: diagnosticTrace.events.map(function(e) { return Object.assign({}, e); }),
                     counts: Object.assign({}, diagnosticTrace.counts), sampleCount: diagnosticTrace.sampleCount,
-                    sampleMS: diagnosticTrace.sampleMS, sampleMaxMS: diagnosticTrace.sampleMaxMS};
+                    sampleMS: diagnosticTrace.sampleMS, sampleMaxMS: diagnosticTrace.sampleMaxMS, fonts: fonts};
             },
             windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,

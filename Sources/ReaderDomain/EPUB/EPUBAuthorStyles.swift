@@ -33,7 +33,9 @@ public enum EPUBAuthorStyles {
         "font/truetype",
         "application/x-font-opentype",
         "application/font-opentype",
-        "font/opentype"
+        "font/opentype",
+        "font/woff", "application/font-woff",
+        "font/woff2", "application/font-woff2"
     ]
 
     public static func isAllowedServedMediaType(_ mediaType: String) -> Bool {
@@ -310,7 +312,7 @@ public enum EPUBAuthorStyles {
         return true
     }
 
-    private static func safeExistingFileURL(for canonicalPath: String, under root: URL, missingError: EPUBError) throws -> URL {
+    static func safeExistingFileURL(for canonicalPath: String, under root: URL, missingError: EPUBError) throws -> URL {
         let fm = FileManager.default
         let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         if rootValues.isSymbolicLink == true {
@@ -496,6 +498,7 @@ public enum EPUBAuthorStyles {
     final class ValidationCache {
         var verifiedFonts: [String: String] = [:]
         var omittedFonts: Set<String> = []
+        var fontPreparation: EPUBFontPreparation?
         private(set) var parsedStylesheets: [String: (byteCount: Int, items: [CSSItem])] = [:]
         private(set) var parsedStylesheetSourceBytes = 0
         private var resourcePresence: [String: Bool] = [:]
@@ -651,9 +654,16 @@ public enum EPUBAuthorStyles {
         fileprivate var activeImportStack: [String] = []
         private var recordedIssues: Set<EPUBStyleIssue> = []
         private(set) var wholeChapterStripped = false
+        private var fontDiagnostics: [EPUBFontDiagnostic] = []
+
+        func recordFont(_ row: EPUBFontDiagnostic) {
+            guard fontDiagnostics.count < 128, !fontDiagnostics.contains(row) else { return }
+            fontDiagnostics.append(row)
+        }
 
         var styleCompatibility: EPUBStyleCompatibility {
-            EPUBStyleCompatibility(issues: Array(recordedIssues), usesReaderLayout: wholeChapterStripped)
+            EPUBStyleCompatibility(issues: Array(recordedIssues), usesReaderLayout: wholeChapterStripped,
+                fontDiagnostics: fontDiagnostics)
         }
 
         init(
@@ -2226,6 +2236,7 @@ public enum EPUBAuthorStyles {
     private final class SanitizationContext {
         unowned let collector: ChapterCollector
         let cssSourcePath: String
+        private var diagnosticFamily: String?
 
         init(collector: ChapterCollector, cssSourcePath: String) {
             self.collector = collector
@@ -2427,6 +2438,8 @@ public enum EPUBAuthorStyles {
             var familyName: String?
             var srcTokens: [CSSToken]?
             var descriptors: [(String, String)] = []
+            var hasSubset = false
+            var unicodeRange: String?
 
             for decl in declarations {
                 let lowerName = decl.name.lowercased()
@@ -2455,6 +2468,9 @@ public enum EPUBAuthorStyles {
                     if let v = parseFontStretch(decl.valueTokens) {
                         descriptors.append(("font-stretch", v))
                     }
+                case "unicode-range":
+                    hasSubset = true
+                    unicodeRange = EPUBUnicodeRange.normalize(tokens: decl.valueTokens)
                 case "font-display":
                     if let v = parseFontDisplay(decl.valueTokens) {
                         descriptors.append(("font-display", v))
@@ -2470,9 +2486,25 @@ public enum EPUBAuthorStyles {
                   !rawSrc.isEmpty else {
                 throw EPUBStyleProcessingError.malformedStylesheet
             }
-            let srcResult = try parseAndValidateFontFaceSrc(rawSrc, emitRules: emitRules)
+            diagnosticFamily = emitRules ? resolvedFamily : nil
+            defer { diagnosticFamily = nil }
+            let invalidSubset = hasSubset && unicodeRange == nil
+            let srcResult = try parseAndValidateFontFaceSrc(rawSrc, emitRules: emitRules && !invalidSubset)
+            // Invalid/over-budget ranges must never become an unrestricted face.
+            // Audit all sources and retain old SFNT identity for safe migration.
+            if invalidSubset {
+                if emitRules {
+                    for source in srcResult.sources where cache?.fontPreparation?.formats[source.canonicalPath] != .woff {
+                        try collector.recordReferencedFont(path: source.canonicalPath, mediaType: source.mediaType)
+                    }
+                }
+                collector.recordFont(.init(family: resolvedFamily, source: .embedded, outcome: .unsupportedSubset))
+                collector.recordIssue(.fontUnavailable)
+                return nil
+            }
+            if let unicodeRange { descriptors.append(("unicode-range", unicodeRange)) }
             if srcResult.sources.isEmpty {
-                if srcResult.sawLocalOrMissing {
+                if srcResult.sawSkippedCandidate {
                     collector.recordIssue(.fontUnavailable)
                     return nil
                 }
@@ -2619,7 +2651,7 @@ public enum EPUBAuthorStyles {
         private func parseAndValidateFontFaceSrc(
             _ tokens: [CSSToken],
             emitRules: Bool
-        ) throws -> (sources: [(canonicalPath: String, mediaType: String)], sawLocalOrMissing: Bool) {
+        ) throws -> (sources: [(canonicalPath: String, mediaType: String)], sawSkippedCandidate: Bool) {
             var groups: [[CSSToken]] = []
             var current: [CSSToken] = []
             var depth = 0
@@ -2661,6 +2693,13 @@ public enum EPUBAuthorStyles {
                 case .function(let fn) where fn.lowercased() == "local":
                     try validateLocalFontFunction(tokens: item)
                     sawLocalCandidate = true
+                    if let diagnosticFamily {
+                        let localName = item.dropFirst().compactMap { token -> String? in
+                            switch token { case .string(let value), .ident(let value): return value; default: return nil }
+                        }.joined(separator: " ")
+                        collector.recordFont(.init(family: diagnosticFamily, localName: localName,
+                            source: .local, outcome: .localOmitted))
+                    }
                 case .url(let rawURL):
                     let outcome = try validateFontSourceItem(rawURL: rawURL, trailingTokens: Array(item[1...]))
                     switch outcome {
@@ -2702,9 +2741,8 @@ public enum EPUBAuthorStyles {
             if sawMissingFontCandidate {
                 collector.recordIssue(.optionalResourceMissing)
             }
-            if sawUnsupportedCandidate {
-                collector.recordIssue(.fontUnavailable)
-            }
+            // Candidate omissions do not imply an unavailable face. Only parseFontFace's
+            // final, effective src may report fontUnavailable after all candidates are audited.
             if truncatedUsableCandidates {
                 collector.recordIssue(.styleComplexity)
             }
@@ -2713,7 +2751,7 @@ public enum EPUBAuthorStyles {
                     try collector.recordReferencedFont(path: src.canonicalPath, mediaType: src.mediaType)
                 }
             }
-            return (sources: validSources, sawLocalOrMissing: sawLocalCandidate || sawMissingFontCandidate || sawUnsupportedCandidate)
+            return (sources: validSources, sawSkippedCandidate: sawLocalCandidate || sawMissingFontCandidate || sawUnsupportedCandidate)
         }
 
         private func validateFontSourceItem(rawURL: String, trailingTokens: [CSSToken]) throws -> FontSourceItemResolution {
@@ -2754,14 +2792,28 @@ public enum EPUBAuthorStyles {
                     throw EPUBError.unsupportedContent
                 }
             }
+            var diagnosticSource: EPUBFontDiagnostic.Source = .embedded
+            var diagnosticFormat: EPUBFontDiagnostic.Format = .unspecified
+            var diagnosticMIME: EPUBFontDiagnostic.Format = .unspecified
+            var diagnosticOutcome: EPUBFontDiagnostic.Outcome = .unsupportedFormat
+            var diagnosticIdentity: EPUBFontIdentity?
+            defer {
+                if let diagnosticFamily {
+                    collector.recordFont(.init(family: diagnosticFamily, source: diagnosticSource,
+                        format: diagnosticFormat, declaredFormat: EPUBFontDiagnostic.formatCategory(declaredFormat),
+                        declaredMIME: diagnosticMIME, outcome: diagnosticOutcome, identity: diagnosticIdentity))
+                }
+            }
 
             let resolved = try EPUBResourcePath.resolve(trimmedURL, relativeTo: cssSourcePath)
+            diagnosticMIME = EPUBFontDiagnostic.formatCategory(manifestByPath[resolved.path])
+            diagnosticFormat = diagnosticMIME
             // Even a deliberately unserved format must not bypass symlink checks.
             _ = try collector.optionalResourcePresent(at: resolved.path)
             if cache?.omittedFonts.contains(resolved.path) == true {
                 guard resolved.fragment == nil else { throw EPUBError.invalidPackage }
                 collector.recordIssue(.obfuscatedFontOmitted)
-                collector.recordIssue(.fontUnavailable)
+                diagnosticOutcome = .adobeObfuscationOmitted
                 return .missingOptional
             }
             let lowerPath = resolved.path.lowercased()
@@ -2772,26 +2824,28 @@ public enum EPUBAuthorStyles {
                 throw EPUBError.invalidPackage
             }
 
-            if lowerPath.hasSuffix(".woff") || lowerPath.hasSuffix(".woff2") ||
-                lowerPath.hasSuffix(".eot") || lowerPath.hasSuffix(".ttc") || lowerPath.hasSuffix(".dfont") {
+            if lowerPath.hasSuffix(".eot") || lowerPath.hasSuffix(".ttc") || lowerPath.hasSuffix(".dfont") {
                 return .unsupportedFormat
             }
+            if cache?.fontPreparation == nil,
+               lowerPath.hasSuffix(".woff") || lowerPath.hasSuffix(".woff2") ||
+                declaredFormat == "woff" || declaredFormat == "woff2" { return .unsupportedFormat }
             if let fmt = declaredFormat {
-                if fmt == "woff" || fmt == "woff2" || fmt == "embedded-opentype" || fmt == "svg" {
+                if fmt == "embedded-opentype" || fmt == "svg" {
                     return .unsupportedFormat
                 }
-                guard fmt == "truetype" || fmt == "opentype" || fmt == "truetype-aat" else {
+                guard ["truetype", "opentype", "truetype-aat", "woff", "woff2"].contains(fmt) else {
                     return .unsupportedFormat
                 }
             }
 
             guard let manifestType = manifestByPath[resolved.path] else {
+                diagnosticSource = .missing; diagnosticOutcome = .missingFile
                 _ = try collector.optionalResourcePresent(at: resolved.path)
                 return .missingOptional
             }
             let lowerManifestType = manifestType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if ["font/woff", "font/woff2", "application/font-woff", "application/font-woff2",
-                "application/vnd.ms-fontobject", "image/svg+xml"].contains(lowerManifestType) {
+            if ["application/vnd.ms-fontobject", "image/svg+xml"].contains(lowerManifestType) {
                 return .unsupportedFormat
             }
             guard EPUBAuthorStyles.isSupportedFontManifestMediaType(manifestType) else {
@@ -2799,8 +2853,39 @@ public enum EPUBAuthorStyles {
             }
 
             let canonicalMediaType: String
+            if let preparation = cache?.fontPreparation {
+                guard collector.extractedEntries?[resolved.path] != nil else {
+                    diagnosticSource = .missing; diagnosticOutcome = .missingFile
+                    return .missingOptional
+                }
+                do {
+                    let type = try preparation.verify(path: resolved.path, under: destination, declaredMediaType: manifestType)
+                    diagnosticFormat = preparation.formats[resolved.path] ?? .sfnt
+                    diagnosticOutcome = preparation.outcomes[resolved.path] ?? .verified
+                    diagnosticIdentity = preparation.identities[resolved.path]
+                    cache?.verifiedFonts[resolved.path] = type
+                    return .valid(canonicalPath: resolved.path, mediaType: type)
+                } catch let omission as EPUBFontPreparation.Omitted {
+                    diagnosticFormat = omission.format; diagnosticOutcome = omission.reason
+                    if [.adobeObfuscationOmitted, .obfuscationKeyUnavailable].contains(omission.reason) {
+                        collector.recordIssue(.obfuscatedFontOmitted)
+                    }
+                    if omission.reason == .invalidStructure {
+                        if preparation.algorithms[resolved.path] != nil {
+                            collector.recordIssue(.obfuscatedFontOmitted)
+                            return .unsupportedFormat
+                        }
+                        throw EPUBStyleProcessingError.invalidFontStructure
+                    }
+                    return .unsupportedFormat
+                }
+            }
+            // Standalone sanitization has no private package transaction for conversion.
+            if diagnosticMIME == .woff || diagnosticMIME == .woff2 ||
+                lowerPath.hasSuffix(".woff") || lowerPath.hasSuffix(".woff2") { return .unsupportedFormat }
             if let extractedEntries = collector.extractedEntries {
                 guard let expectedSize = extractedEntries[resolved.path] else {
+                    diagnosticSource = .missing; diagnosticOutcome = .missingFile
                     _ = try collector.optionalResourcePresent(at: resolved.path)
                     return .missingOptional
                 }
@@ -2821,6 +2906,7 @@ public enum EPUBAuthorStyles {
                 canonicalMediaType = cached
             } else {
                 guard try collector.optionalResourcePresent(at: resolved.path) else {
+                    diagnosticSource = .missing; diagnosticOutcome = .missingFile
                     return .missingOptional
                 }
                 let verified = try EPUBAuthorStyles.verifyExtractedFont(
@@ -2833,6 +2919,7 @@ public enum EPUBAuthorStyles {
                 cache?.verifiedFonts[resolved.path] = canonicalMediaType
             }
 
+            diagnosticOutcome = .verified; diagnosticFormat = EPUBFontDiagnostic.formatCategory(canonicalMediaType)
             return .valid(canonicalPath: resolved.path, mediaType: canonicalMediaType)
         }
 

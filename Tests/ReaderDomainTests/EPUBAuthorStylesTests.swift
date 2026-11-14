@@ -406,7 +406,8 @@ struct EPUBAuthorStylesTests {
         #expect(localOnlyResult.referencedFonts.isEmpty)
         #expect(!localOnlyResult.css.contains("@font-face"))
         #expect(localOnlyResult.css.contains("color: #223344"))
-        #expect(localOnlyResult.styleCompatibility == EPUBStyleCompatibility(issues: [.fontUnavailable], usesReaderLayout: false))
+        #expect(localOnlyResult.styleCompatibility.issues == [.fontUnavailable])
+        #expect(!localOnlyResult.styleCompatibility.usesReaderLayout)
 
         let selfCycleResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
             #"@\69 mport "good.css"; p { color: #334455; }"#,
@@ -429,7 +430,8 @@ struct EPUBAuthorStylesTests {
         #expect(missingFontResult.referencedFonts.isEmpty)
         #expect(!missingFontResult.css.contains("@font-face"))
         #expect(missingFontResult.css.contains("color: #445566"))
-        #expect(missingFontResult.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable], usesReaderLayout: false))
+        #expect(missingFontResult.styleCompatibility.issues == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable]).issues)
+        #expect(!missingFontResult.styleCompatibility.usesReaderLayout)
 
         let missingBgResult = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
             #"p { background: url(../Images/unknown.png); color: #556677; }"#,

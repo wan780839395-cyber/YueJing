@@ -16,6 +16,8 @@ struct EPUBSettingsView: View {
     var openingSummary: String?
     var effectiveLayoutMode: EPUBLayoutMode?
     var compatibilitySummary: String?
+    var fontDiagnostics: [EPUBFontDiagnostic]
+    var compatibilityDetails: String?
     let runtimeDiagnostics: (@MainActor () async -> String)?
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
@@ -24,6 +26,11 @@ struct EPUBSettingsView: View {
     @State private var info: AuxiliaryPage?
     @State private var runtimeSummary: String?
     @State private var showRestore = false
+    private enum SettingsGroup: String { case common, more }
+    @State private var settingsGroup: SettingsGroup = .common
+    @State private var focusSourceOnAppear = false
+    @State private var auxiliaryReturnFocus: String?
+    @AccessibilityFocusState private var controlFocus: String?
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -37,6 +44,8 @@ struct EPUBSettingsView: View {
         openingSummary: String? = nil,
         effectiveLayoutMode: EPUBLayoutMode? = nil,
         compatibilitySummary: String? = nil,
+        fontDiagnostics: [EPUBFontDiagnostic] = [],
+        compatibilityDetails: String? = nil,
         runtimeDiagnostics: (@MainActor () async -> String)? = nil,
         isActive: @escaping @MainActor () -> Bool,
         close: @escaping @MainActor () -> Void,
@@ -49,6 +58,8 @@ struct EPUBSettingsView: View {
         self.openingSummary = openingSummary
         self.effectiveLayoutMode = effectiveLayoutMode
         self.compatibilitySummary = compatibilitySummary
+        self.fontDiagnostics = fontDiagnostics
+        self.compatibilityDetails = compatibilityDetails
         self.runtimeDiagnostics = runtimeDiagnostics
         self.isActive = isActive
         self.close = close
@@ -58,7 +69,7 @@ struct EPUBSettingsView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            ReaderPanelHeader(title: "排版", appearance: appearance) {
+            ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
                 Button(action: finish) {
                     Text("完成").font(ReaderVisualStyle.panelActionFont)
                         .fixedSize(horizontal: true, vertical: false)
@@ -69,60 +80,30 @@ struct EPUBSettingsView: View {
                             minHeight: ReaderVisualStyle.minimumControlHeight
                         )
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
+            groupSelector
+                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if usesAuthorTypography {
-                        authorScaleSummary
+                VStack(alignment: .leading, spacing: 8) {
+                    if settingsGroup == .common {
+                        commonContent
                     } else {
-                        ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                        moreContent
                     }
-                    ReaderSettingsSection(title: "排版来源", detail: "默认尊重书籍排版；切换保留当前文本位置", appearance: appearance) {
-                        Picker("排版来源", selection: $layoutMode) {
-                            ForEach(EPUBLayoutMode.allCases, id: \.self) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(!isActive())
-                        .accessibilityIdentifier("epub.layoutMode")
-                        Text("原始排版保留安全支持的作者样式与未混淆字体；夜间背景优先保障可读性。复杂版式可能简化。")
-                            .font(.caption).foregroundStyle(appearance.foreground.opacity(0.78))
-                        if let compatibilitySummary {
-                            Text(compatibilitySummary)
-                                .font(.caption).foregroundStyle(appearance.foreground)
-                                .accessibilityIdentifier("epub.compatibility.summary")
-                        }
-                    }
-                    ReaderSettingsSection(title: "阅读方式", detail: "切换后保留当前文本位置", appearance: appearance) {
-                        Picker("阅读方式", selection: $readingMode) {
-                            ForEach(EPUBReadingMode.allCases, id: \.self) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(!isActive())
-                        .accessibilityIdentifier("epub.readingMode")
-                    }
-                    typographySection
-                    themeSection
-                    presetsSection
-                    epubScopeSection
-                    moreSection
-                    Text("当前版本：\(AppVersion.current.displayText)")
-                        .font(.footnote)
-                        .foregroundStyle(appearance.foreground.opacity(0.7))
-                        .accessibilityIdentifier("app.version")
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
                 .padding(.bottom, 24)
             }
+            .id(settingsGroup)
             .accessibilityIdentifier("reader.settings.scroll")
         }
+        .foregroundStyle(appearance.foreground)
+        .tint(appearance.accent)
+        .background(appearance.surface)
         .onChange(of: preferences) { value in
             draft = value.validated
         }
@@ -142,12 +123,13 @@ struct EPUBSettingsView: View {
                 : "恢复为字号 20、行距 7。保留当前阅读背景，不改变阅读位置。")
         }
         .sheet(item: $info, onDismiss: {
-            if voiceOver, isActive() { closeFocused = true }
+            if voiceOver, isActive() { controlFocus = auxiliaryReturnFocus }
         }) { page in
             NavigationStack {
                 Group {
                     if page == .diagnostics {
-                        ReaderDiagnosticsView(openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"))
+                        ReaderDiagnosticsView(openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"),
+                                              fontDiagnostics: fontDiagnostics, compatibilityDetails: compatibilityDetails)
                             .task {
                                 runtimeSummary = nil
                                 guard isActive(), let runtimeDiagnostics else { return }
@@ -187,21 +169,184 @@ struct EPUBSettingsView: View {
 
     private var usesAuthorTypography: Bool { (effectiveLayoutMode ?? layoutMode) == .original }
 
-    private var authorScaleSummary: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("作者文字比例").font(.caption.weight(.medium))
-                .foregroundStyle(appearance.secondary)
-            Text("\(Int((draft.fontSize * 5).rounded()))%")
-                .font(.system(.title, design: .serif).weight(.medium).monospacedDigit())
-            Text("100% 为作者原字号。这里只显示比例，不预览书内字体或版式。")
-                .font(.footnote).foregroundStyle(appearance.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private var groupSelector: some View {
+        HStack(spacing: 4) {
+            groupButton("常用", group: .common)
+            groupButton("更多", group: .more)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
+        .padding(4)
         .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("设置分组")
+    }
+
+    private func groupButton(_ title: String, group: SettingsGroup) -> some View {
+        let selected = settingsGroup == group
+        return Button {
+            guard isActive() else { return }
+            focusSourceOnAppear = false
+            settingsGroup = group
+            if voiceOver { controlFocus = "group.\(group.rawValue)" }
+        } label: {
+            Text(title).font(.body.weight(selected ? .semibold : .regular))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8).padding(.vertical, 8)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.secondary, cornerRadius: 12))
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(selected ? appearance.selectedControl : .clear)
+                .opacity(isActive() ? 1 : 0.4)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .disabled(!isActive())
+        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("epub.settings.group.\(group.rawValue)")
+        .accessibilityFocused($controlFocus, equals: "group.\(group.rawValue)")
+    }
+
+    private var commonContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sourceSummary
+            if !usesAuthorTypography {
+                ReaderTypographyPreview(preferences: draft, appearance: appearance)
+            }
+            typographySection
+            sectionDivider
+            presetsSection
+            sectionDivider
+            themeSection
+        }
+    }
+
+    private var sourceSummary: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                sourceDescription
+                Spacer(minLength: 0)
+                changeSourceButton
+            }
+            VStack(alignment: .leading, spacing: 4) { sourceDescription; changeSourceButton }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var sourceDescription: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("当前有效排版").font(.caption).foregroundStyle(appearance.secondary)
+            Text(usesAuthorTypography ? "作者原始排版" : "阅读器排版")
+                .font(.body.weight(.medium))
+            if let effectiveLayoutMode, effectiveLayoutMode != layoutMode {
+                Text("本章已兼容回退；偏好仍为\(layoutMode.title)")
+                    .font(.caption).foregroundStyle(appearance.secondary)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("epub.authorScale.summary")
+        .accessibilityIdentifier("epub.settings.effectiveSource")
+    }
+
+    private var changeSourceButton: some View {
+        Button {
+            guard isActive() else { return }
+            focusSourceOnAppear = true
+            settingsGroup = .more
+        } label: {
+            Label("更改", systemImage: "chevron.right")
+                .font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 12).frame(minHeight: 44)
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
+        .disabled(!isActive())
+        .accessibilityLabel("更改排版来源")
+        .accessibilityIdentifier("epub.settings.changeSource")
+    }
+
+    private var moreContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ReaderSettingsSection(title: "阅读行为", detail: "切换来源或方式，保留当前文本位置", appearance: appearance) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("排版来源").font(.subheadline.weight(.medium))
+                    modeOptions(EPUBLayoutMode.allCases) { mode in
+                        modeButton(mode.title, selected: layoutMode == mode) { layoutMode = mode }
+                            .accessibilityFocused($controlFocus, equals: "layout.\(mode.rawValue)")
+                    }
+                    .accessibilityIdentifier("epub.layoutMode")
+                    .onAppear {
+                        if focusSourceOnAppear, isActive() {
+                            focusSourceOnAppear = false
+                            if voiceOver { controlFocus = "layout.\(layoutMode.rawValue)" }
+                        }
+                    }
+                    Text("原始排版保留安全支持的作者样式与未混淆字体；夜间背景优先保障可读性。复杂版式可能简化。")
+                        .font(.caption).foregroundStyle(appearance.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    sectionDivider
+                    Text("阅读方式").font(.subheadline.weight(.medium))
+                    modeOptions(EPUBReadingMode.allCases) { mode in
+                        modeButton(mode.title, selected: readingMode == mode) { readingMode = mode }
+                    }
+                    .accessibilityIdentifier("epub.readingMode")
+                }
+            }
+            sectionDivider
+            epubScopeSection
+            sectionDivider
+            ReaderSettingsSection(title: "维护信息", detail: "恢复、诊断与许可", appearance: appearance) {
+                restoreTypographyButton
+                moreSection
+                Text("当前版本：\(AppVersion.current.displayText)")
+                    .font(.footnote).foregroundStyle(appearance.secondary)
+                    .accessibilityIdentifier("app.version")
+            }
+        }
+    }
+
+    // Explicit buttons keep each choice >=44pt and let long Dynamic Type labels wrap.
+    private func modeOptions<Option: Hashable, Content: View>(
+        _ options: [Option], @ViewBuilder content: @escaping (Option) -> Content
+    ) -> some View {
+        VStack(spacing: 4) {
+            ForEach(options, id: \.self) { option in content(option) }
+        }
+        .padding(4)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func modeButton(_ title: String, selected: Bool, choose: @escaping @MainActor () -> Void) -> some View {
+        Button {
+            guard isActive() else { return }
+            choose()
+        } label: {
+            HStack(spacing: 12) {
+                Text(title).font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.foreground))
+        .disabled(!isActive())
+        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var sectionDivider: some View {
+        Divider().overlay(appearance.edge).accessibilityHidden(true)
+    }
+
+    private var authorScaleSummary: some View {
+        Text("100% 为作者原字号。这里只显示比例，不预览书内字体或版式。")
+            .font(.caption).foregroundStyle(appearance.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("epub.authorScale.summary")
     }
 
     private var typographySection: some View {
@@ -214,7 +359,8 @@ struct EPUBSettingsView: View {
                 if usesAuthorTypography {
                     EPUBAuthorScaleAdjustment(value: $draft.fontSize, appearance: appearance,
                                               isActive: isActive, commit: commitDraft)
-                    Text("70%–180%，100% 为作者原字号。保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
+                    authorScaleSummary
+                    Text("70%–180% · 行高随文字同比缩放")
                         .font(.caption).foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
@@ -223,7 +369,7 @@ struct EPUBSettingsView: View {
                         key: "font",
                         value: $draft.fontSize,
                         range: 14...36,
-                        accent: appearance.foreground,
+                        accent: appearance.accent,
                         isActive: isActive,
                         commit: commitDraft
                     )
@@ -233,12 +379,14 @@ struct EPUBSettingsView: View {
                         key: "spacing",
                         value: $draft.lineSpacing,
                         range: 0...20,
-                        accent: appearance.foreground,
+                        accent: appearance.accent,
                         isActive: isActive,
                         commit: commitDraft
                     )
                 }
             }
+            .padding(12)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
 
@@ -262,18 +410,28 @@ struct EPUBSettingsView: View {
                 }
                 .padding(4)
                 .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                restoreTypographyButton
             }
         }
     }
 
     private var epubScopeSection: some View {
-        ReaderSettingsSection(title: "EPUB 首版范围", detail: "可重排阅读与安全限制", appearance: appearance) {
+        ReaderSettingsSection(title: "兼容与范围", detail: "EPUB 首版 · 可重排阅读与安全限制", appearance: appearance) {
+            if let compatibilitySummary {
+                Text(compatibilitySummary)
+                    .font(.footnote).foregroundStyle(appearance.foreground)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("epub.compatibility.summary")
+            }
             Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
                 .font(.caption)
-                .foregroundStyle(appearance.foreground.opacity(0.78))
+                .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("epub.settings.scopeNote")
+            if usesAuthorTypography {
+                Text("保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
+                    .font(.caption).foregroundStyle(appearance.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -364,29 +522,31 @@ struct EPUBSettingsView: View {
             }
             .font(.footnote)
             .disabled(!isActive())
-            Text("加减和快捷排版立即重排并恢复当前文本锚点；“完成”只关闭面板。")
+            Text("加减和快捷排版立即应用；滑杆松手应用并恢复文本锚点。“完成”关闭面板。")
                 .font(.caption)
-                .foregroundStyle(appearance.foreground.opacity(0.7))
+                .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var diagnosticsButton: some View {
         Button {
-            if isActive() { info = .diagnostics }
+            if isActive() { auxiliaryReturnFocus = "diagnostics"; info = .diagnostics }
         } label: {
             Label("诊断与耗时", systemImage: "ladybug").frame(minHeight: 44).contentShape(Rectangle())
         }
         .accessibilityIdentifier("reader.info.diagnostics")
+        .accessibilityFocused($controlFocus, equals: "diagnostics")
     }
 
     private var licenseButton: some View {
         Button {
-            if isActive() { info = .license }
+            if isActive() { auxiliaryReturnFocus = "license"; info = .license }
         } label: {
             Text("开源许可").frame(minHeight: 44).contentShape(Rectangle())
         }
         .accessibilityIdentifier("reader.info.license")
+        .accessibilityFocused($controlFocus, equals: "license")
     }
 
     private func themeButton(_ theme: ReaderTheme) -> some View {
@@ -407,15 +567,6 @@ struct EPUBSettingsView: View {
             }
             .padding(8)
             .frame(minWidth: 84, maxWidth: .infinity, minHeight: 64)
-            .background {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(selected ? appearance.selection : .clear)
-                    .allowsHitTesting(false)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
-                    }
-            }
             .overlay(alignment: .topTrailing) {
                 Image(systemName: "checkmark")
                     .font(.caption)
@@ -432,6 +583,16 @@ struct EPUBSettingsView: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(selected ? appearance.selectedControl : .clear)
+                .opacity(isActive() ? 1 : 0.4)
+                .allowsHitTesting(false).accessibilityHidden(true)
+                .animation(selectionAnimation, value: selectionMotionKey)
+                .transaction { transaction in
+                    if reduceMotion { transaction.animation = nil }
+                }
+        }
         .disabled(!isActive())
         .accessibilityLabel(theme.title)
         .accessibilityValue(selected ? "已选择" : "未选择")

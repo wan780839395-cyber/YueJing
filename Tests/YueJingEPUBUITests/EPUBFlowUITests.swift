@@ -22,6 +22,17 @@ final class EPUBFlowUITests: XCTestCase {
         try await super.tearDown()
     }
 
+    // Development reproducer for run 43427854507's first-content failure.
+    // Long cross-chapter/relaunch scenarios below remain acceptance coverage.
+    @MainActor func testEPUBFirstContentVisibleSmoke() {
+        withEPUBFixture { app in
+            openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "open-smoke", app)
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
+            XCTAssertEqual(Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")["path"], "OEBPS/text/ch1.xhtml")
+            exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
+        }
+    }
+
     @MainActor func testEPUBShelfCoverAndDirectoryCrossChapterNavigation() {
         withEPUBFixture { app in
             let illustratedRow = shelfRow(titled: "EPUBTest-Illustrated-A", app)
@@ -182,6 +193,18 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(txtRow.label.contains("TXT"))
 
             openEPUB("EPUBTest-NoCover-B", expectedMarker: "EPUB_NOCOVER_START", stage: "open", app)
+            let beforeGroups = Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")
+            let beforeFrame = viewport(app).frame
+            openSettings(app)
+            selectSettingsGroup("more", app)
+            selectSettingsGroup("common", app)
+            closePanel(app)
+            let afterGroups = Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")
+            for key in ["path", "node", "offset", "scrollX", "scrollY"] {
+                XCTAssertNotNil(beforeGroups[key])
+                XCTAssertEqual(afterGroups[key], beforeGroups[key], "Group navigation must not move the reading position")
+            }
+            XCTAssertEqual(viewport(app).frame, beforeFrame, "Settings groups must not resize the reading viewport")
             selectLayoutMode("阅读器排版", rawValue: "reader", app)
             openSettings(app)
 
@@ -197,6 +220,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("24"))
             XCTAssertTrue(app.staticTexts["reader.spacing.value"].label.contains("10"))
 
+            selectSettingsGroup("more", app)
             let scopeNote = app.staticTexts["epub.settings.scopeNote"]
             revealSetting(scopeNote, app)
             XCTAssertTrue(scopeNote.exists)
@@ -384,6 +408,18 @@ final class EPUBFlowUITests: XCTestCase {
     }
 
     @MainActor private func expandCDock(_ app: XCUIApplication, deadline: Date, startsCollapsed: Bool = false) {
+        // EPUB now exposes its two primary actions directly; TXT keeps the original tray.
+        if app.webViews.matching(identifier: "reader.viewport").firstMatch.exists {
+            let directory = app.buttons["reader.tools.directory"]
+            let settings = app.buttons["reader.tools.settings"]
+            revealDockControl(directory, app, deadline: deadline)
+            waitHittable(directory, timeout: max(0.1, deadline.timeIntervalSinceNow))
+            revealDockControl(settings, app, deadline: deadline)
+            waitHittable(settings, timeout: max(0.1, deadline.timeIntervalSinceNow))
+            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
+            return
+        }
         let expand = app.buttons["reader.tools.expand"]
         let collapse = app.buttons["reader.tools.collapse"]
         if startsCollapsed {
@@ -438,6 +474,14 @@ final class EPUBFlowUITests: XCTestCase {
         if !readyInBounds {
             waitHittable(button, timeout: max(0.1, deadline.timeIntervalSinceNow))
         }
+    }
+
+    @MainActor private func selectSettingsGroup(_ group: String, _ app: XCUIApplication) {
+        let button = app.buttons["epub.settings.group.\(group)"]
+        waitHittable(button)
+        button.tap()
+        XCTAssertEqual(button.value as? String, "已选择")
+        XCTAssertTrue(button.isSelected)
     }
 
     @MainActor private func openSettings(_ app: XCUIApplication) {
@@ -670,7 +714,8 @@ final class EPUBFlowUITests: XCTestCase {
     @MainActor private func selectLayoutMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
         showTools(app)
         openSettings(app)
-        let picker = app.segmentedControls["epub.layoutMode"]
+        selectSettingsGroup("more", app)
+        let picker = app.descendants(matching: .any).matching(identifier: "epub.layoutMode").firstMatch
         revealSetting(picker, app)
         let option = picker.buttons[title]
         waitHittable(option)
@@ -693,7 +738,8 @@ final class EPUBFlowUITests: XCTestCase {
         }
         showTools(app)
         openSettings(app)
-        let picker = app.segmentedControls["epub.readingMode"]
+        selectSettingsGroup("more", app)
+        let picker = app.descendants(matching: .any).matching(identifier: "epub.readingMode").firstMatch
         revealSetting(picker, app)
         let option = picker.buttons[title]
         waitHittable(option)

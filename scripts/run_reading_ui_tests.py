@@ -312,6 +312,9 @@ def _run_ui_attempt(args, out, provenance, timeout_seconds):
             code, timed_out = stream_native(args, out / (target + ".log"), timeout_seconds,
                                            process_lifecycle=timeline)
         except BaseException as error:
+            # Cancellation/unsafe cleanup must not launch attachment-export processes.
+            if not isinstance(error, Exception):
+                raise
             native_error = error
         if native_error is None:
             try:
@@ -320,6 +323,8 @@ def _run_ui_attempt(args, out, provenance, timeout_seconds):
                           {**provenance, "native_exit": code, "timed_out": timed_out})
                 _diagnostic_call(timeline, "record", "native_receipt_written")
             except BaseException as error:
+                if not isinstance(error, Exception):
+                    raise
                 receipt_error = error
                 _diagnostic_call(timeline, "record", "native_receipt_failed")
         _diagnostic_call(timeline, "record", "export_started")
@@ -359,68 +364,35 @@ def _run_ui_attempt(args, out, provenance, timeout_seconds):
 
 
 def stream_native(args, path, timeout_seconds, launch_diagnostics=None, process_lifecycle=None):
-    timed_out = threading.Event()
-    with path.open("x", encoding="utf-8") as stream:
-        _diagnostic_call(process_lifecycle, "record", "popen_requested")
-        try:
-            process = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-        except Exception as error:
-            _diagnostic_call(process_lifecycle, "record", "popen_failed", type(error).__name__)
-            _diagnostic_call(process_lifecycle, "finish")
-            raise
+    """Legacy observer/signature adapter over the shared owned-tree lifecycle."""
+    from workflow_process import run_logged_observed
+
+    def started(process, deadline):
         _diagnostic_call(process_lifecycle, "record", "popen_returned", process.pid)
-        def expire():
-            _diagnostic_call(process_lifecycle, "record", "timer_callback")
-            try:
-                poll_result = process.poll()  # The same single poll controls the original timeout action.
-            except Exception as error:
-                _diagnostic_call(process_lifecycle, "record", "timer_poll_failed", type(error).__name__)
-                raise
-            _diagnostic_call(process_lifecycle, "record", "timer_poll", poll_result)
-            if poll_result is None:
-                timed_out.set()
-                _diagnostic_call(process_lifecycle, "record", "kill_requested")
-                try:
-                    process.kill()
-                except Exception as error:
-                    _diagnostic_call(process_lifecycle, "record", "kill_failed", type(error).__name__)
-                    raise
-                _diagnostic_call(process_lifecycle, "record", "kill_returned")
-        timer = threading.Timer(timeout_seconds, expire)
-        observation_deadline = time.monotonic() + timeout_seconds if launch_diagnostics is not None or process_lifecycle is not None else 0
-        timer.start()
-        _diagnostic_call(process_lifecycle, "record", "timer_started")
-        _diagnostic_call(process_lifecycle, "start", process, observation_deadline)
-        _diagnostic_call(launch_diagnostics, "start", process, observation_deadline)
-        completed = False
-        try:
-            for line in process.stdout:
-                _diagnostic_call(process_lifecycle, "observe_line", line)
-                stream.write(line); stream.flush()
-                print(line, end="", flush=True)
-                _diagnostic_call(launch_diagnostics, "observe_line", line)
-            _diagnostic_call(process_lifecycle, "record", "stdout_eof")
-            _diagnostic_call(process_lifecycle, "record", "wait_started")
-            code = process.wait()
-            _diagnostic_call(process_lifecycle, "record", "wait_returned", code)
-            completed = True
-        except Exception as error:
-            _diagnostic_call(process_lifecycle, "record", "stream_error", type(error).__name__)
-            raise
-        finally:
-            timer.cancel()
-            _diagnostic_call(process_lifecycle, "record", "timer_cancelled")
-            process.stdout.close()
-            _diagnostic_call(process_lifecycle, "record", "stdout_closed")
-            _diagnostic_call(launch_diagnostics, "stop")
-            if not completed:
-                _diagnostic_call(process_lifecycle, "record", "stream_unwound")
-                _diagnostic_call(process_lifecycle, "finish")
-    result = (code, timed_out.is_set())
-    _diagnostic_call(process_lifecycle, "record", "stream_returned", code)
-    _diagnostic_call(process_lifecycle, "record", "returned_timed_out", result[1])
-    _diagnostic_call(process_lifecycle, "finish")
-    return result
+        _diagnostic_call(process_lifecycle, "start", process, deadline)
+        _diagnostic_call(launch_diagnostics, "start", process, deadline)
+        _diagnostic_call(process_lifecycle, "record", "wait_started")
+
+    def observed(line):
+        _diagnostic_call(process_lifecycle, "observe_line", line)
+        _diagnostic_call(launch_diagnostics, "observe_line", line)
+
+    _diagnostic_call(process_lifecycle, "record", "popen_requested")
+    try:
+        code, timed_out = run_logged_observed(
+            args, path, timeout_seconds, cwd=ROOT, on_start=started, on_line=observed)
+        _diagnostic_call(process_lifecycle, "record", "wait_returned", code)
+        _diagnostic_call(process_lifecycle, "record", "stdout_eof")
+        _diagnostic_call(process_lifecycle, "record", "stream_returned", code)
+        _diagnostic_call(process_lifecycle, "record", "returned_timed_out", timed_out)
+        return code, timed_out
+    except BaseException:
+        _diagnostic_call(process_lifecycle, "record", "stream_unwound")
+        raise
+    finally:
+        _diagnostic_call(launch_diagnostics, "stop")
+        _diagnostic_call(process_lifecycle, "record", "stdout_closed")
+        _diagnostic_call(process_lifecycle, "finish")
 
 
 def export_ui_evidence(out, provenance, native_exit):

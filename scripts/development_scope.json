@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "scope": "development-targeted",
+  "branch": "dev/workflow-optimization",
+  "cases": [
+    {"file": "YueJingHostTests/EPUBContentsNavigationTests.swift", "name": "largeDirectoryResolvesFirstMiddleAndLast"},
+    {"file": "YueJingHostTests/EPUBContentsNavigationTests.swift", "name": "samePathPrefersFragmentThenFallsBackToFirstPath"},
+    {"file": "YueJingEPUBUITests/EPUBFlowUITests.swift", "name": "testEPUBFirstContentVisibleSmoke"}
+  ],
+  "build_timeout_seconds": 900,
+  "test_timeout_seconds": 480,
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 3000
+}

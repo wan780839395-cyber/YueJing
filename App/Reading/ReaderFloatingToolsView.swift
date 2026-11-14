@@ -12,6 +12,8 @@ struct ReaderFloatingToolsView: View {
     let rememberFocus: @MainActor (String) -> Void
     let open: @MainActor (ReadingToolPanel) -> Void
     @AccessibilityFocusState.Binding var focusedControl: String?
+    // nil preserves the TXT edge dock and its existing memberwise call sites.
+    var chapterContext: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
     @State private var trayExpanded = false
@@ -21,14 +23,123 @@ struct ReaderFloatingToolsView: View {
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if visible {
-                edgeDock
-                    .transition(.opacity)
+                if let chapterContext {
+                    chapterPanel(chapterContext)
+                        .transition(.opacity)
+                } else {
+                    edgeDock
+                        .transition(.opacity)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
         .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
+    }
+
+    private func chapterPanel(_ context: String) -> some View {
+        let maximumHeight: CGFloat = metrics.compactHeight ? 144 : (dynamicType.isAccessibilitySize ? 300 : 240)
+        return ViewThatFits(in: .vertical) {
+            chapterPanelContent(context)
+            ScrollView(.vertical) {
+                chapterPanelContent(context)
+            }
+            .frame(height: maximumHeight)
+            .accessibilityIdentifier("reader.tools.scroll")
+        }
+        .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth, maxHeight: maximumHeight)
+        .clipShape(RoundedRectangle(cornerRadius: ReaderVisualStyle.panelCornerRadius, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: ReaderVisualStyle.panelCornerRadius, style: .continuous)
+                .fill(appearance.surface)
+                .shadow(color: appearance.shadow, radius: 6, y: 2)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: ReaderVisualStyle.panelCornerRadius, style: .continuous)
+                .strokeBorder(appearance.edge, lineWidth: 1)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .accessibilityIdentifier("reader.tools.chapterPanel")
+    }
+
+    @ViewBuilder
+    private func chapterPanelContent(_ context: String) -> some View {
+        let stacked = dynamicType.isAccessibilitySize || (dynamicType >= .xxLarge && !metrics.compactHeight)
+        if stacked {
+            VStack(alignment: .leading, spacing: 8) {
+                chapterSummary(context)
+                if dynamicType.isAccessibilitySize {
+                    VStack(spacing: 4) {
+                        panelDirectoryButton(fillsWidth: true)
+                        panelSettingsButton(fillsWidth: true)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        panelDirectoryButton(fillsWidth: true)
+                        panelSettingsButton(fillsWidth: true)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, metrics.compactHeight ? 8 : 10)
+        } else {
+            HStack(alignment: .center, spacing: 8) {
+                chapterSummary(context)
+                HStack(spacing: 4) {
+                    panelDirectoryButton(fillsWidth: false)
+                    panelSettingsButton(fillsWidth: false)
+                }
+                .layoutPriority(1)
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 8)
+            .padding(.vertical, metrics.compactHeight ? 4 : 6)
+        }
+    }
+
+    private func chapterSummary(_ context: String) -> some View {
+        Text(context)
+            .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+            .foregroundStyle(appearance.foreground)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityLabel("当前章节，\(context)")
+            .accessibilityIdentifier("reader.tools.chapterContext")
+    }
+
+    private func panelDirectoryButton(fillsWidth: Bool) -> some View {
+        panelButton("目录", symbol: "list.bullet", panel: .directory, key: "directory",
+                    available: directoryAvailable, fillsWidth: fillsWidth)
+    }
+
+    private func panelSettingsButton(fillsWidth: Bool) -> some View {
+        panelButton("阅读设置", symbol: "textformat.size", panel: .settings, key: "settings",
+                    available: settingsAvailable, fillsWidth: fillsWidth)
+            .accessibilityHint("调整文字、行距和阅读背景")
+    }
+
+    private func panelButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String,
+                             available: Bool, fillsWidth: Bool) -> some View {
+        Button {
+            guard visible, state.canInteract, available, !exitSaveFailed else { return }
+            open(panel)
+        } label: {
+            Label(title, systemImage: symbol)
+                .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
+                .imageScale(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil, minHeight: metrics.controlHeight)
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
+        .disabled(!available || exitSaveFailed || !state.canInteract)
+        .accessibilityIdentifier("reader.tools.\(key)")
+        .accessibilityFocused($focusedControl, equals: key)
     }
 
     private var edgeDock: some View {

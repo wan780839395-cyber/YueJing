@@ -5,11 +5,13 @@ on:
   workflow_dispatch:
     inputs:
       validation_scope:
-        description: EPUB opening followup3 / 4 new plus 21 verified reuse; separate same-source delivery
+        description: Explicit development or acceptance scope; frozen historical scopes are not general defaults
         required: true
         type: choice
-        default: epub-opening-followup-3
+        default: select-explicit-scope
         options:
+          - select-explicit-scope
+          - development-targeted
           - full
           - host-natural-root-5c88543-exact3
           - reuse-native-205-d2110a9
@@ -19,6 +21,18 @@ on:
           - epub-diagnostic-a0fbb60
           - epub-opening-followup-3
           - epub-author-layout
+      scope_acknowledgement:
+        description: For full or historical acceptance, repeat the exact scope after reviewing its frozen contract
+        type: string
+        default: ''
+      development_source_sha:
+        description: Approved full commit SHA for development only
+        type: string
+        default: ''
+      development_plan_sha256:
+        description: Approved SHA256 of scripts/development_scope.json
+        type: string
+        default: ''
       allow_unqualified_ipa:
         description: Explicitly allow DEVICE_DIAGNOSTIC_ONLY / UI_NOT_QUALIFIED when native tests fail
         required: true
@@ -39,8 +53,27 @@ permissions:
   contents: read
 
 jobs:
+  admission:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+      SCOPE_ACKNOWLEDGEMENT: ${{ inputs.scope_acknowledgement }}
+      DEVELOPMENT_SOURCE_SHA: ${{ inputs.development_source_sha }}
+      DEVELOPMENT_PLAN_SHA256: ${{ inputs.development_plan_sha256 }}
+      BUILD_IPA: ${{ inputs.build_ipa }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa }}
+      PRIOR_VALIDATION_RUN: ${{ inputs.prior_validation_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Reject default unknown unbound or unacknowledged scopes before native preparation
+        run: python3 -B scripts/workflow_admission.py
+
   validate:
-    if: ${{ inputs.validation_scope != 'reuse-native-205-d2110a9' && inputs.validation_scope != 'epub-compat-33' && inputs.validation_scope != 'epub-paging-6' && inputs.validation_scope != 'epub-reading-15' && inputs.validation_scope != 'epub-diagnostic-a0fbb60' && inputs.validation_scope != 'epub-opening-followup-3' && inputs.validation_scope != 'epub-author-layout' }}
+    needs: admission
+    if: ${{ inputs.validation_scope == 'full' || inputs.validation_scope == 'host-natural-root-5c88543-exact3' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -112,39 +145,13 @@ jobs:
               print('Full regression selected; original full gates remain required.')
           PY
 
-      - name: Verify the selected native toolchain
+      - name: Verify fixed toolchain and generate project through shared contract
         id: toolchain
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/task3
-          test -d "$DEVELOPER_DIR"
-          {
-            printf 'Source: %s\n' "$GITHUB_SHA"
-            sw_vers
-            uname -m
-            xcodebuild -version
-            xcrun swift --version
-          } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
-      - name: Verify XcodeGen and generate the project
+      - name: Confirm generated project from the shared preparation receipt
         id: project
-        run: |
-          set -euo pipefail
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
-            --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          test -x _tooling/xcodegen/bin/xcodegen
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          python3 -c 'import os, re, sys; from pathlib import Path; actual = re.findall(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", Path("artifacts/task3/xcodegen.log").read_text()); sys.exit(0 if actual == [os.environ["XCODEGEN_VERSION"]] else "Unexpected XcodeGen version")'
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . \
-            2>&1 | tee artifacts/task3/project-generation.log
+        run: test -f YueJing.xcodeproj/project.pbxproj
 
       - name: Resolve the official pinned GRDB and ZIPFoundation dependencies once
         id: dependencies
@@ -182,7 +189,11 @@ jobs:
           python3 -B scripts/check_webkit_linkage.py --self-check > artifacts/task3/webkit-linkage-preflight.json
           python3 -B scripts/validate_task3.py freeze-candidate
 
-      - name: Run the original 25 TXTCore tests once
+      - name: Display current full selection counts without implying execution
+        if: ${{ inputs.validation_scope == 'full' }}
+        run: python3 -B scripts/workflow_selection.py --full
+
+      - name: Run reviewed TXTCore selection from inventory
         id: core
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
@@ -204,7 +215,7 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 -B scripts/validate_task3.py test-counts TXTCoreTests
 
-      - name: Run 138 ReaderDomain cases including EPUB and fixed A06 regression
+      - name: Run reviewed ReaderDomain selection including EPUB and A06
         id: domain
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
@@ -226,7 +237,7 @@ jobs:
           if [ "${pipeline[1]}" -ne 0 ]; then exit "${pipeline[1]}"; fi
           python3 -B scripts/validate_task3.py test-counts ReaderDomainTests
 
-      - name: Run the 6 decoder differential tests and one timed pair in Release
+      - name: Run reviewed decoder differential selection in Release
         id: block
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
@@ -299,7 +310,7 @@ jobs:
               ui_execution_authorized=False, device_build=False, ipa=False, full_regression_passed=False)))
           PY
 
-      - name: Run the 17 real App-host UIKit and WebKit tests once
+      - name: Run reviewed App-host UIKit and WebKit selection
         id: host
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && ((inputs.validation_scope == 'full' || inputs.validation_scope == '') || (inputs.validation_scope == 'host-natural-root-5c88543-exact3' && steps.host_preflight.outcome == 'success')) }}
         timeout-minutes: 12
@@ -379,7 +390,7 @@ jobs:
               summary.write('UI cases0; no device build or IPA; full146 regression NOT run/passed.\n')
           PY
 
-      - name: Run 12 real App UI flows including 3 bookmark flows
+      - name: Run reviewed App UI selection
         id: txt_ui
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         timeout-minutes: 23
@@ -389,7 +400,7 @@ jobs:
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             --evidence-dir artifacts/reading-ui-native
 
-      - name: Run 3 independent EPUB App UI flows in the same attempt
+      - name: Run reviewed independent EPUB App UI selection
         id: epub_ui
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         timeout-minutes: 10
@@ -399,7 +410,7 @@ jobs:
             --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             --evidence-dir artifacts/epub-ui-native
 
-      - name: Run the 3 existing Canvas App-host regressions in the same attempt
+      - name: Run reviewed Canvas App-host selection
         id: canvas
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
@@ -432,7 +443,7 @@ jobs:
             --app build/Task3Canvas/Build/Products/Debug-iphonesimulator/YueJing.app \
             --output artifacts/task3/webkit-simulator-linkage
 
-      - name: Require the exact reviewed 205-case union before device App compilation
+      - name: Require the exact reviewed inventory union before device App compilation
         id: test_gate
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' && (inputs.validation_scope == 'full' || inputs.validation_scope == '') }}
         run: |
@@ -510,6 +521,7 @@ jobs:
           if-no-files-found: error
 
   package_reused:
+    needs: admission
     if: ${{ inputs.validation_scope == 'reuse-native-205-d2110a9' }}
     runs-on: macos-15
     timeout-minutes: 30
@@ -539,23 +551,8 @@ jobs:
           python3 -B scripts/check_reuse_native_evidence.py | tee artifacts/task3/reuse-self-check.log
           python3 -B scripts/validate_task3.py freeze-candidate
 
-      - name: Verify the unchanged native toolchain and generate the project
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+      - name: Verify fixed toolchain and generate project through shared contract
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve the unchanged official dependency pins
         run: |
@@ -624,6 +621,7 @@ jobs:
           if-no-files-found: error
 
   epub_compat:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-compat-33' }}
     runs-on: macos-15
     timeout-minutes: 45
@@ -653,23 +651,8 @@ jobs:
           python3 -B scripts/validate_task3.py freeze-candidate
           python3 -B scripts/run_epub_compat_validation.py scope
 
-      - name: Verify the pinned native toolchain and generate the project
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+      - name: Verify fixed toolchain and generate project through shared contract
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve fixed dependencies and select an installed arm64 simulator
         run: |
@@ -754,6 +737,7 @@ jobs:
           if-no-files-found: error
 
   epub_paging:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-paging-6' }}
     runs-on: macos-15
     timeout-minutes: 45
@@ -783,23 +767,8 @@ jobs:
           python3 -B scripts/validate_task3.py freeze-candidate
           python3 -B scripts/run_epub_paging_validation.py scope
 
-      - name: Verify the pinned native toolchain and generate the project
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+      - name: Verify fixed toolchain and generate project through shared contract
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve fixed dependencies and select an installed arm64 simulator
         run: |
@@ -884,6 +853,7 @@ jobs:
           if-no-files-found: error
 
   epub_reading:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-reading-15' }}
     runs-on: macos-15
     timeout-minutes: 60
@@ -913,23 +883,8 @@ jobs:
           python3 -B scripts/validate_task3.py freeze-candidate
           python3 -B scripts/run_epub_reading_validation.py scope
 
-      - name: Verify the pinned native toolchain and generate the project
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 120 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+      - name: Verify fixed toolchain and generate project through shared contract
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve fixed dependencies and select an installed arm64 simulator
         run: |
@@ -1045,6 +1000,7 @@ jobs:
           if-no-files-found: error
 
   epub_diagnostic:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' }}
     runs-on: macos-15
     timeout-minutes: 30
@@ -1071,25 +1027,9 @@ jobs:
           set -euo pipefail
           python3 -B scripts/epub_diagnostic_package.py freeze
 
-      - name: Verify pinned device toolchain and generate project
+      - name: Verify fixed device toolchain and generate project through shared contract
         timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 120 \
-            -H 'Accept: application/octet-stream' -H "Authorization: Bearer ${GH_TOKEN}" \
-            'https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069' --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve and verify fixed dependencies without simulator preparation
         run: |
@@ -1150,6 +1090,7 @@ jobs:
           if-no-files-found: error
 
   epub_freeze:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-opening-followup-3' }}
     runs-on: macos-15
     timeout-minutes: 60
@@ -1184,28 +1125,10 @@ jobs:
           python3 -B scripts/check_epub_opening_presentation.py 2>&1 | tee artifacts/task3/epub-opening-source-check.log
           python3 -B scripts/run_epub_freeze_validation.py scope
 
-      - name: Verify pinned toolchain and generate project
+      - name: Verify fixed toolchain and generate project through shared contract
         id: toolchain
         timeout-minutes: 5
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 120 \
-            -H 'Accept: application/octet-stream' -H "Authorization: Bearer ${GH_TOKEN}" \
-            'https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069' --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve and verify fixed dependencies
         id: dependencies
@@ -1374,6 +1297,7 @@ jobs:
           if-no-files-found: error
 
   epub_author_layout:
+    needs: admission
     if: ${{ inputs.validation_scope == 'epub-author-layout' }}
     runs-on: macos-15
     timeout-minutes: 60
@@ -1407,26 +1331,10 @@ jobs:
           python3 -B scripts/check_epub_author_layout_validation.py 2>&1 | tee artifacts/task3/author-layout-self-check.log
           python3 -B scripts/run_epub_author_layout_validation.py scope
 
-      - name: Verify pinned toolchain and generate project
+      - name: Verify fixed toolchain and generate project through shared contract
         id: toolchain
         timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          test -d "$DEVELOPER_DIR"
-          { printf 'Source: %s\n' "$GITHUB_SHA"; sw_vers; uname -m; xcodebuild -version; xcrun swift --version; } 2>&1 | tee artifacts/task3/toolchain.log
-          grep -Fx 'Xcode 16.4' artifacts/task3/toolchain.log
-          grep -Fx 'Build version 16F6' artifacts/task3/toolchain.log
-          grep -F 'Apple Swift version 6.1.2 ' artifacts/task3/toolchain.log
-          test "$(uname -m)" = arm64
-          mkdir -p _tooling
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 120 \
-            -H 'Accept: application/octet-stream' -H "Authorization: Bearer ${GH_TOKEN}" \
-            'https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069' --output _tooling/xcodegen.zip
-          printf '%s  %s\n' "$XCODEGEN_SHA256" '_tooling/xcodegen.zip' | shasum -a 256 -c -
-          ditto -x -k _tooling/xcodegen.zip _tooling
-          _tooling/xcodegen/bin/xcodegen --version | tee artifacts/task3/xcodegen.log
-          grep -Fx 'Version: 2.46.0' artifacts/task3/xcodegen.log
-          _tooling/xcodegen/bin/xcodegen generate --spec project.yml --project . 2>&1 | tee artifacts/task3/project-generation.log
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
 
       - name: Resolve and verify fixed dependencies
         id: dependencies
@@ -1609,3 +1517,59 @@ jobs:
             artifacts/task3/delivery-summary.json
           retention-days: 3
           if-no-files-found: error
+
+  development:
+    needs: admission
+    if: ${{ inputs.validation_scope == 'development-targeted' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+      DEVELOPMENT_SOURCE_SHA: ${{ inputs.development_source_sha }}
+      DEVELOPMENT_PLAN_SHA256: ${{ inputs.development_plan_sha256 }}
+      BUILD_IPA: ${{ inputs.build_ipa }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa }}
+      PRIOR_VALIDATION_RUN: ${{ inputs.prior_validation_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind development source selection and budgets before preparation
+        run: python3 -B scripts/workflow_development.py preflight
+      - name: Prepare the fixed native tools and generate isolated schemes
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/development/preparation
+      - name: Resolve pinned dependencies and boot an installed simulator
+        run: python3 -B scripts/workflow_development.py prepare-runtime
+      - name: Build each required scheme once and execute selected cases serially
+        run: python3 -B scripts/workflow_development.py run --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+      - name: Display development outcomes without release qualification
+        if: always()
+        run: |
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('artifacts/development/execution/development-summary.json')
+          if path.is_file():
+              data = json.loads(path.read_text())
+          else:
+              plan = json.loads(Path('scripts/development_scope.json').read_text())
+              data = {'qualification':'DEVELOPMENT_ONLY', 'release_qualified':False, 'status':'blocked',
+                      'native_executions':None, 'reason':'preparation or execution receipt incomplete',
+                      'cases':[dict(row, status='blocked', reason='no verified execution receipt') for row in plan['cases']]}
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open('x') as receipt:
+                  json.dump(data, receipt, indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n## Development only — no IPA or release qualification\n```json\n'+json.dumps(data, indent=2)+'\n```\n')
+          PY
+      - name: Preserve development raw evidence and preparation failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: development-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/development/
+            artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn

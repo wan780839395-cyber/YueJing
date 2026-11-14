@@ -11,6 +11,18 @@ enum EPUBReaderLoadingPresentation {
     static func restoresTools(initialOpening: Bool) -> Bool { initialOpening }
 }
 
+/// Read-only chrome summary. A navigation target is not a confirmed visible chapter.
+/// Multiple TOC anchors in one document need finer location evidence; never guess the first.
+enum EPUBReaderChapterContext {
+    static func title(in items: [EPUBNavigationItem], path: String?, confirmedPath: String?) -> String? {
+        guard let path, !path.isEmpty, path == confirmedPath else { return nil }
+        let matches = items.filter { $0.path == path }
+        guard matches.count == 1, let item = matches.first else { return nil }
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
+    }
+}
+
 @MainActor
 struct EPUBReaderScreen: View {
     @ObservedObject var model: EPUBReaderViewModel
@@ -144,7 +156,8 @@ struct EPUBReaderScreen: View {
                     exitSaveFailed: model.exitSaveFailed,
                     rememberFocus: { lastPanelControl = $0 },
                     open: openPanel,
-                    focusedControl: $focusedControl
+                    focusedControl: $focusedControl,
+                    chapterContext: chapterContextText
                 )
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
@@ -223,6 +236,16 @@ struct EPUBReaderScreen: View {
         }
     }
 
+    private var chapterContextText: String {
+        guard tools.visible, tools.panel == nil else { return "章节尚未确认" }
+        if model.loading { return "正在确认章节…" }
+        return EPUBReaderChapterContext.title(
+            in: model.navigationItems,
+            path: model.currentPath,
+            confirmedPath: model.presentationToken?.path
+        ) ?? "章节尚未确认"
+    }
+
     @ViewBuilder
     private func panelHost(session: ReaderPanelSession) -> some View {
         let appearance = ReaderToolAppearance(
@@ -268,6 +291,8 @@ struct EPUBReaderScreen: View {
                     openingSummary: model.diagnosticOpeningSummary,
                     effectiveLayoutMode: model.effectiveLayoutMode,
                     compatibilitySummary: model.compatibilitySummary,
+                    fontDiagnostics: model.styleCompatibility?.fontDiagnostics ?? [],
+                    compatibilityDetails: model.bookCompatibilityDetails,
                     runtimeDiagnostics: {
                         await model.webView.controller?.performanceSummary() ?? "阅读器已释放。"
                     },

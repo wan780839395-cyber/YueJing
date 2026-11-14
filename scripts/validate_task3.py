@@ -210,6 +210,12 @@ def test_counts(target, expected=None):
     log_path = OUT / (target + ".log")
     parsed = inventory.parse_swift_log(target, log_path.read_text(encoding="utf-8", errors="replace"),
                                       int((OUT / (target + "-exit-code.txt")).read_text()))
+    if parsed['parameter_events']:
+        from run_epub_freeze_validation import xcresult_export, parameter_result
+        raw = xcresult_export(OUT / (target + '.xcresult'), 'tests')
+        with (OUT / (target + '-xcresult-tests.json')).open('xb') as output:
+            output.write(raw)
+        parameter_result(json.loads(raw))
     report(target + "-counts.json", dict(source_commit=os.environ["GITHUB_SHA"],
            run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
            expected=count, inventory_sha256=digest(Path(inventory.__file__)),
@@ -337,8 +343,23 @@ def validate_group_events(target):
     expected = inventory.COUNTS[target]
     folder = (ROOT / "artifacts/epub-ui-native" if target == "YueJingEPUBUITests" else
               ROOT / "artifacts/reading-ui-native" if target in ui.GROUPS else OUT)
-    events = parse_events((folder / (target + ".log")).read_bytes(), inventory.expected_names(target),
-                          ui=target in ui.UI_CLASSES, ui_class=ui.UI_CLASSES.get(target, "ReadingFlowUITests"))
+    raw = (folder / (target + '.log')).read_bytes()
+    adapted, arguments = inventory.parameter_events(raw.decode('utf-8'), inventory.expected_names(target))
+    events = parse_events(adapted.encode('utf-8'), inventory.expected_names(target),
+                          ui=target in ui.UI_CLASSES, ui_class=ui.UI_CLASSES.get(target, 'ReadingFlowUITests'))
+    events['raw_sha256'] = hashlib.sha256(raw).hexdigest()
+    events['parameter_events'] = arguments
+    if arguments:
+        from run_epub_freeze_validation import xcresult_export, parameter_result
+        saved = (folder / (target + '-xcresult-tests.json')).read_bytes()
+        live = xcresult_export(folder / (target + '.xcresult'), 'tests')
+        require(json.loads(saved) == json.loads(live), 'Parameter xcresult export drift')
+        events['parameter_result'] = parameter_result(json.loads(live))
+    for case in events['cases']:
+        for kind in ('starts', 'finishes', 'skips', 'issues'):
+            for row in case[kind]:
+                if 'text' in row:
+                    row['text'] = raw.decode('utf-8').splitlines()[row['line']-1]
     require(events["parser_complete"] and events["totals"]["passed"] == expected
             and all(v == 0 for k, v in events["totals"].items() if k != "passed"),
             "Native start/finish event chain incomplete: " + target)
@@ -399,6 +420,8 @@ def collect_all_test_evidence():
     passed = not errors and native_passed == inventory.TOTAL
     return dict(source_commit=os.environ.get("GITHUB_SHA"), run_id=os.environ.get("GITHUB_RUN_ID"),
                 run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT"), passed=passed,
+                selected_declarations=inventory.TOTAL, planned_executions=inventory.EXECUTION_TOTAL,
+                verified_executions=inventory.EXECUTION_TOTAL if passed else None,
                 native_passed=native_passed, verified_passed=native_passed,
                 failed=0 if passed else None, skipped=0 if passed else None,
                 unexecuted=0 if passed else None, unverified=inventory.TOTAL - native_passed,

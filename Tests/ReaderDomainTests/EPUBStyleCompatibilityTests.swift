@@ -50,7 +50,9 @@ struct EPUBStyleCompatibilityTests {
         #expect(res18Mixed.referencedFonts.isEmpty)
         #expect(!res18Mixed.css.contains("@font-face"))
         #expect(res18Mixed.css.contains("color: #112233"))
-        #expect(res18Mixed.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable], usesReaderLayout: false))
+        #expect(res18Mixed.styleCompatibility.issues == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable]).issues)
+        #expect(!res18Mixed.styleCompatibility.usesReaderLayout)
+        #expect(!res18Mixed.styleCompatibility.fontDiagnostics.isEmpty)
 
         // 2. Exact 16, 17, 18, and large (40) valid unique embedded candidates
         var extraEntries: [(String, Data)] = []
@@ -127,7 +129,8 @@ struct EPUBStyleCompatibilityTests {
         #expect(mixedPkg.resource(at: "OPS/Fonts/valid.ttf") != nil)
         #expect(mixedPkg.resource(at: "OPS/Fonts/missing-before.ttf") == nil)
         #expect(mixedPkg.resource(at: "OPS/Fonts/missing-after.ttf") == nil)
-        #expect(mixedPkg.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing], usesReaderLayout: false))
+        #expect(mixedPkg.styleCompatibility?.issues == [.optionalResourceMissing])
+        #expect(mixedPkg.styleCompatibility?.usesReaderLayout == false)
 
         let baselineDoc = try EPUBContentPolicy.sanitizeXHTML(
             data: Data(baselineXHTML.utf8),
@@ -153,11 +156,57 @@ struct EPUBStyleCompatibilityTests {
             let dest = root.appendingPathComponent("fallback-dest-\(idx)", isDirectory: true)
             let pkg = try EPUBPackageParser.parse(archiveURL: url, destination: dest)
             #expect(pkg.resources.map(\.path) == ["OPS/Text/c1.xhtml"])
-            #expect(pkg.styleCompatibility == EPUBStyleCompatibility(issues: expectedIssues, usesReaderLayout: false))
+            #expect(pkg.styleCompatibility?.issues == EPUBStyleCompatibility(issues: expectedIssues).issues)
+            #expect(pkg.styleCompatibility?.usesReaderLayout == false)
             #expect(pkg.textNodes["OPS/Text/c1.xhtml"] == baselineDoc.textNodes)
             let sanitizedText = String(decoding: try Data(contentsOf: dest.appendingPathComponent("OPS/Text/c1.xhtml")), as: UTF8.self)
             #expect(!sanitizedText.contains("@font-face"))
             #expect(!sanitizedText.contains("data-yj-style-fallback"))
+        }
+
+        // A recognized obfuscated candidate is still omitted, but a safe TTF in the
+        // same effective src prevents the package-wide unavailable-face warning.
+        for algorithm in ["http://www.idpf.org/2008/embedding", "http://ns.adobe.com/pdf/enc#RC"] {
+            for hasUsableSource in [true, false] {
+                let suffix = hasUsableSource ? ", url(../Fonts/valid.ttf) format(\"truetype\")" : ""
+                let css = "@font-face { font-family: Mixed; src: url(../Fonts/hidden.ttf)\(suffix); } p { font-family: Mixed, serif; }"
+                let xhtml = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Mixed</title><link rel=\"stylesheet\" href=\"../Styles/book.css\"/></head><body><h1 id=\"heading\">Title</h1><p>Paragraph text</p></body></html>"
+                let encryption = """
+                <encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">
+                <EncryptionMethod Algorithm="\(algorithm)"/>
+                <CipherData><CipherReference URI="OPS/Fonts/hidden.ttf"/></CipherData>
+                </EncryptedData></encryption>
+                """
+                let archive = root.appendingPathComponent(UUID().uuidString + ".epub")
+                try EPUBTestSupport.writeEPUB3(
+                    at: archive,
+                    chapters: [.init(id: "c1", path: "Text/c1.xhtml", title: "Mixed", bodyXHTML: xhtml)],
+                    manifestExtra: """
+                    <item id="css" href="Styles/book.css" media-type="text/css"/>
+                    <item id="hidden" href="Fonts/hidden.ttf" media-type="font/ttf"/>
+                    <item id="valid" href="Fonts/valid.ttf" media-type="font/ttf"/>
+                    """,
+                    extraEntries: [
+                        ("OPS/Styles/book.css", Data(css.utf8)),
+                        ("OPS/Fonts/hidden.ttf", Data("synthetic obfuscated bytes".utf8)),
+                        ("OPS/Fonts/valid.ttf", ttfData),
+                        ("META-INF/encryption.xml", Data(encryption.utf8))
+                    ]
+                )
+                let destination = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let package = try EPUBPackageParser.parse(archiveURL: archive, destination: destination)
+                let compatibility = try #require(package.styleCompatibility)
+                #expect(compatibility.issues.contains(.obfuscatedFontOmitted))
+                #expect(compatibility.issues.contains(.fontUnavailable) == !hasUsableSource)
+                #expect(!compatibility.usesReaderLayout)
+                #expect(package.resource(at: "OPS/Fonts/hidden.ttf") == nil)
+                #expect(!FileManager.default.fileExists(atPath: destination.appendingPathComponent("OPS/Fonts/hidden.ttf").path))
+                #expect((package.resource(at: "OPS/Fonts/valid.ttf") != nil) == hasUsableSource)
+                #expect(package.textNodes["OPS/Text/c1.xhtml"] == baselineDoc.textNodes)
+                let sanitized = String(decoding: try Data(contentsOf: destination.appendingPathComponent("OPS/Text/c1.xhtml")), as: UTF8.self)
+                #expect(sanitized.contains("@font-face") == hasUsableSource)
+            }
         }
     }
 
@@ -207,6 +256,39 @@ struct EPUBStyleCompatibilityTests {
         )
         #expect(!overridden.css.contains("@font-face"))
         #expect(overridden.styleCompatibility.issues.contains(.fontUnavailable))
+
+        // Both URL token forms, unsupported containers and declared formats are
+        // candidate omissions, not face failures when the last src retains a TTF.
+        for skipped in [
+            #"url(../Fonts/f.woff2) format("woff2")"#,
+            #"url("../Fonts/f.woff") format("woff")"#,
+            #"url(../Fonts/valid.ttf) format("future-font")"#,
+            #"url("../Fonts/valid.ttf") format("woff2")"#
+        ] {
+            for sources in [
+                "src: \(skipped), url(../Fonts/valid.ttf) format(\"truetype\");",
+                "src: url(../Fonts/valid.ttf), \(skipped);",
+                "src: \(skipped); src: url(../Fonts/valid.ttf);"
+            ] {
+                let available = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+                    "@font-face { font-family: Mixed; \(sources) } p { font-family: Mixed, serif; }",
+                    sourcePath: "OPS/Styles/s.css", documentPath: "OPS/Text/c1.xhtml",
+                    manifestByPath: manifest, destination: root
+                )
+                #expect(available.css.contains("@font-face"))
+                #expect(available.referencedFonts == ["OPS/Fonts/valid.ttf": "font/ttf"])
+                #expect(available.styleCompatibility.issues.isEmpty)
+                #expect(!available.styleCompatibility.usesReaderLayout)
+            }
+            let unavailable = try EPUBAuthorStyles.sanitizeStylesheetWithCompatibility(
+                "@font-face { font-family: Mixed; src: url(../Fonts/valid.ttf); src: \(skipped), local(Safe); }",
+                sourcePath: "OPS/Styles/s.css", documentPath: "OPS/Text/c1.xhtml",
+                manifestByPath: manifest, destination: root
+            )
+            #expect(unavailable.referencedFonts.isEmpty && !unavailable.css.contains("@font-face"))
+            #expect(unavailable.styleCompatibility.issues == [.fontUnavailable])
+            #expect(!unavailable.styleCompatibility.usesReaderLayout)
+        }
         #expect(throws: EPUBError.corruptResource) {
             _ = try EPUBAuthorStyles.verifyExtractedFont(
                 at: "OPS/Fonts/deleted.ttf", under: root,
@@ -323,7 +405,9 @@ struct EPUBStyleCompatibilityTests {
 
         let dest = root.appendingPathComponent("imports-dest", isDirectory: true)
         let pkg = try EPUBPackageParser.parse(archiveURL: epubURL, destination: dest)
-        #expect(pkg.styleCompatibility == EPUBStyleCompatibility(issues: [], usesReaderLayout: false))
+        #expect(pkg.styleCompatibility?.issues == [])
+        #expect(pkg.styleCompatibility?.usesReaderLayout == false)
+        #expect(pkg.styleCompatibility?.fontDiagnostics.contains(where: { $0.outcome == .verified }) == true)
         #expect(pkg.resources.map(\.path) == ["OPS/Text/c1.xhtml", "OPS/Fonts/subfont.ttf"])
         #expect(!FileManager.default.fileExists(atPath: dest.appendingPathComponent("OPS/Styles/main.css").path))
 
@@ -637,7 +721,8 @@ struct EPUBStyleCompatibilityTests {
         let fontResources = pkg.resources.filter { $0.mediaType == "font/ttf" }
         #expect(fontResources.count == 1)
         #expect(fontResources.first?.path == "OPS/Fonts/shared.ttf")
-        #expect(pkg.styleCompatibility == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable], usesReaderLayout: false))
+        #expect(pkg.styleCompatibility?.issues == EPUBStyleCompatibility(issues: [.optionalResourceMissing, .fontUnavailable]).issues)
+        #expect(pkg.styleCompatibility?.usesReaderLayout == false)
 
         let midCancelDest = root.appendingPathComponent("mid-parse-cancel", isDirectory: true)
         let midCancel = Task {

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from audit_native_case_events import audit_evidence
+from workflow_failure_details import failure_details, failure_markdown
 
 GROUP_STEPS = {
     'TXTCoreTests': 'core', 'ReaderDomainTests': 'domain', 'TXTBlockDecoderTests': 'block',
@@ -69,11 +70,32 @@ def build_report(evidence, head, run, steps):
             except (OSError, ValueError) as error:
                 problems.append(dict(target='logs', artifact=str(path), message=str(error)))
     passed = audit['full_selected_passed'] and not problems
+    # Independent DISPLAY_ONLY extraction: never feeds problems, totals or passed.
+    details = []
+    context = dict(source_commit=head, run_id=str(run), run_attempt='1')
+    group_logs = set()
+    for group in audit['groups']:
+        target = group['target']
+        folder = evidence / ('epub-ui-native' if target == 'YueJingEPUBUITests' else
+                             'reading-ui-native' if target in ('YueJingHostTests', 'YueJingUITests') else 'task3')
+        log = folder / (target + '.log')
+        group_logs.add(log)
+        details.append(failure_details(target, logs=[log],
+            summaries=[p for p in (folder / (target + '-xcresult-summary.json'),
+                                   folder / (target + '-xcresult-tests.json')) if p.exists()],
+            receipts=[p for p in (folder / (target + '-execution.json'),
+                                 folder / (target + '-failure.json')) if p.exists()], provenance=context))
+    for folder in ('task3', 'reading-ui-native', 'epub-ui-native'):
+        for path in sorted((evidence / folder).glob('*.log')):
+            if path not in group_logs:
+                detail = failure_details(path.name, logs=[path], provenance=context)
+                if detail['first_by_kind'] or detail['evidence_errors']:
+                    details.append(detail)
     return dict(source_commit=head, run_id=str(run), run_attempt='1', passed=passed,
                 qualification='All discoverable issues; blocked/cancelled/unexecuted are NOT passed',
                 totals=audit['totals'], selected=audit['selected'], steps=statuses, groups=audit['groups'],
                 problems=problems, diagnostics=diagnostics, raw_audit_complete=audit['audit_complete'],
-                gate=gate, native_commands_started=0)
+                gate=gate, native_commands_started=0, failure_details=details)
 
 
 def markdown(report):
@@ -100,6 +122,7 @@ def markdown(report):
     lines += ['', '## 原始编译/断言诊断', '']
     for item in report['diagnostics']:
         lines.append('- '+safe(item['artifact'])+':'+str(item['line'])+' — '+safe(item['text']))
+    lines.append(failure_markdown(report.get('failure_details', [])))
     lines += ['', '无法在准备失败、用户取消、job 超时或 runner 终止后强行运行依赖项；未执行项明确列出。',
               '本报告不触发重跑、不修复证据、不将失败或缺失结果当作通过。', '']
     return '\n'.join(lines)

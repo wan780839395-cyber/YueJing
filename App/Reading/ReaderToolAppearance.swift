@@ -21,8 +21,16 @@ struct ReaderToolAppearance {
     }
     /// A quiet section surface, local to the settings sheet rather than the reading canvas.
     var card: Color { ReaderVisualStyle.sectionSurface(for: theme) }
-    var secondary: Color { foreground.opacity(0.76) }
+    var secondary: Color {
+        let color = theme.foreground
+        return Color(uiColor: UIColor { traits in
+            color.withAlphaComponent(traits.accessibilityContrast == .high ? 1 : 0.76)
+        })
+    }
+    // Existing in-label consumers (including TXT) retain their translucent selection paint.
     var selection: Color { foreground.opacity(0.06) }
+    // V2 opaque selection must be behind the ButtonStyle's press feedback, not inside its label.
+    var selectedControl: Color { ReaderVisualStyle.selectionSurface(for: theme) }
     var shadow: Color { Color.black.opacity(theme == .dark ? 0.12 : 0.04) }
 }
 

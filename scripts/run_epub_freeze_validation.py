@@ -538,32 +538,9 @@ def provenance(group, destination, bundle, scope):
 
 
 def stream_case(args, path, timeout_seconds):
-    """Write raw output directly: a child keeping a PIPE open cannot hang the scheduler."""
-    timed_out = False
-    with path.open("x", encoding="utf-8") as stream:
-        process = subprocess.Popen(args, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT,
-                                   start_new_session=os.name == "posix")
-
-        def stop():
-            try:
-                if os.name == "posix":
-                    os.killpg(process.pid, signal.SIGKILL)
-                elif process.poll() is None:
-                    process.kill()
-            except ProcessLookupError:
-                pass
-
-        try:
-            try:
-                code = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                stop()
-                code = process.wait(timeout=10)
-        finally:
-            stop()
-            process.wait(timeout=10)
-    return code, timed_out
+    """Own the entire process tree; preserve the historical call/result contract."""
+    from workflow_process import run_logged
+    return run_logged(args, path, timeout_seconds, cwd=ROOT)
 
 
 def run_group(group, destination, *, checked_scope=None):

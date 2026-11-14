@@ -16,22 +16,71 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var readingMode: EPUBReadingMode
     @Published private(set) var layoutMode: EPUBLayoutMode
     @Published private(set) var styleCompatibility: EPUBStyleCompatibility?
+    // Runtime state belongs to the accepted visible token, never to the whole book.
     @Published private(set) var runtimeFontFallback = false
+    @Published private(set) var runtimeFontFallbackToken: EPUBNavigationToken?
+    @Published private(set) var sessionFontFallbackObserved = false
     @Published private var compatibilityNoticeDismissed = false
 
     var effectiveLayoutMode: EPUBLayoutMode { layoutMode.effective(for: styleCompatibility) }
     var compatibilitySummary: String? {
-        guard runtimeFontFallback || styleCompatibility?.issues.isEmpty == false else { return nil }
-        if styleCompatibility?.issues.contains(.navigationUnavailable) == true {
-            return "部分链接或目录不可用，已去活化链接或使用章节目录；正文和原阅读位置保留。"
+        Self.warningSummary(layoutMode: layoutMode, compatibility: styleCompatibility,
+                            runtimeFontFallback: runtimeFontFallback && runtimeFontFallbackToken == currentToken)
+    }
+
+    /// Import-time, book-wide facts and this opening's history, not a current-chapter verdict.
+    /// Runtime history is intentionally not persisted or inherited by a new reader session.
+    var bookCompatibilityDetails: String? {
+        let labels: [EPUBStyleIssue: String] = [
+            .optionalResourceMissing: "部分可选资源缺失", .fontUnavailable: "部分作者字体不可用",
+            .styleComplexity: "部分作者样式超出安全复杂度", .localImportCycle: "样式存在循环引用",
+            .unsupportedStyleCondition: "部分样式条件不受支持", .navigationUnavailable: "部分链接或目录不可用",
+            .malformedOptionalStyle: "部分可选样式无效", .invalidOptionalFont: "部分可选字体无效",
+            .obfuscatedFontOmitted: "部分混淆字体已省略", .manifestImageRecovered: "部分图片已兼容恢复"
+        ]
+        var details: [String] = []
+        if let compatibility = styleCompatibility {
+            if !compatibility.issues.isEmpty {
+                details.append("本书导入时的兼容记录（不代表当前章）：" +
+                    compatibility.issues.map { labels[$0] ?? $0.rawValue }.joined(separator: "；") + "。")
+            }
+            if compatibility.usesReaderLayout {
+                details.append("本书作者排版需兼容处理；选择原始排版时会自动使用阅读器排版，偏好不变。")
+            }
         }
-        if effectiveLayoutMode == .reader {
-            return "部分作者样式不可用，当前使用阅读器兼容排版；已保留你的排版偏好。"
+        if sessionFontFallbackObserved {
+            details.append("本次打开曾检测到作者字体回退；不代表当前章仍在回退，重新打开会重新检测。")
         }
-        if runtimeFontFallback || styleCompatibility?.issues.contains(.fontUnavailable) == true {
-            return "部分作者字体不可用，已使用替代字体；其余安全样式保留。"
+        return details.isEmpty ? nil : details.joined(separator: "\n")
+    }
+
+    static func warningSummary(layoutMode: EPUBLayoutMode, compatibility: EPUBStyleCompatibility?,
+                               runtimeFontFallback: Bool) -> String? {
+        // An explicit reader choice is not a compatibility failure, even with book-level issues.
+        guard layoutMode == .original else { return nil }
+        if compatibility?.usesReaderLayout == true {
+            return "本书作者排版不可用，已自动使用阅读器兼容排版；你的原始排版偏好保留。"
         }
-        return "部分作者样式不可用，已安全简化；正文和阅读位置保留。"
+        if runtimeFontFallback {
+            return "当前章节部分作者字体不可用，已使用替代字体；其余安全样式保留。"
+        }
+        return nil
+    }
+
+    private func resetCurrentRuntimeWarning() {
+        runtimeFontFallback = false
+        runtimeFontFallbackToken = nil
+        compatibilityNoticeDismissed = false
+    }
+
+    private func recordRuntimeFontFallback(_ fallback: Bool, token: EPUBNavigationToken) {
+        guard !closing, !suspended, !exitSaveFailed, currentToken == token,
+              navigationRequest?.token == token, navigationRequest?.layoutMode == effectiveLayoutMode else { return }
+        let currentFallback = effectiveLayoutMode == .original && fallback
+        if currentFallback && !runtimeFontFallback { compatibilityNoticeDismissed = false }
+        runtimeFontFallbackToken = token
+        runtimeFontFallback = currentFallback
+        if currentFallback { sessionFontFallbackObserved = true }
     }
     var compatibilityNotice: String? { compatibilityNoticeDismissed ? nil : compatibilitySummary }
     func dismissCompatibilityNotice() { compatibilityNoticeDismissed = true }
@@ -55,7 +104,11 @@ final class EPUBReaderViewModel: ObservableObject {
     private let bookID: String
     private let service: LibraryService
     private(set) var reader: OpenedEPUBReader?
-    private(set) var currentToken: EPUBNavigationToken?
+    private(set) var currentToken: EPUBNavigationToken? {
+        didSet {
+            if oldValue != currentToken { resetCurrentRuntimeWarning() }
+        }
+    }
     private var sequence: Int64 = 0
     private var preferencesSequence: Int64 = 0
     private var lifecycle = UUID()
@@ -134,6 +187,7 @@ final class EPUBReaderViewModel: ObservableObject {
     func setLayoutMode(_ mode: EPUBLayoutMode) {
         guard mode != layoutMode, ready, !closing, !suspended, !exitSaveFailed else { return }
         layoutMode = mode
+        resetCurrentRuntimeWarning()
         UserDefaults.standard.set(mode.rawValue, forKey: EPUBLayoutMode.defaultsKey)
         settingsChanged()
     }
@@ -147,6 +201,7 @@ final class EPUBReaderViewModel: ObservableObject {
         let request = lifecycle
         loading = true
         ready = false
+        resetCurrentRuntimeWarning()
         openingStarted = ContinuousClock.now
         openingObservation.beganLoading()
         openingPresentationSummary = openingObservation.summary
@@ -473,7 +528,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 }
                 ready = true
                 loading = false
-                runtimeFontFallback = runtimeFontFallback || payload.authorStyleFallback
+                recordRuntimeFontFallback(payload.authorStyleFallback, token: token)
                 return
             }
             let node = payload.restoredNode
@@ -531,7 +586,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     self.currentPosition = position
                     self.ready = true
                     self.loading = false
-                    self.runtimeFontFallback = self.runtimeFontFallback || payload.authorStyleFallback
+                    self.recordRuntimeFontFallback(payload.authorStyleFallback, token: expectedToken)
                     if let started = self.openingStarted {
                         self.openingObservation.becameReady(expectedToken)
                         self.openingPresentationSummary = self.openingObservation.summary
@@ -584,7 +639,7 @@ final class EPUBReaderViewModel: ObservableObject {
             ) else {
                 return
             }
-            runtimeFontFallback = runtimeFontFallback || payload.authorStyleFallback
+            recordRuntimeFontFallback(payload.authorStyleFallback, token: token)
             currentPosition = position
             hasUserPosition = true
             sequence += 1
@@ -762,6 +817,7 @@ final class EPUBReaderViewModel: ObservableObject {
         openingPresentationSummary = openingObservation.summary
         await settleVisibleChapter()
         suspended = true
+        resetCurrentRuntimeWarning()
         lifecycle = UUID()
         generation = UUID()
         openTask?.cancel()

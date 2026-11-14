@@ -427,15 +427,21 @@ struct EPUBAuthorStyleMigrationTests {
         #expect(throws: EPUBError.corruptResource) {
             try EPUBAuthorStyleMigration.validate(previous: duplicatePrev, replacement: validReplacement)
         }
-        // Known revision 1 is upgradeable; current and unknown previous revisions are not.
-        try EPUBAuthorStyleMigration.validate(previous: makePkg(authorStyleRevision: 1), replacement: validReplacement)
+        // All known previous revisions upgrade; current and unknown revisions do not.
+        #expect(EPUBFormat.authorStyleRevision == 6)
+        for revision in [1, 2, 3, 4, 5] {
+            let previous = makePkg(authorStyleRevision: revision)
+            #expect(EPUBFormat.supportsAuthorStyleRevision(revision))
+            #expect(previous.needsAuthorStyleUpgrade)
+            try EPUBAuthorStyleMigration.validate(previous: previous, replacement: validReplacement)
+        }
         for badPrevRev in [0, EPUBFormat.authorStyleRevision, 99, -1] {
             let badPrev = makePkg(authorStyleRevision: badPrevRev)
             #expect(throws: EPUBError.corruptResource) {
                 try EPUBAuthorStyleMigration.validate(previous: badPrev, replacement: validReplacement)
             }
         }
-        let badReplRevisions: [Int?] = [nil, 0, 1, 99, -1]
+        let badReplRevisions: [Int?] = [nil, 0, 1, 2, 3, 4, 5, 99, -1]
         for badReplRev in badReplRevisions {
             let badRepl = makePkg(resources: nextResources, authorStyleRevision: badReplRev)
             #expect(throws: EPUBError.corruptResource) {
@@ -578,42 +584,78 @@ struct EPUBAuthorStyleMigrationTests {
     }
 
     @Test func revisionOneStyleMigrationRebuildsOnceAndBindsCompatibilityMetadata() async throws {
-        let f = try EPUBLibraryFixture()
-        defer { f.remove() }
-        let archive = try writeStyledFontEPUB(at: f.root.appendingPathComponent("revision-one.epub"))
-        let receipt = try await f.install(archive)
-        let queue = try DatabaseQueue(path: f.managed.appendingPathComponent("library.sqlite").path)
-        let raw = try #require(try await queue.read { db in
-            try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [receipt.book.id])
-        })
-        var object = try #require(try JSONSerialization.jsonObject(with: raw) as? [String: Any])
-        object["authorStyleRevision"] = 1
-        object.removeValue(forKey: "styleCompatibility")
-        let legacy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-        try await queue.write { db in
-            try db.execute(sql: "UPDATE epubPackages SET metadata=? WHERE bookID=?", arguments: [legacy, receipt.book.id])
+        // Keep the existing test declaration/count while covering all three stored revisions.
+        for revision in [1, 2, 3] {
+            let f = try EPUBLibraryFixture()
+            defer { f.remove() }
+            let archive = try writeStyledFontEPUB(at: f.root.appendingPathComponent("revision-\(revision).epub"), mixedFontCandidates: true)
+            let sourceBytes = try Data(contentsOf: archive)
+            let receipt = try await f.install(archive)
+            let queue = try DatabaseQueue(path: f.managed.appendingPathComponent("library.sqlite").path)
+            let raw = try #require(try await queue.read { db in
+                try Data.fetchOne(db, sql: "SELECT metadata FROM epubPackages WHERE bookID=?", arguments: [receipt.book.id])
+            })
+            var object = try #require(try JSONSerialization.jsonObject(with: raw) as? [String: Any])
+            object["authorStyleRevision"] = revision
+            if revision == 1 {
+                object.removeValue(forKey: "styleCompatibility")
+            } else {
+                // Reproduce the false diagnostic persisted by the old candidate parser.
+                let stale = try JSONEncoder().encode(EPUBStyleCompatibility(issues: [.fontUnavailable]))
+                object["styleCompatibility"] = try JSONSerialization.jsonObject(with: stale)
+            }
+            let legacy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            try await queue.write { db in
+                try db.execute(sql: "UPDATE epubPackages SET metadata=? WHERE bookID=?", arguments: [legacy, receipt.book.id])
+            }
+            let previous = try await f.store.storedEPUBSnapshot(bookID: receipt.book.id)
+            #expect(previous.package.authorStyleRevision == revision)
+            #expect(previous.package.needsAuthorStyleUpgrade)
+            if revision == 1 {
+                #expect(previous.package.styleCompatibility == nil)
+            } else {
+                #expect(previous.package.styleCompatibility?.issues == [.fontUnavailable])
+            }
+            var previousNodes: [String: [String]] = [:]
+            for path in previous.package.spine {
+                previousNodes[path] = try #require(try previous.package.nodes(at: path))
+            }
+            let position = EPUBReadingPosition(bookID: receipt.book.id, versionID: previous.package.versionID,
+                path: "OPS/Text/ch2.xhtml", node: 1, utf16Offset: 2, viewportOffset: 23)
+            let preferences = ReaderPreferences(fontSize: 24, lineSpacing: 10, theme: .dark)
+            try await persistReadingProgress(store: f.store, snapshot: previous, position: position, preferences: preferences)
+            let freshService = LibraryService(store: try LibraryStore(root: f.managed))
+            let opened = try await freshService.openEPUB(id: receipt.book.id)
+            #expect(opened.openingTimings.readyPreparationOccurred)
+            #expect(opened.publication.package.ready?.directory != previous.package.ready?.directory)
+            #expect(opened.publication.package.authorStyleRevision == EPUBFormat.authorStyleRevision)
+            #expect(opened.publication.package.styleCompatibility?.issues.isEmpty == true)
+            #expect(opened.reading.position == position)
+            #expect(opened.preferences == preferences)
+            #expect(opened.publication.package.sourceSHA256 == previous.package.sourceSHA256)
+            #expect(opened.publication.package.versionID == previous.package.versionID)
+            for path in previous.package.spine {
+                #expect(try opened.publication.package.nodes(at: path) == previousNodes[path])
+            }
+            for resource in previous.package.resources where resource.mediaType != "application/xhtml+xml" {
+                #expect(opened.publication.package.resource(at: resource.path) == resource)
+            }
+            let current = opened.publication.package
+            let marked = EPUBPackage(sourceSHA256: current.sourceSHA256, title: current.title, spine: current.spine,
+                navigation: current.navigation, resources: current.resources, textNodes: current.textNodes,
+                coverPath: current.coverPath, ready: current.ready, styleCompatibility: .init(issues: [.fontUnavailable]))
+            #expect(current != marked)
+            #expect(try EPUBMetadataFingerprintCache.canonical(current) != EPUBMetadataFingerprintCache.canonical(marked))
+            #expect(try await f.store.storedEPUBSnapshot(bookID: receipt.book.id).package.styleCompatibility == current.styleCompatibility)
+            #expect(try Data(contentsOf: await f.store.epubFileURL(bookID: receipt.book.id)) == sourceBytes)
+            try await opened.abandon()
+            let reopened = try await freshService.openEPUB(id: receipt.book.id)
+            #expect(!reopened.openingTimings.readyPreparationOccurred)
+            #expect(reopened.publication.package.ready == current.ready)
+            #expect(reopened.publication.package.styleCompatibility == current.styleCompatibility)
+            #expect(reopened.reading.position == position)
+            try await reopened.abandon()
         }
-        let previous = try await f.store.storedEPUBSnapshot(bookID: receipt.book.id)
-        #expect(previous.package.styleCompatibility == nil)
-        let opened = try await f.service.openEPUB(id: receipt.book.id)
-        #expect(opened.openingTimings.readyPreparationOccurred)
-        #expect(opened.publication.package.ready?.directory != previous.package.ready?.directory)
-        #expect(opened.publication.package.authorStyleRevision == EPUBFormat.authorStyleRevision)
-        #expect(opened.publication.package.styleCompatibility?.issues.isEmpty == true)
-        for resource in previous.package.resources where resource.mediaType != "application/xhtml+xml" {
-            #expect(opened.publication.package.resource(at: resource.path) == resource)
-        }
-        let current = opened.publication.package
-        let marked = EPUBPackage(sourceSHA256: current.sourceSHA256, title: current.title, spine: current.spine,
-            navigation: current.navigation, resources: current.resources, textNodes: current.textNodes,
-            coverPath: current.coverPath, ready: current.ready, styleCompatibility: .init(issues: [.fontUnavailable]))
-        #expect(current != marked)
-        #expect(try EPUBMetadataFingerprintCache.canonical(current) != EPUBMetadataFingerprintCache.canonical(marked))
-        try await opened.abandon()
-        let reopened = try await f.service.openEPUB(id: receipt.book.id)
-        #expect(!reopened.openingTimings.readyPreparationOccurred)
-        #expect(reopened.publication.package.ready == current.ready)
-        try await reopened.abandon()
     }
 
     @Test func styleCompatibilityMigrationCancellationAndStaleCASPreservePublishedVersion() async throws {
@@ -647,14 +689,15 @@ struct EPUBAuthorStyleMigrationTests {
 
     // MARK: - Helpers
 
-    private func writeStyledFontEPUB(at url: URL, unavailableOptionalStyles: Bool = false) throws -> URL {
+    private func writeStyledFontEPUB(at url: URL, unavailableOptionalStyles: Bool = false, mixedFontCandidates: Bool = false) throws -> URL {
         // Reproduce a TrueType resource mislabeled as OpenType without modifying archive bytes on upgrade.
         let ttf = makeMinimalTTF()
         let png = try EPUBLibraryFixture.image(width: 32, height: 32)
+        let skippedCandidate = mixedFontCandidates ? "url(\"../Fonts/book.ttf\") format(\"woff2\"), " : ""
         let css = """
         @font-face {
             font-family: "BookFont";
-            src: url("../Fonts/book.ttf") format("truetype");
+            src: \(skippedCandidate)url("../Fonts/book.ttf") format("truetype");
         }
         p.lead {
             font-family: "BookFont", serif;

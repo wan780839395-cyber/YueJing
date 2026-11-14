@@ -6,6 +6,9 @@ struct ReaderDiagnosticsView: View {
     var importState: ImportDiagnosticState?
     var importSummary: String?
     var openingSummary: String?
+    var fontDiagnostics: [EPUBFontDiagnostic]?
+    var compatibilityDetails: String?
+    @State private var includeFontNames = false
     var body: some View {
         List {
             Section {
@@ -32,6 +35,22 @@ struct ReaderDiagnosticsView: View {
             if importState == nil || openingSummary != nil {
                 Section("本次打开") {
                     Text(openingSummary ?? "尚未应用首个正文窗口。").textSelection(.enabled)
+                }
+            }
+            if let compatibilityDetails {
+                Section("兼容记录（历史）") {
+                    Text(compatibilityDetails).textSelection(.enabled)
+                }
+            }
+            if let fontDiagnostics {
+                Section("字体声明（本机）") {
+                    Toggle("包含字体名称（可选）", isOn: $includeFontNames)
+                        .accessibilityIdentifier("reader.diagnostics.fontNames")
+                    Text("名称来自书内声明，不等于发行方认证。仅在需要核查官方来源时开启；分享前请检查。不会自动上传或下载字体。")
+                        .font(.footnote)
+                    Text(EPUBFontDiagnostic.summary(fontDiagnostics, includeNames: includeFontNames))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("reader.diagnostics.fonts")
                 }
             }
         }

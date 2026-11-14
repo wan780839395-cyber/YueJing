@@ -162,6 +162,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var interactionGeneration = UUID()
     private var scrollDirection: EPUBPageDirection?
     private var transitionSnapshot: UIView?
+    private let restorationCover = UIView()
+    var isRestorationCovered: Bool { !restorationCover.isHidden }
     private var pendingPresentationToken: EPUBNavigationToken?
     var hasTransitionSnapshot: Bool { transitionSnapshot != nil }
     private enum ReadinessPhase: String {
@@ -180,6 +182,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var pendingViewportRestoreToken: EPUBNavigationToken?
     private var nativeScrollActive = false
     private var runtimeTrace = EPUBRuntimeTrace()
+    private var fontResourceFailureSummary: String?
     private struct ParkedDocument {
         let request: EPUBNavigationRequest
         let paths: Set<String>
@@ -224,7 +227,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func setupWebViewIfNeeded() {
         guard webView == nil else { return }
         resourceHandler.onFontResourceFailure = { [weak self] error, token in
-            self?.failReadiness(for: token, error: error, revokeReady: true)
+            guard let self, self.activeRequest?.token == token else { return }
+            switch error as? EPUBError {
+            case .corruptResource: self.fontResourceFailureSummary = "font-resource: integrity-or-size-failure"
+            case .unsafePath: self.fontResourceFailureSummary = "font-resource: unsafe-path-rejected"
+            case .limitExceeded: self.fontResourceFailureSummary = "font-resource: budget-exceeded"
+            default: self.fontResourceFailureSummary = "font-resource: transport-or-capability-failure"
+            }
+            self.failReadiness(for: token, error: error, revokeReady: true)
         }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
@@ -271,6 +281,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         canvasAccessibilityView.accessibilityTraits = .staticText
         canvasAccessibilityView.accessibilityIdentifier = "reader.text.canvas"
         view.addSubview(canvasAccessibilityView)
+        // Keep WebKit mounted/visible so layout and animation frames can run.
+        // The native cover protects even the first document, where no snapshot exists.
+        restorationCover.frame = view.bounds
+        restorationCover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        restorationCover.isUserInteractionEnabled = false
+        restorationCover.accessibilityElementsHidden = true
+        restorationCover.backgroundColor = view.backgroundColor ?? .systemBackground
+        view.addSubview(restorationCover)
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleViewportTap(_:)))
         tap.cancelsTouchesInView = false
@@ -289,6 +307,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         webView?.frame = view.bounds
+        restorationCover.frame = view.bounds
+        transitionSnapshot?.frame = view.bounds
         webView?.scrollView.pinchGestureRecognizer?.isEnabled = false
         applyReadingGesturePolicy()
         let insetBounds = view.bounds.inset(by: UIEdgeInsets(top: 56, left: 16, bottom: 56, right: 16))
@@ -321,12 +341,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         view.backgroundColor = theme.background
         webView.backgroundColor = theme.background
         webView.scrollView.backgroundColor = theme.background
+        restorationCover.backgroundColor = theme.background
     }
 
     func apply(_ request: EPUBNavigationRequest) {
         setupWebViewIfNeeded()
         applyTheme(request.preferences.theme)
         guard activeRequest != request else { return }
+        fontResourceFailureSummary = nil
         runtimeTrace.record(request.preserveViewport ? .promotion : .navigation)
         let parked = parkedDocument
         let reuseClosed = !request.reloadDocument && parked?.paths.contains(request.token.path) == true &&
@@ -405,6 +427,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 view.addSubview(transitionSnapshot)
             }
         }
+        if !request.preserveViewport || reuseClosed || loadedDocumentPath == nil {
+            coverUnconfirmedContent()
+            if let transitionSnapshot { view.bringSubviewToFront(transitionSnapshot) }
+        }
         if reuseDOM, let previous {
             // The DOM is verified already. Move resource/link URLs to the new capability
             // without admitting the old epoch's URLs or downloading the XHTML again.
@@ -431,6 +457,13 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
     }
 
+    private func coverUnconfirmedContent() {
+        restorationCover.isHidden = false
+        view.bringSubviewToFront(restorationCover)
+        canvasAccessibilityView.accessibilityElementsHidden = true
+        webView?.accessibilityElementsHidden = true
+    }
+
     /// Locator readiness is not the model's markReady acknowledgement. Keep the last
     /// frame until that current-token transaction succeeds; never add a visual delay.
     @discardableResult
@@ -442,6 +475,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         readinessPhase = .ready
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
+        restorationCover.isHidden = true
+        canvasAccessibilityView.accessibilityElementsHidden = false
+        webView.accessibilityElementsHidden = false
         return true
     }
 
@@ -478,6 +514,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         renderedChapterPaths.removeAll()
         resourceHandler.invalidate()
         webView.stopLoading()
+        coverUnconfirmedContent()
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
         onLoadFailure?(error, token)
@@ -592,6 +629,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         onChapterBoundary = nil
         loadedDocumentPath = nil
         loadedDocumentToken = nil
+        if isViewLoaded { coverUnconfirmedContent() }
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
         scrollDirection = nil
@@ -868,6 +906,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             readinessTask = nil
             readyToken = nil
             pendingPresentationToken = nil
+            coverUnconfirmedContent()
             transitionSnapshot?.removeFromSuperview()
             transitionSnapshot = nil
         }
@@ -880,6 +919,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     /// Read once on demand. Never samples/changes the locator or drives navigation.
     func performanceSummary() async -> String {
         let native = runtimeTrace.summary + "\n同书关闭页面复用次数：\(closedDocumentReuseCount)；全文档加载次数：\(documentLoadCount)"
+            + "\n" + (fontResourceFailureSummary ?? "font-resource: no-failure-recorded")
         guard let expected = activeRequest?.token, let webView else { return native }
         let script = "window.__yjEpub && JSON.stringify(window.__yjEpub.diagnostics());"
         let browser: String = await withCheckedContinuation { continuation in
@@ -895,6 +935,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 continuation.resume(returning: value)
             }
         }
+        guard !Task.isCancelled, activeRequest?.token == expected else { return "会话已变化，未采用旧快照。" }
         return native + "\nJS事件：脚本安装起计时；与原生时钟起点不同，非帧率/首绘\n" + browser
     }
 
@@ -1113,6 +1154,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         pendingViewportRestoreToken = nil
         readyToken = nil
         pendingPresentationToken = nil
+        coverUnconfirmedContent()
         transitionSnapshot?.removeFromSuperview()
         transitionSnapshot = nil
         onLoadFailure?(error, current.token)

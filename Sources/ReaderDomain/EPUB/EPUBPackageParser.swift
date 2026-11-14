@@ -114,20 +114,30 @@ public enum EPUBPackageParser {
             var referencedBodyImages: Set<String> = []
             var validatedImageMediaTypes: [String: String] = [:]
             var validatedFontMediaTypes: [String: String] = [:]
-            var omittedFonts: Set<String> = []
+            var fontAlgorithms: [String: EPUBFontObfuscation.Algorithm] = [:]
             for path in extraction.entries.keys where path.lowercased() == "meta-inf/encryption.xml" {
                 guard let entry = extraction.entries[path], entry.byteCount <= limits.xmlBytes else {
                     throw EPUBError.limitExceeded
                 }
                 let data = try readExtractedFile(at: path, under: destination, expectedSize: entry.byteCount)
-                omittedFonts.formUnion(try EPUBFontObfuscation.omittedFonts(data: data,
-                    manifest: manifestMediaTypesByPath, entries: Set(extraction.entries.keys), limit: limits.xmlBytes))
+                let declarations = try EPUBFontObfuscation.declarations(data: data,
+                    manifest: manifestMediaTypesByPath, entries: Set(extraction.entries.keys), limit: limits.xmlBytes)
+                for (font, algorithm) in declarations {
+                    guard fontAlgorithms[font] == nil else { throw EPUBError.unsupportedContent }
+                    fontAlgorithms[font] = algorithm
+                }
             }
             let styleCache = EPUBAuthorStyles.ValidationCache()
-            styleCache.omittedFonts = omittedFonts
+            let idpfKey = fontAlgorithms.values.contains(.idpf)
+                ? try EPUBFontObfuscation.idpfKey(opfData: opfData, limit: limits.xmlBytes) : nil
+            let adobeKey = fontAlgorithms.values.contains(.adobe)
+                ? try EPUBFontObfuscation.adobeKey(opfData: opfData, limit: limits.xmlBytes) : nil
+            let fontPreparation = EPUBFontPreparation(entries: extraction.entries, algorithms: fontAlgorithms,
+                idpfKey: idpfKey, adobeKey: adobeKey)
+            styleCache.fontPreparation = fontPreparation
             let extractedEntrySizes = extraction.entries.mapValues(\.byteCount)
             var aggregatedStyleIssues: Set<EPUBStyleIssue> = []
-            if !omittedFonts.isEmpty { aggregatedStyleIssues.insert(.obfuscatedFontOmitted) }
+            var aggregatedFontDiagnostics: [EPUBFontDiagnostic] = []
             var aggregatedUsesReaderLayout = false
             var retainedSanitizedBytes = 0
             trace.totalChapters = spinePaths.count
@@ -160,6 +170,7 @@ public enum EPUBPackageParser {
                 }
                 retainedSanitizedBytes += sanitized.xhtmlData.count
                 aggregatedStyleIssues.formUnion(sanitized.styleCompatibility.issues)
+                aggregatedFontDiagnostics = EPUBFontDiagnostic.bounded(aggregatedFontDiagnostics + sanitized.styleCompatibility.fontDiagnostics)
                 if sanitized.styleCompatibility.usesReaderLayout {
                     aggregatedUsesReaderLayout = true
                 }
@@ -344,22 +355,17 @@ public enum EPUBPackageParser {
                       let fontEntry = extraction.entries[fontPath] else {
                     throw EPUBError.invalidPackage
                 }
-                guard fontEntry.byteCount > 0,
-                      fontEntry.byteCount <= EPUBAuthorStyles.maxFontBytes,
-                      fontEntry.byteCount <= EPUBAuthorStyles.maxTotalFontBytes - totalFontBytes,
-                      fontEntry.byteCount <= limits.expandedBytes - totalServedBytes else {
+                let fontResource = fontPreparation.resources[fontPath] ?? EPUBResource(path: fontPath,
+                    mediaType: fontMediaType, sha256: fontEntry.sha256, byteCount: fontEntry.byteCount)
+                guard fontResource.byteCount > 0,
+                      fontResource.byteCount <= EPUBAuthorStyles.maxFontBytes,
+                      fontResource.byteCount <= EPUBAuthorStyles.maxTotalFontBytes - totalFontBytes,
+                      fontResource.byteCount <= limits.expandedBytes - totalServedBytes else {
                     throw EPUBError.limitExceeded
                 }
-                totalFontBytes += fontEntry.byteCount
-                totalServedBytes += fontEntry.byteCount
-                servedResources.append(
-                    EPUBResource(
-                        path: fontPath,
-                        mediaType: fontMediaType,
-                        sha256: fontEntry.sha256,
-                        byteCount: fontEntry.byteCount
-                    )
-                )
+                totalFontBytes += fontResource.byteCount
+                totalServedBytes += fontResource.byteCount
+                servedResources.append(fontResource)
                 servedPaths.insert(fontPath)
             }
             for extractedPath in extraction.entries.keys where !servedPaths.contains(extractedPath) {
@@ -369,7 +375,8 @@ public enum EPUBPackageParser {
 
             let styleCompatibility = EPUBStyleCompatibility(
                 issues: Array(aggregatedStyleIssues),
-                usesReaderLayout: aggregatedUsesReaderLayout
+                usesReaderLayout: aggregatedUsesReaderLayout,
+                fontDiagnostics: aggregatedFontDiagnostics
             )
 
             trace.emit(.complete)

@@ -473,6 +473,172 @@ struct EPUBFontLoadingHostTests {
             try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
         }
     }
+    @Test func epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow() async throws {
+        try await withReadinessScriptFixture(image: false) { web, recorder in
+            #expect(try await scriptBool(web, """
+                window.testLoads = 0;
+                window.testFace = {family:'slow',weight:'400',style:'normal',stretch:'normal',status:'unloaded',
+                    load:function() {
+                        window.testLoads++;
+                        if (this.status === 'loaded') return Promise.resolve(this);
+                        var face = this;
+                        return new Promise(function(resolve) { setTimeout(function() { face.status='loaded';resolve(face); },1800); });
+                    }};
+                Object.defineProperty(document,'fonts',{configurable:true,value:{forEach:function(fn){fn(window.testFace);},ready:Promise.resolve()}});
+                document.querySelector('style[data-yj-author-style]').textContent = '@font-face{font-family:slow;src:url("/OPS/slow.ttf");}';
+                window.__yjEpub.configure(window.testConfig('slow','first')); true;
+                """))
+            try await waitForScriptOutcome(recorder, epoch: "slow")
+            let first = try #require(recorder.messages.first { $0["epoch"] as? String == "slow" && $0["kind"] as? String == "ready" })
+            #expect(first["authorStyleFallback"] as? Bool == true)
+            #expect(first["restoredNode"] as? Int == 6 && first["restoredOffset"] as? Int == 12)
+            #expect(try await scriptBool(web, "window.testY=scrollY;window.testCSS=document.querySelector('style[data-yj-author-style]').textContent;window.testNode=document.getElementById('yj-t6');window.testAnchor();"))
+            try await waitForScriptBool(web, "window.testFace.status === 'loaded'")
+            #expect(try await scriptBool(web, "scrollY === window.testY && document.querySelector('style[data-yj-author-style]').textContent === window.testCSS"))
+            #expect(recorder.messages.filter { $0["kind"] as? String == "ready" }.count == 1)
+            #expect(try await scriptBool(web, "window.__yjEpub.parkForReopen();window.__yjEpub.configure(window.testConfig('warm','fresh-session'));true;"))
+            try await waitForScriptOutcome(recorder, epoch: "warm")
+            let warm = try #require(recorder.messages.first { $0["epoch"] as? String == "warm" && $0["kind"] as? String == "ready" })
+            #expect(warm["authorStyleFallback"] as? Bool != true)
+            #expect(warm["sessionID"] as? String == "fresh-session")
+            #expect(warm["restoredNode"] as? Int == 6 && warm["restoredOffset"] as? Int == 12)
+            #expect(abs((warm["viewportOffset"] as? Double ?? -100) - 24) <= 1)
+            #expect(try await scriptBool(web, "window.testLoads === 2 && window.testNode === document.getElementById('yj-t6') && window.testAnchor() && document.querySelector('style[data-yj-author-style]').textContent.includes('yjepub://s-fresh-session--e-warm/OPS/slow.ttf')"))
+        }
+    }
+
+    @Test func epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady() async throws {
+        try await withReadinessScriptFixture(image: true) { web, recorder in
+            #expect(try await scriptBool(web, "document.images[0].complete && document.images[0].naturalWidth === 0"))
+            #expect(try await scriptBool(web, "window.__yjEpub.configure(window.testConfig('bad','image'));true;"))
+            try await waitForScriptOutcome(recorder, epoch: "bad")
+            #expect(recorder.messages.contains { $0["epoch"] as? String == "bad" && $0["reason"] as? String == "image-layout-not-ready" })
+            #expect(!recorder.messages.contains { $0["kind"] as? String == "ready" || $0["kind"] as? String == "scroll" })
+            #expect(try await scriptBool(web, "window.__yjEpub.sampleNow() === null"))
+            #expect(try await scriptBool(web, """
+                window.testImage=document.images[0];window.testDecode=window.testImage.decode.bind(window.testImage);
+                var canvas=document.createElement('canvas');canvas.width=32;canvas.height=80;
+                canvas.getContext('2d').fillRect(0,0,32,80);window.testImage.src=canvas.toDataURL('image/png');true;
+                """))
+            try await waitForScriptBool(web, "window.testImage.complete && window.testImage.naturalWidth === 32")
+            #expect(try await scriptBool(web, "window.testImage.decode=function(){return Promise.reject(new Error('controlled decode failure'));};window.__yjEpub.configure(window.testConfig('decode-fail','image'));true;"))
+            try await waitForScriptOutcome(recorder, epoch: "decode-fail")
+            #expect(recorder.messages.contains { $0["epoch"] as? String == "decode-fail" && $0["kind"] as? String == "error" })
+            #expect(try await scriptBool(web, "window.__yjEpub.sampleNow() === null"))
+            #expect(try await scriptBool(web, "window.testImage.decode=function(){return new Promise(function(resolve,reject){window.rejectOldImage=reject;});};window.__yjEpub.configure(window.testConfig('old','image'));true;"))
+            try await waitForScriptBool(web, "typeof window.rejectOldImage === 'function'")
+            #expect(try await scriptBool(web, "window.testImage.decode=window.testDecode;window.__yjEpub.configure(window.testConfig('retry','new-image-session'));window.rejectOldImage(new Error('late old decode'));true;"))
+            try await waitForScriptOutcome(recorder, epoch: "retry")
+            let ready = try #require(recorder.messages.first { $0["epoch"] as? String == "retry" && $0["kind"] as? String == "ready" })
+            #expect(ready["restoredNode"] as? Int == 6 && ready["restoredOffset"] as? Int == 12)
+            #expect(abs((ready["viewportOffset"] as? Double ?? -100) - 24) <= 1)
+            #expect(!recorder.messages.contains { $0["epoch"] as? String == "old" })
+            #expect(!recorder.messages.contains { $0["kind"] as? String == "ready" && $0["epoch"] as? String != "retry" })
+            #expect(try await scriptBool(web, "window.testAnchor() && window.__yjEpub.sampleNow().sessionID === 'new-image-session' && window.testImage.naturalWidth === 32"))
+        }
+    }
+
+    // Actual WKWebView DOM/decoding and production JS; font timing/decode rejection are controlled.
+    // This fixture does not claim native resource transport or database save acceptance.
+    @MainActor private final class ReadinessMessages: NSObject, WKScriptMessageHandler {
+        var messages: [[String: Any]] = []
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if let payload = message.body as? [String: Any] { messages.append(payload) }
+        }
+    }
+
+    private func scriptBool(_ web: WKWebView, _ script: String) async throws -> Bool {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+            web.evaluateJavaScript(script) { value, error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: (value as? Bool) == true) }
+            }
+        }
+    }
+
+    private func waitForScriptBool(_ web: WKWebView, _ script: String) async throws {
+        let deadline = Date().addingTimeInterval(Self.waitTimeoutSeconds)
+        while Date() < deadline {
+            if try await scriptBool(web, script) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(try await scriptBool(web, script))
+    }
+
+    private func waitForScriptOutcome(_ recorder: ReadinessMessages, epoch: String) async throws {
+        let deadline = Date().addingTimeInterval(Self.waitTimeoutSeconds)
+        while Date() < deadline {
+            if recorder.messages.contains(where: { $0["epoch"] as? String == epoch && ["ready", "error"].contains($0["kind"] as? String ?? "") }) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(recorder.messages.contains { $0["epoch"] as? String == epoch })
+    }
+
+    private func withReadinessScriptFixture(image: Bool, _ body: @MainActor (WKWebView, ReadinessMessages) async throws -> Void) async throws {
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
+        let host = UIViewController(), configuration = WKWebViewConfiguration(), recorder = ReadinessMessages()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.add(recorder, name: EPUBLocationScript.handlerName)
+        let web = WKWebView(frame: window.bounds, configuration: configuration)
+        window.rootViewController = host; window.isHidden = false
+        host.view.addSubview(web)
+        defer {
+            web.stopLoading(); configuration.userContentController.removeScriptMessageHandler(forName: EPUBLocationScript.handlerName)
+            window.isHidden = true; window.rootViewController = nil
+        }
+        let paragraphs = (0..<12).map { "<p><span id=\"yj-t\($0)\">" + String(repeating: "abcdefghij ", count: 40) + "</span></p>" }.joined()
+        web.loadHTMLString("<html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/><style data-yj-author-style=\"true\"></style></head><body data-yj-author-scope=\"test\">" + (image ? "<img src=\"data:image/png;base64,AAAA\"/>" : "") + paragraphs + "</body></html>", baseURL: nil)
+        try await waitForScriptBool(web, "document.readyState === 'complete' && !!document.getElementById('yj-t11')")
+        #expect(try await scriptBool(web, EPUBLocationScript.bootstrapSource + """
+            ;window.testConfig=function(epoch,session){return {sessionID:session,epoch:epoch,path:'OPS/c0.xhtml',chapterIndex:0,
+                expectedNodeCount:12,expectedNodeLengths:Array(12).fill(440),targetNode:6,targetOffset:12,
+                targetViewportOffset:24,preserveTargetAnchor:true,readingMode:'scroll',layoutMode:'original',
+                css:'body{margin:0;padding:16px 20px;font:20px/32px serif;}p{margin:0 0 12px;}'};};
+            window.testAnchor=function(){var r=document.createRange(),n=document.getElementById('yj-t6').firstChild;
+                r.setStart(n,12);r.setEnd(n,13);return Math.abs(r.getBoundingClientRect().top-24)<=1;};true;
+            """))
+        try await body(web, recorder)
+    }
+
+    @Test func epubWebKitIsolatesFailedCondensedFaceFromNormalFace() async throws {
+        let fontData = try Self.makeSyntheticGeometricFontData()
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("MixedFaces.epub")
+            let chapterPath = "OEBPS/Text/ch1.xhtml"
+            try Self.writeFontTestEPUB(to: archive, title: "Mixed Faces",
+                fontFileName: "SyntheticGeometric.ttf", fontData: fontData,
+                condensedFontData: Self.makeStructuralOnlySFNTStub())
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let token = try await reader.beginNavigation(path: chapterPath)
+            let controller = EPUBWebViewController()
+            try await fixture.withHostedController(controller) {
+                let outcome = try await loadAndAwaitOutcome(controller: controller,
+                    request: EPUBNavigationRequest(id: UUID(), token: token, publication: reader.publication,
+                        targetPosition: nil, fragment: nil, preferences: reader.preferences,
+                        preserveTargetAnchor: false, reloadDocument: true, layoutMode: .original))
+                guard case .ready(let payload, let count, let served, let rejected) = outcome else {
+                    Issue.record("Expected isolated condensed-face fallback, got: \(outcome)")
+                    return
+                }
+                #expect(count == 1 && payload.authorStyleFallback)
+                #expect(served.contains("OEBPS/Fonts/SyntheticGeometric.ttf"))
+                #expect(served.contains("OEBPS/Fonts/CondensedStub.ttf"))
+                #expect(rejected.isEmpty)
+                let snapshot = try await inspectLoadedFontsAndMetrics(in: controller)
+                let rules = try #require(snapshot["fontFaceRules"] as? [[String: Any]])
+                #expect(rules.count == 1)
+                #expect((rules.first?["src"] as? String)?.contains("SyntheticGeometric.ttf") == true)
+                let glyphs = try #require(snapshot["customAAAA"] as? [String: Any])
+                let width = try #require((glyphs["rangeWidth"] as? NSNumber)?.doubleValue)
+                #expect(abs(width - 240.0) <= 3.0)
+            }
+            try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        }
+    }
+
     // MARK: - Helpers
 
     private enum LocatorOutcome: CustomStringConvertible {
@@ -738,7 +904,8 @@ struct EPUBFontLoadingHostTests {
         title: String,
         fontFileName: String,
         fontData: Data,
-        declaredFontMediaType: String = "font/ttf"
+        declaredFontMediaType: String = "font/ttf",
+        condensedFontData: Data? = nil
     ) throws {
         let container = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -761,6 +928,7 @@ struct EPUBFontLoadingHostTests {
             <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
             <item id="css" href="Styles/font.css" media-type="text/css"/>
             <item id="ttf" href="Fonts/\(EPUBContentPolicy.escapeXMLAttribute(fontFileName))" media-type="\(EPUBContentPolicy.escapeXMLAttribute(declaredFontMediaType))"/>
+            \(condensedFontData == nil ? "" : "<item id=\"condensed\" href=\"Fonts/CondensedStub.ttf\" media-type=\"font/ttf\"/>")
           </manifest>
           <spine>
             <itemref idref="ch1"/>
@@ -787,6 +955,7 @@ struct EPUBFontLoadingHostTests {
             font-weight: 400;
             font-style: normal;
         }
+        \(condensedFontData == nil ? "" : "@font-face { font-family: AuthorDisplayFace; src: url('../Fonts/CondensedStub.ttf') format('truetype'); font-weight: 400; font-style: normal; font-stretch: condensed; }")
         p.synthetic-font {
             font-family: "AuthorDisplayFace", serif;
             font-size: 24px;
@@ -814,7 +983,7 @@ struct EPUBFontLoadingHostTests {
           </body>
         </html>
         """
-        try EPUBUITestFixture.writeArchive(entries: [
+        var entries: [(String, Data)] = [
             ("mimetype", Data("application/epub+zip".utf8)),
             ("META-INF/container.xml", Data(container.utf8)),
             ("OEBPS/content.opf", Data(opf.utf8)),
@@ -822,7 +991,9 @@ struct EPUBFontLoadingHostTests {
             ("OEBPS/Styles/font.css", Data(css.utf8)),
             ("OEBPS/Text/ch1.xhtml", Data(ch1.utf8)),
             ("OEBPS/Fonts/\(fontFileName)", fontData)
-        ], to: archiveURL)
+        ]
+        if let condensedFontData { entries.append(("OEBPS/Fonts/CondensedStub.ttf", condensedFontData)) }
+        try EPUBUITestFixture.writeArchive(entries: entries, to: archiveURL)
     }
 
     // Structural-only SFNT stub matching EPUBAuthorStyles.verifyFontData container checks,

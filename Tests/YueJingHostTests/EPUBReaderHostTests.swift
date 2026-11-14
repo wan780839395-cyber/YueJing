@@ -1156,6 +1156,12 @@ struct EPUBReaderHostTests {
             readyExpectation.fulfill()
         }
         controller.apply(request)
+        if !request.preserveViewport {
+            #expect(controller.isRestorationCovered)
+            #expect(!controller.webView.isHidden && controller.webView.alpha == 1)
+            #expect(!controller.acknowledgePresentation(for: request.token))
+            #expect(controller.isRestorationCovered)
+        }
         if let expectTransitionSnapshot {
             #expect(controller.hasTransitionSnapshot == expectTransitionSnapshot)
             if expectTransitionSnapshot {
@@ -1167,6 +1173,15 @@ struct EPUBReaderHostTests {
         try #require(waitResult == .completed)
         if let capturedError {
             throw capturedError
+        }
+        if !request.preserveViewport {
+            // Cold loads have no old snapshot: protect through JS ready until the
+            // current model owner accepts the actual restored position.
+            #expect(controller.isRestorationCovered)
+            let stale = EPUBNavigationToken(sessionID: request.token.sessionID, epoch: UUID(), path: request.token.path)
+            #expect(!controller.acknowledgePresentation(for: stale))
+            controller.expireReadiness(for: stale)
+            #expect(controller.isRestorationCovered && controller.activeRequest?.token == request.token)
         }
         if expectTransitionSnapshot == true {
             // JS final ready alone must not uncover the asynchronous business-ready gap.
@@ -1183,6 +1198,7 @@ struct EPUBReaderHostTests {
         let acknowledged = controller.acknowledgePresentation(for: request.token)
         #expect(acknowledged)
         #expect(!controller.hasTransitionSnapshot)
+        #expect(!controller.isRestorationCovered)
         return try #require(capturedPayload)
     }
 
