@@ -31,6 +31,8 @@ SIMULATOR_SDK_VERSION = "18.5"
 XCODEGEN_VERSION = "2.46.0"
 XCODEGEN_SHA256 = "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
 XCODEGEN_ASSET = "https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069"
+if os.environ.get("VALIDATION_SCOPE") == "neon-device-023":
+    XCODEGEN_ASSET = "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip"
 DEPENDENCIES = {
     "GRDB": ("https://github.com/groue/GRDB.swift.git", "7.0.0"),
     "ZIPFoundation": ("https://github.com/weichsel/ZIPFoundation.git", "0.9.19"),
