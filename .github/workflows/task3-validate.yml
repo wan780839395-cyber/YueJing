@@ -23,6 +23,7 @@ on:
           - neon-device-023
           - woff2-native-024
           - userfont-native-025
+          - fontpicker-native-026
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -1707,6 +1708,87 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: userfont-ipa-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/*.ipa
+            artifacts/manifest.json
+            artifacts/SHA256SUMS
+            artifacts/task3/app-dependency-gate.json
+            artifacts/task3/ipa-verification.json
+          retention-days: 3
+          if-no-files-found: error
+
+  fontpicker_native:
+    needs: admission
+    if: ${{ inputs.validation_scope == 'fontpicker-native-026' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+      DEVELOPMENT_SOURCE_SHA: ${{ inputs.development_source_sha }}
+      DEVELOPMENT_PLAN_SHA256: ${{ inputs.development_plan_sha256 }}
+      BUILD_IPA: ${{ inputs.build_ipa }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa }}
+      PRIOR_VALIDATION_RUN: ${{ inputs.prior_validation_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind three font picker tests and source selection and budgets before preparation
+        run: python3 -B scripts/run_fontpicker_native.py preflight
+      - name: Prepare the fixed native tools and generate isolated schemes
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
+      - name: Resolve pinned dependencies and boot an installed simulator
+        run: python3 -B scripts/run_fontpicker_native.py prepare-runtime
+      - name: Build each required scheme once and execute selected cases serially
+        run: python3 -B scripts/run_fontpicker_native.py run --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+      - name: Verify native evidence before device build
+        run: python3 -B scripts/run_fontpicker_native.py verify
+      - name: Verify actual Host app simulator linkage
+        run: python3 -B scripts/check_webkit_linkage.py --app build/fontpicker-native-026/YueJingHost/Build/Products/Debug-iphonesimulator/YueJing.app --output artifacts/task3/webkit-simulator-linkage
+      - name: Compile same-source arm64 device Release after three native passes
+        run: |
+          set -uo pipefail
+          set +e
+          xcodebuild -project YueJing.xcodeproj -scheme YueJing -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData -clonedSourcePackagesDirPath build/SourcePackages \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath artifacts/task3/AppBuild.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee artifacts/task3/app-build.log
+          pipeline=("${PIPESTATUS[@]}")
+          printf '%s\n' "${pipeline[0]}" > artifacts/task3/app-build-exit-code.txt
+          if [ "${pipeline[0]}" -ne 0 ]; then exit "${pipeline[0]}"; fi
+          exit "${pipeline[1]}"
+
+      - name: Verify device Release and package only the qualified IPA
+        run: |
+          set -euo pipefail
+          python3 -B scripts/check_webkit_linkage.py \
+            --app build/DerivedData/Build/Products/Release-iphoneos/YueJing.app \
+            --output artifacts/task3/webkit-device-linkage
+          python3 -B scripts/validate_task3.py package-gate-userfont 2>&1 | tee artifacts/task3/dependency-gate.log
+          python3 -B scripts/package_ipa.py 2>&1 | tee artifacts/task3/package.log
+          python3 -B scripts/validate_task3.py verify-ipa-userfont 2>&1 | tee artifacts/task3/ipa-verification.log
+
+      - name: Preserve custom font test and build evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: fontpicker-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/development/
+            artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Publish verified targeted IPA
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: fontpicker-ipa-${{ github.run_id }}-${{ github.sha }}
           path: |
             artifacts/*.ipa
             artifacts/manifest.json

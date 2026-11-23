@@ -159,7 +159,7 @@ def main():
         dependency = json.loads((OUT / "task3/app-dependency-gate.json").read_text(encoding="utf-8"))
         require(all(dependency.get(key) == qualified[key] for key in ("source_commit", "run_id", "run_attempt"))
                 and dependency.get("signing") == "unsigned", "Missing same-run strict device dependency gate")
-    if os.environ.get("VALIDATION_SCOPE") == "userfont-native-025":
+    if os.environ.get("VALIDATION_SCOPE") in ("userfont-native-025", "fontpicker-native-026"):
         from userfont_package import verify_native, release_hashes
         qualified = verify_native()
         gate = json.loads((OUT / "task3/app-dependency-gate.json").read_bytes())

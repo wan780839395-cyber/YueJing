@@ -15,15 +15,19 @@ from validate_task3 import APP, ROOT, digest, require
 
 SCOPE = "userfont-native-025"
 VERSION, BUILD = "0.2.25", "27"
+COUNT, LABEL, RUNNER = 6, "USERFONT", "scripts/run_userfont_native.py"
+if os.environ.get("VALIDATION_SCOPE") == "fontpicker-native-026":
+    SCOPE, VERSION, BUILD = "fontpicker-native-026", "0.2.26", "28"
+    COUNT, LABEL, RUNNER = 3, "FONTPICKER", "scripts/run_fontpicker_native.py"
 PREFIX = "Payload/YueJing.app/"
 
 
 def qualification(run_id, attempt):
     require(all(re.fullmatch(r"[1-9][0-9]*", s) for s in (run_id, attempt)), "Invalid workflow run or attempt")
     return dict(scope=SCOPE, run_id=run_id, run_attempt=attempt,
-                qualification="USERFONT_TARGETED_NATIVE", coverage="USERFONT_TARGETED_NOT_FULL",
+                qualification=LABEL + "_TARGETED_NATIVE", coverage=LABEL + "_TARGETED_NOT_FULL",
                 full_regression_passed=False, diagnostic=False, build_ipa=True, allow_unqualified_ipa=False,
-                native_tests_executed_this_job=6, native_tests_passed=6,
+                native_tests_executed_this_job=COUNT, native_tests_passed=COUNT,
                 native_evidence_directory="artifacts/development/execution")
 
 
@@ -41,7 +45,7 @@ def verify_native():
     require((project["version"], project["build"]) == (VERSION, BUILD)
             == (info.get("CFBundleShortVersionString"), info.get("CFBundleVersion")), "Wrong custom-font release")
     # The native verifier, not a saved pass count, owns the six case identities and raw evidence parsing.
-    subprocess.run([sys.executable, "scripts/run_userfont_native.py", "verify"], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, RUNNER, "verify"], cwd=ROOT, check=True)
     fields = qualification(env["GITHUB_RUN_ID"], env["GITHUB_RUN_ATTEMPT"])
     return dict(**fields, job=env["GITHUB_JOB"], native_summary_sha256=digest(
         ROOT / fields["native_evidence_directory"] / "development-summary.json"))
