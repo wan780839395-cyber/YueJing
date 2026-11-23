@@ -117,7 +117,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain
         SWIFT_INCLUDE_PATHS: '$(inherited) "$(SRCROOT)/Sources/CWOFF2"'
-        OTHER_LDFLAGS: "$(inherited) -lc++"
+        OTHER_LDFLAGS: "$(inherited) -lCWOFF2 -lc++"
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
 
