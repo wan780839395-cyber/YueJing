@@ -15,13 +15,15 @@ struct ReaderSettingAdjustment: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if dynamicType.isAccessibilitySize {
-                Text(title).font(.subheadline.weight(.medium))
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 controls.frame(maxWidth: .infinity, alignment: .center)
             } else {
                 HStack(alignment: .center, spacing: 8) {
-                    Text(title).font(.subheadline.weight(.medium))
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     controls
@@ -31,6 +33,7 @@ struct ReaderSettingAdjustment: View {
                 dragging = editing
                 if !editing, isActive() { commit() }
             })
+            .tint(accent)
             .frame(minHeight: 44)
             .disabled(!isActive())
             .accessibilityLabel(title)
@@ -43,28 +46,35 @@ struct ReaderSettingAdjustment: View {
     private var controls: some View {
         HStack(alignment: .center, spacing: 0) {
             Button { step(-1) } label: {
-                Image(systemName: "minus").font(.body.weight(.medium)).imageScale(.medium)
+                Image(systemName: "minus")
+                    .font(.subheadline.weight(.semibold))
+                    .imageScale(.medium)
                     .frame(minWidth: 44, minHeight: 44)
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: accent))
+            .buttonStyle(ReaderCompactButtonStyle(tint: accent, cornerRadius: 22))
             .disabled(!isActive() || value <= range.lowerBound)
             .accessibilityLabel("减小\(title)").accessibilityIdentifier("reader.\(key).decrease")
-            Text("\(Int(value))").font(.body.monospacedDigit())
+
+            Text("\(Int(value))")
+                .font(.body.weight(.semibold).monospacedDigit())
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: true, vertical: false)
                 .frame(minWidth: 42, alignment: .center)
                 .accessibilityLabel("\(title)，\(Int(value))")
                 .accessibilityIdentifier("reader.\(key).value")
+
             Button { step(1) } label: {
-                Image(systemName: "plus").font(.body.weight(.medium)).imageScale(.medium)
+                Image(systemName: "plus")
+                    .font(.subheadline.weight(.semibold))
+                    .imageScale(.medium)
                     .frame(minWidth: 44, minHeight: 44)
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: accent))
+            .buttonStyle(ReaderCompactButtonStyle(tint: accent, cornerRadius: 22))
             .disabled(!isActive() || value >= range.upperBound)
             .accessibilityLabel("增大\(title)").accessibilityIdentifier("reader.\(key).increase")
         }
-        .padding(2)
-        .background(accent.opacity(0.05), in: Capsule())
+        .padding(3)
+        .background(accent.opacity(0.09), in: Capsule())
     }
 
     private var sliderValue: Binding<Double> {
@@ -75,6 +85,7 @@ struct ReaderSettingAdjustment: View {
             if !dragging { commit() }
         })
     }
+
     private func step(_ delta: Double) {
         guard isActive() else { return }
         value = min(range.upperBound, max(range.lowerBound, value + delta))

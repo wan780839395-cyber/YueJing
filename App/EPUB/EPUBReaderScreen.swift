@@ -88,35 +88,58 @@ struct EPUBReaderScreen: View {
                     EPUBReaderLoadingPresentation.showsFeedback(
                         initialOpening: model.openingPerformanceSummary == nil, phase: loadingFeedback
                     ) {
-                    VStack(spacing: 12) {
-                        Text(model.title).font(.headline).multilineTextAlignment(.center)
+                    VStack(spacing: 14) {
+                        Text(model.title)
+                            .font(.system(.headline, design: .serif).weight(.semibold))
+                            .foregroundStyle(appearance.foreground)
+                            .multilineTextAlignment(.center)
                         Group {
                             if loadingFeedback == .quiet {
-                                Text("正在打开").font(.subheadline)
+                                Text("正在打开")
+                                    .font(.subheadline)
                             } else {
-                                ProgressView(loadingFeedback == .detailed ? model.loadingStage :
-                                    (model.openingPerformanceSummary == nil ? "正在打开" : "正在切换章节"))
+                                HStack(spacing: 8) {
+                                    ProgressView().tint(appearance.accent)
+                                    Text(loadingFeedback == .detailed ? model.loadingStage :
+                                        (model.openingPerformanceSummary == nil ? "正在打开" : "正在切换章节"))
+                                        .font(.subheadline)
+                                }
                             }
                         }
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(appearance.secondary)
                         .frame(minHeight: 24)
                         if loadingFeedback == .detailed {
                             Text(model.openingPerformanceSummary == nil
                                 ? "正在校验书籍并恢复阅读位置。可返回书架停止，已保存记录保留。"
                                 : "正在定位目标章节。可返回书架停止，已保存记录保留。")
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(appearance.secondary)
                                 .multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         if model.openingPerformanceSummary != nil {
-                            Button("返回书架，停止切换") { exitReader() }
-                                .frame(minHeight: 44)
-                                .disabled(!tools.canInteract)
-                                .accessibilityIdentifier("epub.navigation.cancel")
+                            Button { exitReader() } label: {
+                                Text("返回书架，停止切换")
+                                    .font(.subheadline.weight(.medium))
+                                    .padding(.horizontal, 16)
+                                    .frame(minHeight: 44)
+                            }
+                            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary))
+                            .disabled(!tools.canInteract)
+                            .accessibilityIdentifier("epub.navigation.cancel")
                         }
                     }
-                    .padding(.horizontal, 32)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 22)
+                    .frame(maxWidth: 320)
+                    .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.75)
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
+                    .padding(.horizontal, 24)
                     .accessibilityElement(children: model.openingPerformanceSummary == nil ? .combine : .contain)
                     .accessibilityIdentifier("epub.opening.feedback")
                     .accessibilityHidden(tools.panel != nil)
@@ -125,14 +148,34 @@ struct EPUBReaderScreen: View {
 
                 if !model.loading && !model.ready && model.navigationRequest == nil && tools.exitRequest == nil && tools.valid {
                     VStack(spacing: 16) {
-                        Image(systemName: "book.closed").font(.largeTitle).accessibilityHidden(true)
-                        Text("暂时无法显示正文").accessibilityAddTraits(.isHeader)
-                        Button("重试打开") { Task { await model.retry() } }
-                            .buttonStyle(.borderedProminent)
-                            .frame(minHeight: 44)
+                        ZStack {
+                            Circle()
+                                .fill(appearance.accentSoft)
+                                .frame(width: 52, height: 52)
+                            Image(systemName: "book.closed")
+                                .font(.title2.weight(.medium))
+                                .foregroundStyle(appearance.accent)
+                        }
+                        .accessibilityHidden(true)
+                        Text("暂时无法显示正文")
+                            .font(.system(.headline, design: .serif).weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        Button { Task { await model.retry() } } label: {
+                            Text("重试打开")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 22)
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                     }
-                    .padding()
-                    .background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
+                    .padding(24)
+                    .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(appearance.edge, lineWidth: 0.75)
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
                     .accessibilityHidden(tools.panel != nil)
                     .disabled(tools.exitRequest != nil)
                 }
@@ -330,26 +373,37 @@ struct EPUBReaderScreen: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
+
             Button(action: model.dismissCompatibilityNotice) {
                 Image(systemName: "xmark")
-                    .font(.body.weight(.medium))
+                    .font(.caption.weight(.semibold))
                     .frame(minWidth: 44, minHeight: ReaderVisualStyle.minimumControlHeight)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, cornerRadius: 12))
             .accessibilityLabel("关闭兼容排版提示")
             .accessibilityHint("关闭后仍可在排版设置查看兼容说明")
             .accessibilityIdentifier("epub.compatibility.dismiss")
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 8)
+        .padding(.leading, 18)
+        .padding(.trailing, 6)
         .padding(.vertical, 8)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(appearance.sealAccent)
+                .frame(width: 3)
+                .padding(.leading, 10)
+                .padding(.vertical, 12)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(appearance.edge, lineWidth: ReaderVisualStyle.panelDividerHeight)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.9), lineWidth: 0.75)
                 .allowsHitTesting(false)
         }
+        .shadow(color: appearance.subtleShadow, radius: 8, x: 0, y: 3)
         .padding(.horizontal, 12)
         .padding(.top, 8)
         // Stay in the existing safe-area overlay; never inset or resize the reading canvas.
@@ -371,17 +425,19 @@ struct EPUBReaderScreen: View {
     }
 
     private func titleBarContent(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 10) {
             Button { exitReader() } label: {
                 Group {
                     if tools.exitRequest != nil {
-                        ProgressView()
+                        ProgressView().tint(appearance.accent)
                     } else {
-                        Image(systemName: "chevron.down").font(.system(size: 18, weight: .medium))
+                        Image(systemName: "chevron.down").font(.system(size: 16, weight: .semibold))
                     }
                 }
+                .foregroundStyle(appearance.foreground)
                 .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
+                .background(appearance.card.opacity(0.8), in: Circle())
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .disabled(!tools.canInteract)
@@ -389,15 +445,33 @@ struct EPUBReaderScreen: View {
             .accessibilityIdentifier("reader.exit")
             .accessibilityFocused($focusedControl, equals: "back")
 
-            Text(model.title)
-                .font(.headline)
-                .lineLimit(metrics.verticalButtons ? 2 : 1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("书名，\(model.title)")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.title)
+                    .font(.system(.headline, design: .serif).weight(.semibold))
+                    .foregroundStyle(appearance.foreground)
+                    .lineLimit(metrics.verticalButtons ? 2 : 1)
+                    .accessibilityLabel("书名，\(model.title)")
+                if !metrics.compactHeight {
+                    Text("EPUB · \(model.effectiveLayoutMode.title) · \(model.readingMode.title)")
+                        .font(.caption2)
+                        .foregroundStyle(appearance.secondary)
+                        .lineLimit(1)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
+        .padding(.trailing, 14)
+        .padding(.vertical, 6)
         .frame(minHeight: metrics.titleHeight)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
+        .shadow(color: appearance.shadow, radius: 10, x: 0, y: 4)
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .transaction { transaction in transaction.animation = nil }

@@ -43,44 +43,76 @@ final class LibraryCoverMemoryCache {
 struct LibraryBookCoverView: View {
     let book: LibraryBook
     let appearance: LibraryAppearance
+    var size: CGSize = CGSize(width: LibraryAppearance.coverWidth, height: LibraryAppearance.coverHeight)
     var coverLoader: (@Sendable (String) async -> Data?)? = nil
     var onCoverResolved: (@MainActor (UIImage?) -> Void)? = nil
-    @State private var coverImage: UIImage?
+    @State private var resolvedCover: (key: String, image: UIImage?)?
 
     private var cacheKey: String { book.id + ":" + book.versionID }
+    private var cornerRadius: CGFloat { max(6, min(11, size.width * 0.13)) }
+
+    private var displayedCoverImage: UIImage? {
+        guard book.format == .epub else { return nil }
+        if let resolvedCover, resolvedCover.key == cacheKey {
+            return resolvedCover.image
+        }
+        return LibraryCoverMemoryCache.shared.image(for: cacheKey)
+    }
 
     var body: some View {
+        let isLarge = size.width >= 72
         ZStack {
-            if let displayed = coverImage ?? (book.format == .epub ? LibraryCoverMemoryCache.shared.image(for: cacheKey) : nil) {
+            if let displayed = displayedCoverImage {
                 Image(uiImage: displayed)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: LibraryAppearance.coverWidth, height: LibraryAppearance.coverHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.5)
+                    .frame(width: size.width, height: size.height)
+                    .overlay(alignment: .leading) {
+                        // Subtle physical book-spine lighting crease
+                        LinearGradient(
+                            colors: [
+                                Color.black.opacity(0.20),
+                                Color.white.opacity(0.16),
+                                Color.black.opacity(0.06),
+                                Color.clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: max(6, size.width * 0.13))
                     }
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.6)
+                    }
+                    .shadow(color: appearance.shadow, radius: isLarge ? 9 : 4, x: 0, y: isLarge ? 5 : 2)
                     .accessibilityHidden(true)
             } else {
-                LibraryCoverPlaceholder(title: book.title, appearance: appearance)
+                LibraryCoverPlaceholder(
+                    title: book.title,
+                    appearance: appearance,
+                    formatLabel: book.format == .epub ? "EPUB" : "TXT",
+                    size: size
+                )
             }
         }
-        .frame(width: LibraryAppearance.coverWidth, height: LibraryAppearance.coverHeight)
+        .frame(width: size.width, height: size.height)
         .task(id: cacheKey) {
+            let key = cacheKey
             guard book.format == .epub else {
-                coverImage = nil
+                resolvedCover = (key, nil)
                 onCoverResolved?(nil)
                 return
             }
-            if let cached = LibraryCoverMemoryCache.shared.image(for: cacheKey) {
-                coverImage = cached
+            if let cached = LibraryCoverMemoryCache.shared.image(for: key) {
+                resolvedCover = (key, cached)
                 onCoverResolved?(cached)
                 return
             }
             let resolved = await Self.resolveCoverImage(for: book, loader: coverLoader)
             guard !Task.isCancelled else { return }
-            coverImage = resolved
+            resolvedCover = (key, resolved)
             onCoverResolved?(resolved)
         }
     }

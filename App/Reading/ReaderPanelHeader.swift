@@ -16,8 +16,12 @@ struct ReaderPanelHeader<Action: View>: View {
 
     var body: some View {
         VStack(spacing: ReaderVisualStyle.panelHeaderSpacing) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(appearance.accent)
+                        .frame(width: ReaderVisualStyle.headingMarkWidth, height: ReaderVisualStyle.headingMarkHeight)
+                        .accessibilityHidden(true)
                     Text(title)
                         .font(ReaderVisualStyle.panelTitleFont)
                         .foregroundStyle(appearance.foreground)
@@ -30,7 +34,7 @@ struct ReaderPanelHeader<Action: View>: View {
             }
             .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
             Rectangle()
-                .fill(appearance.edge.opacity(0.65))
+                .fill(appearance.edge.opacity(0.7))
                 .frame(height: ReaderVisualStyle.panelDividerHeight)
                 .accessibilityHidden(true)
         }

@@ -110,16 +110,16 @@ struct EPUBContentsView: View {
         VStack(spacing: 0) {
             ReaderPanelHeader(title: "目录", appearance: appearance) {
                 Button { dismiss() } label: {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont)
+                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .frame(
                             minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                             minHeight: ReaderVisualStyle.minimumControlHeight
                         )
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .disabled(!active)
                 .accessibilityLabel("关闭目录")
                 .accessibilityFocused($closeFocused)
@@ -158,7 +158,8 @@ struct EPUBContentsView: View {
                             .accessibilityHint("阅读本章")
                             .buttonStyle(.plain)
                             .disabled(!active)
-                            .listRowBackground(isCurrent ? appearance.selection : appearance.surface)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                            .listRowBackground(appearance.surface)
                             .listRowSeparator(.hidden)
                             .task(id: reveal.initialIssued ? revealKey : nil) {
                                 // Unlike another timed retry, this only runs after the target exists.
@@ -236,28 +237,39 @@ struct EPUBContentsView: View {
     }
 
     private var availabilityStatus: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(active ? "目录可操作" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
-                .font(.caption)
-                .foregroundStyle(appearance.secondary)
-                .accessibilityIdentifier("epub.directory.availability")
-                .accessibilityValue("state=\(access.rawValue);presented=\(presented);scene=\(scenePhase == .active);owner=\(ownerActive);live=\(isActive())")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(active ? appearance.accent : appearance.sealAccent)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+                Text(active ? "目录可操作" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
+                    .font(.caption2)
+                    .foregroundStyle(active ? appearance.secondary : appearance.sealAccent)
+                    .accessibilityIdentifier("epub.directory.availability")
+                    .accessibilityValue("state=\(access.rawValue);presented=\(presented);scene=\(scenePhase == .active);owner=\(ownerActive);live=\(isActive())")
+            }
             if !active {
-                Button("关闭目录后重开") {
+                Button {
                     reveal.cancel()
                     searchFocused = false
                     // Closing is not a grant: the parent rechecks canInteract + session ID.
                     // In background or after replacement this remains a safe no-op.
                     close()
+                } label: {
+                    Text("关闭目录后重开")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 14)
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary))
                 .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
                 .accessibilityIdentifier("epub.directory.recover")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-        .padding(.vertical, 4)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
         .background(appearance.surface)
     }
 
@@ -271,14 +283,20 @@ struct EPUBContentsView: View {
 
     private func emptyRow(_ text: String) -> some View {
         Text(text)
+            .font(.subheadline)
             .foregroundStyle(appearance.secondary)
             .listRowBackground(appearance.surface)
+            .listRowSeparator(.hidden)
     }
 
     private func searchControls(currentIndex: Int?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "magnifyingglass").accessibilityHidden(true)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(appearance.accent)
+                    .padding(.leading, 12)
+                    .accessibilityHidden(true)
                 TextField("筛选标题或章节序号", text: Binding(
                     get: { query },
                     set: {
@@ -290,6 +308,7 @@ struct EPUBContentsView: View {
                 .focused($searchFocused)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
+                .padding(.trailing, query.isEmpty ? 12 : 0)
                 .accessibilityIdentifier("epub.directory.search")
                 if !query.isEmpty {
                     Button {
@@ -307,14 +326,21 @@ struct EPUBContentsView: View {
                 }
             }
             .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.8), lineWidth: 0.7)
+                    .allowsHitTesting(false)
+            }
+
             Button {
                 guard active else { return }
                 query = ""
                 searchFocused = false
                 reveal.request(currentIndex)
             } label: {
-                Label(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节", systemImage: "location")
-                    .font(.subheadline.weight(.medium))
+                Label(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节", systemImage: "scope")
+                    .font(.subheadline.weight(.semibold))
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 12)
@@ -322,13 +348,14 @@ struct EPUBContentsView: View {
                     .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 14))
             .disabled(currentIndex == nil)
             .accessibilityHint(query.isEmpty ? "滚动目录至当前章节，不切换正文" : "先清空筛选，再滚动目录至当前章节，不切换正文")
             .accessibilityIdentifier("epub.directory.current")
         }
         .foregroundStyle(appearance.foreground)
         .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+        .padding(.vertical, 8)
         .background(appearance.surface)
         .disabled(!active)
     }
@@ -358,19 +385,22 @@ struct EPUBContentsView: View {
                 }
             }
             Rectangle()
-                .fill(appearance.edge)
+                .fill(appearance.edge.opacity(0.6))
                 .frame(height: ReaderVisualStyle.panelDividerHeight)
                 .accessibilityHidden(true)
         }
         .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-        .padding(.top, 8)
+        .padding(.top, 10)
         .background(appearance.surface)
     }
 
     private var totalCountBadge: some View {
         Text("共 \(items.count) 章")
-            .font(.system(.subheadline, design: .serif).weight(.medium).monospacedDigit())
-            .foregroundStyle(appearance.foreground)
+            .font(.system(.subheadline, design: .serif).weight(.semibold).monospacedDigit())
+            .foregroundStyle(appearance.accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3.5)
+            .background(appearance.accentSoft, in: Capsule())
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("总章节数，共 \(items.count) 章")
             .accessibilityIdentifier("reader.directory.total")
@@ -387,7 +417,7 @@ struct EPUBContentsView: View {
         }
         return Text(text)
             .font(.caption.monospacedDigit())
-            .foregroundStyle(appearance.foreground.opacity(0.72))
+            .foregroundStyle(appearance.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }

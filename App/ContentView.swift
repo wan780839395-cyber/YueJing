@@ -66,14 +66,20 @@ struct ContentView: View {
                         Button { model.beginFileSelection() } label: {
                             Label("导入", systemImage: "plus")
                                 .labelStyle(.titleAndIcon)
-                                .font(AppVisualStyle.actionFont).imageScale(.medium)
+                                .font(AppVisualStyle.actionFont.weight(.semibold))
+                                .imageScale(.medium)
                                 .foregroundStyle(appearance.accent)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 12)
+                                .padding(.horizontal, 14)
                                 .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
                                 .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                         }
-                        .buttonStyle(AppControlButtonStyle(foreground: appearance.accent, surface: appearance.accent.opacity(0.12)))
+                        .buttonStyle(AppControlButtonStyle(
+                            foreground: appearance.accent,
+                            surface: appearance.accentSoft,
+                            border: appearance.accent.opacity(0.28),
+                            cornerRadius: 22
+                        ))
                         .accessibilityLabel("导入书籍")
                         .disabled(!model.canBeginFileSelection || !canChangeManagement)
                         .accessibilityHidden(drawerPresented)
@@ -87,7 +93,11 @@ struct ContentView: View {
             .navigationDestination(isPresented: informationPresentation) {
                 switch displayedInformation {
                 case .diagnostics:
-                    ReaderDiagnosticsView(importState: model.importDiagnostics, importSummary: model.processingSummary)
+                    ReaderDiagnosticsView(
+                        importState: model.importDiagnostics,
+                        importSummary: model.processingSummary,
+                        libraryAppearance: appearance
+                    )
                 case .license:
                     LibraryLicenseView(appearance: appearance)
                 }
@@ -132,8 +142,13 @@ struct ContentView: View {
             }
         }
         .sheet(item: $model.encodingChoice) { choice in
-            EncodingChoiceView(choice: choice, select: { model.choose($0, for: choice) },
-                cancel: { Task { await model.cancelImport() } }).interactiveDismissDisabled()
+            EncodingChoiceView(
+                choice: choice,
+                appearance: appearance,
+                select: { model.choose($0, for: choice) },
+                cancel: { Task { await model.cancelImport() } }
+            )
+            .interactiveDismissDisabled()
         }
         .alert("书架提示", isPresented: Binding(
             get: { model.canPresentLibraryFeedback && model.message != nil },
@@ -143,17 +158,24 @@ struct ContentView: View {
     }
 
     private var shelfContent: some View {
-        LibraryShelfContent(books: model.books, notice: model.notice, importing: model.importing,
-            importPresentation: model.importPresentation, serviceUnavailable: model.service == nil,
+        LibraryShelfContent(
+            books: model.books,
+            notice: model.notice,
+            importing: model.importing,
+            importPresentation: model.importPresentation,
+            serviceUnavailable: model.service == nil,
             appearance: appearance,
             coverLoader: model.coverLoader,
+            canImport: model.canBeginFileSelection && canChangeManagement,
             onOpenBook: { book in
                 guard canChangeManagement else { return }
                 if let service = model.service { readerRoutes.open(book: book, service: service) }
             },
             onDismissNotice: { model.notice = nil },
             onCancelImport: { Task { await model.cancelImport() } },
-            onRetry: { Task { await model.start() } })
+            onRetry: { Task { await model.start() } },
+            onImport: { model.beginFileSelection() }
+        )
     }
 
     private func managementOptions() -> some View {

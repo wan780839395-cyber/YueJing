@@ -5,50 +5,67 @@ struct LibraryHeaderView: View {
     let bookCount: Int
     let appearance: LibraryAppearance
     var showsShelfTitle: Bool = true
+    var txtCount: Int = 0
+    var epubCount: Int = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 8) {
-                // The open gate/book mark is decorative, not a new action.
-                Path { path in
-                    path.move(to: CGPoint(x: 3, y: 14))
-                    path.addLine(to: CGPoint(x: 3, y: 5))
-                    path.addQuadCurve(to: CGPoint(x: 5, y: 3), control: CGPoint(x: 3, y: 3))
-                    path.addLine(to: CGPoint(x: 7, y: 3))
-                    path.move(to: CGPoint(x: 11, y: 3))
-                    path.addLine(to: CGPoint(x: 13, y: 3))
-                    path.addQuadCurve(to: CGPoint(x: 15, y: 5), control: CGPoint(x: 15, y: 3))
-                    path.addLine(to: CGPoint(x: 15, y: 14))
-                    path.move(to: CGPoint(x: 6, y: 7))
-                    path.addLines([CGPoint(x: 8, y: 7), CGPoint(x: 9, y: 8),
-                                   CGPoint(x: 10, y: 7), CGPoint(x: 12, y: 7),
-                                   CGPoint(x: 12, y: 14), CGPoint(x: 10, y: 14),
-                                   CGPoint(x: 9, y: 15), CGPoint(x: 8, y: 14),
-                                   CGPoint(x: 6, y: 14), CGPoint(x: 6, y: 7)])
-                    path.move(to: CGPoint(x: 9, y: 8))
-                    path.addLine(to: CGPoint(x: 9, y: 15))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 10) {
+                YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("阅境 · 本地书斋")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(appearance.secondary)
+                    Text(showsShelfTitle ? "书架" : "开卷，自有一境。")
+                        .font(showsShelfTitle ? LibraryAppearance.titleFont : .system(.title2, design: .serif).weight(.semibold))
+                        .foregroundStyle(appearance.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
                 }
-                .stroke(appearance.accent, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round))
-                .frame(width: 18, height: 18)
-                .accessibilityHidden(true)
-                Text("阅境 · 本地书籍").font(.caption).foregroundStyle(appearance.secondary)
                 Spacer(minLength: 8)
-                Text("\(bookCount) 本").font(.caption.monospacedDigit())
+                Text("\(bookCount) 册")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(appearance.accent)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(appearance.accentSoft, in: Capsule())
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+
+            if showsShelfTitle {
+                Text("开卷，自有一境。")
+                    .font(.system(.subheadline, design: .serif))
                     .foregroundStyle(appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text(showsShelfTitle ? "书架" : "开卷，自有一境。")
-                .font(showsShelfTitle ? LibraryAppearance.titleFont : .system(.title2, design: .serif).weight(.medium))
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityAddTraits(.isHeader)
-            if showsShelfTitle {
-                Text("开卷，自有一境。").font(.system(.subheadline, design: .serif))
-                    .foregroundStyle(appearance.secondary).fixedSize(horizontal: false, vertical: true)
+
+            if bookCount > 0 && (txtCount > 0 || epubCount > 0) {
+                HStack(spacing: 8) {
+                    if epubCount > 0 {
+                        statChip("EPUB", count: epubCount, tint: appearance.accent, fill: appearance.accentSoft)
+                    }
+                    if txtCount > 0 {
+                        statChip("TXT", count: txtCount, tint: appearance.secondary, fill: appearance.subtleSurface)
+                    }
+                    Spacer(minLength: 0)
+                }
             }
-            Rectangle().fill(appearance.edge.opacity(0.6)).frame(height: 0.5)
-                .padding(.top, 12).accessibilityHidden(true)
         }
         .foregroundStyle(appearance.foreground)
-        .padding(.top, 8).padding(.bottom, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
+
+    private func statChip(_ label: String, count: Int, tint: Color, fill: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+            Text("\(count)")
+                .font(.caption2.monospacedDigit())
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(fill, in: Capsule())
     }
 }

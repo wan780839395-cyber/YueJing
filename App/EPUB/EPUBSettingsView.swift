@@ -68,12 +68,12 @@ struct EPUBSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
                 Button(action: finish) {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont)
+                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .frame(
                             minWidth: ReaderVisualStyle.panelActionMinimumWidth,
@@ -88,7 +88,7 @@ struct EPUBSettingsView: View {
             groupSelector
                 .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     if settingsGroup == .common {
                         commonContent
                     } else {
@@ -96,7 +96,8 @@ struct EPUBSettingsView: View {
                     }
                 }
                 .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-                .padding(.bottom, 24)
+                .padding(.top, 4)
+                .padding(.bottom, 26)
             }
             .id(settingsGroup)
             .accessibilityIdentifier("reader.settings.scroll")
@@ -128,23 +129,35 @@ struct EPUBSettingsView: View {
             NavigationStack {
                 Group {
                     if page == .diagnostics {
-                        ReaderDiagnosticsView(openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"),
-                                              fontDiagnostics: fontDiagnostics, compatibilityDetails: compatibilityDetails)
-                            .task {
-                                runtimeSummary = nil
-                                guard isActive(), let runtimeDiagnostics else { return }
-                                let value = await runtimeDiagnostics()
-                                guard !Task.isCancelled, isActive() else { return }
-                                runtimeSummary = value
-                            }
+                        ReaderDiagnosticsView(
+                            openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"),
+                            fontDiagnostics: fontDiagnostics,
+                            compatibilityDetails: compatibilityDetails,
+                            readerAppearance: appearance
+                        )
+                        .task {
+                            runtimeSummary = nil
+                            guard isActive(), let runtimeDiagnostics else { return }
+                            let value = await runtimeDiagnostics()
+                            guard !Task.isCancelled, isActive() else { return }
+                            runtimeSummary = value
+                        }
                     } else {
                         ScrollView {
                             Text(LibraryLicenseView.bundledLicenseText())
-                                .font(.footnote)
+                                .font(.footnote.monospaced())
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
+                                .padding(18)
+                                .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.75)
+                                        .allowsHitTesting(false)
+                                }
+                                .padding(ReaderVisualStyle.panelHorizontalInset)
                         }
+                        .background(appearance.surface.ignoresSafeArea())
                         .navigationTitle("GRDB & ZIPFoundation · MIT")
                         .navigationBarTitleDisplayMode(.inline)
                     }
@@ -171,24 +184,36 @@ struct EPUBSettingsView: View {
 
     private var groupSelector: some View {
         HStack(spacing: 4) {
-            groupButton("常用", group: .common)
-            groupButton("更多", group: .more)
+            groupButton("常用", symbol: "textformat.size", group: .common)
+            groupButton("更多", symbol: "slider.horizontal.3", group: .more)
         }
         .padding(4)
         .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                .allowsHitTesting(false)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("设置分组")
     }
 
-    private func groupButton(_ title: String, group: SettingsGroup) -> some View {
+    private func groupButton(_ title: String, symbol: String, group: SettingsGroup) -> some View {
         let selected = settingsGroup == group
         return Button {
             guard isActive() else { return }
             focusSourceOnAppear = false
-            settingsGroup = group
+            if reduceMotion {
+                settingsGroup = group
+            } else {
+                withAnimation(ReaderMotion.selectionFeedback) {
+                    settingsGroup = group
+                }
+            }
             if voiceOver { controlFocus = "group.\(group.rawValue)" }
         } label: {
-            Text(title).font(.body.weight(selected ? .semibold : .regular))
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(selected ? .semibold : .medium))
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 8).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -196,7 +221,8 @@ struct EPUBSettingsView: View {
         .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.secondary, cornerRadius: 12))
         .background {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(selected ? appearance.selectedControl : .clear)
+                .fill(selected ? appearance.elevatedSurface : .clear)
+                .shadow(color: selected ? appearance.subtleShadow : .clear, radius: 4, x: 0, y: 1)
                 .opacity(isActive() ? 1 : 0.4)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
@@ -208,15 +234,13 @@ struct EPUBSettingsView: View {
     }
 
     private var commonContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             sourceSummary
             if !usesAuthorTypography {
                 ReaderTypographyPreview(preferences: draft, appearance: appearance)
             }
             typographySection
-            sectionDivider
             presetsSection
-            sectionDivider
             themeSection
         }
     }
@@ -228,19 +252,30 @@ struct EPUBSettingsView: View {
                 Spacer(minLength: 0)
                 changeSourceButton
             }
-            VStack(alignment: .leading, spacing: 4) { sourceDescription; changeSourceButton }
+            VStack(alignment: .leading, spacing: 8) { sourceDescription; changeSourceButton }
         }
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.7), lineWidth: 0.65)
+                .allowsHitTesting(false)
+        }
     }
 
     private var sourceDescription: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("当前有效排版").font(.caption).foregroundStyle(appearance.secondary)
+        VStack(alignment: .leading, spacing: 3) {
+            Text("当前有效排版")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(appearance.secondary)
             Text(usesAuthorTypography ? "作者原始排版" : "阅读器排版")
-                .font(.body.weight(.medium))
+                .font(.system(.subheadline, design: .serif).weight(.semibold))
+                .foregroundStyle(appearance.foreground)
             if let effectiveLayoutMode, effectiveLayoutMode != layoutMode {
                 Text("本章已兼容回退；偏好仍为\(layoutMode.title)")
-                    .font(.caption).foregroundStyle(appearance.secondary)
+                    .font(.caption)
+                    .foregroundStyle(appearance.sealAccent)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -255,21 +290,21 @@ struct EPUBSettingsView: View {
             settingsGroup = .more
         } label: {
             Label("更改", systemImage: "chevron.right")
-                .font(.subheadline.weight(.medium))
+                .font(.subheadline.weight(.semibold))
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 12).frame(minHeight: 44)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 14))
         .disabled(!isActive())
         .accessibilityLabel("更改排版来源")
         .accessibilityIdentifier("epub.settings.changeSource")
     }
 
     private var moreContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ReaderSettingsSection(title: "阅读行为", detail: "切换来源或方式，保留当前文本位置", appearance: appearance) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("排版来源").font(.subheadline.weight(.medium))
+                    Text("排版来源").font(.subheadline.weight(.semibold))
                     modeOptions(EPUBLayoutMode.allCases) { mode in
                         modeButton(mode.title, selected: layoutMode == mode) { layoutMode = mode }
                             .accessibilityFocused($controlFocus, equals: "layout.\(mode.rawValue)")
@@ -285,7 +320,7 @@ struct EPUBSettingsView: View {
                         .font(.caption).foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     sectionDivider
-                    Text("阅读方式").font(.subheadline.weight(.medium))
+                    Text("阅读方式").font(.subheadline.weight(.semibold))
                     modeOptions(EPUBReadingMode.allCases) { mode in
                         modeButton(mode.title, selected: readingMode == mode) { readingMode = mode }
                     }
@@ -296,11 +331,14 @@ struct EPUBSettingsView: View {
             epubScopeSection
             sectionDivider
             ReaderSettingsSection(title: "维护信息", detail: "恢复、诊断与许可", appearance: appearance) {
-                restoreTypographyButton
-                moreSection
-                Text("当前版本：\(AppVersion.current.displayText)")
-                    .font(.footnote).foregroundStyle(appearance.secondary)
-                    .accessibilityIdentifier("app.version")
+                VStack(alignment: .leading, spacing: 10) {
+                    restoreTypographyButton
+                    moreSection
+                    Text("当前版本：\(AppVersion.current.displayText)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(appearance.secondary)
+                        .accessibilityIdentifier("app.version")
+                }
             }
         }
     }
@@ -312,8 +350,13 @@ struct EPUBSettingsView: View {
         VStack(spacing: 4) {
             ForEach(options, id: \.self) { option in content(option) }
         }
-        .padding(4)
+        .padding(5)
         .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                .allowsHitTesting(false)
+        }
         .accessibilityElement(children: .contain)
     }
 
@@ -323,23 +366,36 @@ struct EPUBSettingsView: View {
             choose()
         } label: {
             HStack(spacing: 12) {
-                Text(title).font(.body)
+                Text(title)
+                    .font(.subheadline.weight(selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? appearance.accent : appearance.foreground)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? appearance.accent : appearance.secondary.opacity(0.5))
                     .accessibilityHidden(true)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 44)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.foreground, cornerRadius: 12))
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(selected ? appearance.elevatedSurface : .clear)
+                .shadow(color: selected ? appearance.subtleShadow : .clear, radius: 3, x: 0, y: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
         .disabled(!isActive())
         .accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var sectionDivider: some View {
-        Divider().overlay(appearance.edge).accessibilityHidden(true)
+        Rectangle()
+            .fill(appearance.edge.opacity(0.6))
+            .frame(height: 0.5)
+            .accessibilityHidden(true)
     }
 
     private var authorScaleSummary: some View {
@@ -351,11 +407,11 @@ struct EPUBSettingsView: View {
 
     private var typographySection: some View {
         ReaderSettingsSection(
-            title: usesAuthorTypography ? "作者文字" : "文字",
+            title: usesAuthorTypography ? "作者文字" : "文字与行距",
             detail: usesAuthorTypography ? "调整文字比例，松手应用并恢复文本位置" : "滑动预览，松手应用并按文本锚点恢复",
             appearance: appearance
         ) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 if usesAuthorTypography {
                     EPUBAuthorScaleAdjustment(value: $draft.fontSize, appearance: appearance,
                                               isActive: isActive, commit: commitDraft)
@@ -373,7 +429,10 @@ struct EPUBSettingsView: View {
                         isActive: isActive,
                         commit: commitDraft
                     )
-                    Divider().overlay(appearance.edge)
+                    Rectangle()
+                        .fill(appearance.edge.opacity(0.65))
+                        .frame(height: 0.5)
+                        .accessibilityHidden(true)
                     ReaderSettingAdjustment(
                         title: "行距",
                         key: "spacing",
@@ -385,13 +444,18 @@ struct EPUBSettingsView: View {
                     )
                 }
             }
-            .padding(12)
-            .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(14)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.7), lineWidth: 0.65)
+                    .allowsHitTesting(false)
+            }
         }
     }
 
     private var themeSection: some View {
-        ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", appearance: appearance) {
+        ReaderSettingsSection(title: "阅读纸色", detail: "仅影响阅读界面，不改变书架外观", appearance: appearance) {
             threeOptionLayout(ReaderTheme.allCases) { theme in
                 themeButton(theme)
             }
@@ -408,29 +472,48 @@ struct EPUBSettingsView: View {
                 threeOptionLayout(ReaderTypographyPreset.allCases) { preset in
                     presetButton(preset)
                 }
-                .padding(4)
+                .padding(5)
                 .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                        .allowsHitTesting(false)
+                }
             }
         }
     }
 
     private var epubScopeSection: some View {
         ReaderSettingsSection(title: "兼容与范围", detail: "EPUB 首版 · 可重排阅读与安全限制", appearance: appearance) {
-            if let compatibilitySummary {
-                Text(compatibilitySummary)
-                    .font(.footnote).foregroundStyle(appearance.foreground)
+            VStack(alignment: .leading, spacing: 8) {
+                if let compatibilitySummary {
+                    Text(compatibilitySummary)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(appearance.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(appearance.sealAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .accessibilityIdentifier("epub.compatibility.summary")
+                }
+                Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
+                    .font(.caption)
+                    .foregroundStyle(appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("epub.compatibility.summary")
+                    .accessibilityIdentifier("epub.settings.scopeNote")
+                if usesAuthorTypography {
+                    Text("保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
+                        .font(.caption).foregroundStyle(appearance.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
-                .font(.caption)
-                .foregroundStyle(appearance.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("epub.settings.scopeNote")
-            if usesAuthorTypography {
-                Text("保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
-                    .font(.caption).foregroundStyle(appearance.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -463,24 +546,32 @@ struct EPUBSettingsView: View {
         return Button { apply(preset) } label: {
             VStack(spacing: 4) {
                 Text(presetTitle(preset))
-                    .font(.subheadline.weight(selected ? .semibold : .regular))
+                    .font(.subheadline.weight(selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? appearance.accent : appearance.foreground)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(usesAuthorTypography ? "\(Int(preset.fontSize * 5))%" : "\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(appearance.foreground.opacity(selected ? 0.92 : 0.72))
+                    .foregroundStyle(selected ? appearance.accent.opacity(0.88) : appearance.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 10)
-            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 68)
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 66)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.foreground, cornerRadius: 14))
         .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(selected ? appearance.surface : .clear)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(selected ? appearance.elevatedSurface : .clear)
+                .overlay {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(appearance.accent.opacity(0.45), lineWidth: 1)
+                    }
+                }
+                .shadow(color: selected ? appearance.subtleShadow : .clear, radius: 4, x: 0, y: 1)
                 .allowsHitTesting(false)
                 .animation(selectionAnimation, value: selectionMotionKey)
                 .transaction { transaction in
@@ -509,18 +600,18 @@ struct EPUBSettingsView: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 14))
         .disabled(!isActive() || (usesAuthorTypography ? draft.fontSize == 20 : ReaderTypographyPreset.standard.matches(draft)))
         .accessibilityIdentifier("reader.typography.restore")
     }
 
     private var moreSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 20) { diagnosticsButton; licenseButton }
-                VStack(alignment: .leading, spacing: 4) { diagnosticsButton; licenseButton }
+                HStack(spacing: 12) { diagnosticsButton; licenseButton; Spacer(minLength: 0) }
+                VStack(alignment: .leading, spacing: 6) { diagnosticsButton; licenseButton }
             }
-            .font(.footnote)
+            .font(.footnote.weight(.medium))
             .disabled(!isActive())
             Text("加减和快捷排版立即应用；滑杆松手应用并恢复文本锚点。“完成”关闭面板。")
                 .font(.caption)
@@ -533,8 +624,12 @@ struct EPUBSettingsView: View {
         Button {
             if isActive() { auxiliaryReturnFocus = "diagnostics"; info = .diagnostics }
         } label: {
-            Label("诊断与耗时", systemImage: "ladybug").frame(minHeight: 44).contentShape(Rectangle())
+            Label("诊断与耗时", systemImage: "waveform.path.ecg")
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
         .accessibilityIdentifier("reader.info.diagnostics")
         .accessibilityFocused($controlFocus, equals: "diagnostics")
     }
@@ -543,8 +638,12 @@ struct EPUBSettingsView: View {
         Button {
             if isActive() { auxiliaryReturnFocus = "license"; info = .license }
         } label: {
-            Text("开源许可").frame(minHeight: 44).contentShape(Rectangle())
+            Label("开源许可", systemImage: "doc.text")
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
         .accessibilityIdentifier("reader.info.license")
         .accessibilityFocused($controlFocus, equals: "license")
     }
@@ -558,34 +657,56 @@ struct EPUBSettingsView: View {
             draft.theme = theme
             commitDraft()
         } label: {
-            VStack(spacing: 6) {
-                Text("阅").font(.system(size: 22))
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .foregroundStyle(Color(uiColor: theme.foreground))
-                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                Text(theme.title).font(.caption).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(8)
-            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 64)
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: "checkmark")
-                    .font(.caption)
-                    .foregroundStyle(appearance.foreground)
-                    .padding(6)
-                    .opacity(selected ? 1 : 0)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
+            VStack(spacing: 8) {
+                // Miniature paper specimen swatch matching TXT reader
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("阅")
+                            .font(.system(size: 18, weight: .semibold, design: .serif))
+                            .foregroundStyle(Color(uiColor: theme.foreground))
+                        Spacer(minLength: 0)
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(appearance.accent)
+                            .opacity(selected ? 1 : 0)
+                            .animation(selectionAnimation, value: selectionMotionKey)
+                            .transaction { if reduceMotion { $0.animation = nil } }
                     }
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Capsule()
+                            .fill(Color(uiColor: theme.foreground).opacity(0.32))
+                            .frame(height: 2.5)
+                        Capsule()
+                            .fill(Color(uiColor: theme.foreground).opacity(0.20))
+                            .frame(width: 34, height: 2.5)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(
+                            selected ? appearance.accent : appearance.edge.opacity(0.85),
+                            lineWidth: selected ? 1.6 : 0.65
+                        )
+                }
+                .accessibilityHidden(true)
+
+                Text(theme.title)
+                    .font(.caption.weight(selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? appearance.accent : appearance.foreground)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(6)
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 74)
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 16))
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(selected ? appearance.selectedControl : .clear)
+                .fill(selected ? appearance.selectedControl : appearance.card.opacity(0.55))
                 .opacity(isActive() ? 1 : 0.4)
                 .allowsHitTesting(false).accessibilityHidden(true)
                 .animation(selectionAnimation, value: selectionMotionKey)
@@ -666,6 +787,7 @@ private struct EPUBAuthorScaleAdjustment: View {
                 dragging = editing
                 if !editing, isActive() { commit() }
             })
+            .tint(appearance.accent)
             .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
             .disabled(!isActive())
             .accessibilityLabel("作者文字比例")
@@ -676,36 +798,38 @@ private struct EPUBAuthorScaleAdjustment: View {
     }
 
     private var title: some View {
-        Text("文字比例").font(.subheadline.weight(.medium))
+        Text("文字比例").font(.subheadline.weight(.semibold))
             .fixedSize(horizontal: false, vertical: true)
     }
 
     private var controls: some View {
         HStack(spacing: 0) {
             Button { step(-1) } label: {
-                Image(systemName: "minus").font(.body.weight(.medium))
+                Image(systemName: "minus").font(.subheadline.weight(.semibold))
                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, cornerRadius: 22))
             .disabled(!isActive() || value <= 14)
             .accessibilityLabel("减小作者文字比例")
             .accessibilityIdentifier("reader.font.decrease")
-            Text(percentage).font(.body.monospacedDigit())
+
+            Text(percentage).font(.body.weight(.semibold).monospacedDigit())
                 .fixedSize(horizontal: true, vertical: false)
                 .frame(minWidth: 64)
                 .accessibilityLabel("作者文字比例，\(percentage)")
                 .accessibilityIdentifier("reader.font.value")
+
             Button { step(1) } label: {
-                Image(systemName: "plus").font(.body.weight(.medium))
+                Image(systemName: "plus").font(.subheadline.weight(.semibold))
                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
             }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, cornerRadius: 22))
             .disabled(!isActive() || value >= 36)
             .accessibilityLabel("增大作者文字比例")
             .accessibilityIdentifier("reader.font.increase")
         }
-        .padding(2)
-        .background(appearance.selection, in: Capsule())
+        .padding(3)
+        .background(appearance.accent.opacity(0.09), in: Capsule())
     }
 
     private var sliderValue: Binding<Double> {

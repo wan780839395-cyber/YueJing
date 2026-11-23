@@ -6,32 +6,40 @@ import UIKit
 struct ReaderToolAppearance {
     let theme: ReaderTheme
     let reduceTransparency: Bool
+
     var surface: Color { ReaderVisualStyle.surface(for: theme) }
+    var elevatedSurface: Color { ReaderVisualStyle.elevatedSurface(for: theme) }
     var foreground: Color { Color(uiColor: theme.foreground) }
     var edge: Color { ReaderVisualStyle.edge(for: theme) }
     var accent: Color { ReaderVisualStyle.accent(for: theme) }
+    var accentSoft: Color { accent.opacity(theme == .dark ? 0.18 : 0.11) }
+    var sealAccent: Color { ReaderVisualStyle.sealAccent(for: theme) }
+
     // Opaque local tool paint: softness comes from tone, not canvas text showing through.
-    // Shared by the existing header; this changes its paint only, never its geometry.
     var fill: Color {
         switch theme {
-        case .paper: Color(.sRGB, red: 239.0 / 255, green: 236.0 / 255, blue: 226.0 / 255, opacity: 1)
-        case .light: Color(.sRGB, red: 241.0 / 255, green: 244.0 / 255, blue: 238.0 / 255, opacity: 1)
-        case .dark: Color(.sRGB, red: 45.0 / 255, green: 53.0 / 255, blue: 47.0 / 255, opacity: 1)
+        case .paper: Color(.sRGB, red: 248.0 / 255, green: 245.0 / 255, blue: 236.0 / 255, opacity: 1)
+        case .light: Color(.sRGB, red: 248.0 / 255, green: 250.0 / 255, blue: 248.0 / 255, opacity: 1)
+        case .dark: Color(.sRGB, red: 36.0 / 255, green: 43.0 / 255, blue: 39.0 / 255, opacity: 1)
         }
     }
+
     /// A quiet section surface, local to the settings sheet rather than the reading canvas.
     var card: Color { ReaderVisualStyle.sectionSurface(for: theme) }
+
     var secondary: Color {
         let color = theme.foreground
         return Color(uiColor: UIColor { traits in
-            color.withAlphaComponent(traits.accessibilityContrast == .high ? 1 : 0.76)
+            color.withAlphaComponent(traits.accessibilityContrast == .high ? 1 : 0.72)
         })
     }
+
     // Existing in-label consumers (including TXT) retain their translucent selection paint.
-    var selection: Color { foreground.opacity(0.06) }
-    // V2 opaque selection must be behind the ButtonStyle's press feedback, not inside its label.
+    var selection: Color { accent.opacity(theme == .dark ? 0.18 : 0.11) }
+    // Opaque selection behind the ButtonStyle's press feedback.
     var selectedControl: Color { ReaderVisualStyle.selectionSurface(for: theme) }
-    var shadow: Color { Color.black.opacity(theme == .dark ? 0.12 : 0.04) }
+    var shadow: Color { Color.black.opacity(theme == .dark ? 0.34 : 0.08) }
+    var subtleShadow: Color { Color.black.opacity(theme == .dark ? 0.24 : 0.045) }
 }
 
 /// Tools geometry only. Never reserves space in the reading viewport.

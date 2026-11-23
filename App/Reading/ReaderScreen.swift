@@ -45,22 +45,63 @@ struct ReaderScreen: View {
                     .accessibilityAction(named: Text("退出阅读")) { exitReader() }
                 if model.loading && tools.exitRequest == nil && tools.valid {
                     VStack(alignment: .leading, spacing: 12) {
-                        ProgressView("正在打开书籍…")
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .tint(appearance.accent)
+                                .accessibilityHidden(true)
+                            Text("正在打开书籍…")
+                                .font(.system(.headline, design: .serif).weight(.semibold))
+                        }
                         Text("首次准备可能需要稍等。可返回书架停止本次打开，书籍与已保存位置保留。")
-                            .font(.footnote).fixedSize(horizontal: false, vertical: true)
+                            .font(.footnote)
+                            .foregroundStyle(appearance.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding().background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
-                    .padding().accessibilityElement(children: .combine)
+                    .padding(20)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(appearance.edge, lineWidth: 0.75)
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
+                    .padding()
+                    .accessibilityElement(children: .combine)
                     .accessibilityHidden(tools.panel != nil)
                 }
                 if !model.loading && model.window == nil && tools.exitRequest == nil && tools.valid {
                     VStack(spacing: 16) {
-                        Image(systemName: "book.closed").font(.largeTitle).accessibilityHidden(true)
-                        Text("暂时无法显示正文").accessibilityAddTraits(.isHeader)
-                        Button("重试打开") { Task { await model.retry() } }
-                            .buttonStyle(.borderedProminent).frame(minHeight: 44)
-                    }.padding().background(appearance.surface, in: RoundedRectangle(cornerRadius: 18))
-                        .accessibilityHidden(tools.panel != nil).disabled(tools.exitRequest != nil)
+                        ZStack {
+                            Circle()
+                                .fill(appearance.accentSoft)
+                                .frame(width: 52, height: 52)
+                            Image(systemName: "book.closed")
+                                .font(.title2.weight(.medium))
+                                .foregroundStyle(appearance.accent)
+                        }
+                        .accessibilityHidden(true)
+                        Text("暂时无法显示正文")
+                            .font(.system(.headline, design: .serif).weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        Button { Task { await model.retry() } } label: {
+                            Text("重试打开")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 22)
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
+                    }
+                    .padding(24)
+                    .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(appearance.edge, lineWidth: 0.75)
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
+                    .accessibilityHidden(tools.panel != nil)
+                    .disabled(tools.exitRequest != nil)
                 }
                 VStack(spacing: 0) {
                     titleBar(metrics: metrics, appearance: appearance)
@@ -152,14 +193,16 @@ struct ReaderScreen: View {
     }
 
     private func titleBarContent(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 10) {
             Button { exitReader() } label: {
                 Group {
-                    if tools.exitRequest != nil { ProgressView() }
-                    else { Image(systemName: "chevron.down").font(.system(size: 18, weight: .medium)) }
+                    if tools.exitRequest != nil { ProgressView().tint(appearance.accent) }
+                    else { Image(systemName: "chevron.down").font(.system(size: 16, weight: .semibold)) }
                 }
+                .foregroundStyle(appearance.foreground)
                 .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
+                .background(appearance.card.opacity(0.8), in: Circle())
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .disabled(!tools.canInteract)
@@ -173,12 +216,34 @@ struct ReaderScreen: View {
                 }
             }
             #endif
-            Text(model.title).font(.headline).lineLimit(metrics.verticalButtons ? 2 : 1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("书名，\(model.title)")
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.title)
+                    .font(.system(.headline, design: .serif).weight(.semibold))
+                    .foregroundStyle(appearance.foreground)
+                    .lineLimit(metrics.verticalButtons ? 2 : 1)
+                    .accessibilityLabel("书名，\(model.title)")
+                if model.chapterTotal > 0 && !metrics.compactHeight {
+                    Text("TXT · 共 \(model.chapterTotal) 章")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(appearance.secondary)
+                        .lineLimit(1)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 8).frame(minHeight: metrics.titleHeight)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.leading, 8)
+        .padding(.trailing, 14)
+        .padding(.vertical, 6)
+        .frame(minHeight: metrics.titleHeight)
+        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
+        .shadow(color: appearance.shadow, radius: 10, x: 0, y: 4)
         .padding(.horizontal, 12).padding(.top, 6)
         // Keep title/layout updates out of the visibility transition.
         .transaction { transaction in transaction.animation = nil }

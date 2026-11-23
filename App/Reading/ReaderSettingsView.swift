@@ -29,26 +29,29 @@ struct ReaderSettingsView: View {
         VStack(spacing: 8) {
             ReaderPanelHeader(title: "排版", appearance: appearance) {
                 Button(action: finish) {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont)
+                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .disabled(!isActive())
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     ReaderTypographyPreview(preferences: draft, appearance: appearance)
                     typographySection
                     themeSection
                     presetsSection
                     moreSection
-                }.padding(.horizontal, 20).padding(.bottom, 24)
+                }
+                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                .padding(.top, 4)
+                .padding(.bottom, 26)
             }
             .accessibilityIdentifier("reader.settings.scroll")
         }
@@ -75,29 +78,44 @@ struct ReaderSettingsView: View {
     }
 
     private var typographySection: some View {
-        ReaderSettingsSection(title: "文字", detail: "滑动预览，松手应用并自动保存", appearance: appearance) {
-            VStack(alignment: .leading, spacing: 8) {
+        ReaderSettingsSection(title: "文字与行距", detail: "滑动预览，松手应用并自动保存", appearance: appearance) {
+            VStack(alignment: .leading, spacing: 10) {
                 ReaderSettingAdjustment(title: "字号", key: "font", value: $draft.fontSize, range: 14...36,
-                    accent: appearance.foreground, isActive: isActive, commit: commitDraft)
-                Divider().overlay(appearance.edge)
+                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+                Rectangle()
+                    .fill(appearance.edge.opacity(0.65))
+                    .frame(height: 0.5)
+                    .accessibilityHidden(true)
                 ReaderSettingAdjustment(title: "行距", key: "spacing", value: $draft.lineSpacing, range: 0...20,
-                    accent: appearance.foreground, isActive: isActive, commit: commitDraft)
+                    accent: appearance.accent, isActive: isActive, commit: commitDraft)
+            }
+            .padding(14)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.7), lineWidth: 0.65)
+                    .allowsHitTesting(false)
             }
         }
     }
 
     private var themeSection: some View {
-        ReaderSettingsSection(title: "阅读背景", detail: "仅影响阅读界面", appearance: appearance) {
+        ReaderSettingsSection(title: "阅读纸色", detail: "仅影响阅读界面，不改变书架外观", appearance: appearance) {
             threeOptionLayout(ReaderTheme.allCases) { theme in themeButton(theme) }
         }
     }
 
     private var presetsSection: some View {
         ReaderSettingsSection(title: "快捷排版", detail: "只调整字号和行距，保留当前背景", appearance: appearance) {
-            VStack(spacing: 8) {
+            VStack(spacing: 10) {
                 threeOptionLayout(ReaderTypographyPreset.allCases) { preset in presetButton(preset) }
-                    .padding(4)
+                    .padding(5)
                     .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                            .allowsHitTesting(false)
+                    }
                 restoreTypographyButton
             }
         }
@@ -131,24 +149,32 @@ struct ReaderSettingsView: View {
         return Button { apply(preset) } label: {
             VStack(spacing: 4) {
                 Text(preset.title)
-                    .font(.subheadline.weight(selected ? .semibold : .regular))
+                    .font(.subheadline.weight(selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? appearance.accent : appearance.foreground)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("\(Int(preset.fontSize)) / \(Int(preset.lineSpacing))")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(appearance.foreground.opacity(selected ? 0.92 : 0.72))
+                    .foregroundStyle(selected ? appearance.accent.opacity(0.88) : appearance.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 10)
-            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 68)
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 66)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? appearance.accent : appearance.foreground, cornerRadius: 14))
         .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(selected ? appearance.surface : .clear)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(selected ? appearance.elevatedSurface : .clear)
+                .overlay {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(appearance.accent.opacity(0.45), lineWidth: 1)
+                    }
+                }
+                .shadow(color: selected ? appearance.subtleShadow : .clear, radius: 4, x: 0, y: 1)
                 .allowsHitTesting(false)
                 .animation(selectionAnimation, value: selectionMotionKey)
                 .transaction { transaction in
@@ -173,33 +199,53 @@ struct ReaderSettingsView: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .center)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 14))
         .disabled(!isActive() || ReaderTypographyPreset.standard.matches(draft))
         .accessibilityIdentifier("reader.typography.restore")
     }
 
     private var moreSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            Rectangle()
+                .fill(appearance.edge.opacity(0.6))
+                .frame(height: 0.5)
+                .padding(.vertical, 4)
+                .accessibilityHidden(true)
+
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 20) { diagnosticsButton; licenseButton }
-                VStack(alignment: .leading, spacing: 4) { diagnosticsButton; licenseButton }
+                HStack(spacing: 12) { diagnosticsButton; licenseButton; Spacer(minLength: 0) }
+                VStack(alignment: .leading, spacing: 6) { diagnosticsButton; licenseButton }
             }
-            .font(.footnote).disabled(!isActive())
+            .font(.footnote.weight(.medium))
+            .disabled(!isActive())
+
             Text("预览为示例文字，实际断行以正文为准。加减和快捷排版立即应用；“完成”只关闭，不撤销已应用的设置。")
-                .font(.caption).foregroundStyle(appearance.foreground.opacity(0.7))
+                .font(.caption)
+                .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var diagnosticsButton: some View {
         Button { if isActive() { info = .diagnostics } } label: {
-            Label("诊断与耗时", systemImage: "ladybug").frame(minHeight: 44).contentShape(Rectangle())
-        }.accessibilityIdentifier("reader.info.diagnostics")
+            Label("诊断与耗时", systemImage: "waveform.path.ecg")
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
+        .accessibilityIdentifier("reader.info.diagnostics")
     }
+
     private var licenseButton: some View {
         Button { if isActive() { info = .license } } label: {
-            Text("开源许可").frame(minHeight: 44).contentShape(Rectangle())
-        }.accessibilityIdentifier("reader.info.license")
+            Label("开源许可", systemImage: "doc.text")
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
+        .accessibilityIdentifier("reader.info.license")
     }
 
     private func themeButton(_ theme: ReaderTheme) -> some View {
@@ -210,41 +256,63 @@ struct ReaderSettingsView: View {
             guard isActive() else { return }
             draft.theme = theme; commitDraft()
         } label: {
-            VStack(spacing: 6) {
-                Text("阅").font(.system(size: 22))
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .foregroundStyle(Color(uiColor: theme.foreground))
-                    .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                Text(theme.title).font(.caption).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 8) {
+                // Miniature paper specimen swatch
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("阅")
+                            .font(.system(size: 18, weight: .semibold, design: .serif))
+                            .foregroundStyle(Color(uiColor: theme.foreground))
+                        Spacer(minLength: 0)
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(appearance.accent)
+                            .opacity(selected ? 1 : 0)
+                            .animation(selectionAnimation, value: selectionMotionKey)
+                            .transaction { if reduceMotion { $0.animation = nil } }
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Capsule()
+                            .fill(Color(uiColor: theme.foreground).opacity(0.32))
+                            .frame(height: 2.5)
+                        Capsule()
+                            .fill(Color(uiColor: theme.foreground).opacity(0.20))
+                            .frame(width: 34, height: 2.5)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                .background(Color(uiColor: theme.background), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(
+                            selected ? appearance.accent : appearance.edge.opacity(0.85),
+                            lineWidth: selected ? 1.6 : 0.65
+                        )
+                }
+                .accessibilityHidden(true)
+
+                Text(theme.title)
+                    .font(.caption.weight(selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? appearance.accent : appearance.foreground)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(8)
-            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 64)
+            .padding(6)
+            .frame(minWidth: 84, maxWidth: .infinity, minHeight: 74)
             .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(selected ? appearance.selection : .clear)
+                    .fill(selected ? appearance.selection : appearance.card.opacity(0.55))
                     .allowsHitTesting(false)
                     .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
-                    }
-            }
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: "checkmark")
-                    .font(.caption)
-                    .foregroundStyle(appearance.foreground)
-                    .padding(6)
-                    .opacity(selected ? 1 : 0)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { transaction in
-                        if reduceMotion { transaction.animation = nil }
-                    }
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                    .transaction { if reduceMotion { $0.animation = nil } }
             }
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground)).disabled(!isActive())
-        .accessibilityLabel(theme.title).accessibilityValue(selected ? "已选择" : "未选择")
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 16))
+        .disabled(!isActive())
+        .accessibilityLabel(theme.title)
+        .accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("reader.theme.\(theme.rawValue)")
     }
@@ -253,6 +321,7 @@ struct ReaderSettingsView: View {
         guard isActive() else { return }
         draft = preset.applying(to: draft); commitDraft()
     }
+
     private func commitDraft() {
         guard isActive() else { return }
         let value = draft.validated
@@ -260,6 +329,7 @@ struct ReaderSettingsView: View {
         preferences = value
         changed()
     }
+
     private func finish() {
         guard isActive() else { return }
         commitDraft(); close()

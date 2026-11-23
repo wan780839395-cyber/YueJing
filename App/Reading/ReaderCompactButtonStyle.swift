@@ -11,9 +11,8 @@ struct ReaderCompactButtonStyle: ButtonStyle {
     let tint: Color
     var role: ReaderControlRole = .quiet
     @Environment(\.isEnabled) private var isEnabled
-    var cornerRadius: CGFloat = 16
+    var cornerRadius: CGFloat = 14
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = isEnabled && configuration.isPressed
@@ -24,7 +23,7 @@ struct ReaderCompactButtonStyle: ButtonStyle {
             .foregroundStyle(tint)
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(tint.opacity(pressed ? 0.10 : (role == .primary ? 0.06 : 0)))
+                    .fill(tint.opacity(pressed ? 0.14 : (role == .primary ? 0.10 : 0)))
                     .allowsHitTesting(false)
                     .animation(animatePress ? ReaderMotion.pressFeedback : nil,
                                value: animatePress ? (pressed ? 1 : 2) : 0)
@@ -32,6 +31,6 @@ struct ReaderCompactButtonStyle: ButtonStyle {
                         if !animatePress { transaction.animation = nil }
                     }
             }
-            .opacity(isEnabled ? 1 : 0.4)
+            .opacity(isEnabled ? 1 : 0.38)
     }
 }

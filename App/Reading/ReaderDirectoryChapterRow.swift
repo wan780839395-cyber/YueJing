@@ -11,7 +11,7 @@ struct ReaderDirectoryChapterRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicType
 
     static let horizontalColumnLimit = 6
-    static let columnSpacing: CGFloat = 16
+    static let columnSpacing: CGFloat = 14
 
     static func ordinalColumnDigits(ordinal: Int, totalCount: Int) -> Int {
         let highestOrdinal = max(1, max(ordinal, totalCount))
@@ -28,11 +28,11 @@ struct ReaderDirectoryChapterRow: View {
 
     private var ordinalFont: Font {
         if usesStackedLayout {
-            return .system(.footnote, design: .serif).weight(.medium)
+            return .system(.footnote, design: .serif).weight(.semibold)
         }
         return columnDigits >= 5
-            ? .system(.subheadline, design: .serif).weight(.medium)
-            : .system(.title3, design: .serif).weight(.medium)
+            ? .system(.footnote, design: .serif).weight(.semibold)
+            : .system(.subheadline, design: .serif).weight(.semibold)
     }
 
     private var ordinalPlaceholder: String {
@@ -40,27 +40,42 @@ struct ReaderDirectoryChapterRow: View {
     }
 
     var body: some View {
-        Group {
-            if usesStackedLayout {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        ordinalLabel
-                        Spacer(minLength: 8)
+        HStack(spacing: 10) {
+            // Subtle vertical bookmark indicator for the active chapter
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(isCurrent ? appearance.accent : Color.clear)
+                .frame(width: 3, height: 22)
+                .accessibilityHidden(true)
+
+            Group {
+                if usesStackedLayout {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            ordinalLabel
+                            Spacer(minLength: 8)
+                            currentCheckmark
+                        }
+                        titleText
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: Self.columnSpacing) {
+                        measuredOrdinalColumn
+                        titleText
                         currentCheckmark
                     }
-                    titleText
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: Self.columnSpacing) {
-                    measuredOrdinalColumn
-                    titleText
-                    currentCheckmark
                 }
             }
         }
-        .padding(.leading, 10)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
+        .background {
+            if isCurrent {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(appearance.selection)
+                    .allowsHitTesting(false)
+            }
+        }
         .contentShape(Rectangle())
     }
 
@@ -80,15 +95,15 @@ struct ReaderDirectoryChapterRow: View {
         Text("\(ordinal)")
             .font(ordinalFont)
             .monospacedDigit()
-            .foregroundStyle(isCurrent ? appearance.foreground : appearance.secondary)
+            .foregroundStyle(isCurrent ? appearance.accent : appearance.secondary)
             .fixedSize(horizontal: true, vertical: false)
             .accessibilityHidden(true)
     }
 
     private var titleText: some View {
         Text(title)
-            .font(.system(.body, design: .serif))
-            .foregroundStyle(appearance.foreground)
+            .font(.system(.body, design: .serif).weight(isCurrent ? .semibold : .regular))
+            .foregroundStyle(isCurrent ? appearance.foreground : appearance.foreground.opacity(0.92))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
@@ -97,9 +112,9 @@ struct ReaderDirectoryChapterRow: View {
     @ViewBuilder
     private var currentCheckmark: some View {
         if isCurrent {
-            Image(systemName: "checkmark")
-                .font(.subheadline)
-                .foregroundStyle(appearance.secondary)
+            Image(systemName: "bookmark.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(appearance.accent)
                 .accessibilityHidden(true)
         }
     }

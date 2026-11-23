@@ -15,14 +15,26 @@ struct ReaderContentsSheet: View {
     let selectedBookmark: @MainActor (ReadingWindow) -> Bool
     @State private var showingBookmarks = false
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 10) {
             Group {
                 if dynamicType.isAccessibilitySize {
-                    VStack(spacing: 2) { sectionButtons }
-                } else { HStack(spacing: 8) { sectionButtons } }
-            }.padding(.horizontal, 16)
+                    VStack(spacing: 4) { sectionButtons }
+                } else {
+                    HStack(spacing: 4) { sectionButtons }
+                }
+            }
+            .padding(4)
+            .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                    .allowsHitTesting(false)
+            }
+            .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+
             if showingBookmarks {
                 ReaderBookmarksView(model: bookmarks, presentationID: presentationID, isActive: isActive,
                     close: close, appearance: appearance,
@@ -36,29 +48,53 @@ struct ReaderContentsSheet: View {
         }
         .onDisappear { model.endBookmarkPanel(presentationID) }
     }
+
     @ViewBuilder private var sectionButtons: some View {
         Button {
-            if isActive() && !bookmarks.isBusy { showingBookmarks = false }
+            if isActive() && !bookmarks.isBusy {
+                if reduceMotion { showingBookmarks = false }
+                else { withAnimation(ReaderMotion.selectionFeedback) { showingBookmarks = false } }
+            }
         } label: {
-            Text("目录").fontWeight(showingBookmarks ? .regular : .semibold)
-                .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                .background(showingBookmarks ? Color.clear : appearance.selection,
-                            in: RoundedRectangle(cornerRadius: 10))
+            Label("目录", systemImage: "list.bullet")
+                .font(.subheadline.weight(showingBookmarks ? .medium : .semibold))
+                .foregroundStyle(showingBookmarks ? appearance.secondary : appearance.accent)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background {
+                    if !showingBookmarks {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(appearance.elevatedSurface)
+                            .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityValue(showingBookmarks ? "" : "已选择")
         .accessibilityIdentifier("reader.contents.directory")
         .disabled(!isActive() || bookmarks.isBusy)
+
         Button {
             if isActive() && !bookmarks.isBusy && !showingBookmarks {
                 model.refreshBookmarkCapture(presentationID)
-                showingBookmarks = true
+                if reduceMotion { showingBookmarks = true }
+                else { withAnimation(ReaderMotion.selectionFeedback) { showingBookmarks = true } }
             }
         } label: {
-            Text("书签").fontWeight(showingBookmarks ? .semibold : .regular)
-                .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                .background(showingBookmarks ? appearance.selection : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 10))
+            Label("书签", systemImage: "bookmark")
+                .font(.subheadline.weight(showingBookmarks ? .semibold : .medium))
+                .foregroundStyle(showingBookmarks ? appearance.sealAccent : appearance.secondary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background {
+                    if showingBookmarks {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(appearance.elevatedSurface)
+                            .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityValue(showingBookmarks ? "已选择" : "")

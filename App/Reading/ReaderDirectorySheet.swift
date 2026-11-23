@@ -15,18 +15,19 @@ struct ReaderDirectorySheet: View {
     @AccessibilityFocusState private var focusedChapterID: String?
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
+
     var body: some View {
         VStack(spacing: 0) {
             ReaderPanelHeader(title: "目录", appearance: appearance) {
                 Button { if active { close() } } label: {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont)
+                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
                                minHeight: ReaderVisualStyle.minimumControlHeight)
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .accessibilityLabel("关闭目录")
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
@@ -42,9 +43,14 @@ struct ReaderDirectorySheet: View {
                                 Text(message).fixedSize(horizontal: false, vertical: true)
                                 Button("重试目录") { if active { model.retry() } }.frame(minHeight: 44)
                             }
+                            .listRowBackground(appearance.surface)
                         }
                         if let page = model.state.page {
-                            if page.chapters.isEmpty { Text("暂无目录。") }
+                            if page.chapters.isEmpty {
+                                Text("暂无目录。")
+                                    .foregroundStyle(appearance.secondary)
+                                    .listRowBackground(appearance.surface)
+                            }
                             ForEach(Array(page.chapters.enumerated()), id: \.element.id) { item in
                                 let current = page.currentIndex == page.start + item.offset
                                 let owner = model.ownerRevision
@@ -62,14 +68,22 @@ struct ReaderDirectorySheet: View {
                                 .accessibilityValue(current ? "当前章节" : "")
                                 .accessibilityHint("阅读本章")
                                 .buttonStyle(.plain)
-                                .listRowBackground(current ? appearance.selection : appearance.surface)
+                                .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                                .listRowBackground(appearance.surface)
                                 .listRowSeparator(.hidden)
                             }
                         } else if !model.state.loading, model.state.message == nil {
                             Text("正文显示后会定位当前章节。")
+                                .foregroundStyle(appearance.secondary)
+                                .listRowBackground(appearance.surface)
                         }
                         if model.state.loading && (model.state.page?.chapters.isEmpty ?? true) {
-                            HStack { ProgressView(); Text("正在读取目录…") }.accessibilityElement(children: .combine)
+                            HStack(spacing: 10) {
+                                ProgressView().tint(appearance.accent)
+                                Text("正在读取目录…").foregroundStyle(appearance.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .listRowBackground(appearance.surface)
                         }
                     }
                     .listStyle(.plain)
@@ -108,6 +122,7 @@ struct ReaderDirectorySheet: View {
         }
         .accessibilityAction(.escape) { if active { close() } }
     }
+
     private var active: Bool { isActive() && model.state.ownsPresentation(presentationID) }
 
     private func directorySummaryHeader(page: ReadingDirectoryPage) -> some View {
@@ -135,19 +150,22 @@ struct ReaderDirectorySheet: View {
                 }
             }
             Rectangle()
-                .fill(appearance.edge)
+                .fill(appearance.edge.opacity(0.6))
                 .frame(height: ReaderVisualStyle.panelDividerHeight)
                 .accessibilityHidden(true)
         }
         .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-        .padding(.top, 8)
+        .padding(.top, 10)
         .background(appearance.surface)
     }
 
     private func totalCountBadge(total: Int) -> some View {
         Text("共 \(total) 章")
-            .font(.system(.subheadline, design: .serif).weight(.medium).monospacedDigit())
-            .foregroundStyle(appearance.foreground)
+            .font(.system(.subheadline, design: .serif).weight(.semibold).monospacedDigit())
+            .foregroundStyle(appearance.accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3.5)
+            .background(appearance.accentSoft, in: Capsule())
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("总章节数，共 \(total) 章")
             .accessibilityIdentifier("reader.directory.total")
@@ -164,7 +182,7 @@ struct ReaderDirectorySheet: View {
         }
         return Text(text)
             .font(.caption.monospacedDigit())
-            .foregroundStyle(appearance.foreground.opacity(0.72))
+            .foregroundStyle(appearance.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }

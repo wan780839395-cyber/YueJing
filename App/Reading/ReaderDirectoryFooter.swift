@@ -26,9 +26,14 @@ struct ReaderDirectoryFooter: View {
         }
         .font(.footnote)
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
         .background(appearance.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .padding(.horizontal, 12).padding(.bottom, 12)
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -114,7 +119,7 @@ struct ReaderDirectoryFooter: View {
                     Label("回到当前章节", systemImage: "scope").labelStyle(.titleAndIcon)
                 }
             }
-            .font(.footnote.weight(.medium))
+            .font(.footnote.weight(.semibold))
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: !fillsWidth, vertical: true)
             .padding(.horizontal, iconOnly ? 10 : 14)
@@ -122,7 +127,7 @@ struct ReaderDirectoryFooter: View {
             .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                    minHeight: ReaderVisualStyle.minimumControlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
         .accessibilityLabel("回到当前章节")
     }
 
@@ -146,7 +151,7 @@ struct ReaderDirectoryFooter: View {
                 .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil,
                        minHeight: ReaderVisualStyle.minimumControlHeight)
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary))
         .disabled(disabled)
     }
 
@@ -160,7 +165,7 @@ struct ReaderDirectoryFooter: View {
                 .accessibilityHidden(true)
             Text(rangeLabel)
                 .font(.footnote.monospacedDigit())
-                .foregroundStyle(appearance.foreground.opacity(0.7))
+                .foregroundStyle(appearance.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: singleLine, vertical: true)
             Color.clear

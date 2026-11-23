@@ -17,20 +17,26 @@ struct ReaderSettingsSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 9) {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(appearance.accent)
+                        .frame(width: 3, height: 14)
+                        .accessibilityHidden(true)
                     Text(title)
-                        .font(.body.weight(.medium))
+                        .font(.system(.subheadline, design: .serif).weight(.semibold))
+                        .foregroundStyle(appearance.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
                 }
                 Text(detail)
-                    .font(.footnote).foregroundStyle(appearance.secondary)
+                    .font(.caption)
+                    .foregroundStyle(appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             content
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 8)
     }
 }
