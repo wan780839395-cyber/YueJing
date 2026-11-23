@@ -9,6 +9,7 @@ struct EPUBResourceCapability: Sendable, Equatable {
     var preferences: ReaderPreferences
     var readingMode: EPUBReadingMode = .scroll
     var layoutMode: EPUBLayoutMode = .original
+    var userFontID: String? = nil
 
     var expectedHost: String {
         Self.host(for: token)
@@ -37,11 +38,28 @@ struct EPUBResourceCapability: Sendable, Equatable {
         return components.url
     }
 
+    // The session URL is opaque: it never carries a filesystem path or a selectable library ID.
+    static func userFontURL(for token: EPUBNavigationToken) -> URL? {
+        var parts = URLComponents()
+        parts.scheme = EPUBResourceHandler.scheme
+        parts.host = host(for: token)
+        parts.path = "/.yj-body-font"
+        parts.query = "selected=1"
+        return parts.url
+    }
+
+    func selectedFont(for url: URL) -> String? {
+        guard let userFontID, EPUBUserFontPreference.validID(userFontID),
+              url == Self.userFontURL(for: token) else { return nil }
+        return userFontID
+    }
+
     static func == (lhs: EPUBResourceCapability, rhs: EPUBResourceCapability) -> Bool {
         lhs.token == rhs.token &&
             lhs.publication.package == rhs.publication.package &&
             lhs.publication.resourceRoot == rhs.publication.resourceRoot &&
             lhs.preferences == rhs.preferences && lhs.readingMode == rhs.readingMode && lhs.layoutMode == rhs.layoutMode
+            && lhs.userFontID == rhs.userFontID
     }
 }
 
@@ -56,6 +74,11 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         "frame-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'"
 
     private var capability: EPUBResourceCapability?
+    private let userFonts: EPUBUserFontStore
+    init(userFonts: EPUBUserFontStore = .shared) {
+        self.userFonts = userFonts
+        super.init()
+    }
     private var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private(set) var servedPaths: [String] = []
     private(set) var rejectedURLs: [String] = []
@@ -66,7 +89,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
     #endif
 
     func activate(_ capability: EPUBResourceCapability) {
-        if self.capability?.token != capability.token {
+        if self.capability?.token != capability.token || self.capability?.userFontID != capability.userFontID {
             cancelInFlightTasks()
         }
         self.capability = capability
@@ -89,6 +112,30 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
+    private func serveUserFont(_ id: String, url: URL, token: EPUBNavigationToken, task: any WKURLSchemeTask) {
+        let key = ObjectIdentifier(task)
+        activeTasks[key] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let bytes = try await userFonts.data(for: id)
+                try Task.checkCancellation()
+                guard capability?.token == token, capability?.selectedFont(for: url) == id,
+                      activeTasks[key] != nil else { return }
+                let type = bytes.starts(with: [0x4F, 0x54, 0x54, 0x4F]) ? "font/otf" : "font/ttf"
+                guard !bytes.isEmpty, bytes.count <= EPUBAuthorStyles.maxFontBytes,
+                      let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": type, "Content-Length": String(bytes.count),
+                            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"]) else { throw EPUBError.corruptResource }
+                activeTasks.removeValue(forKey: key)
+                task.didReceive(response); task.didReceive(bytes); task.didFinish()
+            } catch {
+                guard activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else { return }
+                // Optional presentation choice: let FontFace reject and fall back, never invalidate the book.
+                task.didFailWithError(EPUBError.corruptResource)
+            }
+        }
+    }
+
     func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
         guard let url = urlSchemeTask.request.url else {
             rejectedURLs.append("<missing-url>")
@@ -100,7 +147,6 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
               url.user == nil,
               url.password == nil,
               url.port == nil,
-              url.query == nil,
               url.host?.lowercased() == capability.expectedHost else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.staleSession)
@@ -110,6 +156,15 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
         guard method == "GET" else {
             rejectedURLs.append(url.absoluteString)
             urlSchemeTask.didFailWithError(EPUBError.corruptResource)
+            return
+        }
+        if let id = capability.selectedFont(for: url) {
+            serveUserFont(id, url: url, token: capability.token, task: urlSchemeTask)
+            return
+        }
+        guard url.query == nil else {
+            rejectedURLs.append(url.absoluteString)
+            urlSchemeTask.didFailWithError(EPUBError.staleSession)
             return
         }
         let rawPath = String(url.path.drop(while: { $0 == "/" }))

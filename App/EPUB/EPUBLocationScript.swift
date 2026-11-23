@@ -29,6 +29,7 @@ struct EPUBLocatorPayload: Sendable, Equatable {
     var viewportOffset: Double? = nil
     var restorationPending = false
     var authorStyleFallback = false
+    var userFontUnavailable = false
 }
 
 /// Isolated content-world script for DOM text-node + UTF-16 offset locating and restoration.
@@ -235,7 +236,8 @@ enum EPUBLocationScript {
         startAtEnd: Bool = false,
         readingMode: EPUBReadingMode = .scroll,
         preserveViewport: Bool = false,
-        layoutMode: EPUBLayoutMode = .original
+        layoutMode: EPUBLayoutMode = .original,
+        userFontID: String? = nil
     ) throws -> String {
         guard let chapterIndex = package.spine.firstIndex(of: token.path),
               let nodes = try package.nodes(at: token.path) else {
@@ -262,6 +264,11 @@ enum EPUBLocationScript {
             "authorTextScale": preferences.validated.fontSize / 20,
             "css": trustedStyleSheet(for: preferences, readingMode: readingMode, layoutMode: layoutMode)
         ]
+        if let id = userFontID, EPUBUserFontPreference.validID(id),
+           let url = EPUBResourceCapability.userFontURL(for: token) {
+            config["userFontID"] = id
+            config["userFontURL"] = url.absoluteString
+        }
         if readingMode == .scroll, targetPosition?.path == token.path,
            let offset = targetPosition?.viewportOffset {
             guard offset.isFinite, abs(offset) <= 16_384 else { throw EPUBError.invalidPosition }
@@ -303,6 +310,12 @@ enum EPUBLocationScript {
         } else {
             authorStyleFallback = false
         }
+        var userFontUnavailable = false
+        if let raw = dict["userFontUnavailable"] {
+            guard kind == .ready, let number = raw as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            userFontUnavailable = number.boolValue
+        }
         return EPUBLocatorPayload(
             kind: kind,
             sessionID: sessionID,
@@ -322,7 +335,8 @@ enum EPUBLocationScript {
             contentWidth: (dict["contentWidth"] as? NSNumber)?.doubleValue ?? 0,
             viewportOffset: (dict["viewportOffset"] as? NSNumber)?.doubleValue,
             restorationPending: dict["restorationPending"] as? Bool ?? false,
-            authorStyleFallback: authorStyleFallback
+            authorStyleFallback: authorStyleFallback,
+            userFontUnavailable: userFontUnavailable
         )
     }
 
@@ -384,6 +398,7 @@ enum EPUBLocationScript {
 
         function post(payload) {
             try {
+                if (payload.kind === "ready" && userFont && userFont.unavailable) { payload.userFontUnavailable = true; }
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.yjepubLocator) {
                     window.webkit.messageHandlers.yjepubLocator.postMessage(payload);
                 }
@@ -791,6 +806,7 @@ enum EPUBLocationScript {
             });
             var faces = [], matched = new Set(), faceIndex = 0;
             document.fonts.forEach(function(font) {
+                if (userFont && font === userFont.face) { return; }
                 var cssRule = orderedRules[faceIndex++];
                 var family = familyKey(font.family);
                 if (families.has(family)) {
@@ -902,6 +918,7 @@ enum EPUBLocationScript {
                     });
                 });
                 document.fonts.forEach(function(font) {
+                    if (userFont && font === userFont.face) { return; }
                     var entry = {family: familyKey(font.family), weight: normalizeWeight(font.weight),
                         fontStyle: normalizeFontStyle(font.style), stretch: normalizeStretch(font.stretch),
                         range: normalizedFontRange(font.unicodeRange)};
@@ -1499,6 +1516,72 @@ enum EPUBLocationScript {
             });
         }
 
+        // Document-local only: an installed face has already decoded and needs no new
+        // epoch URL. Never retain an unresolved load across configure/park transactions.
+        var userFont = null;
+        function clearUserFont() {
+            if (!userFont) { return; }
+            if (userFont.style) { userFont.style.remove(); }
+            if (userFont.face && document.fonts) { document.fonts.delete(userFont.face); }
+            userFont = null;
+        }
+
+        function prepareUserFont(config) {
+            var id = config.userFontID;
+            if (typeof id !== "string" || id.length !== 64 || /[^a-f0-9]/.test(id)) {
+                clearUserFont();
+                return null;
+            }
+            if (userFont && userFont.id === id && (userFont.style || (config.preserveViewport && userFont.unavailable))) {
+                return null;
+            }
+            clearUserFont();
+            var record = userFont = {id: id}, generation = state.syncGeneration;
+            var family = "yj-user-" + id;
+            return new Promise(function(resolve) {
+                var timer = window.setTimeout(function() { finish(false); }, 1500);
+                var settled = false;
+                function finish(ok) {
+                    if (settled) { return; }
+                    settled = true;
+                    window.clearTimeout(timer);
+                    if (record === userFont && generation === state.syncGeneration) {
+                        try {
+                            if (ok) {
+                                document.fonts.add(record.face);
+                                var style = document.createElementNS("http://www.w3.org/1999/xhtml", "style");
+                                // Only generated text leaves; never change an ancestor's inherited typography.
+                                style.textContent = 'section[data-yj-chapter] span[data-yj-original-id^="yj-t"]' +
+                                    ':not(:is(h1,h2,h3,h4,h5,h6,pre,code,kbd,samp,var,svg,math) *)' +
+                                    '{font-family:"' + family + '" !important;}';
+                                document.head.appendChild(style);
+                                record.style = style;
+                            }
+                        } catch (_) { ok = false; }
+                        if (!ok) {
+                            if (record.face && document.fonts) { document.fonts.delete(record.face); }
+                            record.face = null;
+                            record.unavailable = true;
+                        }
+                    }
+                    resolve();
+                }
+                try {
+                    // Isolated native configuration is the sole URL source (never chapter CSS or metadata).
+                    if (!config.userFontURL || !document.fonts) { finish(false); return; }
+                    record.face = new FontFace(family, 'url(' + JSON.stringify(config.userFontURL) + ')');
+                    record.face.load().then(function() { finish(true); }, function() { finish(false); });
+                } catch (_) { finish(false); }
+            });
+        }
+
+        function configuredFontWait(config) {
+            var custom = prepareUserFont(config);
+            var author = hasAuthorFonts(document) ? waitForAuthorFonts(document) : null;
+            if (!custom || !author) { return custom || author; }
+            return Promise.all([author, custom]).then(function(results) { return results[0]; });
+        }
+
         function configure(config) {
             if (!config || typeof config !== "object") { return; }
             recordDiagnostic(config.preserveViewport === true ? "promotion" : "navigation");
@@ -1532,10 +1615,11 @@ enum EPUBLocationScript {
                     post(ready);
                     reportScrollNow();
                 }
-                if (hasAuthorFonts(document)) {
+                var promotionFonts = configuredFontWait(config);
+                if (promotionFonts) {
                     state.ready = false;
                     state.suppressingReflow = true;
-                    waitForAuthorFonts(document).then(function(result) {
+                    promotionFonts.then(function(result) {
                         if (state.sessionID !== promotedSession || state.epoch !== promotedEpoch || state.syncGeneration !== promotedGeneration) { return; }
                         if (result && result.fallback) {
                             window.requestAnimationFrame(function() {
@@ -1632,9 +1716,10 @@ enum EPUBLocationScript {
                     return;
                 }
                 var requested = {x: state.requestedScroll.x, y: state.requestedScroll.y};
+                var restoreGeneration = state.syncGeneration;
                 var settlingFrames = 0, stableFrames = 0, corrections = 0;
                 function confirmRestoration() {
-                    if (state.sessionID !== mySession || state.epoch !== myEpoch) { return; }
+                    if (state.sessionID !== mySession || state.epoch !== myEpoch || state.syncGeneration !== restoreGeneration) { return; }
                     var maxX = Math.max(0, contentWidth() - viewportWidth());
                     var maxY = Math.max(0, Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0) - window.innerHeight);
                     var expectedX = Math.max(0, Math.min(maxX, requested.x));
@@ -1700,11 +1785,12 @@ enum EPUBLocationScript {
                 }
                 window.requestAnimationFrame(confirmRestoration);
             }
-            if (!hasAuthorFonts(document)) {
+            var fonts = configuredFontWait(config);
+            if (!fonts) {
                 waitForImagesAndTwoFrames(mySession, myEpoch, restoreAndConfirm);
                 return;
             }
-            waitForAuthorFonts(document).then(function() {
+            fonts.then(function() {
                 if (state.sessionID !== mySession || state.epoch !== myEpoch || state.syncGeneration !== myGeneration) { return; }
                 waitForImagesAndTwoFrames(mySession, myEpoch, restoreAndConfirm);
             }).catch(function() {
@@ -1857,6 +1943,7 @@ enum EPUBLocationScript {
             parkForReopen: function() {
                 // Keep nodes/pixels only. No old async transaction, sample or epoch survives closing.
                 state.syncGeneration += 1;
+                if (userFont && !userFont.style) { clearUserFont(); }
                 cancelImagePreloads();
                 if (state.scrollTimer !== null) { window.clearTimeout(state.scrollTimer); }
                 state.scrollTimer = null;

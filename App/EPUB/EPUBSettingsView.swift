@@ -22,6 +22,8 @@ struct EPUBSettingsView: View {
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
     let appearance: ReaderToolAppearance
+    let userFontID: String?
+    let onUserFontChange: @MainActor (EPUBUserFont?) -> Void
     @State private var draft: ReaderPreferences
     @State private var info: AuxiliaryPage?
     @State private var runtimeSummary: String?
@@ -49,7 +51,9 @@ struct EPUBSettingsView: View {
         runtimeDiagnostics: (@MainActor () async -> String)? = nil,
         isActive: @escaping @MainActor () -> Bool,
         close: @escaping @MainActor () -> Void,
-        appearance: ReaderToolAppearance
+        appearance: ReaderToolAppearance,
+        userFontID: String? = nil,
+        onUserFontChange: @escaping @MainActor (EPUBUserFont?) -> Void = { _ in }
     ) {
         _preferences = preferences
         _readingMode = readingMode
@@ -64,6 +68,8 @@ struct EPUBSettingsView: View {
         self.isActive = isActive
         self.close = close
         self.appearance = appearance
+        self.userFontID = userFontID
+        self.onUserFontChange = onUserFontChange
         _draft = State(initialValue: preferences.wrappedValue.validated)
     }
 
@@ -91,6 +97,7 @@ struct EPUBSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     if settingsGroup == .common {
                         commonContent
+                        EPUBUserFontPicker(selectedID: userFontID, isActive: isActive, select: onUserFontChange)
                     } else {
                         moreContent
                     }

@@ -1,5 +1,5 @@
 import Foundation
-import ReaderDomain
+@testable import ReaderDomain
 import Testing
 import UIKit
 import WebKit
@@ -176,6 +176,76 @@ struct EPUBFontLoadingHostTests {
             }
             try await reader2.close(position: nil, sequence: 1, token: nil, preferences: reader2.preferences)
         }
+    }
+
+    @Test func userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain() async throws {
+        try await withHostFixture { fixture in
+            let store = EPUBUserFontStore(root: fixture.root.appendingPathComponent("test-font-library"))
+            let file = fixture.root.appendingPathComponent("wide.ttf")
+            try Self.makeSyntheticGeometricFontData().write(to: file)
+            let font = try await store.importFont(from: file)
+            let archive = fixture.root.appendingPathComponent("body-font.epub")
+            let html = "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Body</title></head><body>" +
+                String(repeating: "<p>AAAA</p>", count: 140) + "</body></html>"
+            try EPUBUITestFixture.writeCustomXHTMLEPUB(to: archive, title: "Body", bodyXHTML: html)
+            let bytes = try Data(contentsOf: archive)
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let path = try #require(reader.publication.package.spine.first)
+            let anchor = EPUBReadingPosition(bookID: receipt.book.id, versionID: reader.publication.package.versionID,
+                path: path, node: 72, utf16Offset: 2, viewportOffset: 32)
+            let originalToken = try await reader.beginNavigation(path: path)
+            let marked = try await reader.markReady(originalToken)
+            let saved = try await reader.save(anchor, sequence: 1, token: originalToken)
+            #expect(marked && saved)
+            let controller = EPUBWebViewController(userFonts: store)
+            try await fixture.withHostedController(controller) {
+                for id in [Optional(font.id), nil] {
+                    let token = try await reader.beginNavigation(path: path)
+                    let result = try await loadAndAwaitOutcome(controller: controller, request: EPUBNavigationRequest(
+                        id: UUID(), token: token, publication: reader.publication, targetPosition: anchor,
+                        fragment: nil, preferences: reader.preferences, preserveTargetAnchor: true,
+                        reloadDocument: false, layoutMode: .original, userFontID: id))
+                    guard case .ready(let payload, _, _, _) = result else { Issue.record("No restored ready"); return }
+                    #expect(!payload.userFontUnavailable && payload.path == path)
+                    #expect(payload.restoredNode == anchor.node && payload.restoredOffset == anchor.utf16Offset)
+                    let metric = try await controller.evaluateLocatorJavaScriptForTesting("""
+                        (()=>{const s=document.querySelector('p span'), r=document.createRange();
+                        r.selectNodeContents(s);return r.getBoundingClientRect().width/parseFloat(getComputedStyle(s).fontSize);})()
+                        """)
+                    let em = try #require(metric as? NSNumber).doubleValue
+                    if id != nil { #expect(abs(em - 10) < 0.1) } else { #expect(em < 8) }
+                }
+            }
+            try await reader.abandon()
+            let fresh = LibraryService(store: try LibraryStore(root: fixture.managedRoot))
+            let reopened = try await fresh.openEPUB(id: receipt.book.id)
+            #expect(reopened.reading.position == anchor)
+            try await reopened.abandon()
+            #expect(try Data(contentsOf: archive) == bytes)
+        }
+    }
+
+    @Test func bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile() throws {
+        let suite = "font-test-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite)); defer { defaults.removePersistentDomain(forName: suite) }
+        let id = String(repeating: "a", count: 64)
+        EPUBUserFontPreference.set(id, bookID: "first", defaults: defaults)
+        #expect(EPUBUserFontPreference.restored(bookID: "first", defaults: defaults) == id)
+        #expect(EPUBUserFontPreference.restored(bookID: "second", defaults: defaults) == nil)
+        EPUBUserFontPreference.set(nil, bookID: "first", defaults: defaults)
+        #expect(EPUBUserFontPreference.restored(bookID: "first", defaults: defaults) == nil)
+        let book = EPUBPackage(sourceSHA256: "first", title: "", spine: [], navigation: [], resources: [], textNodes: [:], coverPath: nil)
+        let token = EPUBNavigationToken(sessionID: "a", path: "p.xhtml")
+        var cap = EPUBResourceCapability(token: token, publication: EPUBPublication(package: book, resourceRoot: URL(fileURLWithPath: "/unused")), preferences: ReaderPreferences())
+        let url = try #require(EPUBResourceCapability.userFontURL(for: token))
+        #expect(cap.selectedFont(for: url) == nil)
+        cap.userFontID = id
+        #expect(cap.selectedFont(for: url) == id)
+        let stale = try #require(EPUBResourceCapability.userFontURL(for: EPUBNavigationToken(sessionID: "a", path: "p.xhtml")))
+        #expect(cap.selectedFont(for: stale) == nil)
+        let other = try #require(URL(string: url.absoluteString + "&id=other"))
+        #expect(cap.selectedFont(for: other) == nil)
     }
 
     @Test func epubWebKitLoadsReconstructedWOFF2ThroughFontCapability() async throws {

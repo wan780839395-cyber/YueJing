@@ -18,6 +18,7 @@ struct EPUBNavigationRequest: Equatable {
     var readingMode: EPUBReadingMode = .scroll
     var preserveViewport: Bool = false
     var layoutMode: EPUBLayoutMode = .original
+    var userFontID: String? = nil
 
     static func == (lhs: EPUBNavigationRequest, rhs: EPUBNavigationRequest) -> Bool {
         lhs.id == rhs.id &&
@@ -30,7 +31,7 @@ struct EPUBNavigationRequest: Equatable {
             lhs.preserveTargetAnchor == rhs.preserveTargetAnchor &&
             lhs.reloadDocument == rhs.reloadDocument && lhs.startAtEnd == rhs.startAtEnd &&
             lhs.readingMode == rhs.readingMode && lhs.preserveViewport == rhs.preserveViewport &&
-            lhs.layoutMode == rhs.layoutMode
+            lhs.layoutMode == rhs.layoutMode && lhs.userFontID == rhs.userFontID
     }
 }
 
@@ -142,7 +143,11 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     """
     private static var cachedRuleList: WKContentRuleList?
 
-    let resourceHandler = EPUBResourceHandler()
+    private(set) var resourceHandler = EPUBResourceHandler()
+    convenience init(userFonts: EPUBUserFontStore) {
+        self.init(nibName: nil, bundle: nil)
+        resourceHandler = EPUBResourceHandler(userFonts: userFonts)
+    }
     private(set) var webView: WKWebView!
     private let canvasAccessibilityView = UIView(frame: .zero)
     private var messageProxy: WeakScriptMessageProxy?
@@ -353,11 +358,13 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         let parked = parkedDocument
         let reuseClosed = !request.reloadDocument && parked?.paths.contains(request.token.path) == true &&
             parked?.request.publication.package == request.publication.package &&
+            parked?.request.userFontID == request.userFontID &&
             parked?.request.publication.resourceRoot == request.publication.resourceRoot &&
             parked?.request.token.sessionID != request.token.sessionID
         let previous = activeRequest ?? parked?.request
         let reuseDOM = reuseClosed || (!request.reloadDocument && renderedChapterPaths.contains(request.token.path) &&
             readyToken != nil && readyToken == previous?.token &&
+            previous?.userFontID == request.userFontID &&
             loadedDocumentToken?.sessionID == request.token.sessionID &&
             previous?.publication.package == request.publication.package &&
             previous?.publication.resourceRoot == request.publication.resourceRoot)
@@ -410,7 +417,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             token: request.token,
             publication: request.publication,
             preferences: request.preferences,
-            readingMode: request.readingMode, layoutMode: request.layoutMode
+            readingMode: request.readingMode, layoutMode: request.layoutMode, userFontID: request.userFontID
         )
         resourceHandler.activate(capability)
 
@@ -723,7 +730,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 preserveTargetAnchor: request.preserveTargetAnchor,
                 startAtEnd: request.startAtEnd,
                 readingMode: request.readingMode,
-                preserveViewport: request.preserveViewport, layoutMode: request.layoutMode
+                preserveViewport: request.preserveViewport, layoutMode: request.layoutMode,
+                userFontID: request.userFontID
             )
             let motion = "window.__yjEpub && window.__yjEpub.setScrollActive(\(nativeScrollActive));"
             let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + motion + invoke

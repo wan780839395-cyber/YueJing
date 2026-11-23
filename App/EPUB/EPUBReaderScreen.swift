@@ -351,7 +351,12 @@ struct EPUBReaderScreen: View {
                     },
                     isActive: { panelActive(.settings, session.id) },
                     close: { closePanel(session.id) },
-                    appearance: appearance
+                    appearance: appearance,
+                    userFontID: model.userFontID,
+                    onUserFontChange: { font in
+                        guard panelActive(.settings, session.id) else { return }
+                        model.setUserFont(font)
+                    }
                 )
             }
         }

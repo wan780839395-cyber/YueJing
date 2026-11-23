@@ -15,6 +15,8 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published var preferences = ReaderPreferences()
     @Published private(set) var readingMode: EPUBReadingMode
     @Published private(set) var layoutMode: EPUBLayoutMode
+    @Published private(set) var userFontID: String?
+    @Published private var userFontUnavailable = false
     @Published private(set) var styleCompatibility: EPUBStyleCompatibility?
     // Runtime state belongs to the accepted visible token, never to the whole book.
     @Published private(set) var runtimeFontFallback = false
@@ -24,7 +26,8 @@ final class EPUBReaderViewModel: ObservableObject {
 
     var effectiveLayoutMode: EPUBLayoutMode { layoutMode.effective(for: styleCompatibility) }
     var compatibilitySummary: String? {
-        Self.warningSummary(layoutMode: layoutMode, compatibility: styleCompatibility,
+        if userFontUnavailable { return "本书选择的字体暂不可用，已按原排版显示。可在字体设置中重新选择。" }
+        return Self.warningSummary(layoutMode: layoutMode, compatibility: styleCompatibility,
                             runtimeFontFallback: runtimeFontFallback && runtimeFontFallbackToken == currentToken)
     }
 
@@ -68,6 +71,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     private func resetCurrentRuntimeWarning() {
+        userFontUnavailable = false
         runtimeFontFallback = false
         runtimeFontFallbackToken = nil
         compatibilityNoticeDismissed = false
@@ -152,6 +156,7 @@ final class EPUBReaderViewModel: ObservableObject {
             rawValue: UserDefaults.standard.string(forKey: EPUBReadingMode.defaultsKey) ?? ""
         ) ?? .scroll
         self.layoutMode = layoutMode ?? EPUBLayoutMode.restored()
+        self.userFontID = EPUBUserFontPreference.restored(bookID: bookID)
         openingObservation = EPUBOpeningObservation(intentAt: openingIntent, processOpenOrdinal: processOpenOrdinal,
                                                     rendererTaken: rendererCache.map { _ in retained?.controller != nil })
         preferences = ReaderPreferences(theme: EPUBPresentationThemeHint.read())
@@ -190,6 +195,34 @@ final class EPUBReaderViewModel: ObservableObject {
         resetCurrentRuntimeWarning()
         UserDefaults.standard.set(mode.rawValue, forKey: EPUBLayoutMode.defaultsKey)
         settingsChanged()
+    }
+
+    func setUserFont(_ font: EPUBUserFont?) {
+        let id = font?.id
+        guard id != userFontID, id.map(EPUBUserFontPreference.validID) != false,
+              let reader, let token = currentToken, ready, !closing, !suspended, !exitSaveFailed else { return }
+        let life = lifecycle
+        navigationTask?.cancel()
+        navigationTask = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            let sampled = await self.webView.sampleNow()
+            guard self.lifecycle == life, self.currentToken == token, self.ready,
+                  !self.closing, !self.suspended, !self.exitSaveFailed, !Task.isCancelled else { return }
+            var target = self.currentPosition.flatMap { $0.path == token.path ? $0 : nil }
+            if let sampled, sampled.sessionID == token.sessionID, sampled.epoch == token.epoch,
+               self.webView.controller?.renderedChapterPaths.contains(sampled.path) == true,
+               let live = try? EPUBLocationScript.makeValidatedPosition(bookID: reader.book.id,
+                    package: reader.publication.package, path: sampled.path, node: sampled.node,
+                    rawUTF16Offset: sampled.utf16Offset, viewportOffset: sampled.viewportOffset) { target = live }
+            guard let target else {
+                self.message = "尚未取得当前阅读位置，本次未更换字体。"
+                return
+            }
+            self.userFontID = id
+            EPUBUserFontPreference.set(id, bookID: self.bookID)
+            await self.beginChapterNavigation(path: target.path, targetPosition: target, fragment: nil,
+                preserveTargetAnchor: true, persistOnReady: false, reloadDocument: false)
+        }
     }
 
     func load() async {
@@ -480,7 +513,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 preserveTargetAnchor: preserveTargetAnchor,
                 reloadDocument: reloadDocument,
                 startAtEnd: startAtEnd,
-                readingMode: readingMode, layoutMode: effectiveLayoutMode
+                readingMode: readingMode, layoutMode: effectiveLayoutMode, userFontID: userFontID
             )
             // Do not wait for SwiftUI reconciliation to revoke the old viewport epoch.
             if let request = navigationRequest { webView.controller?.apply(request) }
@@ -529,6 +562,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 ready = true
                 loading = false
                 recordRuntimeFontFallback(payload.authorStyleFallback, token: token)
+                userFontUnavailable = userFontID != nil && payload.userFontUnavailable
                 return
             }
             let node = payload.restoredNode
@@ -587,6 +621,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     self.ready = true
                     self.loading = false
                     self.recordRuntimeFontFallback(payload.authorStyleFallback, token: expectedToken)
+                    self.userFontUnavailable = self.userFontID != nil && payload.userFontUnavailable
                     if let started = self.openingStarted {
                         self.openingObservation.becameReady(expectedToken)
                         self.openingPresentationSummary = self.openingObservation.summary
@@ -707,7 +742,8 @@ final class EPUBReaderViewModel: ObservableObject {
                     id: UUID(), token: token, publication: reader.publication,
                     targetPosition: nil, fragment: nil, preferences: self.preferences.validated,
                     preserveTargetAnchor: false, reloadDocument: false,
-                    readingMode: self.readingMode, preserveViewport: true, layoutMode: self.effectiveLayoutMode
+                    readingMode: self.readingMode, preserveViewport: true, layoutMode: self.effectiveLayoutMode,
+                    userFontID: self.userFontID
                 )
                 // Apply immediately: SwiftUI updates may arrive after the user exits the page.
                 if let request = self.navigationRequest { self.webView.controller?.apply(request) }
