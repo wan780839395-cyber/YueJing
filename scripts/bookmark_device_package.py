@@ -97,7 +97,11 @@ def scope_receipt():
     if scope == SEARCH:
         check_search_chain(source, batch.base)
     elif scope == SEARCH_RETURN:
-        check_search_chain(source, batch.base, max_commits=1, paths=RETURN_PATHS)
+        # This build uses identical product inputs to the original frozen device commit.
+        # Admit only its direct child and only the two files implementing the Intel route.
+        original = '7ccee53ae1c0930ffc3b43b46a0d60033cf285fb'
+        check_search_chain(source, original, max_commits=1, paths={'.github/workflows/task3-validate.yml', 'scripts/bookmark_device_package.py'})
+        v.require(batch.base == '7f110bbeb257fea29ec3a7f165e68bcca961f179', 'Unexpected frozen product')
     else:
         v.require(git('rev-list', '--parents', '-n1', 'HEAD').split() == [source, batch.base],
                   'Expected exact direct child of bookmark base')

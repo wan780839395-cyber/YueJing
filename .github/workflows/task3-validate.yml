@@ -1015,7 +1015,7 @@ jobs:
       ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' ||
           ((inputs.validation_scope == 'woff2-native-024' || inputs.validation_scope == 'bookmark-device-028' || inputs.validation_scope == 'search-device-029') && inputs.build_ipa) ||
           (inputs.validation_scope == 'search-return-device-030' && inputs.scope_acknowledgement == 'search-return-device-030' && inputs.build_ipa && inputs.allow_unqualified_ipa) }}
-    runs-on: macos-15
+    runs-on: ${{ inputs.validation_scope == 'search-return-device-030' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
@@ -1042,7 +1042,7 @@ jobs:
 
       - name: Verify fixed device toolchain and generate project through shared contract
         timeout-minutes: 5
-        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3 --allowed-architectures ${{ inputs.validation_scope == 'search-return-device-030' && 'x86_64' || 'arm64' }}
 
       - name: Resolve and verify fixed dependencies without simulator preparation
         run: |
