@@ -466,19 +466,32 @@ def prepare_runtime(root=ROOT):
         times[label] = dict(elapsed_seconds=time.monotonic()-started, exit_code=code, timed_out=timeout)
         require(code == 0 and not timeout, 'Runtime preparation failed: '+label)
     try:
+        # Warm the selected Xcode's simulator service during independent dependency resolution.
+        # Opening the UI is only a hint: still require fresh simctl JSON, selection and bootstatus.
+        simulator = Path(os.environ['DEVELOPER_DIR']) / 'Applications/Simulator.app'
+        started = time.monotonic()
+        code, timeout = run_logged(['/usr/bin/open', '-g', '-j', '-a', str(simulator)],
+                                   output/'simulator-warmup.log', 10, cwd=root)
+        times['warmup'] = dict(exit_code=code, timed_out=timeout, elapsed_seconds=time.monotonic()-started)
         run('dependencies', ['xcodebuild', '-resolvePackageDependencies', '-project', 'YueJing.xcodeproj',
                              '-scheme', 'YueJing', '-clonedSourcePackagesDirPath', 'build/SourcePackages'], 300)
         validation.resolved()
         for kind in ('devices', 'runtimes'):
             command = ['xcrun', 'simctl', 'list', kind] + (['available'] if kind == 'devices' else []) + ['-j']
-            run(kind, command, 30)
+            try:
+                run(kind, command, 30)
+            except ValueError:
+                # Collect a bounded, read-only service snapshot; do not discard the original error.
+                run_logged(['/bin/launchctl', 'print', f'gui/{os.getuid()}/com.apple.CoreSimulator.CoreSimulatorService'],
+                           output/'simulator-service.log', 5, cwd=root)
+                raise
             (root/'artifacts/task3'/f'{kind}.json').write_bytes((output/(kind+'.log')).read_bytes())
         validation.select_simulator()
         selected = json.loads((root/'artifacts/task3/simulator-selection.json').read_text())
         udid = selected['udid']
         devices = json.loads((output/'devices.log').read_text())['devices']
         state = next(d['state'] for group in devices.values() for d in group if d['udid'] == udid)
-        if state != 'Booted':
+        if state not in ('Booted', 'Booting'):
             run('simulator-boot', ['xcrun', 'simctl', 'boot', udid], 30)
         run('simulator-ready', ['xcrun', 'simctl', 'bootstatus', udid, '-b'], 120)
     finally:

@@ -26,6 +26,7 @@ on:
           - fontpicker-native-026
           - fontcopy-native-027
           - bookmark-device-028
+          - search-device-029
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -33,7 +34,7 @@ on:
         type: string
         default: ''
       development_source_sha:
-        description: Approved full commit SHA for development only
+        description: Approved full candidate SHA for scopes requiring source binding
         type: string
         default: ''
       development_plan_sha256:
@@ -75,7 +76,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: ${{ inputs.validation_scope == 'search-device-029' && 9 || 2 }}
       - name: Reject default unknown unbound or unacknowledged scopes before native preparation
         run: python3 -B scripts/workflow_admission.py
 
@@ -1009,7 +1010,7 @@ jobs:
 
   epub_diagnostic:
     needs: admission
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' || ((inputs.validation_scope == 'woff2-native-024' || inputs.validation_scope == 'bookmark-device-028') && inputs.build_ipa) }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' || ((inputs.validation_scope == 'woff2-native-024' || inputs.validation_scope == 'bookmark-device-028' || inputs.validation_scope == 'search-device-029') && inputs.build_ipa) }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -1028,7 +1029,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: ${{ inputs.validation_scope == 'search-device-029' && 9 || 2 }}
 
       - name: Freeze device-only source and disclose UI NOT QUALIFIED
         run: |

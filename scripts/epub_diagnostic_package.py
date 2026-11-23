@@ -35,9 +35,11 @@ if WOFF2:
     VERSION, BUILD = "0.2.24", "26"
     ALLOWED = frozenset(("scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
 
-BOOKMARK = os.environ.get("VALIDATION_SCOPE") == "bookmark-device-028"
-if BOOKMARK:
-    from bookmark_device_package import VERSION, BUILD, SCOPE
+DEVICE_BATCH = os.environ.get("VALIDATION_SCOPE") in ("bookmark-device-028", "search-device-029")
+if DEVICE_BATCH:
+    from bookmark_device_package import BATCHES
+    SCOPE = os.environ["VALIDATION_SCOPE"]
+    VERSION, BUILD = BATCHES[SCOPE].version, BATCHES[SCOPE].build
 
 
 # Exact upstream MIT texts as vendored in the frozen product.
@@ -69,9 +71,9 @@ def tree(revision):
 
 
 def scope_receipt():
-    if BOOKMARK:
-        from bookmark_device_package import scope_receipt as bookmark_receipt
-        return bookmark_receipt()
+    if DEVICE_BATCH:
+        from bookmark_device_package import scope_receipt as device_receipt
+        return device_receipt()
     env = os.environ
     v.require(env.get("VALIDATION_SCOPE") == SCOPE and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
               and env.get("GITHUB_REF") == ("refs/heads/dev/workflow-optimization" if NEON or WOFF2 else "refs/heads/main") and env.get("GITHUB_RUN_ATTEMPT") == "1"
@@ -137,7 +139,7 @@ def validate_saved():
     return actual
 
 
-def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False):
+def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False, device_scope=None):
     """Read the extracted artifact against independently supplied run identities."""
     v.require(re.fullmatch(r"[0-9a-f]{40}", source) and re.fullmatch(r"[1-9][0-9]*", run_id)
               and re.fullmatch(r"[0-9a-f]{64}", ipa_sha), "Expected full release SHA, run ID and IPA SHA256")
@@ -148,11 +150,15 @@ def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False):
     proof = json.loads((root / "task3/ipa-verification.json").read_bytes())
     scope = json.loads((root / "task3/epub-diagnostic-scope.json").read_bytes())
     version, build = "0.2.24", "26"
-    if bookmark:
-        from bookmark_device_package import identity as device_identity, VERSION as version, BUILD as build
-        v.require(scope == device_identity(source, run_id) == gate["device_scope"]
+    if bookmark:  # Historical keyword remains pinned to bookmark, irrespective of environment.
+        v.require(device_scope is None, "Ambiguous device batch")
+        device_scope = "bookmark-device-028"
+    if device_scope is not None:
+        from bookmark_device_package import BATCHES, identity as device_identity
+        version, build = BATCHES[device_scope].version, BATCHES[device_scope].build
+        v.require(scope == device_identity(source, run_id, device_scope) == gate["device_scope"]
                   and proof["dependency_gate_sha256"] == v.digest(root / "task3/app-dependency-gate.json"),
-                  "Downloaded bookmark device scope or Release gate differs")
+                  "Downloaded device scope or Release gate differs")
     ipa = root / f"YueJing-{version}.ipa"
     v.require(list(root.glob("*.ipa")) == [ipa] and not ipa.is_symlink() and v.digest(ipa) == ipa_sha
               and (root / "SHA256SUMS").read_text().splitlines() == [f"{ipa_sha}  {ipa.name}", f"{v.digest(manifest_path)}  manifest.json"],
@@ -161,7 +167,7 @@ def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False):
                     ipa_bytes=ipa.stat().st_size, minimum_os="16.6", architectures=["arm64"], platform="iPhoneOS", signing="unsigned")
     v.require(all(manifest[k] == val for k, val in identity.items()) and all(proof[k] == val for k, val in manifest.items()),
               "Downloaded manifest/release identity mismatch")
-    if not bookmark:
+    if device_scope is None:
         v.require(scope["scope"] == WOFF2_SCOPE and scope["product_source_commit"] == WOFF2_PRODUCT, "Wrong WOFF2 release")
     v.require(scope == proof["diagnostic_evidence"]
               and scope["qualification"] == proof["qualification"] == "DEVICE_DIAGNOSTIC_ONLY"
@@ -174,7 +180,7 @@ def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False):
         v.require(len(names) == len(set(names)) and archive.testzip() is None, "Duplicate or damaged IPA member")
         files = {n: hashlib.sha256(archive.read(n)).hexdigest() for n in names if not n.endswith("/")}
     licenses = {name: sha for name, (_, sha) in MIT_LICENSES.items()}
-    if bookmark:
+    if device_scope is not None:
         from userfont_package import check_release_gate
         check_release_gate(root / "task3/app-dependency-gate.json", {"device_scope": scope}, manifest, files)
     v.require(files == proof["release_files_sha256"] and len(files) == proof["verified_packaged_files"]
@@ -187,7 +193,7 @@ def verify_download(directory, source, run_id, ipa_sha, *, bookmark=False):
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["freeze"]:
-        if not BOOKMARK:
+        if not DEVICE_BATCH:
             v.freeze_candidate()
         v.report("epub-diagnostic-scope.json", scope_receipt())
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:

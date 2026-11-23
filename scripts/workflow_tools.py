@@ -31,7 +31,7 @@ SIMULATOR_SDK_VERSION = "18.5"
 XCODEGEN_VERSION = "2.46.0"
 XCODEGEN_SHA256 = "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
 XCODEGEN_ASSET = "https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/478866069"
-if os.environ.get("VALIDATION_SCOPE") in {"neon-device-023", "woff2-native-024", "userfont-native-025", "fontpicker-native-026", "fontcopy-native-027", "bookmark-device-028"}:
+if os.environ.get("VALIDATION_SCOPE") in {"neon-device-023", "woff2-native-024", "userfont-native-025", "fontpicker-native-026", "fontcopy-native-027", "bookmark-device-028", "search-device-029"}:
     XCODEGEN_ASSET = "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip"
 DEPENDENCIES = {
     "GRDB": ("https://github.com/groue/GRDB.swift.git", "7.0.0"),
