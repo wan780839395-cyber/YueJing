@@ -85,8 +85,10 @@ final class EPUBFontPickerUITests: XCTestCase {
         XCTAssertTrue(preview.waitForExistence(timeout: 5))
         XCTAssertFalse(empty.exists)
         XCTAssertFalse(selectedOriginal.exists)
-        let reset = app.buttons["epub.font.followOriginal"]
-        requireInteractive(reset)
+        let reset = app.buttons.matching(identifier: "epub.font.followOriginal").firstMatch
+        XCTAssertTrue(reset.waitForExistence(timeout: 5), "Missing Gemini follow-original button")
+        XCTAssertTrue(reset.isEnabled, "Follow-original remained disabled after import")
+        XCTAssertTrue(reset.isHittable, "Follow-original has no reachable hit point after import")
         reset.tap()
         XCTAssertTrue(selectedOriginal.waitForExistence(timeout: 5))
         XCTAssertEqual(selection.value as? String, "跟随原书")
