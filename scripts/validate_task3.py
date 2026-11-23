@@ -489,10 +489,14 @@ def system_swift_runtime(link, search_paths, sdk, output):
                 stub_sha256=digest(stub), target="arm64-ios", availability="iOS 12.2+ Swift 5 runtime")
 
 
-def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False, epub_freeze=False, epub_author_layout=False):
+def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False, epub_freeze=False, epub_author_layout=False, userfont=False):
     require(sys.platform == "darwin", "Packaging gates require the real macOS output")
-    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic, epub_freeze, epub_author_layout))) <= 1, "Native qualification modes are mutually exclusive")
-    if reused:
+    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic, epub_freeze, epub_author_layout, userfont))) <= 1, "Native qualification modes are mutually exclusive")
+    extra_fields = {}
+    if userfont:
+        from userfont_package import verify_native
+        extra_fields = verify_native()
+    elif reused:
         from reuse_native_evidence import validate_saved
         validate_saved()
     elif epub_compat:
@@ -598,14 +602,17 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
             and digest(zip_checkout / "LICENSE") == ZIP_LICENSE_SHA256
             and digest(ROOT / "App/Resources/ZIPFoundation-LICENSE.txt") == ZIP_LICENSE_SHA256,
             "ZIPFoundation official license resource is missing or changed")
-    diagnostic_fields = {}
+    if userfont:
+        from epub_diagnostic_package import release_licenses
+        from userfont_package import release_hashes
+        extra_fields.update(mit_licenses=release_licenses(), release_files_sha256=release_hashes(APP))
     if diagnostic:
         from epub_diagnostic_package import WOFF2, release_licenses
         if WOFF2:
-            diagnostic_fields.update(mit_licenses=release_licenses(), run_id=os.environ["GITHUB_RUN_ID"],
-                                     run_attempt=os.environ["GITHUB_RUN_ATTEMPT"])
+            extra_fields.update(mit_licenses=release_licenses(), run_id=os.environ["GITHUB_RUN_ID"],
+                                run_attempt=os.environ["GITHUB_RUN_ATTEMPT"])
     report("app-dependency-gate.json", dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence,
-           **diagnostic_fields,
+           **extra_fields,
            grdb_linkage="dynamic" if any(path.name == "GRDB" for path in binaries) else "SPM automatic/static",
            packages=packages, zipfoundation_license_sha256=digest(zip_license),
            grdb_privacy_resources=[str(path.relative_to(APP)) for path in resources],
@@ -613,8 +620,8 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
            **(dict(run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"]) if epub_freeze or epub_author_layout else {})))
 
 
-def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False, epub_freeze=False, epub_author_layout=False):
-    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic, epub_freeze, epub_author_layout))) <= 1, "Native qualification modes are mutually exclusive")
+def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=False, diagnostic=False, epub_freeze=False, epub_author_layout=False, userfont=False):
+    require(sum(map(bool, (reused, epub_compat, epub_paging, epub_reading, diagnostic, epub_freeze, epub_author_layout, userfont))) <= 1, "Native qualification modes are mutually exclusive")
     artifacts = ROOT / "artifacts"
     manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
     version = manifest.get("version")
@@ -648,7 +655,14 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
         require({name for name in names if not name.endswith("/")} == set(expected), "Packaged files differ from the actual built App")
         for name, path in expected.items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == digest(path), "Packaged bytes differ: " + name)
-    if epub_compat:
+    if userfont:
+        from userfont_package import verify_native, check_release_gate
+        qualification = verify_native()
+        gate = OUT / "app-dependency-gate.json"
+        check_release_gate(gate, qualification, manifest, {name: digest(path) for name, path in expected.items()})
+        report("ipa-verification.json", dict(**manifest, **qualification, verified_packaged_files=len(expected),
+               dependency_gate=gate.name, dependency_gate_sha256=digest(gate)))
+    elif epub_compat:
         from run_epub_compat_validation import validate_saved
         qualification = validate_saved()
         require(version == "0.2.2" and build == "4", "EPUB compatibility release identity differs")
@@ -727,6 +741,8 @@ if __name__ == "__main__":
              "decoder-comparison": decoder_comparison,
              "all-test-gate": write_all_test_evidence,
              "package-gate": package_gate, "verify-ipa": verify_ipa,
+             "package-gate-userfont": lambda: package_gate(userfont=True),
+             "verify-ipa-userfont": lambda: verify_ipa(userfont=True),
              "package-gate-epub-compat": lambda: package_gate(epub_compat=True),
              "verify-ipa-epub-compat": lambda: verify_ipa(epub_compat=True),
              "package-gate-epub-paging": lambda: package_gate(epub_paging=True),

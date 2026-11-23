@@ -1,0 +1,16 @@
+{
+  "scope": "userfont-native-025",
+  "branch": "dev/workflow-optimization",
+  "build_timeout_seconds": 900,
+  "test_timeout_seconds": 240,
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 2700,
+  "cases": [
+    {"file":"ReaderDomainTests/EPUBUserFontStoreTests.swift","name":"reopenFindsOriginalBytesAndDeduplicatesRenamedSources()"},
+    {"file":"ReaderDomainTests/EPUBUserFontStoreTests.swift","name":"invalidSourcesDoNotEnterLibrary()"},
+    {"file":"ReaderDomainTests/EPUBUserFontStoreTests.swift","name":"lookupRejectsTraversalMissingTamperedAndLinkedBlobs()"},
+    {"file":"ReaderDomainTests/EPUBUserFontStoreTests.swift","name":"enforcesSingleAndLibraryByteLimitsWithoutChargingDuplicates()"},
+    {"file":"YueJingHostTests/EPUBFontLoadingHostTests.swift","name":"userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain()"},
+    {"file":"YueJingHostTests/EPUBFontLoadingHostTests.swift","name":"bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile()"}
+  ]
+}

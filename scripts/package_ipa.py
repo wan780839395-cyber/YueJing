@@ -159,6 +159,13 @@ def main():
         dependency = json.loads((OUT / "task3/app-dependency-gate.json").read_text(encoding="utf-8"))
         require(all(dependency.get(key) == qualified[key] for key in ("source_commit", "run_id", "run_attempt"))
                 and dependency.get("signing") == "unsigned", "Missing same-run strict device dependency gate")
+    if os.environ.get("VALIDATION_SCOPE") == "userfont-native-025":
+        from userfont_package import verify_native, release_hashes
+        qualified = verify_native()
+        gate = json.loads((OUT / "task3/app-dependency-gate.json").read_bytes())
+        require(all(gate.get(k) == value for k, value in qualified.items()) and gate.get("source_commit") == commit
+                and gate.get("signing") == "unsigned" and gate.get("release_files_sha256") == release_hashes(APP),
+                "Refuse custom font IPA without same-run native and device qualification")
     expected = expected_project_identity(PROJECT_SPEC)
     require(APP.is_dir() and not APP.is_symlink(), "Expected built App is missing or is a symlink")
     info_path = APP / "Info.plist"
