@@ -27,7 +27,8 @@ struct EPUBFontCompletionTests {
         func opf(_ content: String) -> Data {
             Data("<package xmlns='http://www.idpf.org/2007/opf' unique-identifier='chosen'><metadata xmlns:dc='http://purl.org/dc/elements/1.1/'>\(content)</metadata></package>".utf8)
         }
-        let key = try #require(EPUBFontObfuscation.idpfKey(opfData: opf("<dc:identifier id='other'>wrong</dc:identifier><dc:identifier id='chosen'> a &#9;b&#13;&#10;c </dc:identifier>"), limit: 8192))
+        let candidateKey = try EPUBFontObfuscation.idpfKey(opfData: opf("<dc:identifier id='other'>wrong</dc:identifier><dc:identifier id='chosen'> a &#9;b&#13;&#10;c </dc:identifier>"), limit: 8192)
+        let key = try #require(candidateKey)
         #expect(key.map { String(format: "%02x", $0) }.joined() == "a9993e364706816aba3e25717850c26c9cd0d89d")
         #expect(try EPUBFontObfuscation.idpfKey(opfData: opf("<dc:identifier id='chosen'>a&#160;bc</dc:identifier>"), limit: 8192) != key)
         for body in ["<dc:identifier id='other'>abc</dc:identifier>",
@@ -70,7 +71,8 @@ struct EPUBFontCompletionTests {
             #expect(package.textNodes["OPS/Text/c.xhtml"] == ["Synthetic text"])
             #expect(package.styleCompatibility?.issues.contains(.fontUnavailable) == false)
             #expect(package.styleCompatibility?.fontDiagnostics.contains(where: { $0.outcome == (index == 0 ? .convertedWOFF : .restoredIDPF) }) == true)
-            #expect(!EPUBFontDiagnostic.summary(package.styleCompatibility?.fontDiagnostics ?? []).contains("Synthetic Body"))
+            let summary = EPUBFontDiagnostic.summary(package.styleCompatibility?.fontDiagnostics ?? [])
+            #expect(!summary.contains("Synthetic Body"))
         }
     }
 

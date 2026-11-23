@@ -166,6 +166,8 @@ targets:
     dependencies:
       - target: YueJing
       - target: ReaderDomain
+      - package: ZIPFoundation
+        product: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.host-tests
