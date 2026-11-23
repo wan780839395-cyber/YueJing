@@ -40,6 +40,19 @@ struct EPUBReaderScreen: View {
     @ScaledMetric(relativeTo: .headline) private var titleLine: CGFloat = 22
     @AccessibilityFocusState private var focusedControl: String?
 
+    private var searchReturnAction: (@MainActor () -> Void)? {
+        guard model.canReturnFromSearch else { return nil }
+        return { _ = Task { await model.returnFromSearch() } }
+    }
+
+    private func floatingTools(_ metrics: ReaderToolMetrics, _ appearance: ReaderToolAppearance) -> ReaderFloatingToolsView {
+        ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
+            directoryAvailable: model.ready, settingsAvailable: model.ready,
+            exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
+            open: openPanel, focusedControl: $focusedControl, chapterContext: chapterContextText,
+            returnFromSearch: searchReturnAction)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let metrics = ReaderToolMetrics(
@@ -200,19 +213,7 @@ struct EPUBReaderScreen: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                ReaderFloatingToolsView(
-                    state: tools,
-                    metrics: metrics,
-                    appearance: appearance,
-                    directoryAvailable: model.ready,
-                    settingsAvailable: model.ready,
-                    exitSaveFailed: model.exitSaveFailed,
-                    rememberFocus: { lastPanelControl = $0 },
-                    open: openPanel,
-                    focusedControl: $focusedControl,
-                    chapterContext: chapterContextText,
-                    returnFromSearch: model.canReturnFromSearch ? { Task { await model.returnFromSearch() } } : nil
-                )
+                floatingTools(metrics, appearance)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
             }

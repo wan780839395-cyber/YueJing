@@ -22,6 +22,18 @@ struct ReaderScreen: View {
     @State private var hitProbe = ReaderHitProbeStore()
     #endif
 
+    private var searchReturnAction: (@MainActor () -> Void)? {
+        guard model.canReturnFromSearch else { return nil }
+        return { _ = Task { await model.returnFromSearch() } }
+    }
+
+    private func floatingTools(_ metrics: ReaderToolMetrics, _ appearance: ReaderToolAppearance) -> ReaderFloatingToolsView {
+        ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
+            directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
+            exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
+            open: openPanel, focusedControl: $focusedControl, returnFromSearch: searchReturnAction)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let metrics = ReaderToolMetrics(height: geometry.size.height, scaledControl: controlHeight,
@@ -120,12 +132,7 @@ struct ReaderScreen: View {
             }
             // Secondary layout: tool content cannot resize or recenter the reading viewport.
             .overlay(alignment: .bottomTrailing) {
-                ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
-                    directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
-                    exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
-                    open: openPanel, focusedControl: $focusedControl,
-                    returnFromSearch: model.canReturnFromSearch ? { Task { await model.returnFromSearch() } } : nil)
-                    .padding(.horizontal, 14).padding(.bottom, 8)
+                floatingTools(metrics, appearance).padding(.horizontal, 14).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }
