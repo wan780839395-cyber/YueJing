@@ -118,8 +118,19 @@ final class EPUBReaderViewModel: ObservableObject {
     }
     private var sequence: Int64 = 0
     private var preferencesSequence: Int64 = 0
-    private var lifecycle = UUID()
-    private var generation = UUID()
+    private enum SearchCompletion {
+        case publish(EPUBReadingPosition)
+        case consume
+    }
+    @Published private var searchOrigin: EPUBReadingPosition?
+    private var pendingSearch: SearchCompletion?
+    private var lifecycle = UUID() {
+        didSet { searchOrigin = nil }
+    }
+    private var generation = UUID() {
+        didSet { pendingSearch = nil }
+    }
+    private var suspending = false
     private var closing = false
     private var suspended = false
     private var shouldPersistOnReady = false
@@ -139,6 +150,15 @@ final class EPUBReaderViewModel: ObservableObject {
 
     var presentationToken: EPUBNavigationToken? {
         ready && !loading && !closing && !suspended && !exitSaveFailed ? currentToken : nil
+    }
+
+    private var acceptsSearch: Bool {
+        !suspending && !suspended && !closing && closeTask == nil && !exitSaveFailed
+    }
+
+    var canReturnFromSearch: Bool {
+        // A failed load has no presentation token. Allow an explicit retry in that state.
+        acceptsSearch && searchOrigin != nil && !loading && (presentationToken != nil || navigationRequest == nil)
     }
 
     var diagnosticOpeningSummary: String? {
@@ -405,8 +425,43 @@ final class EPUBReaderViewModel: ObservableObject {
         navigateExplicitly(path: path, fragment: fragment, target: nil)
     }
 
+    func jumpToSearchHit(_ hit: BookSearchHit, isActive: () -> Bool) async throws {
+        guard isActive(), acceptsSearch, let reader, let token = presentationToken else { throw EPUBError.staleSession }
+        let life = lifecycle, gen = generation
+        @MainActor func checkSelection() throws {
+            try Task.checkCancellation()
+            guard isActive(), acceptsSearch, lifecycle == life, generation == gen,
+                  self.reader === reader, presentationToken == token else { throw EPUBError.staleSession }
+        }
+        let target = try await reader.resolveSearchHit(hit)
+        try checkSelection()
+        let origin: EPUBReadingPosition
+        if let searchOrigin {
+            origin = searchOrigin
+        } else {
+            origin = try await sampleVisiblePosition(reader: reader, token: token, isActive: isActive)
+            try checkSelection()
+        }
+        navigateExplicitly(path: target.path, fragment: nil, target: target, searchCompletion: .publish(origin))
+    }
+
+    func returnFromSearch() async {
+        guard !Task.isCancelled, canReturnFromSearch, let reader, let origin = searchOrigin else { return }
+        do {
+            try origin.validate(in: reader.publication.package)
+            navigateExplicitly(path: origin.path, fragment: nil, target: origin, searchCompletion: .consume)
+        } catch {
+            message = Self.safeFailureMessage(error)
+        }
+    }
+
     /// Shared admission/revocation for TOC, document links and a resolved bookmark.
     func navigateExplicitly(path: String, fragment: String?, target: EPUBReadingPosition?) {
+        navigateExplicitly(path: path, fragment: fragment, target: target, searchCompletion: nil)
+    }
+
+    private func navigateExplicitly(path: String, fragment: String?, target: EPUBReadingPosition?,
+                                    searchCompletion: SearchCompletion?) {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               reader.publication.package.spine.contains(path) else {
             return
@@ -436,7 +491,8 @@ final class EPUBReaderViewModel: ObservableObject {
                 fragment: fragment,
                 preserveTargetAnchor: target != nil,
                 persistOnReady: true,
-                reloadDocument: false
+                reloadDocument: false,
+                searchCompletion: searchCompletion
             )
         }
     }
@@ -501,7 +557,8 @@ final class EPUBReaderViewModel: ObservableObject {
         preserveTargetAnchor: Bool,
         persistOnReady: Bool,
         reloadDocument: Bool,
-        startAtEnd: Bool = false
+        startAtEnd: Bool = false,
+        searchCompletion: SearchCompletion? = nil
     ) async {
         guard !Task.isCancelled, let reader, !closing, !suspended, !exitSaveFailed else { return }
         promotionTask?.cancel()
@@ -521,6 +578,7 @@ final class EPUBReaderViewModel: ObservableObject {
             let token = try await reader.beginNavigation(path: path)
             guard !Task.isCancelled, lifecycle == life, generation == gen, !closing, !suspended, self.reader === reader else { return }
             currentToken = token
+            pendingSearch = searchCompletion
             currentPath = path
             shouldPersistOnReady = persistOnReady
             webView.clearPayload()
@@ -606,6 +664,10 @@ final class EPUBReaderViewModel: ObservableObject {
                 message = "章节定位坐标无效，未写入进度。"
                 return
             }
+            if pendingSearch != nil && (navigationRequest?.targetPosition != position || position.utf16Offset != rawOffset) {
+                rejectUnconfirmedPosition(token)
+                return
+            }
             let life = lifecycle
             let gen = generation
             let expectedToken = token
@@ -630,17 +692,26 @@ final class EPUBReaderViewModel: ObservableObject {
                         return
                     }
                     guard marked else {
-                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                        self.rejectUnconfirmedPosition(expectedToken)
                         return
                     }
                     // No suspension between the accepted presentation and publishing ready.
-                    guard self.webView.controller?.acknowledgePresentation(for: expectedToken) != false else {
+                    let acknowledged = self.webView.controller?.acknowledgePresentation(for: expectedToken)
+                    guard acknowledged == true || (acknowledged == nil && self.pendingSearch == nil) else {
                         self.handleLoadFailure(EPUBError.invalidPosition, token: expectedToken)
                         return
                     }
                     self.currentPosition = position
                     self.ready = true
                     self.loading = false
+                    // Commit only the current generation's displayed destination, never its request.
+                    if let completion = self.pendingSearch, self.acceptsSearch {
+                        switch completion {
+                        case .publish(let origin): self.searchOrigin = origin
+                        case .consume: self.searchOrigin = nil
+                        }
+                    }
+                    self.pendingSearch = nil
                     self.recordRuntimeFontFallback(payload.authorStyleFallback, token: expectedToken)
                     self.userFontUnavailable = self.userFontID != nil && payload.userFontUnavailable
                     if let started = self.openingStarted {
@@ -671,12 +742,12 @@ final class EPUBReaderViewModel: ObservableObject {
                 } catch is CancellationError {
                     if self.lifecycle == life, self.generation == gen,
                        self.currentToken == expectedToken, !self.ready {
-                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                        self.rejectUnconfirmedPosition(expectedToken)
                     }
                 } catch {
                     if self.lifecycle == life, self.generation == gen,
                        self.currentToken == expectedToken, !self.ready {
-                        self.webView.controller?.rejectPresentation(for: expectedToken)
+                        self.rejectUnconfirmedPosition(expectedToken)
                     }
                     if self.lifecycle == life, !self.closing {
                         self.message = Self.safeFailureMessage(error)
@@ -868,12 +939,21 @@ final class EPUBReaderViewModel: ObservableObject {
         }
     }
 
+    private func rejectUnconfirmedPosition(_ token: EPUBNavigationToken) {
+        webView.controller?.rejectPresentation(for: token)
+        // Normally rejectPresentation delivers onLoadFailure synchronously. A detached
+        // controller cannot do so; don't strand a pending search (especially a return).
+        if pendingSearch != nil { handleLoadFailure(EPUBError.invalidPosition, token: token) }
+    }
+
     func suspend() async {
-        guard !closing, !suspended else { return }
+        guard !closing, !suspended, !suspending else { return }
+        suspending = true
         openingObservation.interrupt(.background)
         openingPresentationSummary = openingObservation.summary
         await settleVisibleChapter()
         suspended = true
+        suspending = false
         resetCurrentRuntimeWarning()
         lifecycle = UUID()
         generation = UUID()

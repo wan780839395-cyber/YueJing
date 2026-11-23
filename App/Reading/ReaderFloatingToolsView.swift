@@ -34,27 +34,40 @@ struct ReaderFloatingToolsView: View {
     @AccessibilityFocusState.Binding var focusedControl: String?
     // nil preserves the TXT edge dock and its existing memberwise call sites.
     var chapterContext: String? = nil
+    var returnFromSearch: (@MainActor () -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
     @State private var trayExpanded = false
 
     private var visible: Bool { state.visible && state.panel == nil }
+    private var canReturnFromSearch: Bool {
+        returnFromSearch != nil && visible && state.canInteract && state.exitRequest == nil && !exitSaveFailed
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if visible {
-                if let chapterContext {
-                    chapterPanel(chapterContext)
-                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
-                } else {
-                    edgeDock
+                VStack(alignment: .trailing, spacing: 8) {
+                    if canReturnFromSearch, let returnFromSearch {
+                        dockSurface(cornerRadius: 26) {
+                            returnFromSearchButton(action: returnFromSearch)
+                        }
                         .transition(.opacity)
+                    }
+                    if let chapterContext {
+                        chapterPanel(chapterContext)
+                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
+                    } else {
+                        edgeDock
+                            .transition(.opacity)
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
+        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: canReturnFromSearch)
         .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
     }
 
@@ -249,6 +262,27 @@ struct ReaderFloatingToolsView: View {
         .accessibilityIdentifier("reader.tools.expand")
         .accessibilityHint("展开目录和排版工具")
         .accessibilityFocused($focusedControl, equals: "dock.expand")
+    }
+
+    private func returnFromSearchButton(action: @escaping @MainActor () -> Void) -> some View {
+        Button {
+            guard visible, state.canInteract, state.exitRequest == nil, !exitSaveFailed else { return }
+            action()
+        } label: {
+            Label("回到搜索前", systemImage: "arrow.uturn.backward")
+                .font(dynamicType.isAccessibilitySize ? .body.weight(.semibold) : .subheadline.weight(.semibold))
+                .imageScale(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14).padding(.vertical, 5)
+                .frame(minWidth: 44, minHeight: metrics.controlHeight)
+                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 22))
+        .disabled(exitSaveFailed || !state.canInteract)
+        .accessibilityLabel("回到搜索前")
+        .accessibilityHint("返回搜索跳转前的位置")
+        .accessibilityIdentifier("reader.tools.returnFromSearch")
+        .accessibilityFocused($focusedControl, equals: "returnFromSearch")
     }
 
     private var collapseButton: some View {

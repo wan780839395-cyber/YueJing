@@ -545,6 +545,19 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         }
     }
 
+    var navigationTargetVisible: Bool {
+        guard let window, table.bounds.height > 0 else { return false }
+        for path in table.indexPathsForVisibleRows ?? [] where window.slices.indices.contains(path.row) {
+            let slice = window.slices[path.row]
+            if let line = slice.lines.first(where: { $0.range.location.value <= window.targetUTF16 && window.targetUTF16 < $0.range.end.value }) {
+                let y = table.rectForRow(at: path).minY + CGFloat(line.top)
+                return y < table.bounds.maxY - table.adjustedContentInset.bottom &&
+                    y + CGFloat(line.height) > table.bounds.minY + table.adjustedContentInset.top
+            }
+        }
+        return false
+    }
+
     /// Preserve the semantic target across repeated reflows until a real scrolling action changes it.
     func restorableAnchor() -> ReadingAnchor? {
         userInputSinceRestore ? actualVisibleAnchor() : window?.anchor
@@ -552,12 +565,16 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     /// Read-only snapshot for explicit bookmarks; never substitutes a saved/default anchor.
     func bookmarkAnchor() -> ReadingAnchor? {
-        guard isViewLoaded, viewIfLoaded?.window != nil, !restoring, !interacting else { return nil }
-        // Finish pending row layout before sampling the explicit bookmark position.
-        table.layoutIfNeeded()
-        guard let visible = actualVisibleAnchor() else { return nil }
+        guard let visible = visibleNavigationAnchor() else { return nil }
         return ReadingAnchor(bookID: visible.bookID, versionID: visible.versionID,
                              rawByteOffset: visible.rawByteOffset, lineFraction: 0)
+    }
+
+    /// Unlike bookmarks or reflow targets, a search return preserves the visible line fraction.
+    func visibleNavigationAnchor() -> ReadingAnchor? {
+        guard isViewLoaded, viewIfLoaded?.window != nil, !restoring, !interacting else { return nil }
+        table.layoutIfNeeded()
+        return actualVisibleAnchor()
     }
 
     func restorationPoint() -> ReaderViewportRestoration? {

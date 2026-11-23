@@ -123,7 +123,8 @@ struct ReaderScreen: View {
                 ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
                     directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
                     exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
-                    open: openPanel, focusedControl: $focusedControl)
+                    open: openPanel, focusedControl: $focusedControl,
+                    returnFromSearch: model.canReturnFromSearch ? { Task { await model.returnFromSearch() } } : nil)
                     .padding(.horizontal, 14).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)

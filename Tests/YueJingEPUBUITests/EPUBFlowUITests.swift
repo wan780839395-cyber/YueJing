@@ -344,6 +344,8 @@ final class EPUBFlowUITests: XCTestCase {
             _ = searchHit(word, epub: false, in: app)
             closePanel(app)
             XCTAssertEqual(Self.parseCanvasValue(view.value as? String ?? "")["raw"], before["raw"])
+            let back = app.buttons["reader.tools.returnFromSearch"]
+            XCTAssertFalse(back.exists)
             let hit = searchHit(word, epub: false, in: app)
             hit.tap()
             let prefix = "第一章 TXT_COMPANION_START\n" + (1...10).map {
@@ -356,6 +358,21 @@ final class EPUBFlowUITests: XCTestCase {
                     app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", word)).firstMatch.exists
             }, object: nil)
             XCTAssertEqual(waitForPredicates([reached], timeout: 12), .completed, "TXT viewport: \(String(describing: view.value))")
+            showTools(app); waitHittable(back)
+            searchHit("TXT_C_LINE_6", epub: false, in: app).tap()
+            let secondRaw = 3 + ("第一章 TXT_COMPANION_START\n" + (1...5).map {
+                "TXT_C_LINE_\($0) 合成对照 TXT 文本，用于验证 EPUB 与 TXT 共存且互不串书。\n"
+            }.joined()).utf8.count
+            let second = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Self.parseCanvasValue(view.value as? String ?? "")["raw"] == String(secondRaw)
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([second], timeout: 12), .completed)
+            showTools(app); waitHittable(back); back.tap()
+            let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let now = Self.parseCanvasValue(view.value as? String ?? "")
+                return now["raw"] == before["raw"] && now["utf16"] == before["utf16"] && now["lineVisible"] == "true" && !back.exists
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([restored], timeout: 12), .completed)
         }
     }
 
@@ -368,6 +385,8 @@ final class EPUBFlowUITests: XCTestCase {
             closePanel(app)
             let stayed = Self.parseCanvasValue(canvas.value as? String ?? "")
             for k in ["path", "node", "offset"] { XCTAssertNotNil(before[k]); XCTAssertEqual(stayed[k], before[k]) }
+            let back = app.buttons["reader.tools.returnFromSearch"]
+            XCTAssertFalse(back.exists)
             let hit = searchHit(word, epub: true, in: app)
             hit.tap()
             let reached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -377,6 +396,20 @@ final class EPUBFlowUITests: XCTestCase {
                     value["path"] == "OEBPS/text/ch2.xhtml" && value["node"] == "21" && value["offset"] == "0"
             }, object: nil)
             XCTAssertEqual(waitForPredicates([reached], timeout: 15), .completed, "EPUB canvas: \(String(describing: canvas.value))")
+            showTools(app); waitHittable(back)
+            searchHit("EPUB_A_C2_P25", epub: true, in: app).tap()
+            let second = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let now = Self.parseCanvasValue(canvas.value as? String ?? "")
+                return now["path"] == "OEBPS/text/ch2.xhtml" && now["node"] == "26" && canvas.label.contains("EPUB_A_C2_P25")
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([second], timeout: 15), .completed)
+            showTools(app); waitHittable(back); back.tap()
+            let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let now = Self.parseCanvasValue(canvas.value as? String ?? "")
+                return ["path", "node", "offset"].allSatisfy { now[$0] == before[$0] } &&
+                    canvas.label.contains("EPUB_CH1_START") && !back.exists
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([restored], timeout: 15), .completed)
         }
     }
 

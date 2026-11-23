@@ -210,7 +210,8 @@ struct EPUBReaderScreen: View {
                     rememberFocus: { lastPanelControl = $0 },
                     open: openPanel,
                     focusedControl: $focusedControl,
-                    chapterContext: chapterContextText
+                    chapterContext: chapterContextText,
+                    returnFromSearch: model.canReturnFromSearch ? { Task { await model.returnFromSearch() } } : nil
                 )
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
@@ -577,15 +578,7 @@ struct EPUBReaderScreen: View {
             guard panelActive(.directory, panelID), let reader = model.reader else { throw CancellationError() }
             return try await reader.searchBook(query)
         }, jump: { hit in
-            guard panelActive(.directory, panelID), let reader = model.reader, let token = model.presentationToken else {
-                throw EPUBError.staleSession
-            }
-            let position = try await reader.resolveSearchHit(hit)
-            try Task.checkCancellation()
-            guard panelActive(.directory, panelID), model.reader === reader, model.presentationToken == token else {
-                throw EPUBError.staleSession
-            }
-            model.navigateExplicitly(path: position.path, fragment: nil, target: position)
+            try await model.jumpToSearchHit(hit, isActive: { panelActive(.directory, panelID) })
             mutateTools { _ = $0.chapterSelected(id: panelID) }
         })
     }

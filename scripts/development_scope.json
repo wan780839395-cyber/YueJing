@@ -10,30 +10,6 @@
     {
       "file": "YueJingEPUBUITests/EPUBFlowUITests.swift",
       "name": "testEPUBSearchResultJumpsToMatchingText"
-    },
-    {
-      "file": "ReaderDomainTests/EPUBBookSearchTests.swift",
-      "name": "searchReportsBothChaptersAndDoesNotMoveSavedPosition"
-    },
-    {
-      "file": "ReaderDomainTests/EPUBBookSearchTests.swift",
-      "name": "literalSearchRespectsUTF16GraphemesAndLimits"
-    },
-    {
-      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
-      "name": "crossWindowMatchesMapNormalizedTextToOriginalBytesInEveryEncoding"
-    },
-    {
-      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
-      "name": "overlapAndLimitUseGlobalNonOverlappingMatchesAndOneExtraWitness"
-    },
-    {
-      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
-      "name": "oversizedGraphemeIsSkippedWithoutSplittingOrHidingFollowingMatches"
-    },
-    {
-      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
-      "name": "cancelledSupersededClosedAndInexactSearchPositionsAreRejected"
     }
   ],
   "build_timeout_seconds": 900,

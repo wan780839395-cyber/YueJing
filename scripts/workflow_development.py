@@ -479,7 +479,8 @@ def prepare_runtime(root=ROOT):
         for kind in ('devices', 'runtimes'):
             command = ['xcrun', 'simctl', 'list', kind] + (['available'] if kind == 'devices' else []) + ['-j']
             try:
-                run(kind, command, 30)
+                # Cold CoreSimulator discovery is infrastructure, not a test-case allowance.
+                run(kind, command, 120 if kind == 'devices' else 30)
             except ValueError:
                 # Collect a bounded, read-only service snapshot; do not discard the original error.
                 run_logged(['/bin/launchctl', 'print', f'gui/{os.getuid()}/com.apple.CoreSimulator.CoreSimulatorService'],

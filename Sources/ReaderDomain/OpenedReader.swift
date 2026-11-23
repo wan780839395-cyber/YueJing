@@ -214,9 +214,15 @@ extension OpenedReader {
 
     public func prepareSearchWindow(_ hit: BookSearchHit, width: Double,
                                     preferences: ReaderPreferences) async throws -> ReadingWindow {
-        try await checkSearchSession()
         guard case .txt(let anchor) = hit.location, anchor.lineFraction == 0 else { throw LibraryError.invalidAnchor }
-        let target = try await strictBookmarkAnchor(anchor, request: BookmarkRequest())
+        return try await prepareSearchReturnWindow(around: anchor, width: width, preferences: preferences)
+    }
+
+    public func prepareSearchReturnWindow(around target: ReadingAnchor, width: Double,
+                                          preferences: ReaderPreferences) async throws -> ReadingWindow {
+        try await checkSearchSession()
+        // Validate the exact raw boundary, but render the original fraction (bookmarks use zero).
+        _ = try await strictBookmarkAnchor(target, request: BookmarkRequest())
         let rendered = try await window(around: target, width: width, preferences: preferences)
         guard rendered.anchor == target, rendered.slices.contains(where: { slice in
             slice.lines.contains { $0.range.location.value <= rendered.targetUTF16 && rendered.targetUTF16 < $0.range.end.value }

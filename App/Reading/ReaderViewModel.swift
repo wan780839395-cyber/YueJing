@@ -17,7 +17,7 @@ final class ReaderViewModel: ObservableObject {
     let directory = ReaderDirectoryViewModel()
     let bookmarks = ReaderBookmarksViewModel()
     private struct BookmarkPanelContext {
-        let presentation: UUID
+        let presentation: UUID? // nil is a toolbar navigation lease, not a directory lease.
         let life: UUID
         let generation: UUID
         let positionRevision: UInt64
@@ -27,8 +27,12 @@ final class ReaderViewModel: ObservableObject {
         let window: UUID?
     }
     private var bookmarkContext: BookmarkPanelContext?
-    private var preparedBookmarkWindow: UUID?
-    private var preparedBookmarkContext: BookmarkPanelContext?
+    private var preparedJump: (window: UUID, context: BookmarkPanelContext, search: Bool)?
+    private enum SearchEffect { case remember(ReadingAnchor), returned }
+    private var pendingSearchEffect: (navigation: UUID, effect: SearchEffect)?
+    @Published private var searchOrigin: ReadingAnchor?
+    var canReturnFromSearch: Bool { searchOrigin != nil && !closing && !suspended && !exitSaveFailed }
+    private var returnRequest: UUID?
     private var searchRequest = UUID()
     private var searchHitIDs: Set<UUID> = []
     enum BookmarkJumpError: Error { case stateChanged }
@@ -110,7 +114,7 @@ final class ReaderViewModel: ObservableObject {
               value.bookID == reader.reading.session.bookID, value.versionID == reader.reading.session.versionID else { return }
         // Duplicate UIKit callbacks must not revoke an otherwise unchanged capture.
         if anchor != value {
-            bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
+            bookmarks.invalidatePosition(); preparedJump = nil
             positionRevision &+= 1
         }
         anchor = value; userPosition = true; sequence += 1
@@ -141,6 +145,7 @@ final class ReaderViewModel: ObservableObject {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               chapter.documentVersion == reader.reading.session.versionID else { return }
         positionRevision &+= 1
+        pendingSearchEffect = nil
         navigationGate.begin()
         anchor = ReadingAnchor(bookID: bookID, versionID: chapter.documentVersion, rawByteOffset: chapter.rawByteRange.location.value)
         requestWindow()
@@ -181,6 +186,7 @@ final class ReaderViewModel: ObservableObject {
     func suspend() async {
         guard !closing else { return }
         suspended = true; lifecycle = UUID(); generation = UUID()
+        pendingSearchEffect = nil
         endBookmarkPanel()
         let request = lifecycle, owner = reader
         openTask?.cancel(); openTask = nil
@@ -203,6 +209,7 @@ final class ReaderViewModel: ObservableObject {
     func close() async -> Bool {
         guard !closing else { return false }
         closing = true; lifecycle = UUID(); generation = UUID()
+        searchOrigin = nil; pendingSearchEffect = nil
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
@@ -223,6 +230,7 @@ final class ReaderViewModel: ObservableObject {
     }
     func leaveKeepingSavedPosition() async {
         closing = true; lifecycle = UUID(); generation = UUID()
+        searchOrigin = nil; pendingSearchEffect = nil
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
@@ -232,6 +240,7 @@ final class ReaderViewModel: ObservableObject {
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
         lifecycle = UUID(); generation = UUID()
+        searchOrigin = nil; pendingSearchEffect = nil
         endBookmarkPanel()
         let request = lifecycle, old = reader
         openTask?.cancel(); openTask = nil; directory.dismiss()
@@ -259,7 +268,7 @@ final class ReaderViewModel: ObservableObject {
     }
     private func requestWindow() {
         guard let reader, let anchor, !closing, !suspended, !exitSaveFailed, width >= 80 else { return }
-        bookmarks.invalidatePosition(); preparedBookmarkWindow = nil
+        bookmarks.invalidatePosition(); preparedJump = nil
         layoutTask?.cancel(); generation = UUID(); layoutNeedsRefresh = true
         let request = generation, life = lifecycle, settings = preferences, currentWidth = width, revision = positionRevision
         let navigation = navigationGate.navigation
@@ -287,10 +296,19 @@ final class ReaderViewModel: ObservableObject {
     }
     /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
-        guard !closing, !suspended, window?.id == id else { return }
+        guard !closing, !suspended, window?.id == id, viewport.controller?.window?.id == id else { return }
         if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel() }
+        let navigation = navigationGate.navigation
         let navigationApplied = navigationGate.applied(window: id)
         if let visible = directoryAnchor() {
+            if navigationApplied, let pending = pendingSearchEffect, pending.navigation == navigation {
+                pendingSearchEffect = nil
+                guard viewport.interactionActive, viewport.controller?.navigationTargetVisible == true else { return }
+                switch pending.effect {
+                case .remember(let origin): if searchOrigin == nil { searchOrigin = origin }
+                case .returned: searchOrigin = nil
+                }
+            }
             if navigationApplied { visibleChanged(visible, windowID: id) }
             directory.displayed(visible)
         }
@@ -314,10 +332,7 @@ extension ReaderViewModel {
         // Sampling may finish pending UIKit layout and synchronously publish an anchor callback.
         // Build the lease afterwards, then validate it against the now-current window.
         let visible = viewport.controller?.bookmarkAnchor()
-        let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,
-            generation: generation, positionRevision: positionRevision, owner: owner,
-            controller: viewport.controller.map(ObjectIdentifier.init),
-            binding: viewport.controller?.sceneBindingID, window: window?.id)
+        let context = navigationContext(owner: owner, presentation: presentation)
         bookmarkContext = context
         let captured = bookmarkPositionIsCurrent(context) ? visible : nil
         bookmarks.present(reader: owner, anchor: captured, presentation: presentation,
@@ -334,18 +349,15 @@ extension ReaderViewModel {
         if let presentation, bookmarkContext?.presentation != presentation { return }
         bookmarks.dismiss(presentation: presentation)
         searchRequest = UUID(); searchHitIDs = []
-        bookmarkContext = nil; preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        bookmarkContext = nil; preparedJump = nil; returnRequest = nil
     }
     func prepareBookmarkWindow(id: String, presentation: UUID,
                                request: BookmarkRequest) async throws -> ReadingWindow {
         guard let panel = bookmarkContext, panel.presentation == presentation,
               bookmarkOwnerIsCurrent(panel) else { throw LibraryError.invalidAnchor }
         // The add-position snapshot is not a navigation lease. Capture a fresh lease at click time.
-        let context = BookmarkPanelContext(presentation: presentation, life: lifecycle,
-            generation: generation, positionRevision: positionRevision, owner: panel.owner,
-            controller: viewport.controller.map(ObjectIdentifier.init),
-            binding: viewport.controller?.sceneBindingID, window: window?.id)
-        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        let context = navigationContext(owner: panel.owner, presentation: presentation)
+        preparedJump = nil
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         let target = try await context.owner.bookmarkAnchor(id: id, request: request)
         try request.check()
@@ -353,23 +365,43 @@ extension ReaderViewModel {
         let rendered = try await context.owner.window(around: target, width: width, preferences: preferences)
         try request.check()
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
-        preparedBookmarkWindow = rendered.id; preparedBookmarkContext = context
+        preparedJump = (rendered.id, context, false)
         return rendered
     }
     /// No progress write until the existing windowApplied -> visibleChanged navigation path.
     func applyBookmarkWindow(_ rendered: ReadingWindow, presentation: UUID) -> Bool {
-        guard let context = preparedBookmarkContext, context.presentation == presentation,
-              preparedBookmarkWindow == rendered.id, bookmarkPositionIsCurrent(context),
-              rendered.anchor.bookID == context.owner.book.id,
-              rendered.anchor.versionID == context.owner.book.versionID else { return false }
-        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        guard let jump = preparedJump, jump.window == rendered.id,
+              jump.context.presentation == presentation, bookmarkPositionIsCurrent(jump.context),
+              rendered.anchor.bookID == jump.context.owner.book.id,
+              rendered.anchor.versionID == jump.context.owner.book.versionID else { return false }
+        var effect: SearchEffect?
+        if jump.search, searchOrigin == nil {
+            // Sample at admission, not when the sheet opened or the query began. Layout can
+            // deliver synchronous callbacks, so validate the lease again after sampling.
+            let metadata = jump.context.owner.source.metadata
+            guard let visible = viewport.controller?.visibleNavigationAnchor(),
+                  visible.bookID == rendered.anchor.bookID, visible.versionID == rendered.anchor.versionID,
+                  visible.rawByteOffset >= metadata.bomByteCount, visible.rawByteOffset < metadata.byteCount,
+                  bookmarkPositionIsCurrent(jump.context) else { return false }
+            effect = .remember(visible)
+        }
+        preparedJump = nil
+        applyNavigationWindow(rendered, effect: effect)
+        return true
+    }
+    private func applyNavigationWindow(_ rendered: ReadingWindow, effect: SearchEffect?) {
         layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
         navigationGate.begin()
-        guard let navigation = navigationGate.navigation else { return false }
+        guard let navigation = navigationGate.navigation else { return }
+        pendingSearchEffect = effect.map { (navigation, $0) }
         navigationGate.expect(window: rendered.id, navigation: navigation)
         anchor = rendered.anchor; layoutNeedsRefresh = false
         viewport.onNextRestoreIsNavigation = true; window = rendered; loading = false
-        return true
+    }
+    private func navigationContext(owner: OpenedReader, presentation: UUID?) -> BookmarkPanelContext {
+        BookmarkPanelContext(presentation: presentation, life: lifecycle, generation: generation,
+            positionRevision: positionRevision, owner: owner, controller: viewport.controller.map(ObjectIdentifier.init),
+            binding: viewport.controller?.sceneBindingID, window: window?.id)
     }
     private func bookmarkOwnerIsCurrent(_ context: BookmarkPanelContext) -> Bool {
         bookmarkContext?.presentation == context.presentation && lifecycle == context.life &&
@@ -393,7 +425,7 @@ extension ReaderViewModel {
         try Task.checkCancellation()
         guard let panel = bookmarkContext, bookmarkOwnerIsCurrent(panel) else { throw BookmarkJumpError.stateChanged }
         let request = UUID(); searchRequest = request; searchHitIDs = []
-        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        preparedJump = nil
         let results = try await panel.owner.searchBook(query)
         try Task.checkCancellation()
         guard searchRequest == request, bookmarkOwnerIsCurrent(panel) else { throw BookmarkJumpError.stateChanged }
@@ -406,16 +438,33 @@ extension ReaderViewModel {
         guard let panel = bookmarkContext, bookmarkOwnerIsCurrent(panel),
               searchHitIDs.contains(hit.id) else { throw BookmarkJumpError.stateChanged }
         let request = UUID(); searchRequest = request // A later selection revokes this preparation.
-        let context = BookmarkPanelContext(presentation: panel.presentation, life: lifecycle,
-            generation: generation, positionRevision: positionRevision, owner: panel.owner,
-            controller: viewport.controller.map(ObjectIdentifier.init),
-            binding: viewport.controller?.sceneBindingID, window: window?.id)
-        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        let context = navigationContext(owner: panel.owner, presentation: panel.presentation)
+        preparedJump = nil
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         let rendered = try await panel.owner.prepareSearchWindow(hit, width: width, preferences: preferences)
         try Task.checkCancellation()
         guard searchRequest == request, bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
-        preparedBookmarkWindow = rendered.id; preparedBookmarkContext = context
+        preparedJump = (rendered.id, context, true)
         return rendered
+    }
+
+    func returnFromSearch() async {
+        guard !Task.isCancelled, canReturnFromSearch, returnRequest == nil, let origin = searchOrigin,
+              let reader, bookmarkContext == nil else { return }
+        let context = navigationContext(owner: reader, presentation: nil)
+        let intent = viewport.controller?.toolIntent?()
+        guard bookmarkPositionIsCurrent(context) else { return }
+        let request = UUID(); returnRequest = request
+        defer { if returnRequest == request { returnRequest = nil } }
+        @MainActor func isCurrent() -> Bool {
+            !Task.isCancelled && returnRequest == request && searchOrigin == origin &&
+                bookmarkPositionIsCurrent(context) && viewport.controller?.toolIntent?() == intent
+        }
+        do {
+            let rendered = try await reader.prepareSearchReturnWindow(around: origin, width: width, preferences: preferences)
+            guard isCurrent() else { return }
+            applyNavigationWindow(rendered, effect: .returned)
+        } catch is CancellationError { }
+        catch { if isCurrent() { message = "未能返回搜索前的位置，可重试。" } }
     }
 }
