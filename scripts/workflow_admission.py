@@ -26,7 +26,7 @@ def main():
         if not (env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and env.get('GITHUB_RUN_ATTEMPT') == '1'
                 and env.get('GITHUB_REF') == 'refs/heads/dev/workflow-optimization'
                 and head == env.get('GITHUB_SHA') == env.get('DEVELOPMENT_SOURCE_SHA')
-                and parent == '88024e7a7f474a90c2ef9b58d23ca0e5cc4ebda2'
+                and parent == '56a5437e38d496c0dc4c6c93344fd1565f98eda2'
                 and env.get('BUILD_IPA') == 'true' and env.get('ALLOW_UNQUALIFIED_IPA') == 'true'
                 and not env.get('PRIOR_VALIDATION_RUN')):
             raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')

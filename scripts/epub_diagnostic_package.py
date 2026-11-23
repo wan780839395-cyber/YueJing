@@ -28,16 +28,13 @@ if NEON:
         VERSION, BUILD = "0.2.23", "25"
 
 WOFF2_SCOPE = "woff2-native-024"
-WOFF2_PRODUCT = "88024e7a7f474a90c2ef9b58d23ca0e5cc4ebda2"
+WOFF2_PRODUCT = "56a5437e38d496c0dc4c6c93344fd1565f98eda2"
 WOFF2 = os.environ.get("VALIDATION_SCOPE") == WOFF2_SCOPE
 if WOFF2:
     BASE, SCOPE = WOFF2_PRODUCT, WOFF2_SCOPE
     VERSION, BUILD = "0.2.24", "26"
-    # Exact child diff, not a permitted superset. Coordinate native paths before publishing.
-    ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/workflow_admission.py",
-                         "scripts/workflow_tools.py", "scripts/epub_diagnostic_package.py",
-                         "scripts/validate_task3.py", "scripts/run_woff2_native.py",
-                         "scripts/woff2_native_plan.json"))
+    ALLOWED = frozenset(("scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
+
 
 # Exact upstream MIT texts as vendored in the frozen product.
 MIT_LICENSES = {
