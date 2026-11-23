@@ -21,6 +21,7 @@ on:
           - epub-diagnostic-a0fbb60
           - neon-device-022
           - neon-device-023
+          - woff2-native-024
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -70,6 +71,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Reject default unknown unbound or unacknowledged scopes before native preparation
         run: python3 -B scripts/workflow_admission.py
 
@@ -1003,7 +1005,7 @@ jobs:
 
   epub_diagnostic:
     needs: admission
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' || inputs.validation_scope == 'woff2-native-024' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -1570,6 +1572,62 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: development-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/development/
+            artifacts/task3/
+          retention-days: 3
+          if-no-files-found: warn
+
+  woff2_native:
+    needs: admission
+    if: ${{ inputs.validation_scope == 'woff2-native-024' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
+      DEVELOPMENT_SOURCE_SHA: ${{ inputs.development_source_sha }}
+      DEVELOPMENT_PLAN_SHA256: ${{ inputs.development_plan_sha256 }}
+      BUILD_IPA: ${{ inputs.build_ipa }}
+      ALLOW_UNQUALIFIED_IPA: ${{ inputs.allow_unqualified_ipa }}
+      PRIOR_VALIDATION_RUN: ${{ inputs.prior_validation_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind WOFF2 source selection and budgets before preparation
+        run: python3 -B scripts/run_woff2_native.py preflight
+      - name: Prepare the fixed native tools and generate isolated schemes
+        run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/development/preparation
+      - name: Resolve pinned dependencies and boot an installed simulator
+        run: python3 -B scripts/run_woff2_native.py prepare-runtime
+      - name: Build each required scheme once and execute selected cases serially
+        run: python3 -B scripts/run_woff2_native.py run --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+      - name: Display development outcomes without release qualification
+        if: always()
+        run: |
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('artifacts/development/execution/development-summary.json')
+          if path.is_file():
+              data = json.loads(path.read_text())
+          else:
+              plan = json.loads(Path('scripts/woff2_native_plan.json').read_text())
+              data = {'qualification':'DEVELOPMENT_ONLY', 'release_qualified':False, 'status':'blocked',
+                      'native_executions':None, 'reason':'preparation or execution receipt incomplete',
+                      'cases':[dict(row, status='blocked', reason='no verified execution receipt') for row in plan['cases']]}
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open('x') as receipt:
+                  json.dump(data, receipt, indent=2)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n## WOFF2 native results — device package is qualified independently\n```json\n'+json.dumps(data, indent=2)+'\n```\n')
+          PY
+      - name: Preserve development raw evidence and preparation failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: woff2-native-evidence-${{ github.run_id }}-${{ github.sha }}
           path: |
             artifacts/development/
             artifacts/task3/

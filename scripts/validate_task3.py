@@ -185,14 +185,20 @@ def candidate_files():
 
 
 def freeze_candidate():
-    inventory.validate_source()
+    if os.environ.get("VALIDATION_SCOPE") == "woff2-native-024":
+        # Verify this batch's bounded declaration inventory, not a historical full-suite count.
+        from run_woff2_native import read_plan
+        plan = read_plan()
+        source_inventory = dict(kind="SOURCE_INVENTORY_NOT_NATIVE", scope=plan["scope"], cases=plan["cases"], native_executions=0)
+    else:
+        source_inventory = inventory.validate_source()
     require(run(["git", "rev-parse", "HEAD"]) == os.environ["GITHUB_SHA"], "Checkout SHA mismatch")
     require(not run(["git", "status", "--porcelain", "--untracked-files=no"]), "CI requires a clean committed candidate")
     require(set(candidate_files()) <= set(run(["git", "ls-files"]).splitlines()),
             "Every candidate source and validation file must belong to the committed revision")
     report("candidate-sources.json", dict(source_commit=os.environ["GITHUB_SHA"],
            run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
-           files=candidate_files(), inventory=inventory.validate_source()))
+           files=candidate_files(), inventory=source_inventory))
 
 
 def check_candidate():
@@ -592,7 +598,14 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
             and digest(zip_checkout / "LICENSE") == ZIP_LICENSE_SHA256
             and digest(ROOT / "App/Resources/ZIPFoundation-LICENSE.txt") == ZIP_LICENSE_SHA256,
             "ZIPFoundation official license resource is missing or changed")
+    diagnostic_fields = {}
+    if diagnostic:
+        from epub_diagnostic_package import WOFF2, release_licenses
+        if WOFF2:
+            diagnostic_fields.update(mit_licenses=release_licenses(), run_id=os.environ["GITHUB_RUN_ID"],
+                                     run_attempt=os.environ["GITHUB_RUN_ATTEMPT"])
     report("app-dependency-gate.json", dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence,
+           **diagnostic_fields,
            grdb_linkage="dynamic" if any(path.name == "GRDB" for path in binaries) else "SPM automatic/static",
            packages=packages, zipfoundation_license_sha256=digest(zip_license),
            grdb_privacy_resources=[str(path.relative_to(APP)) for path in resources],
@@ -657,11 +670,20 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                native_tests_executed_this_run=15, coverage="EPUB_READING_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
     elif diagnostic:
-        from epub_diagnostic_package import validate_saved, VERSION, BUILD
+        from epub_diagnostic_package import validate_saved, VERSION, BUILD, WOFF2, release_licenses
         qualification = validate_saved()
         require(version == VERSION and build == BUILD, "Diagnostic package identity differs")
+        diagnostic_fields = dict(native_tests_executed_this_run=0)
+        if WOFF2:
+            dependency = json.loads((OUT / "app-dependency-gate.json").read_bytes())
+            hashes = {name: digest(path) for name, path in expected.items()}
+            require(all(dependency[key] == qualification[key] for key in ("run_id", "run_attempt", "source_commit"))
+                    and dependency["mit_licenses"] == release_licenses() and dependency["signing"] == "unsigned"
+                    and all(hashes["Payload/YueJing.app/" + row["binary"]] == row["sha256"] for row in dependency["actual_images"]),
+                    "WOFF2 dependency receipt or actual device Release bytes changed before verification")
+            diagnostic_fields = dict(native_tests_executed_this_job=0, release_files_sha256=hashes)
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
-               native_tests_executed_this_run=0, coverage="UI_NOT_QUALIFIED",
+               **diagnostic_fields, coverage="UI_NOT_QUALIFIED",
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,
                separate_validation_reference=qualification["validation_reference"],
                dependency_gate="app-dependency-gate.json"))

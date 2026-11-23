@@ -1,0 +1,22 @@
+{
+  "scope": "woff2-native-024",
+  "branch": "dev/workflow-optimization",
+  "build_timeout_seconds": 900,
+  "test_timeout_seconds": 240,
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 2700,
+  "cases": [
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"importAndColdReopenPublishOnlyValidatedSFNT()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"truncatedContainerNeverPublishesAFont()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"oversizedReconstructionAbortsPackageWithoutPublication()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"bridgeEnforcesRemainingInputAndOutputIndependently()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"cancelledBridgeDoesNotReturnData()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ResourceTests.swift","name":"invalidSubsetDoesNotGrantReconstructedFontCapability()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ReadyMigrationTests.swift","name":"omittedWOFF2ReadyRefreshesOnceWithoutMovingProgress()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ReadyMigrationTests.swift","name":"unmarkedRevisionSixReadyWithoutWOFF2EvidenceIsReused()"},
+    {"file":"ReaderDomainTests/EPUBWOFF2ReadyMigrationTests.swift","name":"refreshRejectsDamageAndRollsBack(_:)","arguments":["source","oldResource","nodePack","differentNodes","progress","publication","currentRevision","currentProgress"]},
+    {"file":"ReaderDomainTests/EPUBFontCompletionTests.swift","name":"packageFontOmissionsDiagnoseWOFF2LocalMissingAndSubsetWithoutCapabilities()"},
+    {"file":"ReaderDomainTests/EPUBAuthorStylesTests.swift","name":"authorStylesRejectsCorruptOversizedAndInvalidSFNTFontsAndDRM()"},
+    {"file":"YueJingHostTests/EPUBFontLoadingHostTests.swift","name":"epubWebKitLoadsReconstructedWOFF2ThroughFontCapability()"}
+  ]
+}

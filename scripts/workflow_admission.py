@@ -1,5 +1,6 @@
 """Cheap Task3 dispatch admission, before native tool preparation."""
 import os
+import subprocess
 import task3_test_inventory as inventory
 from workflow_development import preflight
 
@@ -9,7 +10,7 @@ HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'e
 
 
 def admit(scope, acknowledgement):
-    if scope not in HISTORICAL | {'full', 'development-targeted'}:
+    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024'}:
         raise ValueError('Choose an explicit scope; no native work is authorized by the default')
     if scope != 'development-targeted' and acknowledgement != scope:
         raise ValueError('Explicit scope acknowledgement required; historical frozen gates still apply')
@@ -18,7 +19,20 @@ def admit(scope, acknowledgement):
 
 def main():
     scope = admit(os.environ.get('VALIDATION_SCOPE', ''), os.environ.get('SCOPE_ACKNOWLEDGEMENT', ''))
-    if scope == 'development-targeted':
+    if scope == 'woff2-native-024':
+        env = os.environ
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip()
+        if not (env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and env.get('GITHUB_RUN_ATTEMPT') == '1'
+                and env.get('GITHUB_REF') == 'refs/heads/dev/workflow-optimization'
+                and head == env.get('GITHUB_SHA') == env.get('DEVELOPMENT_SOURCE_SHA')
+                and parent == '88024e7a7f474a90c2ef9b58d23ca0e5cc4ebda2'
+                and env.get('BUILD_IPA') == 'true' and env.get('ALLOW_UNQUALIFIED_IPA') == 'true'
+                and not env.get('PRIOR_VALIDATION_RUN')):
+            raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')
+        from run_woff2_native import preflight as native_preflight
+        native_preflight()
+    elif scope == 'development-targeted':
         preflight()
     else:
         if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or os.environ.get('GITHUB_RUN_ATTEMPT') != '1':
