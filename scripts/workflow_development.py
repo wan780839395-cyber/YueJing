@@ -277,7 +277,6 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
     from workflow_failure_details import failure_details
     import run_epub_freeze_validation as freeze
     runner = runner or run_logged
-    parser = parser or freeze.parse_log_for_spec
     exporter = exporter or export_results
     specs = select(plan)
     output.mkdir(parents=True, exist_ok=False)
@@ -395,7 +394,8 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
                     current['export_seconds'] = time.monotonic()-before_export
                 if current['status'] == 'passed':
                     validate_build(builds[scheme], identity_for(scheme), products)
-                    counts = parser(str(index), spec, raw, current['exit_code'], current['timed_out'])
+                    args = (str(index), spec, raw, current['exit_code'], current['timed_out'])
+                    counts = parser(*args) if parser else freeze.parse_log_for_spec(*args, action=command[1])
                     require((folder/'test.xcresult').is_dir(), 'Missing native xcresult')
                     if spec['cases'][0] in inventory.PARAMETERIZED:
                         freeze.parameter_result(json.loads((folder/'xcresult-tests.json').read_text(encoding='utf-8')))

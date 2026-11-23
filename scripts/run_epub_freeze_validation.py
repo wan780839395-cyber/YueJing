@@ -431,7 +431,7 @@ def command(group, destination, result_bundle):
     return command_for_spec(GROUPS[group], destination, result_bundle)
 
 
-def parse_log_for_spec(group, spec, raw, code, timed_out):
+def parse_log_for_spec(group, spec, raw, code, timed_out, *, action="test"):
     require(type(code) is int and code == 0 and timed_out is False, "Native failure/timeout")
     require(isinstance(raw, bytes) and raw, "Missing native log")
     names, kind = spec["cases"], spec["kind"]
@@ -451,7 +451,9 @@ def parse_log_for_spec(group, spec, raw, code, timed_out):
         require(case["status"] == "passed" and len(case["starts"]) == len(case["finishes"]) == 1
                 and case["starts"][0]["line"] < case["finishes"][0]["line"]
                 and not case["skips"] and not case["issues"], "Invalid case event chain")
-    require("** TEST SUCCEEDED **" in text and "** TEST FAILED **" not in text, "Native success marker missing")
+    expected_marker = {"test": "** TEST SUCCEEDED **", "test-without-building": "** TEST EXECUTE SUCCEEDED **"}.get(action)
+    markers = re.findall(r"^\*\* TEST(?: EXECUTE)? (?:SUCCEEDED|FAILED) \*\*\r?$", text, re.MULTILINE)
+    require(expected_marker is not None and [m.rstrip("\r") for m in markers] == [expected_marker], "Native success marker missing or conflicting")
     require(not re.search(r"^.*\b(?:Test|Suite)[^\r\n]*\b(?:skipped|failed)\b", text, re.MULTILINE), "Failure takes precedence")
     summaries = re.findall(r"Test run with (\d+) tests?\b[^\r\n]*?\b(passed|failed)\b", text)
     if kind != "ui":

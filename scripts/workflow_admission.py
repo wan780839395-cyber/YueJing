@@ -10,7 +10,7 @@ HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'e
 
 
 def admit(scope, acknowledgement):
-    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'}:
+    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027', 'bookmark-device-028'}:
         raise ValueError('Choose an explicit scope; no native work is authorized by the default')
     if scope != 'development-targeted' and acknowledgement != scope:
         raise ValueError('Explicit scope acknowledgement required; historical frozen gates still apply')
@@ -19,6 +19,11 @@ def admit(scope, acknowledgement):
 
 def main():
     scope = admit(os.environ.get('VALIDATION_SCOPE', ''), os.environ.get('SCOPE_ACKNOWLEDGEMENT', ''))
+    if scope == 'full':
+        from bookmark_device_package import BASE
+        parents = subprocess.check_output(['git', 'rev-list', '--parents', '-n1', 'HEAD'], text=True).split()[1:]
+        if BASE in parents:
+            raise ValueError('This bookmark batch permits targeted development and device-only packaging, not full')
     if scope == 'woff2-native-024':
         env = os.environ
         head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
@@ -32,6 +37,9 @@ def main():
             raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')
         from run_woff2_native import preflight as native_preflight
         native_preflight()
+    elif scope == 'bookmark-device-028':
+        from bookmark_device_package import scope_receipt
+        scope_receipt()
     elif scope in ('userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'):
         env = os.environ
         if not (env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and env.get('GITHUB_RUN_ATTEMPT') == '1'

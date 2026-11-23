@@ -159,6 +159,11 @@ def main():
         dependency = json.loads((OUT / "task3/app-dependency-gate.json").read_text(encoding="utf-8"))
         require(all(dependency.get(key) == qualified[key] for key in ("source_commit", "run_id", "run_attempt"))
                 and dependency.get("signing") == "unsigned", "Missing same-run strict device dependency gate")
+    if os.environ.get("VALIDATION_SCOPE") == "bookmark-device-028":
+        from bookmark_device_package import check_gate
+        from epub_diagnostic_package import validate_saved
+        from userfont_package import release_hashes
+        check_gate(validate_saved(), release_hashes(APP))
     if os.environ.get("VALIDATION_SCOPE") in ("userfont-native-025", "fontpicker-native-026", "fontcopy-native-027"):
         from userfont_package import verify_native, release_hashes
         qualified = verify_native()

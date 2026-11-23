@@ -510,7 +510,7 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
         validate_saved()
     elif diagnostic:
         from epub_diagnostic_package import validate_saved
-        validate_saved()
+        device_scope = validate_saved()
     elif epub_author_layout:
         from run_epub_author_layout_validation import delivery_gate
         delivery_gate()
@@ -607,8 +607,11 @@ def package_gate(reused=False, epub_compat=False, epub_paging=False, epub_readin
         from userfont_package import release_hashes
         extra_fields.update(mit_licenses=release_licenses(), release_files_sha256=release_hashes(APP))
     if diagnostic:
-        from epub_diagnostic_package import WOFF2, release_licenses
-        if WOFF2:
+        from epub_diagnostic_package import BOOKMARK, WOFF2, release_licenses
+        if BOOKMARK:
+            from userfont_package import release_hashes
+            extra_fields.update(device_scope=device_scope, release_files_sha256=release_hashes(APP))
+        if WOFF2 or BOOKMARK:
             extra_fields.update(mit_licenses=release_licenses(), run_id=os.environ["GITHUB_RUN_ID"],
                                 run_attempt=os.environ["GITHUB_RUN_ATTEMPT"])
     report("app-dependency-gate.json", dict(source_commit=os.environ["GITHUB_SHA"], actual_images=evidence,
@@ -684,11 +687,11 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                native_tests_executed_this_run=15, coverage="EPUB_READING_TARGETED_NOT_FULL",
                native_evidence=qualification, dependency_gate="app-dependency-gate.json"))
     elif diagnostic:
-        from epub_diagnostic_package import validate_saved, VERSION, BUILD, WOFF2, release_licenses
+        from epub_diagnostic_package import validate_saved, VERSION, BUILD, WOFF2, BOOKMARK, release_licenses
         qualification = validate_saved()
         require(version == VERSION and build == BUILD, "Diagnostic package identity differs")
         diagnostic_fields = dict(native_tests_executed_this_run=0)
-        if WOFF2:
+        if WOFF2 or BOOKMARK:
             dependency = json.loads((OUT / "app-dependency-gate.json").read_bytes())
             hashes = {name: digest(path) for name, path in expected.items()}
             require(all(dependency[key] == qualification[key] for key in ("run_id", "run_attempt", "source_commit"))
@@ -696,6 +699,9 @@ def verify_ipa(reused=False, epub_compat=False, epub_paging=False, epub_reading=
                     and all(hashes["Payload/YueJing.app/" + row["binary"]] == row["sha256"] for row in dependency["actual_images"]),
                     "WOFF2 dependency receipt or actual device Release bytes changed before verification")
             diagnostic_fields = dict(native_tests_executed_this_job=0, release_files_sha256=hashes)
+            if BOOKMARK:
+                from bookmark_device_package import check_gate
+                diagnostic_fields['dependency_gate_sha256'] = check_gate(qualification, hashes)
         report("ipa-verification.json", dict(**manifest, verified_packaged_files=len(expected),
                **diagnostic_fields, coverage="UI_NOT_QUALIFIED",
                qualification="DEVICE_DIAGNOSTIC_ONLY", diagnostic_evidence=qualification,

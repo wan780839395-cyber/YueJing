@@ -25,6 +25,7 @@ on:
           - userfont-native-025
           - fontpicker-native-026
           - fontcopy-native-027
+          - bookmark-device-028
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -1008,7 +1009,7 @@ jobs:
 
   epub_diagnostic:
     needs: admission
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' || (inputs.validation_scope == 'woff2-native-024' && inputs.build_ipa) }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' || ((inputs.validation_scope == 'woff2-native-024' || inputs.validation_scope == 'bookmark-device-028') && inputs.build_ipa) }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -1029,7 +1030,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Freeze unchanged product source and disclose UI NOT QUALIFIED
+      - name: Freeze device-only source and disclose UI NOT QUALIFIED
         run: |
           set -euo pipefail
           python3 -B scripts/epub_diagnostic_package.py freeze
