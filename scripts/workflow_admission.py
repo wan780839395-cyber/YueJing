@@ -10,7 +10,7 @@ HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'e
 
 
 def admit(scope, acknowledgement):
-    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027', 'bookmark-device-028', 'search-device-029'}:
+    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027', 'bookmark-device-028', 'search-device-029', 'search-return-device-030'}:
         raise ValueError('Choose an explicit scope; no native work is authorized by the default')
     if scope != 'development-targeted' and acknowledgement != scope:
         raise ValueError('Explicit scope acknowledgement required; historical frozen gates still apply')
@@ -37,7 +37,7 @@ def main():
             raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')
         from run_woff2_native import preflight as native_preflight
         native_preflight()
-    elif scope in ('bookmark-device-028', 'search-device-029'):
+    elif scope in ('bookmark-device-028', 'search-device-029', 'search-return-device-030'):
         from bookmark_device_package import scope_receipt
         scope_receipt()
     elif scope in ('userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'):

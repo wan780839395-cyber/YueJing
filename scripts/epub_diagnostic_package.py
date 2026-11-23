@@ -35,7 +35,7 @@ if WOFF2:
     VERSION, BUILD = "0.2.24", "26"
     ALLOWED = frozenset(("scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
 
-DEVICE_BATCH = os.environ.get("VALIDATION_SCOPE") in ("bookmark-device-028", "search-device-029")
+DEVICE_BATCH = os.environ.get("VALIDATION_SCOPE") in ("bookmark-device-028", "search-device-029", "search-return-device-030")
 if DEVICE_BATCH:
     from bookmark_device_package import BATCHES
     SCOPE = os.environ["VALIDATION_SCOPE"]

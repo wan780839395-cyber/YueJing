@@ -15,6 +15,7 @@ BASE = '765fc4e1f09b1d09554b60e2016b1b34bc9aabbb'
 PLAN = '6a618ed99773c0f2ff626c633cefd08b60b1c3a9f60a5c4106a96ac82d780e2d'
 REF = 'refs/heads/dev/workflow-optimization'
 SEARCH = 'search-device-029'
+SEARCH_RETURN = 'search-return-device-030'
 
 
 class Batch(NamedTuple):
@@ -26,17 +27,23 @@ class Batch(NamedTuple):
 
 BATCHES = {SCOPE: Batch(VERSION, BUILD, BASE, PLAN),
            SEARCH: Batch('0.2.29', '31', '13bb9b05d6dac14a55e5f34b9f683b4b869331df',
-                         '5ff8ec571ff8d613554103737af40096b4bc60eb9c4adbb6b9f7cb65d67d51f8')}
+                         '5ff8ec571ff8d613554103737af40096b4bc60eb9c4adbb6b9f7cb65d67d51f8'),
+           SEARCH_RETURN: Batch('0.2.30', '32', '7f110bbeb257fea29ec3a7f165e68bcca961f179', '5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f')}
 # Both search checkouts need MAX_SEARCH_COMMITS + 1 commits, including the base.
 MAX_SEARCH_COMMITS = 8
 SEARCH_PATHS = frozenset(('.github/workflows/task3-validate.yml', 'project.yml', 'scripts/workflow_tools.py',
                           'scripts/workflow_admission.py', 'scripts/bookmark_device_package.py',
                           'scripts/epub_diagnostic_package.py', 'scripts/package_ipa.py', 'scripts/validate_task3.py',
                           'scripts/workflow_development.py'))
+RETURN_PATHS = frozenset(('.github/workflows/task3-validate.yml', 'project.yml', 'scripts/workflow_tools.py',
+                          'scripts/workflow_admission.py', 'scripts/bookmark_device_package.py',
+                          'scripts/epub_diagnostic_package.py', 'scripts/package_ipa.py'))
 
 
 def identity(source, run_id, scope=SCOPE):
     batch = BATCHES[scope]
+    v.require(re.fullmatch('[0-9a-f]{40}', batch.base) and re.fullmatch('[0-9a-f]{64}', batch.plan),
+              'Device scope has no frozen product SHA and plan SHA256')
     v.require(re.fullmatch('[0-9a-f]{40}', source) and re.fullmatch('[1-9][0-9]*', run_id),
               'Expected full commit and positive device run ID')
     return dict(scope=scope, version=batch.version, build=batch.build, source_commit=source, base_commit=batch.base,
@@ -51,9 +58,9 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=v.ROOT, timeout=30).decode()
 
 
-def check_search_chain(source, base):
+def check_search_chain(source, base, *, max_commits=MAX_SEARCH_COMMITS, paths=SEARCH_PATHS):
     current = source
-    for _ in range(MAX_SEARCH_COMMITS):
+    for _ in range(max_commits):
         lineage = git('rev-list', '--parents', '-n1', current).split()
         v.require(len(lineage) == 2 and lineage[0] == current, 'Missing search parent or unexpected merge')
         parent = lineage[1]
@@ -62,7 +69,7 @@ def check_search_chain(source, base):
         entries = raw.split('\0')
         v.require(len(entries) >= 3 and len(entries) % 2 == 1 and entries[-1] == '', 'Empty or invalid search change')
         for meta, path in zip(entries[0:-1:2], entries[1:-1:2]):
-            v.require(path in SEARCH_PATHS and meta.split()[:2] == [':100644', '100644'] and meta.endswith(' M'),
+            v.require(path in paths and meta.split()[:2] == [':100644', '100644'] and meta.endswith(' M'),
                       'Expected only edits of approved ordinary files in search candidate history')
         if parent == base:
             return
@@ -89,6 +96,8 @@ def scope_receipt():
               'Expected a clean checkout of the approved candidate')
     if scope == SEARCH:
         check_search_chain(source, batch.base)
+    elif scope == SEARCH_RETURN:
+        check_search_chain(source, batch.base, max_commits=1, paths=RETURN_PATHS)
     else:
         v.require(git('rev-list', '--parents', '-n1', 'HEAD').split() == [source, batch.base],
                   'Expected exact direct child of bookmark base')
@@ -106,8 +115,9 @@ def check_gate(scope, hashes):
 
 
 if __name__ == '__main__':
-    commands = {'verify-download': SCOPE, 'verify-search-download': SEARCH}
+    commands = {'verify-download': SCOPE, 'verify-search-download': SEARCH,
+                'verify-search-return-download': SEARCH_RETURN}
     if len(sys.argv) != 6 or sys.argv[1] not in commands:
-        sys.exit('usage: bookmark_device_package.py {verify-download|verify-search-download} EXTRACTED_DIR SOURCE_SHA DEVICE_RUN_ID IPA_SHA256')
+        sys.exit('usage: bookmark_device_package.py {' + '|'.join(commands) + '} EXTRACTED_DIR SOURCE_SHA DEVICE_RUN_ID IPA_SHA256')
     from epub_diagnostic_package import verify_download
     verify_download(*sys.argv[2:], device_scope=commands[sys.argv[1]])
