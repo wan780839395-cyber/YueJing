@@ -409,6 +409,15 @@ extension EPUBContentPool {
         defer { try? FileManager.default.removeItem(at: work) }
         guard try EPUBResourceStore.sourceDigest(archive) == expected.sourceSHA256 else { throw LibraryError.changedFile }
         let package = try EPUBPackageParser.parse(archiveURL: archive, destination: work, observe: observe)
+        if expected.needsWOFF2Upgrade || package.woff2Revision != nil, let reference = expected.ready {
+            // A changed presentation is not an exact-source repair: prove the *old*
+            // publication before allowing its XHTML/resource inventory to change.
+            let folder = try EPUBReadyArtifact.folder(root: root, reference: reference)
+            try EPUBReadyArtifact.verifyManifest(folder: folder, expectedSHA256: EPUBMetadataFingerprintCache.canonical(expected))
+            try EPUBReadyArtifact.verifyNodes(package: expected, folder: folder)
+            try EPUBPublicationCache.verifyResources(EPUBPublication(package: expected,
+                resourceRoot: folder.appendingPathComponent("resources", isDirectory: true)))
+        }
         let trace = EPUBPreparationTrace(observer: observe)
         trace.emit(.migration)
         do { try EPUBAuthorStyleMigration.validate(previous: expected, replacement: package) }
@@ -430,6 +439,7 @@ extension EPUBContentPool {
                   package.navigation == expected.navigation, package.resources == expected.resources,
                   package.coverPath == expected.coverPath,
                   package.authorStyleRevision == expected.authorStyleRevision,
+                  package.woff2Revision == expected.woff2Revision,
                   package.styleCompatibility == expected.styleCompatibility else { throw EPUBError.corruptResource }
             for path in package.spine {
                 guard let nodes = package.textNodes[path], let chapter = reference.chapters[path],

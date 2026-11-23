@@ -1,11 +1,20 @@
 import Foundation
 
+extension EPUBStyleCompatibility {
+    // At the 128-row persistence cap an omitted candidate may no longer be visible.
+    // Neither a generic fontUnavailable flag nor a CSS hint alone warrants a reparse.
+    var mayContainEmbeddedWOFF2: Bool {
+        fontDiagnostics.count == 128 || fontDiagnostics.contains { $0.source == .embedded && $0.format == .woff2 }
+    }
+}
+
 /// A presentation-only revision never changes the persisted text-position version.
 /// Prove every old chapter's text and all non-XHTML resources before publishing.
 enum EPUBAuthorStyleMigration {
     static func validate(previous: EPUBPackage, replacement: EPUBPackage) throws {
         guard previous.needsAuthorStyleUpgrade,
               replacement.authorStyleRevision == EPUBFormat.authorStyleRevision,
+              !replacement.needsAuthorStyleUpgrade,
               previous.sourceSHA256 == replacement.sourceSHA256,
               previous.parserVersion == replacement.parserVersion,
               previous.title == replacement.title,
@@ -14,6 +23,11 @@ enum EPUBAuthorStyleMigration {
               previous.coverPath == replacement.coverPath else { throw EPUBError.corruptResource }
         if let ready = previous.ready { try EPUBReadyArtifact.validate(ready, package: previous) }
         if let ready = replacement.ready { try EPUBReadyArtifact.validate(ready, package: replacement) }
+        if previous.needsWOFF2Upgrade || replacement.woff2Revision != nil, let old = previous.ready, let new = replacement.ready {
+            // CAS publication: both complete node packs (not just individual index claims) must match.
+            guard old.nodeBytes == new.nodeBytes, old.nodeSHA256 == new.nodeSHA256,
+                  old.chapters == new.chapters else { throw EPUBError.corruptResource }
+        }
         for path in previous.spine {
             guard try nodeDigest(previous, path: path) == nodeDigest(replacement, path: path) else {
                 throw EPUBError.corruptResource

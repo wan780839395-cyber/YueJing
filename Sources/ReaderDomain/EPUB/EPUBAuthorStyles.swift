@@ -2494,7 +2494,9 @@ public enum EPUBAuthorStyles {
             // Audit all sources and retain old SFNT identity for safe migration.
             if invalidSubset {
                 if emitRules {
-                    for source in srcResult.sources where cache?.fontPreparation?.formats[source.canonicalPath] != .woff {
+                    for source in srcResult.sources {
+                        let format = cache?.fontPreparation?.formats[source.canonicalPath]
+                        guard format != .woff, format != .woff2 else { continue }
                         try collector.recordReferencedFont(path: source.canonicalPath, mediaType: source.mediaType)
                     }
                 }

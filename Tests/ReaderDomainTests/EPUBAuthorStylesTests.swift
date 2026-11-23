@@ -535,7 +535,13 @@ struct EPUBAuthorStylesTests {
         }
         #expect(try EPUBAuthorStyles.verifyFontData(validOTF, declaredMediaType: "font/ttf") == "font/otf")
         #expect(try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: "font/otf") == "font/ttf")
-        for unsupported in ["application/octet-stream", "image/png", "font/woff", "font/woff2"] {
+        // A container MIME is an allowed import hint, never a served resource type.
+        for hint in ["font/woff", "font/woff2"] {
+            #expect(try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: hint) == "font/ttf")
+            #expect(!EPUBAuthorStyles.isAllowedServedMediaType(hint))
+            #expect(EPUBAuthorStyles.maximumServedBytes(forMediaType: hint) == nil)
+        }
+        for unsupported in ["application/octet-stream", "image/png"] {
             #expect(throws: EPUBError.unsupportedContent) {
                 _ = try EPUBAuthorStyles.verifyFontData(validTTF, declaredMediaType: unsupported)
             }

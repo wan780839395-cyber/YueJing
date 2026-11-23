@@ -52,8 +52,8 @@ targets:
         OTHER_LDFLAGS: "$(inherited) -Wl,-dead_strip_dylibs"
         PRODUCT_NAME: YueJing
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.app
-        MARKETING_VERSION: "0.2.23"
-        CURRENT_PROJECT_VERSION: "25"
+        MARKETING_VERSION: "0.2.24"
+        CURRENT_PROJECT_VERSION: "26"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
@@ -77,6 +77,28 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
 
+  # Private native implementation. Swift imports only the explicit C module;
+  # do not auto-enroll vendor headers, encoders, CLI or test harnesses.
+  CWOFF2:
+    type: library.static
+    platform: iOS
+    deploymentTarget: "16.6"
+    sources:
+      - path: Sources/CWOFF2
+        includes:
+          - yj_context.cpp
+          - yj_woff2.cpp
+          - woff/src/*.cc
+          - brotli/c/common/*.c
+          - brotli/c/dec/*.c
+    settings:
+      base:
+        HEADER_SEARCH_PATHS: '$(inherited) "$(SRCROOT)/Sources/CWOFF2/woff/include" "$(SRCROOT)/Sources/CWOFF2/brotli/c/include"'
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        GCC_ENABLE_CPP_EXCEPTIONS: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        SKIP_INSTALL: YES
+
   ReaderDomain:
     type: framework
     platform: iOS
@@ -84,6 +106,8 @@ targets:
     sources:
       - path: Sources/ReaderDomain
     dependencies:
+      - target: CWOFF2
+        embed: false
       - target: TXTCore
       - package: GRDB
         product: GRDB
@@ -92,6 +116,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.reader-domain
+        SWIFT_INCLUDE_PATHS: '$(inherited) "$(SRCROOT)/Sources/CWOFF2"'
+        OTHER_LDFLAGS: "$(inherited) -lc++"
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
 

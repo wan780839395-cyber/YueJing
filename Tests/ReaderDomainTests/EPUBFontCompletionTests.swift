@@ -78,7 +78,8 @@ struct EPUBFontCompletionTests {
         let root = try EPUBTestSupport.makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
         let samples: [(Data, String, String, EPUBFontDiagnostic.Outcome)] = [
-            (Data([0x77, 0x4f, 0x46, 0x32] + Array(repeating: 0, count: 44)), "font/woff2", "", .unsupportedFormat),
+            // Signature only: a malformed header, not a valid WOFF2 conversion fixture.
+            (Data([0x77, 0x4f, 0x46, 0x32] + Array(repeating: 0, count: 44)), "font/woff2", "", .invalidStructure),
             (makeWOFF(), "font/woff", "unicode-range: U+110000;", .unsupportedSubset)
         ]
         for (index, sample) in samples.enumerated() {

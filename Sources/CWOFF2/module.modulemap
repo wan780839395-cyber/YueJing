@@ -1,0 +1,4 @@
+module CWOFF2 {
+  header "yj_woff2.h"
+  export *
+}

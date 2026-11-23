@@ -389,7 +389,9 @@ public enum EPUBPackageParser {
                 resources: servedResources,
                 textNodes: textNodesByPath,
                 coverPath: resolvedCoverPath,
-                styleCompatibility: styleCompatibility
+                styleCompatibility: styleCompatibility,
+                woff2Revision: styleCompatibility.mayContainEmbeddedWOFF2 || fontPreparation.formats.values.contains(.woff2)
+                    ? .boundedSFNT : nil
             )
         } catch {
             trace.emit(trace.stage, failure: error)

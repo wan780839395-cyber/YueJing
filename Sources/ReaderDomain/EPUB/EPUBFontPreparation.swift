@@ -38,6 +38,7 @@ final class EPUBFontPreparation {
         guard original.count == entry.byteCount, EPUBResourceStore.digest(original) == entry.sha256 else {
             throw EPUBError.corruptResource // Integrity failure is never a presentation fallback.
         }
+        let inputRemaining = EPUBAuthorStyles.maxTotalFontBytes - totalInputBytes
         totalInputBytes += original.count
         try Task.checkCancellation()
         var data = original
@@ -63,9 +64,13 @@ final class EPUBFontPreparation {
         let magic = Array(data.prefix(4))
         if magic == [0x77, 0x4f, 0x46, 0x32] {
             format = .woff2
-            try omit(.unsupportedFormat) // No bounded Brotli + transform decoder in this target.
-        }
-        if magic == [0x77, 0x4f, 0x46, 0x46] {
+            do {
+                data = try EPUBWOFF2Decoder.decode(data, inputRemaining: inputRemaining,
+                    outputRemaining: EPUBAuthorStyles.maxTotalFontBytes - totalOutputBytes)
+            } catch EPUBError.corruptResource { try omit(.invalidStructure) }
+            catch EPUBError.unsupportedContent { try omit(.unsupportedFormat) }
+            if outcome == .verified { outcome = .convertedWOFF }
+        } else if magic == [0x77, 0x4f, 0x46, 0x46] {
             format = .woff
             do { data = try EPUBWOFFDecoder.decode(data) }
             catch EPUBError.corruptResource { try omit(.invalidStructure) }

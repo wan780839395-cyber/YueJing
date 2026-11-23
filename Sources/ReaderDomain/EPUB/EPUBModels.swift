@@ -10,6 +10,12 @@ public enum EPUBFormat {
     }
 }
 
+// Independent of the DOM/position and CSS revisions. Unknown non-nil revisions
+// fail Codable decoding instead of being treated as a legacy omission.
+public enum EPUBWOFF2Revision: Int, Codable, Sendable {
+    case boundedSFNT = 1
+}
+
 public struct EPUBResource: Codable, Sendable, Equatable {
     public let path: String
     public let mediaType: String
@@ -44,25 +50,31 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
     public let ready: EPUBReadyReference?
     public let authorStyleRevision: Int?
     public let styleCompatibility: EPUBStyleCompatibility?
+    public let woff2Revision: EPUBWOFF2Revision?
+    var needsWOFF2Upgrade: Bool {
+        authorStyleRevision == EPUBFormat.authorStyleRevision && woff2Revision == nil &&
+            styleCompatibility?.mayContainEmbeddedWOFF2 == true
+    }
     public var needsAuthorStyleUpgrade: Bool {
-        EPUBFormat.supportsAuthorStyleRevision(authorStyleRevision) && authorStyleRevision != EPUBFormat.authorStyleRevision
+        needsWOFF2Upgrade || (EPUBFormat.supportsAuthorStyleRevision(authorStyleRevision) && authorStyleRevision != EPUBFormat.authorStyleRevision)
     }
     private var chapterNodes: EPUBChapterNodes? = nil
     private enum CodingKeys: String, CodingKey {
         case sourceSHA256, parserVersion, title, spine, navigation, resources, textNodes, coverPath, ready
-        case authorStyleRevision, styleCompatibility
+        case authorStyleRevision, styleCompatibility, woff2Revision
     }
     public init(sourceSHA256: String, parserVersion: String = EPUBFormat.parserVersion, title: String,
                 spine: [String], navigation: [EPUBNavigationItem], resources: [EPUBResource],
                 textNodes: [String: [String]], coverPath: String?, ready: EPUBReadyReference? = nil,
                 authorStyleRevision: Int? = EPUBFormat.authorStyleRevision,
-                styleCompatibility: EPUBStyleCompatibility? = nil) {
+                styleCompatibility: EPUBStyleCompatibility? = nil, woff2Revision: EPUBWOFF2Revision? = nil) {
         self.sourceSHA256 = sourceSHA256; self.parserVersion = parserVersion; self.title = title
         self.spine = spine; self.navigation = navigation; self.resources = resources
         self.textNodes = textNodes; self.coverPath = coverPath
         self.ready = ready
         self.authorStyleRevision = authorStyleRevision
         self.styleCompatibility = styleCompatibility
+        self.woff2Revision = woff2Revision
     }
     public var versionID: String { sourceSHA256 + ":" + parserVersion }
     public func resource(at path: String) -> EPUBResource? { resources.first { $0.path == path } }
@@ -77,7 +89,7 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
         EPUBPackage(sourceSHA256: sourceSHA256, parserVersion: parserVersion, title: title,
                     spine: spine, navigation: navigation, resources: resources,
                     textNodes: [:], coverPath: coverPath, ready: reference, authorStyleRevision: authorStyleRevision,
-                    styleCompatibility: styleCompatibility)
+                    styleCompatibility: styleCompatibility, woff2Revision: woff2Revision)
     }
 
     func attachingNodes(folder: URL) throws -> EPUBPackage {
@@ -93,7 +105,7 @@ public struct EPUBPackage: Codable, Sendable, Equatable {
         lhs.title == rhs.title && lhs.spine == rhs.spine && lhs.navigation == rhs.navigation &&
         lhs.resources == rhs.resources && lhs.textNodes == rhs.textNodes &&
         lhs.coverPath == rhs.coverPath && lhs.ready == rhs.ready && lhs.authorStyleRevision == rhs.authorStyleRevision &&
-        lhs.styleCompatibility == rhs.styleCompatibility
+        lhs.styleCompatibility == rhs.styleCompatibility && lhs.woff2Revision == rhs.woff2Revision
     }
 }
 

@@ -178,6 +178,48 @@ struct EPUBFontLoadingHostTests {
         }
     }
 
+    @Test func epubWebKitLoadsReconstructedWOFF2ThroughFontCapability() async throws {
+        // The Host target does not compile ReaderDomainTests. Same original
+        // Tests/CWOFF2/fixtures/generate.mjs fixture("tt-glyf-hmtx").woff.
+        let source = try #require(Data(base64Encoded: "d09GMgABAAAAAAFlAAoAAAAAAswAAAEdAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYCJAQgCixICwgAQwoFACwFgUYGTgcgGyYCAASe/x9z98vmqP+IeFLVSFZJZXWHSMiERCjkN3Gu8xElyZSqqNqqeY0zC7DdbOdfRm/zWrXVTwadTPszUJ8AvEY48pWxGFf37zfmD+C34vm6tYMkE+VOHD96h0Q9GCdVoLMJqgWiZy06Sa/mBovylRh2DTCS13ASLEmeTAGEo69EbJYK8To0NITpKNbId+wcUHez3KgnnX0IGUCCFYtLNjUILSJ1s4h8X8TxMoCQbYDJZPTc1sQyTaghkUzUkk0x6iGVrl+9ZLLAND04WjjkihHW2eScPZY52aV131FBKeXxW87+n2CdE07Z5pADFK1YJRk6Wz09WU/f6Cmgd3xELVCpiumWBbiZ7umYoolmWsoYGsdPMU4hESoR"))
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("Box.epub")
+            let path = "OEBPS/Fonts/box.woff2", chapter = "OEBPS/Text/ch1.xhtml"
+            try Self.writeFontTestEPUB(to: archive, title: "Box", fontFileName: "box.woff2",
+                fontData: source, declaredFontMediaType: "font/woff2", fontFormat: "woff2")
+            let receipt = try await fixture.install(archive)
+            let reader = try await fixture.service.openEPUB(id: receipt.book.id)
+            let token = try await reader.beginNavigation(path: chapter)
+            let resource = try #require(reader.publication.package.resource(at: path))
+            #expect(resource.mediaType == "font/ttf")
+            let derived = try EPUBResourceStore.data(path: path, publication: reader.publication)
+            #expect(EPUBResourceStore.digest(derived) == "bbea2f6bd2d701dd5dae124a2808a306b98d13b035f628836301813b8bf27eac")
+            let controller = EPUBWebViewController()
+            try await fixture.withHostedController(controller) {
+                let outcome = try await loadAndAwaitOutcome(controller: controller,
+                    request: EPUBNavigationRequest(id: UUID(), token: token, publication: reader.publication,
+                        targetPosition: nil, fragment: nil, preferences: reader.preferences,
+                        preserveTargetAnchor: false, reloadDocument: true, layoutMode: .original))
+                guard case .ready(let payload, let count, let served, let rejected) = outcome else {
+                    Issue.record("Expected reconstructed font ready, got: \(outcome)"); return
+                }
+                #expect(count == 1 && !payload.authorStyleFallback)
+                #expect(served.contains(path) && rejected.isEmpty)
+                let snapshot = try await inspectLoadedFontsAndMetrics(in: controller)
+                let family = "yjfont-\(EPUBAuthorStyles.scopeIdentifier(for: chapter))-0"
+                let faces = try #require(snapshot["faces"] as? [[String: Any]])
+                #expect(faces.contains { $0["family"] as? String == family && $0["status"] as? String == "loaded" })
+                let rules = try #require(snapshot["fontFaceRules"] as? [[String: Any]])
+                let url = try #require(EPUBResourceCapability.url(for: token, path: path))
+                #expect((rules.first?["src"] as? String)?.contains(url.absoluteString) == true)
+                let metrics = try #require(snapshot["customAAAA"] as? [String: Any])
+                let width = try #require((metrics["rangeWidth"] as? NSNumber)?.doubleValue)
+                #expect(abs(width - 51.84) <= 2) // four 'A' advances of 540 / 1000 em at 24px
+            }
+            try await reader.close(position: nil, sequence: 1, token: nil, preferences: reader.preferences)
+        }
+    }
+
     @Test func epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs() async throws {
         try await withHostFixture { fixture in
             // 1. A structural-only SFNT stub passes EPUBAuthorStyles.verifyFontData and SHA checks
@@ -905,6 +947,7 @@ struct EPUBFontLoadingHostTests {
         fontFileName: String,
         fontData: Data,
         declaredFontMediaType: String = "font/ttf",
+        fontFormat: String = "truetype",
         condensedFontData: Data? = nil
     ) throws {
         let container = """
@@ -951,7 +994,7 @@ struct EPUBFontLoadingHostTests {
         let css = """
         @font-face {
             font-family: "AuthorDisplayFace";
-            src: url("../Fonts/\(fontFileName)") format("truetype");
+            src: url("../Fonts/\(fontFileName)") format("\(fontFormat)");
             font-weight: 400;
             font-style: normal;
         }
