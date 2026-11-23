@@ -14,6 +14,14 @@ ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/validate_t
                      "scripts/epub_diagnostic_package.py", "docs/EPUB_DIAGNOSTIC_PACKAGE.md"))
 
 
+NEON = os.environ.get("VALIDATION_SCOPE") == "neon-device-022"
+if NEON:
+    BASE = "96e88d8037f8159ab9a4ba4d5609038910a1ba4f"
+    SCOPE = "neon-device-022"
+    VERSION, BUILD = "0.2.22", "24"
+    ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
+
+
 def git(*args):
     return subprocess.check_output(["git", *args], cwd=v.ROOT, timeout=30)
 
@@ -30,7 +38,7 @@ def tree(revision):
 def scope_receipt():
     env = os.environ
     v.require(env.get("VALIDATION_SCOPE") == SCOPE and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-              and env.get("GITHUB_REF") == "refs/heads/main" and env.get("GITHUB_RUN_ATTEMPT") == "1"
+              and env.get("GITHUB_REF") == ("refs/heads/dev/workflow-optimization" if NEON else "refs/heads/main") and env.get("GITHUB_RUN_ATTEMPT") == "1"
               and env.get("GITHUB_REPOSITORY") == "wan780839395-cyber/YueJing", "Diagnostic dispatch identity differs")
     v.require(env.get("ALLOW_UNQUALIFIED_IPA") == "true" and env.get("BUILD_IPA") == "true",
               "Explicit diagnostic delivery and device build inputs are required")
@@ -39,6 +47,7 @@ def scope_receipt():
     v.require(inputs.get("validation_scope") == SCOPE
               and str(inputs.get("allow_unqualified_ipa")).lower() == "true"
               and str(inputs.get("build_ipa")).lower() == "true"
+              and (not NEON or inputs.get("scope_acknowledgement") == SCOPE)
               and not inputs.get("prior_validation_run"), "Diagnostic dispatch inputs differ")
     head = git("rev-parse", "HEAD").decode().strip()
     v.require(head == env.get("GITHUB_SHA") and git("rev-parse", "HEAD^").decode().strip() == BASE,
@@ -47,7 +56,7 @@ def scope_receipt():
     before, after = tree(BASE), tree("HEAD")
     changed = {n for n in set(before) | set(after) if before.get(n) != after.get(n)}
     v.require(changed == ALLOWED and all(after[n][:2] == ["100644", "blob"] for n in changed),
-              "Diagnostic package may only change the four publishing paths")
+              "Diagnostic package must match the exact publishing path set")
     from package_ipa import expected_project_identity
     identity = expected_project_identity()
     v.require(identity["version"] == VERSION and identity["build"] == BUILD, "Diagnostic version differs")
@@ -56,8 +65,8 @@ def scope_receipt():
                 qualification="DEVICE_DIAGNOSTIC_ONLY", coverage="UI_NOT_QUALIFIED",
                 native_tests_executed_this_run=0, full_regression_passed=False,
                 allow_unqualified_ipa=True, build_ipa=True,
-                unresolved_cases=["testEPUBShelfCoverAndDirectoryCrossChapterNavigation"],
-                validation_reference=dict(run_id="43427854507", source_commit=BASE,
+                unresolved_cases=["Neon UI and on-device reading interactions not validated"] if NEON else ["testEPUBShelfCoverAndDirectoryCrossChapterNavigation"],
+                validation_reference=None if NEON else dict(run_id="43427854507", source_commit=BASE,
                     artifact_id=14040301098,
                     artifact_sha256="c049599ff0bd06d5f4fc672c5ea3ffa16af0f00e823130f0f6617d13c6b4e08e",
                     reported_passed=24, reported_failed=1,
@@ -82,8 +91,8 @@ if __name__ == "__main__":
         v.report("epub-diagnostic-scope.json", scope_receipt())
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
             output.write("## DIAGNOSTIC ONLY — TESTS NOT RUN / UI NOT QUALIFIED\n\n"
-                         "User requested a device package after complete targeted validation and unified triage. "
-                         "No simulator, Domain, Host or UI execution in this packaging run. Product source unchanged from a0fbb60. "
+                         "User requested a device package for on-device diagnosis, not native qualification. "
+                         "No simulator, Domain, Host or UI execution in this packaging run. Product source frozen at the bound parent commit. "
                          "Device Release, dependency, unsigned and payload byte checks remain required.\n")
     else:
         raise SystemExit("Expected freeze")

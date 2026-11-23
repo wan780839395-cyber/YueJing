@@ -19,6 +19,7 @@ on:
           - epub-paging-6
           - epub-reading-15
           - epub-diagnostic-a0fbb60
+          - neon-device-022
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -1001,7 +1002,7 @@ jobs:
 
   epub_diagnostic:
     needs: admission
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -1011,7 +1012,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
-      VALIDATION_SCOPE: epub-diagnostic-a0fbb60
+      VALIDATION_SCOPE: ${{ inputs.validation_scope }}
     defaults:
       run:
         shell: bash
