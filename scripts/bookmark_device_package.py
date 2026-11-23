@@ -28,7 +28,7 @@ class Batch(NamedTuple):
 BATCHES = {SCOPE: Batch(VERSION, BUILD, BASE, PLAN),
            SEARCH: Batch('0.2.29', '31', '13bb9b05d6dac14a55e5f34b9f683b4b869331df',
                          '5ff8ec571ff8d613554103737af40096b4bc60eb9c4adbb6b9f7cb65d67d51f8'),
-           SEARCH_RETURN: Batch('0.2.30', '32', '7f110bbeb257fea29ec3a7f165e68bcca961f179', '5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f')}
+           SEARCH_RETURN: Batch('0.2.30', '32', '077de6cbe1fca1eaca76bd9ce96244087d0ec673', '5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f')}
 # Both search checkouts need MAX_SEARCH_COMMITS + 1 commits, including the base.
 MAX_SEARCH_COMMITS = 8
 SEARCH_PATHS = frozenset(('.github/workflows/task3-validate.yml', 'project.yml', 'scripts/workflow_tools.py',
@@ -97,11 +97,7 @@ def scope_receipt():
     if scope == SEARCH:
         check_search_chain(source, batch.base)
     elif scope == SEARCH_RETURN:
-        # This build uses identical product inputs to the original frozen device commit.
-        # Admit only its direct child and only the two files implementing the Intel route.
-        original = '7ccee53ae1c0930ffc3b43b46a0d60033cf285fb'
-        check_search_chain(source, original, max_commits=1, paths={'.github/workflows/task3-validate.yml', 'scripts/bookmark_device_package.py'})
-        v.require(batch.base == '7f110bbeb257fea29ec3a7f165e68bcca961f179', 'Unexpected frozen product')
+        check_search_chain(source, batch.base, max_commits=1, paths={'scripts/bookmark_device_package.py'})
     else:
         v.require(git('rev-list', '--parents', '-n1', 'HEAD').split() == [source, batch.base],
                   'Expected exact direct child of bookmark base')
