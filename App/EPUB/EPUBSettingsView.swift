@@ -97,7 +97,6 @@ struct EPUBSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     if settingsGroup == .common {
                         commonContent
-                        EPUBUserFontPicker(selectedID: userFontID, isActive: isActive, select: onUserFontChange)
                     } else {
                         moreContent
                     }
@@ -249,6 +248,8 @@ struct EPUBSettingsView: View {
             typographySection
             presetsSection
             themeSection
+            EPUBUserFontPicker(selectedID: userFontID, isActive: isActive,
+                               select: onUserFontChange, appearance: appearance)
         }
     }
 
