@@ -49,6 +49,28 @@ public actor OpenedEPUBReader {
         guard !closed else { return false }
         return try await store.saveEPUB(session: reading.session, position: position, sequence: sequence, token: token)
     }
+    public func bookmarks() async throws -> [EPUBBookmark] {
+        guard !closed else { throw EPUBError.staleSession }
+        return try await store.epubBookmarks(session: reading.session)
+    }
+
+    /// Returns false only for an existing text anchor. A stale callback is an error.
+    public func addBookmark(_ position: EPUBReadingPosition, title: String, token: EPUBNavigationToken) async throws -> Bool {
+        guard !closed else { throw EPUBError.staleSession }
+        return try await store.addEPUBBookmark(session: reading.session, position: position, title: title, token: token)
+    }
+
+    public func deleteBookmark(id: String) async throws {
+        guard !closed else { throw EPUBError.staleSession }
+        try await store.deleteEPUBBookmark(session: reading.session, id: id)
+    }
+
+    /// Resolves against the active package; neither begins navigation nor saves progress.
+    public func bookmarkPosition(id: String) async throws -> EPUBReadingPosition {
+        guard !closed else { throw EPUBError.staleSession }
+        return try await store.epubBookmarkPosition(session: reading.session, id: id)
+    }
+
     public func savePreferences(_ value: ReaderPreferences, sequence: Int64) async throws -> Bool {
         guard !closed else { return false }
         return try await store.saveReaderPreferences(value, session: reading.session, sequence: sequence)

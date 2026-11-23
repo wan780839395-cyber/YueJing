@@ -40,7 +40,11 @@ public struct EPUBFontIdentity: Codable, Sendable, Equatable, Hashable {
     /// omitted individually; this API never throws or changes font/book acceptance.
     /// TTC/WOFF/WOFF2 and platform-specific legacy encodings are not decoded here.
     public static func extract(fromValidatedSFNT data: Data) -> Self? {
-        guard data.count <= Limits.fontBytes else { return nil }
+        extract(fromValidatedSFNT: data, maximumBytes: Limits.fontBytes)
+    }
+
+    static func extract(fromValidatedSFNT data: Data, maximumBytes: Int) -> Self? {
+        guard data.count <= maximumBytes else { return nil }
         return data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
             NameReader(bytes: bytes).extract()
         }
@@ -85,7 +89,7 @@ public struct EPUBFontIdentity: Codable, Sendable, Equatable, Hashable {
                 guard let start = Int(exactly: u32(record + 8)),
                       let length = Int(exactly: u32(record + 12)),
                       start >= directoryEnd, fits(start, length, end: bytes.count),
-                      length <= Limits.fontBytes - tableBytes else { return nil }
+                      length <= bytes.count - tableBytes else { return nil }
                 tableBytes += length
                 if u32(record) == 0x6e616d65 {
                     guard name == nil, length <= Limits.nameBytes else { return nil }

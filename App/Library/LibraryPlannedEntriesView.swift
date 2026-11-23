@@ -70,7 +70,7 @@ struct LibraryPlannedEntriesView: View {
 
             Text(features.contains(.comics)
                  ? "漫画聚合与 AI 故事仍为规划入口，以上故事扩展均未接入。"
-                 : "已支持本地 TXT 与非 DRM 可重排 EPUB 2/3（含内嵌封面与文字占位回退）；不支持固定版式、DRM、脚本、联网资源及 EPUB 书签。")
+                 : "已支持本地 TXT 与非 DRM 可重排 EPUB 2/3（含内嵌封面与文字占位回退）；支持 EPUB 本地书签，不支持固定版式、DRM、脚本及联网资源。")
                 .font(.caption)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)

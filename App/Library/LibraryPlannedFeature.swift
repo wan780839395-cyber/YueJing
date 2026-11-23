@@ -53,7 +53,7 @@ enum LibraryPlannedFeature: String, Identifiable, Sendable {
         case .epub:
             return [
                 "第一版支持受支持 XHTML 正文、常见段落/标题/强调/列表及本地 JPEG/PNG 插图；不宣称完整 EPUB 规范或逐像素还原任意出版物 CSS。",
-                "不支持固定版式（fixed-layout）、DRM/加密资源、脚本、表单、联网资源、音视频及 EPUB 书签；不破解 DRM。",
+                "可在目录的书签页保存或返回阅读位置。不支持固定版式（fixed-layout）、DRM/加密资源、脚本、表单、联网资源及音视频；不破解 DRM。",
                 "SVG、复杂 MathML 及嵌入字体不在本批保证范围，遇必须依赖这些能力的内容会明确拒绝并提示，不假称完整呈现。"
             ]
         case .cover:

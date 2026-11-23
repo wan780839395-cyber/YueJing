@@ -13,6 +13,9 @@ struct EPUBUserFontPicker: View {
     // A provider may dismiss its sheet before delivering the delegate callback.
     @State private var activeAttemptID: UUID?
     @State private var importing = false
+    @State private var pendingRemoval: EPUBUserFont?
+    @State private var deleting = false
+    @State private var listRevision = UUID()
     @State private var loading = true
     @State private var notice: String?
     @State private var isError = false
@@ -26,16 +29,32 @@ struct EPUBUserFontPicker: View {
 
     var body: some View {
         EPUBUserFontCard(selectionName: selectionName, fonts: fonts, selectedID: selectedID, preview: preview,
-            isLoading: loading, isImporting: importing, notice: notice, isError: isError, appearance: appearance,
+            isLoading: loading, isImporting: importing, isDeleting: deleting,
+            notice: notice, isError: isError, appearance: appearance,
             select: { font in
-                guard isActive(), !importing else { return }
+                guard isActive(), !importing, !deleting, font.map({ fonts.contains($0) }) != false else { return }
                 notice = nil; isError = false; select(font)
             }, openFiles: {
-                guard isActive(), !importing, attempt == nil else { return }
+                guard isActive(), !importing, !deleting, attempt == nil else { return }
                 let next = EPUBFontFilePicker.Attempt()
                 notice = nil; isError = false; activeAttemptID = next.id; attempt = next
+            }, requestRemoval: { font in
+                guard canRemove(font) else { return }
+                pendingRemoval = font
             })
-        .task { await refreshList() }
+        .alert(item: $pendingRemoval) { font in
+            Alert(title: Text("删除“\(font.displayName)”？"),
+                  message: Text("仅删除阅境字体库中的副本，不影响原字体文件。使用它的所有书籍将跟随原书字体。"),
+                  primaryButton: .destructive(Text("删除")) { removeConfirmed(font) },
+                  secondaryButton: .cancel(Text("取消")))
+        }
+        .onReceive(EPUBUserFontPreference.removed) { id in
+            if pendingRemoval?.id == id { pendingRemoval = nil }
+            if selectedID == id { preview = nil }
+            fonts.removeAll { $0.id == id }
+            listRevision = UUID()
+        }
+        .task(id: listRevision) { await refreshList() }
         .task(id: selectedID) {
             preview = nil
             guard let selectedID else { return }
@@ -66,6 +85,26 @@ struct EPUBUserFontPicker: View {
         .onDisappear { importTask?.cancel(); importTask = nil; importing = false }
     }
 
+    private func canRemove(_ font: EPUBUserFont) -> Bool {
+        isActive() && !deleting && !importing && !loading && attempt == nil && fonts.contains(font)
+    }
+
+    private func removeConfirmed(_ font: EPUBUserFont) {
+        guard canRemove(font) else { return }
+        deleting = true
+        notice = nil
+        Task { @MainActor in
+            defer { deleting = false }
+            do {
+                try await EPUBUserFontPreference.remove(font.id)
+                if isActive() { report("已从字体库删除：" + font.displayName, error: false) }
+            } catch {
+                guard isActive() else { return }
+                report("未能删除字体库副本，字体选择未更改。请重新打开字体设置后再试。", error: true)
+            }
+        }
+    }
+
     private func importSelection(_ url: URL) {
         importTask?.cancel(); importing = true; notice = nil
         importTask = Task { @MainActor in
@@ -78,7 +117,7 @@ struct EPUBUserFontPicker: View {
                 select(font)
                 report((existed ? "字体已在库中：" : "已导入：") + font.displayName, error: false)
             } catch EPUBError.limitExceeded {
-                if !Task.isCancelled, isActive() { report("超过字体容量限制：单个最多 8 MiB，字体库共 32 MiB。", error: true) }
+                if !Task.isCancelled, isActive() { report("超过字体容量限制：单个最多 \(EPUBUserFontStore.maxFontMiB) MiB，字体库共 32 MiB。", error: true) }
             } catch EPUBError.corruptResource {
                 if !Task.isCancelled, isActive() { report("文件不是完整的 TTF/OTF 字体，请重新下载后再试。", error: true) }
             } catch EPUBError.unsupportedContent {

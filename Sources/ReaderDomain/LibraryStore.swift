@@ -783,3 +783,103 @@ extension LibraryStore {
         }
     }
 }
+
+// Bookmark operations never use the reading-progress transaction or its sequence counter.
+extension LibraryStore {
+    private static let epubBookmarkLimit = 1024 // Per book/version/unit; list never silently truncates.
+
+    private func bookmarkPackage(_ session: ReadingSession, token: EPUBNavigationToken? = nil) throws -> EPUBPackage {
+        try Task.checkCancellation()
+        guard let authority = epubSessions[session.id], !closedSessions.contains(session.id),
+              authority.package.sourceSHA256 == session.bookID,
+              authority.package.versionID == session.versionID else { throw EPUBError.staleSession }
+        if let token {
+            guard authority.ready, authority.token == token, token.sessionID == session.id else { throw EPUBError.staleSession }
+        }
+        return authority.package
+    }
+
+    // Read the durable authority inside the same DB snapshot/transaction as the bookmark operation.
+    private static func requireBookmarkSession(_ db: Database, _ session: ReadingSession) throws {
+        guard try Int.fetchOne(db, sql: """
+            SELECT 1 FROM books b JOIN bookFormats f ON f.bookID=b.id JOIN epubPackages p ON p.bookID=b.id
+            WHERE b.id=? AND b.versionID=? AND b.activeSession=? AND f.format='epub' AND p.versionID=b.versionID
+            """, arguments: [session.bookID, session.versionID, session.id]) != nil else { throw EPUBError.staleSession }
+    }
+
+    func addEPUBBookmark(session: ReadingSession, position: EPUBReadingPosition, title: String,
+                         token: EPUBNavigationToken) throws -> Bool {
+        let package = try bookmarkPackage(session, token: token)
+        guard token.path.utf8.elementsEqual(position.path.utf8),
+              package.spine.contains(where: { $0.utf8.elementsEqual(position.path.utf8) }) else { throw EPUBError.invalidPosition }
+        try position.validate(in: package)
+        guard title.utf8.count <= 1024 else { throw EPUBError.limitExceeded }
+        return try queue.write { db in
+            try Self.requireBookmarkSession(db, session)
+            try db.execute(sql: """
+                INSERT INTO epubBookmarks(id,bookID,versionID,unit,path,node,utf16Offset,viewportOffset,title,createdAt)
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bookID,versionID,unit,path,node,utf16Offset) DO NOTHING
+                """, arguments: [UUID().uuidString, session.bookID, session.versionID, position.unit,
+                                  position.path, position.node, position.utf16Offset, position.viewportOffset,
+                                  title, Date().timeIntervalSince1970])
+            guard db.changesCount == 1 else { return false }
+            // Check after insert so a duplicate at capacity still returns false. Throw rolls back only this insert.
+            guard try Int.fetchOne(db, sql: """
+                SELECT 1 FROM epubBookmarks WHERE bookID=? AND versionID=? AND unit=? LIMIT 1 OFFSET ?
+                """, arguments: [session.bookID, session.versionID, position.unit, Self.epubBookmarkLimit]) == nil else {
+                throw EPUBError.limitExceeded
+            }
+            return true
+        }
+    }
+
+    func epubBookmarks(session: ReadingSession) throws -> [EPUBBookmark] {
+        _ = try bookmarkPackage(session)
+        return try queue.read { db in
+            try Self.requireBookmarkSession(db, session)
+            let records = try EPUBBookmarkRecord.fetchAll(db, sql: """
+                SELECT * FROM epubBookmarks WHERE bookID=? AND versionID=? AND unit=?
+                ORDER BY createdAt DESC, id ASC LIMIT ?
+                """, arguments: [session.bookID, session.versionID, EPUBFormat.positionUnit, Self.epubBookmarkLimit + 1])
+            guard records.count <= Self.epubBookmarkLimit else { throw EPUBError.limitExceeded }
+            return records.map(\.bookmark)
+        }
+    }
+
+    func epubBookmarkPosition(session: ReadingSession, id: String) throws -> EPUBReadingPosition {
+        let package = try bookmarkPackage(session)
+        return try queue.read { db in
+            try Self.requireBookmarkSession(db, session)
+            guard let record = try EPUBBookmarkRecord.fetchOne(db, sql: """
+                SELECT * FROM epubBookmarks WHERE bookID=? AND versionID=? AND unit=? AND id=?
+                """, arguments: [session.bookID, session.versionID, EPUBFormat.positionUnit, id]) else { throw EPUBError.invalidPosition }
+            let position = record.bookmark.position
+            try position.validate(in: package)
+            return position
+        }
+    }
+
+    func deleteEPUBBookmark(session: ReadingSession, id: String) throws {
+        _ = try bookmarkPackage(session)
+        try queue.write { db in
+            try Self.requireBookmarkSession(db, session)
+            try db.execute(sql: """
+                DELETE FROM epubBookmarks WHERE bookID=? AND versionID=? AND unit=? AND id=?
+                """, arguments: [session.bookID, session.versionID, EPUBFormat.positionUnit, id])
+            guard db.changesCount == 1 else { throw EPUBError.invalidPosition }
+        }
+    }
+}
+
+private struct EPUBBookmarkRecord: FetchableRecord, Decodable {
+    let id, bookID, versionID, unit, path, title: String
+    let node, utf16Offset: Int
+    let viewportOffset: Double?
+    let createdAt: Double
+
+    var bookmark: EPUBBookmark {
+        let position = EPUBReadingPosition(bookID: bookID, versionID: versionID, path: path, node: node,
+                                           utf16Offset: utf16Offset, unit: unit, viewportOffset: viewportOffset)
+        return EPUBBookmark(id: id, position: position, title: title, createdAt: Date(timeIntervalSince1970: createdAt))
+    }
+}

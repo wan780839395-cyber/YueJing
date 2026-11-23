@@ -316,7 +316,8 @@ struct EPUBReaderScreen: View {
                     isActive: { panelActive(.directory, session.id) },
                     close: { closePanel(session.id) },
                     appearance: appearance,
-                    selected: { item in selectNavigationItem(item, session.id) }
+                    selected: { item in selectNavigationItem(item, session.id) },
+                    bookmarkActions: bookmarkActions(for: session.id)
                 )
                 .id(session.id) // No query/presented/reveal state shared by quick reopens.
             } else {
@@ -570,6 +571,22 @@ struct EPUBReaderScreen: View {
     private func closePanel(_ id: UUID) {
         mutateTools { _ = $0.closePanel(id: id) }
     }
+    private func bookmarkActions(for panelID: UUID) -> EPUBBookmarkActions {
+        let active = { panelActive(.directory, panelID) }
+        return EPUBBookmarkActions(list: {
+            guard active(), let reader = model.reader else { throw EPUBError.staleSession }
+            return try await reader.bookmarks()
+        }, add: {
+            try await model.addVisibleBookmark(isActive: active)
+        }, remove: { bookmark in
+            guard active(), let reader = model.reader else { throw EPUBError.staleSession }
+            try await reader.deleteBookmark(id: bookmark.id)
+        }, jump: { bookmark in
+            try await model.jumpToBookmark(id: bookmark.id, isActive: active)
+            mutateTools { _ = $0.chapterSelected(id: panelID) }
+        })
+    }
+
 
     private func selectNavigationItem(_ item: EPUBNavigationItem, _ id: UUID) {
         guard panelActive(.directory, id) else { return }

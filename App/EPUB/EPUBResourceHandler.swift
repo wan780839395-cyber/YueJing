@@ -122,7 +122,7 @@ final class EPUBResourceHandler: NSObject, WKURLSchemeHandler {
                 guard capability?.token == token, capability?.selectedFont(for: url) == id,
                       activeTasks[key] != nil else { return }
                 let type = bytes.starts(with: [0x4F, 0x54, 0x54, 0x4F]) ? "font/otf" : "font/ttf"
-                guard !bytes.isEmpty, bytes.count <= EPUBAuthorStyles.maxFontBytes,
+                guard !bytes.isEmpty, bytes.count <= EPUBUserFontStore.maxFontBytes,
                       let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": type, "Content-Length": String(bytes.count),
                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"]) else { throw EPUBError.corruptResource }

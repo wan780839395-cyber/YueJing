@@ -77,10 +77,14 @@ public enum EPUBAuthorStyles {
     /// Validates raw font bytes for un-obfuscated SFNT TrueType/OpenType headers and non-overlapping table bounds.
     @discardableResult
     public static func verifyFontData(_ data: Data, declaredMediaType: String) throws -> String {
+        try verifyFontData(data, declaredMediaType: declaredMediaType, maximumBytes: maxFontBytes)
+    }
+
+    static func verifyFontData(_ data: Data, declaredMediaType: String, maximumBytes: Int) throws -> String {
         guard !data.isEmpty else {
             throw EPUBError.corruptResource
         }
-        guard data.count <= maxFontBytes else {
+        guard data.count <= maximumBytes else {
             throw EPUBError.limitExceeded
         }
         guard data.count >= 12 else {

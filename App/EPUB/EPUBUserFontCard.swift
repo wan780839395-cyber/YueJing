@@ -9,11 +9,13 @@ struct EPUBUserFontCard: View {
     let preview: Font?
     let isLoading: Bool
     let isImporting: Bool
+    let isDeleting: Bool
     let notice: String?
     let isError: Bool
     let appearance: ReaderToolAppearance
     let select: (EPUBUserFont?) -> Void
     let openFiles: () -> Void
+    let requestRemoval: (EPUBUserFont) -> Void
 
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -67,6 +69,16 @@ struct EPUBUserFontCard: View {
                 }
 
                 if !fonts.isEmpty {
+                    Menu {
+                        ForEach(fonts) { font in
+                            Button(font.displayName) { requestRemoval(font) }
+                        }
+                    } label: {
+                        Label(isDeleting ? "正在删除…" : "从字体库删除…", systemImage: "trash")
+                            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+                    }
+                    .disabled(isLoading || isImporting || isDeleting)
+                    .accessibilityIdentifier("epub.font.removeMenu")
                     footnoteSummary
                 }
             }
@@ -169,8 +181,8 @@ struct EPUBUserFontCard: View {
             .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .disabled(isImporting)
-        .opacity(isImporting ? 0.55 : 1)
+        .disabled(isImporting || isDeleting)
+        .opacity(isImporting || isDeleting ? 0.55 : 1)
         .accessibilityLabel("当前书的正文字体")
         .accessibilityValue(isLoading ? "\(selectionName)，正在读取字体库" : selectionName)
         .accessibilityHint(fonts.isEmpty ? "当前暂无已导入字体，可选择跟随原书或从下方导入" : "轻点选择跟随原书或已导入字体")
@@ -285,7 +297,7 @@ struct EPUBUserFontCard: View {
                 .foregroundStyle(appearance.accent)
                 .padding(.top, 1)
                 .accessibilityHidden(true)
-            Text("字体库暂无自定义字体。支持导入本机或 iCloud 中已下载的 TTF / OTF（单文件 ≤ 8 MiB，共 ≤ 32 MiB）。")
+            Text("字体库暂无自定义字体。支持导入本机或 iCloud 中已下载的 TTF / OTF（单文件 ≤ \(EPUBUserFontStore.maxFontMiB) MiB，共 ≤ 32 MiB）。")
                 .font(.caption)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -359,7 +371,7 @@ struct EPUBUserFontCard: View {
                 .strokeBorder(appearance.accent.opacity(0.32), lineWidth: 0.75)
                 .allowsHitTesting(false)
         }
-        .disabled(isImporting)
+        .disabled(isImporting || isDeleting)
         .accessibilityLabel(isImporting ? "正在导入字体" : "从文件导入字体")
         .accessibilityHint("打开系统文件选取本机或 iCloud 中已下载的 TTF 或 OTF 字体")
         .accessibilityIdentifier("epub.font.import")
@@ -377,7 +389,7 @@ struct EPUBUserFontCard: View {
                        minHeight: ReaderVisualStyle.minimumControlHeight)
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 14))
-        .disabled(isImporting)
+        .disabled(isImporting || isDeleting)
         .accessibilityLabel("切回跟随原书字体")
         .accessibilityIdentifier("epub.font.followOriginal")
     }
@@ -426,7 +438,7 @@ struct EPUBUserFontCard: View {
     }
 
     private var footnoteSummary: some View {
-        Text("仅对本书生效 · 支持 TTF / OTF（单文件 ≤ 8 MiB，字体库 ≤ 32 MiB）")
+        Text("仅对本书生效 · 支持 TTF / OTF（单文件 ≤ \(EPUBUserFontStore.maxFontMiB) MiB，字体库 ≤ 32 MiB）")
             .font(.caption)
             .foregroundStyle(appearance.secondary)
             .fixedSize(horizontal: false, vertical: true)

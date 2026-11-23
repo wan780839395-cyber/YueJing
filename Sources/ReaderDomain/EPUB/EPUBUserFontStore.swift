@@ -15,7 +15,8 @@ public actor EPUBUserFontStore {
 
     private let root: URL
     private static let maxFonts = 512 // Bound metadata/work even for tiny fonts.
-    private static let maxBytes = EPUBAuthorStyles.maxFontBytes
+    public static let maxFontMiB = 16
+    public static let maxFontBytes = maxFontMiB * 1024 * 1024
 
     init(root: URL) { self.root = root }
 
@@ -43,6 +44,15 @@ public actor EPUBUserFontStore {
         }
     }
 
+    /// Only accept library identities, never a picker URL. unlink is non-recursive.
+    public func removeFont(id: String) throws {
+        guard Self.isID(id) else { throw EPUBError.unsafePath }
+        try withLibrary {
+            _ = try stored(id) // no-follow regular file, valid SFNT and matching digest
+            guard unlink(root.appendingPathComponent(id).path) == 0 else { throw Self.posixError() }
+        }
+    }
+
     public func data(for id: String) throws -> Data {
         guard Self.isID(id) else { throw EPUBError.unsafePath }
         return try withLibrary { try stored(id).bytes }
@@ -54,9 +64,9 @@ public actor EPUBUserFontStore {
 
     private static func describe(_ bytes: Data) throws -> EPUBUserFont {
         // The validator returns the canonical type from the SFNT, not the hint.
-        let type = try EPUBAuthorStyles.verifyFontData(bytes, declaredMediaType: "font/ttf")
+        let type = try EPUBAuthorStyles.verifyFontData(bytes, declaredMediaType: "font/ttf", maximumBytes: maxFontBytes)
         let id = EPUBResourceStore.digest(bytes)
-        let names = EPUBFontIdentity.extract(fromValidatedSFNT: bytes)
+        let names = EPUBFontIdentity.extract(fromValidatedSFNT: bytes, maximumBytes: maxFontBytes)
         let name = names?.fullName ?? names?.family ?? names?.postScriptName ?? "Font \(id.prefix(12))"
         return EPUBUserFont(id: id, displayName: name, mediaType: type)
     }
@@ -128,7 +138,7 @@ public actor EPUBUserFontStore {
         var info = stat()
         guard fstat(fd, &info) == 0 else { throw posixError() }
         guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG), info.st_size > 0 else { throw EPUBError.corruptResource }
-        guard info.st_size <= Int64(maxBytes) else { throw EPUBError.limitExceeded }
+        guard info.st_size <= Int64(maxFontBytes) else { throw EPUBError.limitExceeded }
         // Size is only a preflight: bound every actual read and probe one byte for growth.
         let expected = Int(info.st_size)
         var bytes = Data()

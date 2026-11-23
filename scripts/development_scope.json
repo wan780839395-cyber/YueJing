@@ -3,9 +3,18 @@
   "scope": "development-targeted",
   "branch": "dev/workflow-optimization",
   "cases": [
-    {"file": "YueJingHostTests/EPUBContentsNavigationTests.swift", "name": "largeDirectoryResolvesFirstMiddleAndLast"},
-    {"file": "YueJingHostTests/EPUBContentsNavigationTests.swift", "name": "samePathPrefersFragmentThenFallsBackToFirstPath"},
-    {"file": "YueJingEPUBUITests/EPUBFlowUITests.swift", "name": "testEPUBFirstContentVisibleSmoke"}
+    {
+      "file": "YueJingHostTests/EPUBReaderHostTests.swift",
+      "name": "epubBookmarkSamplesVisibleAnchorAndJumpsBackAcrossChapters"
+    },
+    {
+      "file": "YueJingHostTests/EPUBFontLoadingHostTests.swift",
+      "name": "deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor"
+    },
+    {
+      "file": "YueJingHostTests/EPUBFontLoadingHostTests.swift",
+      "name": "deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport"
+    }
   ],
   "build_timeout_seconds": 900,
   "test_timeout_seconds": 480,

@@ -87,6 +87,25 @@ enum LibrarySchema {
                 t.column("directory", .text).notNull().unique()
             }
         }
+        migrator.registerMigration("v8-epub-bookmarks") { db in
+            try db.execute(sql: """
+                CREATE TABLE epubBookmarks (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    bookID TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                    versionID TEXT NOT NULL,
+                    unit TEXT NOT NULL CHECK(unit = 'epub-text-node-utf16-v1'),
+                    path TEXT NOT NULL,
+                    node INTEGER NOT NULL CHECK(typeof(node) = 'integer' AND node >= 0),
+                    utf16Offset INTEGER NOT NULL CHECK(typeof(utf16Offset) = 'integer' AND utf16Offset >= 0),
+                    viewportOffset REAL CHECK(viewportOffset BETWEEN -16384 AND 16384),
+                    title TEXT NOT NULL,
+                    createdAt REAL NOT NULL,
+                    UNIQUE(bookID, versionID, unit, path, node, utf16Offset)
+                );
+                CREATE INDEX epubBookmarks_scope_created_id
+                    ON epubBookmarks(bookID, versionID, unit, createdAt DESC, id ASC);
+                """)
+        }
         return migrator
     }
 }

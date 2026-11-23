@@ -65,16 +65,23 @@ struct EPUBContentsView: View {
     let close: @MainActor () -> Void
     let appearance: ReaderToolAppearance
     let selected: @MainActor (EPUBNavigationItem) -> Void
+    var bookmarkActions: EPUBBookmarkActions? = nil
+    private enum ContentsTab: String {
+        case directory
+        case bookmarks
+    }
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var activeTab: ContentsTab = .directory
+    @State private var bookmarksBusy = false
     @State private var query = ""
     @State private var presented = false
     @State private var initializedSessionID: UUID?
     @State private var laidOut = false
     @State private var reveal = EPUBContentsRevealState()
     @FocusState private var searchFocused: Bool
-
     static func currentIndex(in items: [EPUBNavigationItem], path currentPath: String?, fragment currentFragment: String?) -> Int? {
         guard let currentPath else { return nil }
         if let currentFragment, !currentFragment.isEmpty,
@@ -107,8 +114,9 @@ struct EPUBContentsView: View {
         // Resolve once for the whole render, never once per lazy row/header branch.
         let selectedIndex = Self.currentIndex(in: items, path: currentPath, fragment: currentFragment)
         let visibleIndices = Self.filteredIndices(in: items, query: query)
+        let showingBookmarks = (activeTab == .bookmarks && bookmarkActions != nil)
         VStack(spacing: 0) {
-            ReaderPanelHeader(title: "目录", appearance: appearance) {
+            ReaderPanelHeader(title: showingBookmarks ? "书签" : "目录", appearance: appearance) {
                 Button { dismiss() } label: {
                     Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
@@ -121,15 +129,29 @@ struct EPUBContentsView: View {
                 }
                 .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .disabled(!active)
-                .accessibilityLabel("关闭目录")
+                .accessibilityLabel(showingBookmarks ? "关闭书签" : "关闭目录")
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
-            summaryHeader(currentIndex: selectedIndex)
-            availabilityStatus
-            searchControls(currentIndex: selectedIndex)
-            ScrollViewReader { proxy in
-                List {
+            if bookmarkActions != nil {
+                tabSelector
+            }
+            if showingBookmarks, let bookmarkActions {
+                availabilityStatus
+                EPUBBookmarksView(
+                    sessionID: sessionID,
+                    active: active,
+                    isPanelActive: { presented && isActive() },
+                    actions: bookmarkActions,
+                    appearance: appearance,
+                    isBusy: $bookmarksBusy
+                )
+            } else {
+                summaryHeader(currentIndex: selectedIndex)
+                availabilityStatus
+                searchControls(currentIndex: selectedIndex)
+                ScrollViewReader { proxy in
+                    List {
                     if items.isEmpty {
                         emptyRow("暂无目录。")
                     } else if visibleIndices.isEmpty {
@@ -173,7 +195,9 @@ struct EPUBContentsView: View {
                         }
                     }
                     Section {
-                        Text("当前支持 EPUB 目录与章节/锚点跳转；EPUB 书签暂未纳入本批范围。")
+                        Text(bookmarkActions == nil
+                            ? "当前支持 EPUB 目录与章节/锚点跳转。"
+                            : "支持 EPUB 目录跳转与书签管理；可切换至「书签」记录或回到当前阅读位置。")
                             .font(.caption)
                             .foregroundStyle(appearance.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -204,15 +228,17 @@ struct EPUBContentsView: View {
                           let target = reveal.initialTarget() else { return }
                     proxy.scrollTo(target, anchor: .center)
                 }
+                }
             }
         }
+        .background(appearance.surface)
         .onAppear {
             presented = true
             initializeSession(currentIndex: selectedIndex)
         }
         .onChange(of: active) { available in
             if available { initializeSession(currentIndex: selectedIndex) }
-            else { reveal.cancel(); searchFocused = false }
+            else { reveal.cancel(); searchFocused = false; bookmarksBusy = false }
         }
         .onDisappear {
             presented = false
@@ -220,6 +246,7 @@ struct EPUBContentsView: View {
             reveal.cancel()
             closeFocused = false
             searchFocused = false
+            bookmarksBusy = false
         }
         .task(id: active) {
             guard active, UIAccessibility.isVoiceOverRunning else { return }
@@ -232,18 +259,108 @@ struct EPUBContentsView: View {
     private func initializeSession(currentIndex: Int?) {
         guard active, initializedSessionID != sessionID else { return }
         initializedSessionID = sessionID
+        activeTab = .directory
+        bookmarksBusy = false
         query = ""
         reveal.request(currentIndex)
     }
 
+    private var tabSelector: some View {
+        Group {
+            if dynamicType.isAccessibilitySize {
+                VStack(spacing: 4) { tabButtons }
+            } else {
+                HStack(spacing: 4) { tabButtons }
+            }
+        }
+        .padding(4)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
+                .allowsHitTesting(false)
+        }
+        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+        .padding(.top, 10)
+        .background(appearance.surface)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("目录与书签切换")
+    }
+
+    @ViewBuilder
+    private var tabButtons: some View {
+        tabButton(
+            title: "目录",
+            symbol: "list.bullet",
+            tab: .directory,
+            selectedTint: appearance.accent,
+            identifier: "epub.contents.directory"
+        )
+        tabButton(
+            title: "书签",
+            symbol: "bookmark",
+            tab: .bookmarks,
+            selectedTint: appearance.sealAccent,
+            identifier: "epub.contents.bookmarks"
+        )
+    }
+
+    private func tabButton(
+        title: String,
+        symbol: String,
+        tab: ContentsTab,
+        selectedTint: Color,
+        identifier: String
+    ) -> some View {
+        let selected = activeTab == tab
+        let disabled = !active || bookmarksBusy
+        return Button {
+            guard active, !bookmarksBusy, activeTab != tab else { return }
+            if tab == .bookmarks {
+                reveal.cancel()
+                searchFocused = false
+                laidOut = false
+            }
+            if reduceMotion {
+                activeTab = tab
+            } else {
+                withAnimation(ReaderMotion.selectionFeedback) {
+                    activeTab = tab
+                }
+            }
+        } label: {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(selected ? .semibold : .medium))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight)
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: selected ? selectedTint : appearance.secondary, cornerRadius: 12))
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(selected ? appearance.elevatedSurface : .clear)
+                .shadow(color: selected ? appearance.subtleShadow : .clear, radius: 4, x: 0, y: 1)
+                .opacity(disabled ? 0.4 : 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .disabled(disabled)
+        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(identifier)
+    }
     private var availabilityStatus: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let showingBookmarks = (activeTab == .bookmarks && bookmarkActions != nil)
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(active ? appearance.accent : appearance.sealAccent)
                     .frame(width: 6, height: 6)
                     .accessibilityHidden(true)
-                Text(active ? "目录可操作" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
+                Text(active
+                    ? (showingBookmarks ? "书签可操作" : "目录可操作")
+                    : (showingBookmarks ? "书签暂不可操作。返回前台后可关闭面板并重新打开。" : "目录暂不可操作。返回前台后可关闭目录并重新打开。"))
                     .font(.caption2)
                     .foregroundStyle(active ? appearance.secondary : appearance.sealAccent)
                     .accessibilityIdentifier("epub.directory.availability")
@@ -257,7 +374,7 @@ struct EPUBContentsView: View {
                     // In background or after replacement this remains a safe no-op.
                     close()
                 } label: {
-                    Text("关闭目录后重开")
+                    Text(showingBookmarks ? "关闭面板后重开" : "关闭目录后重开")
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 14)
                 }

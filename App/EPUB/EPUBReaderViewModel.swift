@@ -17,6 +17,7 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var layoutMode: EPUBLayoutMode
     @Published private(set) var userFontID: String?
     @Published private var userFontUnavailable = false
+    private var fontRemovalObservation: AnyCancellable?
     @Published private(set) var styleCompatibility: EPUBStyleCompatibility?
     // Runtime state belongs to the accepted visible token, never to the whole book.
     @Published private(set) var runtimeFontFallback = false
@@ -89,7 +90,9 @@ final class EPUBReaderViewModel: ObservableObject {
     var compatibilityNotice: String? { compatibilityNoticeDismissed ? nil : compatibilitySummary }
     func dismissCompatibilityNotice() { compatibilityNoticeDismissed = true }
     @Published private(set) var loading = true
-    @Published private(set) var ready = false
+    @Published private(set) var ready = false {
+        didSet { if ready { refreshRemovedFontIfNeeded() } }
+    }
     @Published private(set) var promotingVisibleChapter = false
     // Native motion is not a save/navigation permission. Keep the same touch
     // target while a resident chapter receives its new authority asynchronously.
@@ -161,6 +164,12 @@ final class EPUBReaderViewModel: ObservableObject {
                                                     rendererTaken: rendererCache.map { _ in retained?.controller != nil })
         preferences = ReaderPreferences(theme: EPUBPresentationThemeHint.read())
         if let openingTitle { title = openingTitle }
+        fontRemovalObservation = EPUBUserFontPreference.removed.sink { [weak self] id in
+            guard let self, self.userFontID == id else { return }
+            self.userFontID = nil
+            self.userFontUnavailable = false
+            self.refreshRemovedFontIfNeeded()
+        }
     }
 
     /// Start alongside the system presentation; load() still admits only one active opening.
@@ -197,9 +206,15 @@ final class EPUBReaderViewModel: ObservableObject {
         settingsChanged()
     }
 
+    private func refreshRemovedFontIfNeeded() {
+        if ready, userFontID == nil, navigationRequest?.userFontID != nil { setUserFont(nil) }
+    }
+
     func setUserFont(_ font: EPUBUserFont?) {
         let id = font?.id
-        guard id != userFontID, id.map(EPUBUserFontPreference.validID) != false,
+        let removedFromPresentation = id == nil && userFontID == nil && navigationRequest?.userFontID != nil
+        let selectionValue = id.map { EPUBUserFontPreference.selectionValue($0) }
+        guard (id != userFontID || removedFromPresentation), id.map(EPUBUserFontPreference.validID) != false,
               let reader, let token = currentToken, ready, !closing, !suspended, !exitSaveFailed else { return }
         let life = lifecycle
         navigationTask?.cancel()
@@ -208,6 +223,7 @@ final class EPUBReaderViewModel: ObservableObject {
             let sampled = await self.webView.sampleNow()
             guard self.lifecycle == life, self.currentToken == token, self.ready,
                   !self.closing, !self.suspended, !self.exitSaveFailed, !Task.isCancelled else { return }
+            guard selectionValue == id.map({ EPUBUserFontPreference.selectionValue($0) }) else { return }
             var target = self.currentPosition.flatMap { $0.path == token.path ? $0 : nil }
             if let sampled, sampled.sessionID == token.sessionID, sampled.epoch == token.epoch,
                self.webView.controller?.renderedChapterPaths.contains(sampled.path) == true,
@@ -219,7 +235,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 return
             }
             self.userFontID = id
-            EPUBUserFontPreference.set(id, bookID: self.bookID)
+            if !removedFromPresentation { EPUBUserFontPreference.set(id, bookID: self.bookID) }
             await self.beginChapterNavigation(path: target.path, targetPosition: target, fragment: nil,
                 preserveTargetAnchor: true, persistOnReady: false, reloadDocument: false)
         }
@@ -386,6 +402,11 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func navigateToInternalLink(path: String, fragment: String?) {
+        navigateExplicitly(path: path, fragment: fragment, target: nil)
+    }
+
+    /// Shared admission/revocation for TOC, document links and a resolved bookmark.
+    func navigateExplicitly(path: String, fragment: String?, target: EPUBReadingPosition?) {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               reader.publication.package.spine.contains(path) else {
             return
@@ -411,9 +432,9 @@ final class EPUBReaderViewModel: ObservableObject {
             guard let self, !Task.isCancelled, self.generation == intent else { return }
             await self.beginChapterNavigation(
                 path: path,
-                targetPosition: nil,
+                targetPosition: target,
                 fragment: fragment,
-                preserveTargetAnchor: false,
+                preserveTargetAnchor: target != nil,
                 persistOnReady: true,
                 reloadDocument: false
             )

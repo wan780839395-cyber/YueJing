@@ -504,7 +504,7 @@ struct EPUBSettingsView: View {
                         .background(appearance.sealAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .accessibilityIdentifier("epub.compatibility.summary")
                 }
-                Text("支持可重排 XHTML、本地静态图片及安全净化的作者 CSS、未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单、联网资源及 EPUB 书签。")
+                Text("支持可重排 XHTML、本地静态图片、目录与书签、安全净化的作者 CSS 及未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单及联网资源。")
                     .font(.caption)
                     .foregroundStyle(appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)

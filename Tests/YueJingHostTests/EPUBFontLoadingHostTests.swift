@@ -226,6 +226,110 @@ struct EPUBFontLoadingHostTests {
         }
     }
 
+    #if targetEnvironment(simulator)
+    @Test func deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor() async throws {
+        try await withHostFixture { fixture in
+            let source = fixture.root.appendingPathComponent("synthetic-wide.ttf")
+            let bytes = try Self.makeSyntheticGeometricFontData()
+            try bytes.write(to: source)
+            let archive = fixture.root.appendingPathComponent("removal.epub")
+            let html = "<html xmlns='http://www.w3.org/1999/xhtml'><head><title>Removal</title></head><body>" +
+                String(repeating: "<p>AAAA</p>", count: 140) + "</body></html>"
+            try EPUBUITestFixture.writeCustomXHTMLEPUB(to: archive, title: UUID().uuidString, bodyXHTML: html)
+            let receipt = try await fixture.install(archive)
+            let id = receipt.book.id
+            let store = EPUBUserFontStore.shared
+            let existing = try await store.list()
+            try #require(!existing.contains { $0.id == Self.syntheticFontSHA256 }) // never delete a pre-existing copy
+            let font = try await store.importFont(from: source)
+            defer { EPUBUserFontPreference.set(nil, bookID: id) }
+            do {
+                let model = EPUBReaderViewModel(bookID: id, service: fixture.service, readingMode: .scroll, layoutMode: .original)
+                let controller = EPUBWebViewController()
+                model.webView.attach(controller)
+                controller.onLocatorEvent = { [weak model] in model?.handleLocatorEvent($0) }
+                controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
+                try await fixture.withHostedController(controller) {
+                    @MainActor func ready(after old: EPUBNavigationToken?, selected: String?) async throws -> EPUBNavigationToken {
+                        let end = Date().addingTimeInterval(Self.waitTimeoutSeconds)
+                        while Date() < end {
+                            if let token = model.presentationToken, token != old,
+                               model.navigationRequest?.userFontID == selected { return token }
+                            try await Task.sleep(for: .milliseconds(10))
+                        }
+                        throw EPUBError.invalidPosition
+                    }
+                    @MainActor func glyphWidth() async throws -> Double {
+                        let value = try await controller.evaluateLocatorJavaScriptForTesting("""
+                            (()=>{const s=document.querySelector('p span'),r=document.createRange();
+                            r.selectNodeContents(s);return r.getBoundingClientRect().width/parseFloat(getComputedStyle(s).fontSize);})()
+                            """)
+                        return try #require(value as? NSNumber).doubleValue
+                    }
+                    await model.load()
+                    let initial = try await ready(after: nil, selected: nil)
+                    let originalWidth = try await glyphWidth()
+                    model.setUserFont(font)
+                    let selected = try await ready(after: initial, selected: font.id)
+                    let wide = try await glyphWidth()
+                    try #require(originalWidth < 8 && abs(wide - 10) < 0.1)
+                    _ = try await controller.evaluateLocatorJavaScriptForTesting("document.querySelectorAll('p')[72].scrollIntoView(); true")
+                    let before = try #require(await controller.sampleVisibleNow())
+                    try #require(before.node > 0 && before.epoch == selected.epoch)
+                    // Use exactly the picker action, including the successful-deletion notification.
+                    try await EPUBUserFontPreference.remove(font.id)
+                    _ = try await ready(after: selected, selected: nil)
+                    let restoredWidth = try await glyphWidth()
+                    #expect(abs(restoredWidth - originalWidth) < 0.05)
+                    let after = try #require(await controller.sampleVisibleNow())
+                    #expect(after.path == before.path && after.node == before.node && after.utf16Offset == before.utf16Offset)
+                    #expect(model.userFontID == nil && EPUBUserFontPreference.restored(bookID: id) == nil)
+                    #expect(try Data(contentsOf: source) == bytes)
+                    let closed = await model.close()
+                    #expect(closed)
+                }
+            } catch {
+                try? await store.removeFont(id: font.id) // only the copy this fixture imported
+                throw error
+            }
+        }
+    }
+    #endif
+
+    @Test func deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport() async throws {
+        let suite = "font-removal-" + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try await withHostFixture { fixture in
+            let store = EPUBUserFontStore(root: fixture.root.appendingPathComponent("fonts"))
+            let source = fixture.root.appendingPathComponent("keep.ttf")
+            let bytes = try Self.makeSyntheticGeometricFontData()
+            try bytes.write(to: source)
+            let font = try await store.importFont(from: source)
+            let other = String(repeating: "b", count: 64)
+            defaults.set(font.id, forKey: "epub.bodyFont.v1.legacy")
+            EPUBUserFontPreference.set(font.id, bookID: "active", defaults: defaults)
+            EPUBUserFontPreference.set(other, bookID: "other", defaults: defaults)
+            do {
+                try await EPUBUserFontPreference.remove(other, store: store, defaults: defaults)
+                Issue.record("Missing managed copy should not be deleted")
+            } catch {}
+            #expect(EPUBUserFontPreference.restored(bookID: "other", defaults: defaults) == other)
+            try await EPUBUserFontPreference.remove(font.id, store: store, defaults: defaults)
+            #expect(try Data(contentsOf: source) == bytes)
+            let reimport = try await store.importFont(from: source)
+            let reopened = try #require(UserDefaults(suiteName: suite))
+            #expect(reimport.id == font.id)
+            for book in ["active", "legacy"] {
+                #expect(EPUBUserFontPreference.restored(bookID: book, defaults: reopened) == nil)
+            }
+            EPUBUserFontPreference.set(reimport.id, bookID: "active", defaults: reopened)
+            #expect(EPUBUserFontPreference.restored(bookID: "active", defaults: reopened) == font.id)
+            #expect(EPUBUserFontPreference.restored(bookID: "legacy", defaults: reopened) == nil)
+            #expect(EPUBUserFontPreference.restored(bookID: "other", defaults: reopened) == other)
+        }
+    }
+
     @Test func bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile() throws {
         let suite = "font-test-" + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: suite)); defer { defaults.removePersistentDomain(forName: suite) }

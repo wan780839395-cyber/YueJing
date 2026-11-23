@@ -481,6 +481,57 @@ struct EPUBReaderHostTests {
         }
     }
 
+    @Test func epubBookmarkSamplesVisibleAnchorAndJumpsBackAcrossChapters() async throws {
+        try await withHostFixture { fixture in
+            let archive = fixture.root.appendingPathComponent("Bookmarks.epub")
+            try EPUBUITestFixture.writeIllustratedEPUB(to: archive, title: "Synthetic Bookmarks")
+            let receipt = try await fixture.install(archive)
+            let model = EPUBReaderViewModel(bookID: receipt.book.id, service: fixture.service,
+                                            readingMode: .scroll, layoutMode: .reader)
+            let controller = EPUBWebViewController()
+            model.webView.attach(controller)
+            controller.onLocatorEvent = { [weak model] in model?.handleLocatorEvent($0) }
+            controller.onLoadFailure = { [weak model] error, token in model?.handleLoadFailure(error, token: token) }
+            try await fixture.withHostedController(controller) {
+                await model.load()
+                let first = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: first)
+                let reader = try #require(model.reader)
+                let middle = try #require(model.navigationItems.first { $0.fragment == "sec-mid" })
+                model.go(to: middle)
+                try await waitForNewToken(model: model, previous: first)
+                let midToken = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: midToken, minimumNode: 6)
+                let added = try await model.addVisibleBookmark { true }
+                #expect(added)
+                let marks = try await reader.bookmarks()
+                let mark = try #require(marks.first)
+                #expect(marks.count == 1 && mark.position.path == middle.path && mark.position.node > 0)
+
+                let away = try #require(model.navigationItems.first { $0.path == first.path })
+                model.go(to: away)
+                try await waitForNewToken(model: model, previous: midToken)
+                let awayToken = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: awayToken)
+                do {
+                    try await model.jumpToBookmark(id: mark.id) { false }
+                    Issue.record("An inactive bookmark panel navigated")
+                } catch EPUBError.staleSession { }
+                #expect(model.presentationToken == awayToken)
+                try await model.jumpToBookmark(id: mark.id) { true }
+                try await waitForNewToken(model: model, previous: awayToken)
+                let returned = try #require(model.currentToken)
+                try await waitUntilReady(model: model, expectedToken: returned)
+                #expect(model.currentPosition == mark.position)
+                let sample = try #require(await controller.sampleVisibleNow())
+                #expect(sample.path == mark.position.path && sample.node == mark.position.node)
+                #expect(sample.utf16Offset == mark.position.utf16Offset)
+                let closed = await model.close()
+                #expect(closed)
+            }
+        }
+    }
+
     @Test func epubTypographyReflowRestoresAnchorAndGatesStaleNavigationCallbacks() async throws {
         try await withHostFixture { fixture in
             let archiveURL = fixture.root.appendingPathComponent("Reflow.epub")
