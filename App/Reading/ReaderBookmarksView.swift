@@ -117,16 +117,32 @@ struct ReaderBookmarksView: View {
                 if let page = model.page {
                     Section {
                         if page.items.isEmpty && model.message == nil && !model.isBusy {
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(spacing: 10) {
+                                ZStack {
+                                    Circle()
+                                        .fill(appearance.sealAccent.opacity(0.12))
+                                        .frame(width: 44, height: 44)
+                                    Image(systemName: "bookmark.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(appearance.sealAccent)
+                                }
+                                .accessibilityHidden(true)
                                 Text("尚无书签。在正文位置稳定后，可添加当前阅读位置。")
                                     .font(.subheadline)
                                     .foregroundStyle(appearance.secondary)
+                                    .multilineTextAlignment(.center)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .accessibilityIdentifier("reader.bookmarks.empty")
                             }
-                            .padding(16)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(appearance.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 22)
+                            .frame(maxWidth: .infinity)
+                            .background(appearance.card.opacity(0.75), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.65)
+                                    .allowsHitTesting(false)
+                            }
                             .listRowBackground(appearance.surface)
                             .listRowSeparator(.hidden)
                         }

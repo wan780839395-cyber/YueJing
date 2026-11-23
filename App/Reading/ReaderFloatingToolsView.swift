@@ -1,6 +1,26 @@
 import ReaderDomain
 import SwiftUI
 
+/// Caps vertical height without stretching shorter content to `maxHeight`.
+private struct BoundedHeightLayout: Layout {
+    let maxHeight: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let cappedHeight = min(proposal.height ?? maxHeight, maxHeight)
+        let size = subview.sizeThatFits(ProposedViewSize(width: proposal.width, height: cappedHeight))
+        return CGSize(width: size.width, height: min(size.height, cappedHeight))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let subview = subviews.first else { return }
+        subview.place(
+            at: bounds.origin,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
+    }
+}
+
 @MainActor
 struct ReaderFloatingToolsView: View {
     let state: ReadingToolsPresentation
@@ -40,25 +60,35 @@ struct ReaderFloatingToolsView: View {
 
     private func chapterPanel(_ context: String) -> some View {
         let maximumHeight: CGFloat = metrics.compactHeight ? 144 : (dynamicType.isAccessibilitySize ? 300 : 240)
-        return ViewThatFits(in: .vertical) {
-            chapterPanelContent(context)
-            ScrollView(.vertical) {
+        let topSheen = Color.white.opacity(appearance.theme == .dark ? 0.08 : 0.65)
+        return BoundedHeightLayout(maxHeight: maximumHeight) {
+            ViewThatFits(in: .vertical) {
                 chapterPanelContent(context)
+                ScrollView(.vertical) {
+                    chapterPanelContent(context)
+                }
+                .frame(height: maximumHeight)
+                .accessibilityIdentifier("reader.tools.scroll")
             }
-            .frame(height: maximumHeight)
-            .accessibilityIdentifier("reader.tools.scroll")
         }
-        .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth, maxHeight: maximumHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .background {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(appearance.elevatedSurface)
-                .shadow(color: appearance.shadow, radius: 14, x: 0, y: 5)
+                .shadow(color: appearance.shadow, radius: 16, x: 0, y: 6)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(appearance.edge.opacity(0.9), lineWidth: 0.85)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [topSheen, appearance.edge.opacity(0.85)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.85
+                )
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -88,6 +118,10 @@ struct ReaderFloatingToolsView: View {
         } else {
             HStack(alignment: .center, spacing: 10) {
                 chapterSummary(context)
+                Rectangle()
+                    .fill(appearance.edge.opacity(0.65))
+                    .frame(width: 0.5, height: 26)
+                    .accessibilityHidden(true)
                 HStack(spacing: 6) {
                     panelDirectoryButton(fillsWidth: false)
                     panelSettingsButton(fillsWidth: false)
@@ -102,11 +136,11 @@ struct ReaderFloatingToolsView: View {
 
     private func chapterSummary(_ context: String) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+            Capsule()
                 .fill(appearance.accent)
-                .frame(width: 3, height: 22)
+                .frame(width: 3, height: 24)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 if !metrics.compactHeight && !dynamicType.isAccessibilitySize {
                     Text("当前章节")
                         .font(.caption2.weight(.semibold))
@@ -127,18 +161,18 @@ struct ReaderFloatingToolsView: View {
     }
 
     private func panelDirectoryButton(fillsWidth: Bool) -> some View {
-        panelButton("目录", symbol: "list.bullet", panel: .directory, key: "directory",
+        panelButton("目录", accessibilityTitle: "目录", symbol: "list.bullet", panel: .directory, key: "directory",
                     available: directoryAvailable, fillsWidth: fillsWidth)
     }
 
     private func panelSettingsButton(fillsWidth: Bool) -> some View {
-        panelButton("阅读设置", symbol: "textformat.size", panel: .settings, key: "settings",
+        panelButton("设置", accessibilityTitle: "阅读设置", symbol: "textformat.size", panel: .settings, key: "settings",
                     available: settingsAvailable, fillsWidth: fillsWidth)
             .accessibilityHint("调整文字、行距和阅读背景")
     }
 
-    private func panelButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String,
-                             available: Bool, fillsWidth: Bool) -> some View {
+    private func panelButton(_ title: String, accessibilityTitle: String, symbol: String, panel: ReadingToolPanel,
+                             key: String, available: Bool, fillsWidth: Bool) -> some View {
         Button {
             guard visible, state.canInteract, available, !exitSaveFailed else { return }
             open(panel)
@@ -150,10 +184,11 @@ struct ReaderFloatingToolsView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .frame(minWidth: 44, maxWidth: fillsWidth ? .infinity : nil, minHeight: metrics.controlHeight)
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 14))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 16))
         .disabled(!available || exitSaveFailed || !state.canInteract)
+        .accessibilityLabel(accessibilityTitle)
         .accessibilityIdentifier("reader.tools.\(key)")
         .accessibilityFocused($focusedControl, equals: key)
     }
@@ -266,17 +301,25 @@ struct ReaderFloatingToolsView: View {
     }
 
     private func dockSurface<Content: View>(cornerRadius: CGFloat, @ViewBuilder content: () -> Content) -> some View {
-        content()
+        let topSheen = Color.white.opacity(appearance.theme == .dark ? 0.08 : 0.65)
+        return content()
             .padding(5)
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(appearance.elevatedSurface)
-                    .shadow(color: appearance.shadow, radius: 12, x: 0, y: 4)
+                    .shadow(color: appearance.shadow, radius: 14, x: 0, y: 5)
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(appearance.edge.opacity(0.9), lineWidth: 0.85)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [topSheen, appearance.edge.opacity(0.85)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.85
+                    )
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
     }

@@ -20,8 +20,22 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 floatingTabDock
                     .padding(.horizontal, LibraryAppearance.horizontalInset)
-                    .padding(.top, 6)
+                    .padding(.top, 8)
                     .padding(.bottom, 10)
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        LinearGradient(
+                            colors: [
+                                appearance.page.opacity(0),
+                                appearance.page.opacity(0.84),
+                                appearance.page.opacity(0.96)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .ignoresSafeArea(.container, edges: .bottom)
+                        .allowsHitTesting(false)
+                    }
                     .allowsHitTesting(!drawerPresented && canNavigate)
                     .accessibilityHidden(drawerPresented)
             }
@@ -58,9 +72,11 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
     }
 
     private var floatingTabDock: some View {
-        HStack(spacing: 4) {
+        let topSheen = Color.white.opacity(appearance.isDarkSurface ? 0.10 : 0.72)
+        return HStack(spacing: 4) {
             ForEach(LibrarySection.allCases, id: \.self) { item in
                 let selected = section == item
+                let iconName = selected ? item.selectedSymbol : item.symbol
                 Button {
                     guard canNavigate, !drawerPresented else { return }
                     if reduceMotion {
@@ -74,7 +90,7 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                     Group {
                         if dynamicType.isAccessibilitySize {
                             VStack(spacing: 2) {
-                                Image(systemName: item.symbol)
+                                Image(systemName: iconName)
                                     .font(.body.weight(selected ? .semibold : .regular))
                                     .accessibilityHidden(true)
                                 Text(item.title)
@@ -83,7 +99,7 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                             }
                         } else {
                             HStack(spacing: 6) {
-                                Image(systemName: item.symbol)
+                                Image(systemName: iconName)
                                     .font(.subheadline.weight(selected ? .semibold : .regular))
                                     .accessibilityHidden(true)
                                 Text(item.title)
@@ -100,6 +116,10 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
                         if selected {
                             Capsule()
                                 .fill(appearance.accentSoft)
+                                .overlay {
+                                    Capsule()
+                                        .strokeBorder(appearance.accent.opacity(0.24), lineWidth: 0.65)
+                                }
                                 .allowsHitTesting(false)
                         }
                     }
@@ -118,10 +138,17 @@ struct LibraryNavigationShell<Shelf: View, Explore: View, Settings: View>: View 
         .background(appearance.elevatedSurface, in: Capsule())
         .overlay {
             Capsule()
-                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.85)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [topSheen, appearance.edge.opacity(0.85)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.85
+                )
                 .allowsHitTesting(false)
         }
-        .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
+        .shadow(color: appearance.shadow, radius: 16, x: 0, y: 6)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("library.dock")
     }

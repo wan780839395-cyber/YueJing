@@ -184,21 +184,45 @@ struct LibraryHeroBookCard: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [appearance.elevatedSurface, appearance.surface],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [appearance.elevatedSurface, appearance.surface],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
+                // Whisper-quiet editorial aura in the upper-right corner
+                RadialGradient(
+                    colors: [
+                        (hasBeenRead ? appearance.sealAccent : appearance.accent).opacity(appearance.isDarkSurface ? 0.11 : 0.065),
+                        Color.clear
+                    ],
+                    center: .topTrailing,
+                    startRadius: 8,
+                    endRadius: 170
                 )
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            }
+            .allowsHitTesting(false)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.85)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(appearance.isDarkSurface ? 0.10 : 0.75),
+                            appearance.edge.opacity(0.85)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.85
+                )
                 .allowsHitTesting(false)
         }
-        .shadow(color: appearance.shadow, radius: 14, x: 0, y: 6)
+        .shadow(color: appearance.shadow, radius: 15, x: 0, y: 6)
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 

@@ -8,6 +8,9 @@ enum LibrarySection: String, CaseIterable, Sendable {
     var symbol: String {
         switch self { case .shelf: "books.vertical"; case .explore: "square.grid.2x2"; case .settings: "slider.horizontal.3" }
     }
+    var selectedSymbol: String {
+        switch self { case .shelf: "books.vertical.fill"; case .explore: "square.grid.2x2.fill"; case .settings: "slider.horizontal.3" }
+    }
 }
 
 enum LibraryInformationPage: Sendable { case diagnostics, license }

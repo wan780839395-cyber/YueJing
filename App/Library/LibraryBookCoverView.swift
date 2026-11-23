@@ -86,6 +86,18 @@ struct LibraryBookCoverView: View {
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.6)
                     }
+                    .background(alignment: .trailing) {
+                        if isLarge {
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .fill(appearance.isDarkSurface ? Color.white.opacity(0.12) : Color(red: 0.96, green: 0.94, blue: 0.89))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                        .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.5)
+                                }
+                                .padding(.vertical, 3)
+                                .offset(x: 2.5)
+                        }
+                    }
                     .shadow(color: appearance.shadow, radius: isLarge ? 9 : 4, x: 0, y: isLarge ? 5 : 2)
                     .accessibilityHidden(true)
             } else {

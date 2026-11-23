@@ -149,6 +149,20 @@ struct ReaderDirectorySheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            if let currentIndex = page.currentIndex, page.total > 0 {
+                let fraction = min(1, max(0.02, Double(currentIndex + 1) / Double(page.total)))
+                GeometryReader { bar in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(appearance.edge.opacity(0.45))
+                        Capsule()
+                            .fill(appearance.accent)
+                            .frame(width: max(8, bar.size.width * fraction))
+                    }
+                }
+                .frame(height: 3)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+            }
             Rectangle()
                 .fill(appearance.edge.opacity(0.6))
                 .frame(height: ReaderVisualStyle.panelDividerHeight)

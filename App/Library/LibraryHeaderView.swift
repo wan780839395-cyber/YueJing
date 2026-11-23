@@ -1,4 +1,17 @@
+import ReaderDomain
 import SwiftUI
+
+enum LibraryShelfFormatFilter: String, CaseIterable, Sendable {
+    case all, epub, txt
+
+    var title: String {
+        switch self {
+        case .all: "全部"
+        case .epub: "EPUB"
+        case .txt: "TXT"
+        }
+    }
+}
 
 @MainActor
 struct LibraryHeaderView: View {
@@ -7,6 +20,12 @@ struct LibraryHeaderView: View {
     var showsShelfTitle: Bool = true
     var txtCount: Int = 0
     var epubCount: Int = 0
+    var selectedFilter: LibraryShelfFormatFilter = .all
+    var onSelectFilter: ((LibraryShelfFormatFilter) -> Void)? = nil
+
+    private var showsInteractiveFilter: Bool {
+        onSelectFilter != nil && txtCount > 0 && epubCount > 0
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -39,7 +58,16 @@ struct LibraryHeaderView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if bookCount > 0 && (txtCount > 0 || epubCount > 0) {
+            if showsInteractiveFilter {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        filterChip(.all, count: bookCount)
+                        filterChip(.epub, count: epubCount)
+                        filterChip(.txt, count: txtCount)
+                    }
+                    .padding(.vertical, 2)
+                }
+            } else if bookCount > 0 && (txtCount > 0 || epubCount > 0) {
                 HStack(spacing: 8) {
                     if epubCount > 0 {
                         statChip("EPUB", count: epubCount, tint: appearance.accent, fill: appearance.accentSoft)
@@ -54,6 +82,43 @@ struct LibraryHeaderView: View {
         .foregroundStyle(appearance.foreground)
         .padding(.top, 6)
         .padding(.bottom, 4)
+    }
+
+    private func filterChip(_ filter: LibraryShelfFormatFilter, count: Int) -> some View {
+        let selected = selectedFilter == filter
+        return Button {
+            onSelectFilter?(filter)
+        } label: {
+            HStack(spacing: 5) {
+                Text(filter.title)
+                    .font(.caption.weight(selected ? .semibold : .medium))
+                Text("\(count)")
+                    .font(.caption2.monospacedDigit())
+                    .opacity(selected ? 0.9 : 0.72)
+            }
+            .foregroundStyle(selected ? appearance.accent : appearance.secondary)
+            .padding(.horizontal, 12)
+            .frame(minWidth: 44, minHeight: 36)
+            .background(
+                selected ? appearance.accentSoft : appearance.surface,
+                in: Capsule()
+            )
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        selected ? appearance.accent.opacity(0.45) : appearance.edge.opacity(0.75),
+                        lineWidth: selected ? 1 : 0.65
+                    )
+                    .allowsHitTesting(false)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("筛选\(filter.title)，共 \(count) 册")
+        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("library.shelf.filter.\(filter.rawValue)")
     }
 
     private func statChip(_ label: String, count: Int, tint: Color, fill: Color) -> some View {

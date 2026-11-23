@@ -312,9 +312,25 @@ struct LibraryManagementOptions: View {
                     .allowsHitTesting(false)
             }
             .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
+
+            // Quiet studio colophon signature
+            HStack(spacing: 10) {
+                YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("阅境 · 专注本地离线阅读")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(appearance.foreground.opacity(0.85))
+                    Text("原文件只读保留 · 零云端追踪")
+                        .font(.caption2)
+                        .foregroundStyle(appearance.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 8)
+            .accessibilityElement(children: .combine)
         }
     }
-
     private func settingsActionRow(title: String, detail: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {

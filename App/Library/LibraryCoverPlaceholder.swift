@@ -103,17 +103,37 @@ struct LibraryCoverPlaceholder: View {
                 .padding(.trailing, isLarge ? 6 : 4)
                 .padding(.leading, max(9, size.width * 0.16))
 
-            // Traditional title cartouche with serif centerpiece glyph
+            // Subtle traditional stitched binding notches along the spine
+            if isLarge {
+                VStack(spacing: size.height * 0.19) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Capsule()
+                            .fill(inkColor.opacity(appearance.isDarkSurface ? 0.34 : 0.22))
+                            .frame(width: max(4, size.width * 0.065), height: 1.2)
+                    }
+                }
+                .padding(.leading, max(2, size.width * 0.03))
+            }
+
+            // Traditional title cartouche with serif centerpiece glyph & miniature seal chop
             VStack(spacing: isLarge ? 6 : 3) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(appearance.surface.opacity(appearance.isDarkSurface ? 0.22 : 0.72))
+                        .fill(appearance.surface.opacity(appearance.isDarkSurface ? 0.22 : 0.76))
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .strokeBorder(accentColor.opacity(0.32), lineWidth: 0.5)
                     Text(leadingGlyph)
                         // Decorative artwork glyph; the real book title uses Dynamic Type in the row/card.
                         .font(.system(size: max(18, size.width * 0.34), weight: .semibold, design: .serif))
                         .foregroundStyle(inkColor)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if isLarge {
+                        Circle()
+                            .fill(appearance.sealAccent.opacity(0.82))
+                            .frame(width: 4.5, height: 4.5)
+                            .padding(3.5)
+                    }
                 }
                 .frame(width: size.width * 0.50, height: size.height * 0.46)
 
@@ -148,6 +168,19 @@ struct LibraryCoverPlaceholder: View {
                 .strokeBorder(inkColor.opacity(appearance.isDarkSurface ? 0.24 : 0.14), lineWidth: 0.6)
         }
         .frame(width: size.width, height: size.height)
+        .background(alignment: .trailing) {
+            if isLarge {
+                // Tactile stacked-pages fore-edge lip peeking slightly behind hardcover board
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(appearance.isDarkSurface ? Color.white.opacity(0.12) : Color(red: 0.96, green: 0.94, blue: 0.89))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.5)
+                    }
+                    .padding(.vertical, 3)
+                    .offset(x: 2.5)
+            }
+        }
         .shadow(color: appearance.shadow, radius: isLarge ? 8 : 4, x: 0, y: isLarge ? 4 : 2)
         .accessibilityHidden(true)
     }

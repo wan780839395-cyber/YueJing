@@ -24,6 +24,7 @@ struct LibraryShelfContent: View {
     var onImport: (() -> Void)? = nil
 
     @AppStorage("dev.yuejing.ui.shelfLayout.v1") private var layoutRawValue: String = ShelfLayoutMode.gallery.rawValue
+    @State private var formatFilter: LibraryShelfFormatFilter = .all
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -35,7 +36,21 @@ struct LibraryShelfContent: View {
     private var txtCount: Int { books.filter { $0.format == .txt }.count }
     private var epubCount: Int { books.filter { $0.format == .epub }.count }
 
+    private var effectiveFilter: LibraryShelfFormatFilter {
+        guard txtCount > 0 && epubCount > 0 else { return .all }
+        return formatFilter
+    }
+
+    private var displayedBooks: [LibraryBook] {
+        switch effectiveFilter {
+        case .all: return books
+        case .epub: return books.filter { $0.format == .epub }
+        case .txt: return books.filter { $0.format == .txt }
+        }
+    }
+
     var body: some View {
+        let visibleBooks = displayedBooks
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 LibraryHeaderView(
@@ -43,7 +58,12 @@ struct LibraryShelfContent: View {
                     appearance: appearance,
                     showsShelfTitle: false,
                     txtCount: txtCount,
-                    epubCount: epubCount
+                    epubCount: epubCount,
+                    selectedFilter: effectiveFilter,
+                    onSelectFilter: { chosen in
+                        if reduceMotion { formatFilter = chosen }
+                        else { withAnimation(ReaderMotion.selectionFeedback) { formatFilter = chosen } }
+                    }
                 )
 
                 if let notice {
@@ -60,7 +80,7 @@ struct LibraryShelfContent: View {
                 } else if books.isEmpty {
                     emptyStudyCard
                 } else {
-                    if let leadBook = books.first {
+                    if let leadBook = visibleBooks.first {
                         Button { onOpenBook(leadBook) } label: {
                             LibraryHeroBookCard(
                                 book: leadBook,
@@ -74,7 +94,7 @@ struct LibraryShelfContent: View {
                         .accessibilityHint("打开正文，恢复已保存的阅读位置")
                     }
 
-                    let restBooks = Array(books.dropFirst())
+                    let restBooks = Array(visibleBooks.dropFirst())
                     if !restBooks.isEmpty {
                         collectionHeader(count: restBooks.count)
                         if layoutMode == .gallery {

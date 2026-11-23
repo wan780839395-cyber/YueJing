@@ -33,6 +33,7 @@ struct ReaderTypographyPreview: View {
                 }
             }
             .foregroundStyle(Color(uiColor: preferences.theme.foreground).opacity(0.62))
+            .padding(.trailing, 14)
 
             Rectangle()
                 .fill(Color(uiColor: preferences.theme.foreground).opacity(0.10))
@@ -49,6 +50,22 @@ struct ReaderTypographyPreview: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
         .background(Color(uiColor: preferences.theme.background), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            // Miniature notched bookmark ribbon tucked into the top edge of the sample page
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: 8, y: 0))
+                path.addLine(to: CGPoint(x: 8, y: 15))
+                path.addLine(to: CGPoint(x: 4, y: 11.5))
+                path.addLine(to: CGPoint(x: 0, y: 15))
+                path.closeSubpath()
+            }
+            .fill(appearance.sealAccent.opacity(0.88))
+            .frame(width: 8, height: 15)
+            .padding(.trailing, 16)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.85)

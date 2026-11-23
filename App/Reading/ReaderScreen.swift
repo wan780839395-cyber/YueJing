@@ -103,6 +103,16 @@ struct ReaderScreen: View {
                     .accessibilityHidden(tools.panel != nil)
                     .disabled(tools.exitRequest != nil)
                 }
+                ZStack {
+                    if tools.visible && tools.panel == nil {
+                        edgeScrims(theme: model.preferences.theme)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: tools.visible && tools.panel == nil)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
                 VStack(spacing: 0) {
                     titleBar(metrics: metrics, appearance: appearance)
                     Spacer(minLength: 0)
@@ -114,7 +124,7 @@ struct ReaderScreen: View {
                     directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
                     exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
                     open: openPanel, focusedControl: $focusedControl)
-                    .padding(.horizontal, 16).padding(.bottom, 8)
+                    .padding(.horizontal, 14).padding(.bottom, 8)
             }
             .foregroundStyle(appearance.foreground).tint(appearance.accent)
         }
@@ -192,16 +202,45 @@ struct ReaderScreen: View {
         .allowsHitTesting(visible && tools.canInteract).accessibilityHidden(!visible)
     }
 
+    private func edgeScrims(theme: ReaderTheme) -> some View {
+        let bg = Color(uiColor: theme.background)
+        return VStack(spacing: 0) {
+            LinearGradient(
+                colors: [bg.opacity(0.96), bg.opacity(0.82), bg.opacity(0)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 82)
+            .ignoresSafeArea(.container, edges: .top)
+            Spacer(minLength: 0)
+            LinearGradient(
+                colors: [bg.opacity(0), bg.opacity(0.84), bg.opacity(0.96)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 88)
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
     private func titleBarContent(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
-        HStack(spacing: 10) {
+        let topSheen = Color.white.opacity(appearance.theme == .dark ? 0.08 : 0.65)
+        return HStack(spacing: 10) {
             Button { exitReader() } label: {
                 Group {
                     if tools.exitRequest != nil { ProgressView().tint(appearance.accent) }
-                    else { Image(systemName: "chevron.down").font(.system(size: 16, weight: .semibold)) }
+                    else { Image(systemName: "chevron.down").font(.system(size: 15, weight: .semibold)) }
                 }
                 .foregroundStyle(appearance.foreground)
                 .frame(minWidth: 44, minHeight: 44)
-                .background(appearance.card.opacity(0.8), in: Circle())
+                .background(appearance.card.opacity(0.85), in: Circle())
+                .overlay {
+                    Circle()
+                        .strokeBorder(appearance.edge.opacity(0.55), lineWidth: 0.5)
+                        .allowsHitTesting(false)
+                }
                 .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -223,28 +262,46 @@ struct ReaderScreen: View {
                     .foregroundStyle(appearance.foreground)
                     .lineLimit(metrics.verticalButtons ? 2 : 1)
                     .accessibilityLabel("书名，\(model.title)")
-                if model.chapterTotal > 0 && !metrics.compactHeight {
-                    Text("TXT · 共 \(model.chapterTotal) 章")
-                        .font(.caption2.monospacedDigit())
+                if !metrics.compactHeight {
+                    Text("TXT · 本地阅读")
+                        .font(.caption2)
                         .foregroundStyle(appearance.secondary)
                         .lineLimit(1)
                         .accessibilityHidden(true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if model.chapterTotal > 0 && !metrics.compactHeight && !dynamicType.isAccessibilitySize {
+                Text("共 \(model.chapterTotal) 章")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(appearance.accent)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(appearance.accentSoft, in: Capsule())
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.leading, 8)
-        .padding(.trailing, 14)
+        .padding(.trailing, 12)
         .padding(.vertical, 6)
         .frame(minHeight: metrics.titleHeight)
-        .background(appearance.fill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(appearance.elevatedSurface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [topSheen, appearance.edge.opacity(0.85)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.85
+                )
                 .allowsHitTesting(false)
         }
-        .shadow(color: appearance.shadow, radius: 10, x: 0, y: 4)
-        .padding(.horizontal, 12).padding(.top, 6)
+        .shadow(color: appearance.shadow, radius: 12, x: 0, y: 4)
+        .padding(.horizontal, 14).padding(.top, 6)
         // Keep title/layout updates out of the visibility transition.
         .transaction { transaction in transaction.animation = nil }
     }
