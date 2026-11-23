@@ -24,6 +24,7 @@ on:
           - woff2-native-024
           - userfont-native-025
           - fontpicker-native-026
+          - fontcopy-native-027
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -1719,7 +1720,7 @@ jobs:
 
   fontpicker_native:
     needs: admission
-    if: ${{ inputs.validation_scope == 'fontpicker-native-026' }}
+    if: ${{ inputs.validation_scope == 'fontpicker-native-026' || inputs.validation_scope == 'fontcopy-native-027' }}
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -1735,7 +1736,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Bind three font picker tests and source selection and budgets before preparation
+      - name: Bind selected font picker tests and source selection and budgets before preparation
         run: python3 -B scripts/run_fontpicker_native.py preflight
       - name: Prepare the fixed native tools and generate isolated schemes
         run: python3 -B scripts/workflow_tools.py prepare --evidence artifacts/task3
@@ -1745,9 +1746,13 @@ jobs:
         run: python3 -B scripts/run_fontpicker_native.py run --destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
       - name: Verify native evidence before device build
         run: python3 -B scripts/run_fontpicker_native.py verify
+      - name: Verify UI app simulator linkage for copy import
+        if: ${{ inputs.validation_scope == 'fontcopy-native-027' }}
+        run: python3 -B scripts/check_webkit_linkage.py --app build/fontcopy-native-027/YueJingEPUBUI/Build/Products/Debug-iphonesimulator/YueJing.app --output artifacts/task3/webkit-simulator-linkage
       - name: Verify actual Host app simulator linkage
+        if: ${{ inputs.validation_scope == 'fontpicker-native-026' }}
         run: python3 -B scripts/check_webkit_linkage.py --app build/fontpicker-native-026/YueJingHost/Build/Products/Debug-iphonesimulator/YueJing.app --output artifacts/task3/webkit-simulator-linkage
-      - name: Compile same-source arm64 device Release after three native passes
+      - name: Compile same-source arm64 device Release after targeted native acceptance
         run: |
           set -uo pipefail
           set +e

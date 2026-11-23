@@ -10,7 +10,7 @@ HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'e
 
 
 def admit(scope, acknowledgement):
-    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026'}:
+    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'}:
         raise ValueError('Choose an explicit scope; no native work is authorized by the default')
     if scope != 'development-targeted' and acknowledgement != scope:
         raise ValueError('Explicit scope acknowledgement required; historical frozen gates still apply')
@@ -32,7 +32,7 @@ def main():
             raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')
         from run_woff2_native import preflight as native_preflight
         native_preflight()
-    elif scope in ('userfont-native-025', 'fontpicker-native-026'):
+    elif scope in ('userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'):
         env = os.environ
         if not (env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and env.get('GITHUB_RUN_ATTEMPT') == '1'
                 and env.get('GITHUB_REPOSITORY') == 'wan780839395-cyber/YueJing'
@@ -41,14 +41,14 @@ def main():
                 and env.get('BUILD_IPA') == 'true' and env.get('ALLOW_UNQUALIFIED_IPA') == 'false'
                 and not env.get('PRIOR_VALIDATION_RUN')):
             raise ValueError('Custom font qualified delivery identity mismatch')
-        if scope == 'fontpicker-native-026':
-            for path, blob in {'App/EPUB/EPUBUserFontCard.swift': 'c541095379ba29e28a66873ae9cfa319dcc02207', 'App/EPUB/EPUBSettingsView.swift': '97a7c6a34acc0b35bad042b3d39082bcb63f4ad4', 'App/EPUB/EPUBUserFontPicker.swift': 'a6854b7a6d4f64446068749bbb006f1849b7113f', 'App/EPUB/EPUBFontFilePicker.swift': 'f14158742e31d0364aadc4e9de5e4f1300ee7f61'}.items():
+        if scope in ('fontpicker-native-026', 'fontcopy-native-027'):
+            for path, blob in {'App/EPUB/EPUBUserFontCard.swift': 'c541095379ba29e28a66873ae9cfa319dcc02207', 'App/EPUB/EPUBSettingsView.swift': '97a7c6a34acc0b35bad042b3d39082bcb63f4ad4', 'App/EPUB/EPUBUserFontPicker.swift': 'a6854b7a6d4f64446068749bbb006f1849b7113f', 'App/EPUB/EPUBFontFilePicker.swift': ('b374be2fbb4f847de51ae86fcef35067a1459eea' if scope == 'fontcopy-native-027' else 'f14158742e31d0364aadc4e9de5e4f1300ee7f61')}.items():
                 if subprocess.check_output(['git', 'rev-parse', 'HEAD:' + path], text=True).strip() != blob:
                     raise ValueError('Frozen picker or Gemini UI drift: ' + path)
             from run_fontpicker_native import read_cases
             from hashlib import sha256
             from pathlib import Path
-            if sha256(Path('scripts/fontpicker_native_plan.json').read_bytes()).hexdigest() != env.get('DEVELOPMENT_PLAN_SHA256'):
+            if sha256(Path('scripts/fontcopy_native_plan.json' if scope == 'fontcopy-native-027' else 'scripts/fontpicker_native_plan.json').read_bytes()).hexdigest() != env.get('DEVELOPMENT_PLAN_SHA256'):
                 raise ValueError('Font picker plan drift')
             read_cases()
         else:

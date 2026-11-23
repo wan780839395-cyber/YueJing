@@ -23,6 +23,10 @@ HOST = 'YueJingHostTests/EPUBFontFilePickerTests.swift'
 UI = 'YueJingEPUBUITests/EPUBFontPickerUITests.swift'
 HOST_NAMES = ('genericProviderItemsAreBrowsableButOnlyFontURLsAreForwarded()',
               'pickerDeliversFirstSelectionOrCancellationOnlyOnce()')
+COPY_ONLY = os.environ.get('VALIDATION_SCOPE') == 'fontcopy-native-027'
+if COPY_ONLY:
+    SCOPE, PLAN = 'fontcopy-native-027', ROOT / 'scripts/fontcopy_native_plan.json'
+CASE_COUNT, SCHEME_COUNT = (1, 1) if COPY_ONLY else (3, 2)
 UI_NAME = 'testRevisedCardOpensFilesAndReturns'
 BUILD, TEST, CASE, TOTAL = prior.BUILD, prior.TEST, prior.CASE, prior.TOTAL
 load, require = prior.load, dev.require
@@ -34,10 +38,10 @@ def read_cases():
     require([plan[k + '_timeout_seconds'] for k in ('build', 'test', 'case', 'total')] ==
             [BUILD, TEST, CASE, TOTAL], 'Timeout drift')
     project = (ROOT/'project.yml').read_text(encoding='utf-8')
-    for key, version in [('MARKETING_VERSION', '0.2.26'), ('CURRENT_PROJECT_VERSION', '28')]:
+    for key, version in [('MARKETING_VERSION', '0.2.27' if COPY_ONLY else '0.2.26'), ('CURRENT_PROJECT_VERSION', '29' if COPY_ONLY else '28')]:
         require(re.findall(r'^\s*' + key + r': "([^"]+)"$', project, re.M) == [version], 'Version drift: ' + key)
     cases = plan['cases']
-    require(cases == [dict(file=HOST, name=n) for n in HOST_NAMES] + [dict(file=UI, name=UI_NAME)], 'Case drift')
+    require(cases == ([] if COPY_ONLY else [dict(file=HOST, name=n) for n in HOST_NAMES]) + [dict(file=UI, name=UI_NAME)], 'Case drift')
     host = (ROOT/'Tests'/HOST).read_text(encoding='utf-8')
     require(re.search(r'^struct EPUBFontFilePickerTests\b', host, re.M) and
             len(re.findall(r'^\s*@Test\b', host, re.M)) == 2 and
@@ -61,7 +65,7 @@ def identity():
     return dict(scope=SCOPE, branch=native.BRANCH, event=env['GITHUB_EVENT_NAME'], source_commit=head,
                 development_source_sha=head, plan_sha256=digest, run_id=env['GITHUB_RUN_ID'], run_attempt='1',
                 job=JOB, qualification='DEVELOPMENT_ONLY', release_qualified=False,
-                selected_declarations=3, planned_executions=3)
+                selected_declarations=CASE_COUNT, planned_executions=CASE_COUNT)
 
 
 def runtime_evidence(source, dest):
@@ -139,7 +143,7 @@ def verify_result(case, scheme, tests, summary):
 
 
 def jobs(cases, dest):
-    for rel in (HOST, UI):
+    for rel in ((UI,) if COPY_ONLY else (HOST, UI)):
         scheme = dev.SCHEMES[rel.split('/')[0]]
         derived = ROOT/'build'/SCOPE/scheme
         folder = OUTPUT/('build-' + scheme)
@@ -226,18 +230,18 @@ def execute(cases, dest, source):
             if row['status'] == 'running':
                 row['status'] = 'incomplete'
         passed = sum(c['status'] == 'passed' for c in result['cases'])
-        ok = len(built) == 2 and passed == 3
+        ok = len(built) == SCHEME_COUNT and passed == CASE_COUNT
         result.update(status='passed' if ok else 'failed', observed_passed_executions=passed,
-                      native_executions=3 if ok else None)
+                      native_executions=CASE_COUNT if ok else None)
         dev.write_json(OUTPUT/'development-summary.json', result)
     return ok
 
 
 def verify(cases, dest, source):
     result = load(OUTPUT/'development-summary.json')
-    expected = dict(source, destination=dest, status='passed', native_executions=3, observed_passed_executions=3)
+    expected = dict(source, destination=dest, status='passed', native_executions=CASE_COUNT, observed_passed_executions=CASE_COUNT)
     require(all(result[k] == v for k, v in expected.items()), 'Summary identity/count/status mismatch')
-    require(len(result['builds']) == 2 and len(result['cases']) == 3, 'Expected two builds and three cases')
+    require(len(result['builds']) == SCHEME_COUNT and len(result['cases']) == CASE_COUNT, 'Expected two builds and three cases')
     require(0 <= time.monotonic() - result['started'] < TOTAL and 0 <= time.time() - result['started_at'] < TOTAL,
             'Not a current same-job execution')
     deadline = result['started'] + TOTAL
@@ -253,7 +257,7 @@ def verify(cases, dest, source):
         if case:
             require(row['selector'] == native.selector(case) and row['executions'] == 1, 'Wrong test receipt')
         check_evidence(folder, cmd, case, dest, row, deadline, replay=True)
-    print('Verified same-job raw xcresults and logs: two Host tests and one EPUB UI test.')
+    print('Verified same-job raw xcresults and logs: ' + str(CASE_COUNT) + ' selected test(s).')
 
 
 def main():

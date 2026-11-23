@@ -19,6 +19,9 @@ COUNT, LABEL, RUNNER = 6, "USERFONT", "scripts/run_userfont_native.py"
 if os.environ.get("VALIDATION_SCOPE") == "fontpicker-native-026":
     SCOPE, VERSION, BUILD = "fontpicker-native-026", "0.2.26", "28"
     COUNT, LABEL, RUNNER = 3, "FONTPICKER", "scripts/run_fontpicker_native.py"
+if os.environ.get("VALIDATION_SCOPE") == "fontcopy-native-027":
+    SCOPE, VERSION, BUILD = "fontcopy-native-027", "0.2.27", "29"
+    COUNT, LABEL, RUNNER = 1, "FONTCOPY", "scripts/run_fontpicker_native.py"
 PREFIX = "Payload/YueJing.app/"
 
 

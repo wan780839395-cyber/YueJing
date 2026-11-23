@@ -1,0 +1,14 @@
+{
+  "scope": "fontcopy-native-027",
+  "branch": "dev/workflow-optimization",
+  "build_timeout_seconds": 900,
+  "test_timeout_seconds": 240,
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 2700,
+  "cases": [
+    {
+      "file": "YueJingEPUBUITests/EPUBFontPickerUITests.swift",
+      "name": "testRevisedCardOpensFilesAndReturns"
+    }
+  ]
+}

@@ -19,8 +19,8 @@ struct EPUBFontFilePicker: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(complete) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Avoid copying arbitrary or oversized files before the app's bounded read.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: Self.browsingTypes, asCopy: false)
+        // Request a provider-supplied copy. The font store still validates and bounds its own import.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: Self.browsingTypes, asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker
