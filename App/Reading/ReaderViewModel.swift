@@ -29,6 +29,8 @@ final class ReaderViewModel: ObservableObject {
     private var bookmarkContext: BookmarkPanelContext?
     private var preparedBookmarkWindow: UUID?
     private var preparedBookmarkContext: BookmarkPanelContext?
+    private var searchRequest = UUID()
+    private var searchHitIDs: Set<UUID> = []
     enum BookmarkJumpError: Error { case stateChanged }
     private let bookID: String
     private let service: LibraryService
@@ -331,6 +333,7 @@ extension ReaderViewModel {
     func endBookmarkPanel(_ presentation: UUID? = nil) {
         if let presentation, bookmarkContext?.presentation != presentation { return }
         bookmarks.dismiss(presentation: presentation)
+        searchRequest = UUID(); searchHitIDs = []
         bookmarkContext = nil; preparedBookmarkWindow = nil; preparedBookmarkContext = nil
     }
     func prepareBookmarkWindow(id: String, presentation: UUID,
@@ -382,5 +385,37 @@ extension ReaderViewModel {
               let id = context.window, window?.id == id,
               viewport.controller?.window?.id == id, navigationGate.isDisplayed(window: id) else { return false }
         return true
+    }
+}
+
+extension ReaderViewModel {
+    func searchBook(_ query: String) async throws -> BookSearchResults {
+        try Task.checkCancellation()
+        guard let panel = bookmarkContext, bookmarkOwnerIsCurrent(panel) else { throw BookmarkJumpError.stateChanged }
+        let request = UUID(); searchRequest = request; searchHitIDs = []
+        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        let results = try await panel.owner.searchBook(query)
+        try Task.checkCancellation()
+        guard searchRequest == request, bookmarkOwnerIsCurrent(panel) else { throw BookmarkJumpError.stateChanged }
+        searchHitIDs = Set(results.hits.map(\.id))
+        return results
+    }
+
+    func prepareSearchWindow(_ hit: BookSearchHit) async throws -> ReadingWindow {
+        try Task.checkCancellation()
+        guard let panel = bookmarkContext, bookmarkOwnerIsCurrent(panel),
+              searchHitIDs.contains(hit.id) else { throw BookmarkJumpError.stateChanged }
+        let request = UUID(); searchRequest = request // A later selection revokes this preparation.
+        let context = BookmarkPanelContext(presentation: panel.presentation, life: lifecycle,
+            generation: generation, positionRevision: positionRevision, owner: panel.owner,
+            controller: viewport.controller.map(ObjectIdentifier.init),
+            binding: viewport.controller?.sceneBindingID, window: window?.id)
+        preparedBookmarkWindow = nil; preparedBookmarkContext = nil
+        guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
+        let rendered = try await panel.owner.prepareSearchWindow(hit, width: width, preferences: preferences)
+        try Task.checkCancellation()
+        guard searchRequest == request, bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
+        preparedBookmarkWindow = rendered.id; preparedBookmarkContext = context
+        return rendered
     }
 }

@@ -23,7 +23,18 @@ struct ReaderPanelHost: View {
                 ReaderContentsSheet(model: model, bookmarks: model.bookmarks, presentationID: session.id,
                     isActive: { active(.directory, session.id) }, close: { close(session.id) },
                     appearance: appearance, selectedChapter: { selected($0, session.id) },
-                    selectedBookmark: { selectedBookmark($0, session.id) })
+                    selectedBookmark: { selectedBookmark($0, session.id) },
+                    searchActions: BookSearchActions(search: { query in
+                        guard active(.directory, session.id) else { throw CancellationError() }
+                        return try await model.searchBook(query)
+                    }, jump: { hit in
+                        guard active(.directory, session.id) else { throw CancellationError() }
+                        let rendered = try await model.prepareSearchWindow(hit)
+                        try Task.checkCancellation()
+                        guard active(.directory, session.id), selectedBookmark(rendered, session.id) else {
+                            throw LibraryError.invalidAnchor
+                        }
+                    }))
             } else {
                 ReaderSettingsView(preferences: settings, changed: {
                     if active(.settings, session.id) { model.settingsChanged() }

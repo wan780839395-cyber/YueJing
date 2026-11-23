@@ -529,6 +529,16 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             table.setContentOffset(CGPoint(x: 0, y: min(maximum, max(minimum, desired))), animated: false)
             userInputSinceRestore = point.userInputSinceRestore
         }
+        #if DEBUG
+        if EPUBUITestFixture.isRequested, value.slices.indices.contains(row) {
+            let slice = value.slices[row]
+            if let line = slice.lines.first(where: { $0.range.location.value <= value.targetUTF16 && value.targetUTF16 < $0.range.end.value }) {
+                let y = table.rectForRow(at: IndexPath(row: row, section: 0)).minY + CGFloat(line.top)
+                let visible = y < table.bounds.maxY - table.adjustedContentInset.bottom && y + CGFloat(line.height) > table.bounds.minY + table.adjustedContentInset.top
+                table.accessibilityValue = "raw=\(value.anchor.rawByteOffset)|utf16=\(value.targetUTF16)|lineVisible=\(visible)"
+            }
+        }
+        #endif
         restoring = false
         if userNavigation, let visible = actualVisibleAnchor() {
             userInputSinceRestore = true; onAnchor?(visible, value.id)

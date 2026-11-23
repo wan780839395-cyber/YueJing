@@ -4,16 +4,36 @@
   "branch": "dev/workflow-optimization",
   "cases": [
     {
-      "file": "YueJingHostTests/EPUBReaderHostTests.swift",
-      "name": "epubBookmarkSamplesVisibleAnchorAndJumpsBackAcrossChapters"
+      "file": "YueJingEPUBUITests/EPUBFlowUITests.swift",
+      "name": "testTXTSearchResultJumpsToMatchingText"
     },
     {
-      "file": "YueJingHostTests/EPUBFontLoadingHostTests.swift",
-      "name": "deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor"
+      "file": "YueJingEPUBUITests/EPUBFlowUITests.swift",
+      "name": "testEPUBSearchResultJumpsToMatchingText"
     },
     {
-      "file": "YueJingHostTests/EPUBFontLoadingHostTests.swift",
-      "name": "deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport"
+      "file": "ReaderDomainTests/EPUBBookSearchTests.swift",
+      "name": "searchReportsBothChaptersAndDoesNotMoveSavedPosition"
+    },
+    {
+      "file": "ReaderDomainTests/EPUBBookSearchTests.swift",
+      "name": "literalSearchRespectsUTF16GraphemesAndLimits"
+    },
+    {
+      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
+      "name": "crossWindowMatchesMapNormalizedTextToOriginalBytesInEveryEncoding"
+    },
+    {
+      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
+      "name": "overlapAndLimitUseGlobalNonOverlappingMatchesAndOneExtraWitness"
+    },
+    {
+      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
+      "name": "oversizedGraphemeIsSkippedWithoutSplittingOrHidingFollowingMatches"
+    },
+    {
+      "file": "ReaderDomainTests/TXTBookSearchTests.swift",
+      "name": "cancelledSupersededClosedAndInexactSearchPositionsAreRejected"
     }
   ],
   "build_timeout_seconds": 900,

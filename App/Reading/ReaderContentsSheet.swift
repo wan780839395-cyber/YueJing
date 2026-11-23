@@ -13,7 +13,13 @@ struct ReaderContentsSheet: View {
     let appearance: ReaderToolAppearance
     let selectedChapter: @MainActor (TXTChapter) -> Void
     let selectedBookmark: @MainActor (ReadingWindow) -> Bool
-    @State private var showingBookmarks = false
+    var searchActions: BookSearchActions? = nil
+    private enum ContentsTab {
+        case directory
+        case bookmarks
+        case search
+    }
+    @State private var activeTab: ContentsTab = .directory
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -35,11 +41,20 @@ struct ReaderContentsSheet: View {
             }
             .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
 
-            if showingBookmarks {
+            if activeTab == .bookmarks {
                 ReaderBookmarksView(model: bookmarks, presentationID: presentationID, isActive: isActive,
                     close: close, appearance: appearance,
                     prepare: { try await model.prepareBookmarkWindow(id: $0, presentation: presentationID, request: $1) },
                     apply: selectedBookmark)
+            } else if activeTab == .search, let searchActions {
+                BookSearchView(
+                    sessionID: presentationID,
+                    active: isActive(),
+                    isPanelActive: isActive,
+                    actions: searchActions,
+                    appearance: appearance,
+                    close: close
+                )
             } else {
                 ReaderDirectorySheet(model: model.directory, presentationID: presentationID,
                     isActive: isActive, currentAnchor: model.directoryAnchor,
@@ -50,44 +65,55 @@ struct ReaderContentsSheet: View {
     }
 
     @ViewBuilder private var sectionButtons: some View {
-        Button {
-            if isActive() && !bookmarks.isBusy {
-                if reduceMotion { showingBookmarks = false }
-                else { withAnimation(ReaderMotion.selectionFeedback) { showingBookmarks = false } }
-            }
-        } label: {
-            Label("目录", systemImage: "list.bullet")
-                .font(.subheadline.weight(showingBookmarks ? .medium : .semibold))
-                .foregroundStyle(showingBookmarks ? appearance.secondary : appearance.accent)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .background {
-                    if !showingBookmarks {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(appearance.elevatedSurface)
-                            .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        sectionButton(
+            title: "目录",
+            symbol: "list.bullet",
+            tab: .directory,
+            selectedTint: appearance.accent,
+            identifier: "reader.contents.directory"
+        )
+        sectionButton(
+            title: "书签",
+            symbol: "bookmark",
+            tab: .bookmarks,
+            selectedTint: appearance.sealAccent,
+            identifier: "reader.contents.bookmarks",
+            beforeSelect: { model.refreshBookmarkCapture(presentationID) }
+        )
+        if searchActions != nil {
+            sectionButton(
+                title: "搜正文",
+                symbol: "magnifyingglass",
+                tab: .search,
+                selectedTint: appearance.accent,
+                identifier: "reader.contents.search"
+            )
         }
-        .buttonStyle(.plain)
-        .accessibilityValue(showingBookmarks ? "" : "已选择")
-        .accessibilityIdentifier("reader.contents.directory")
-        .disabled(!isActive() || bookmarks.isBusy)
+    }
 
-        Button {
-            if isActive() && !bookmarks.isBusy && !showingBookmarks {
-                model.refreshBookmarkCapture(presentationID)
-                if reduceMotion { showingBookmarks = true }
-                else { withAnimation(ReaderMotion.selectionFeedback) { showingBookmarks = true } }
+    private func sectionButton(
+        title: String,
+        symbol: String,
+        tab: ContentsTab,
+        selectedTint: Color,
+        identifier: String,
+        beforeSelect: (@MainActor () -> Void)? = nil
+    ) -> some View {
+        let selected = activeTab == tab
+        return Button {
+            if isActive() && !bookmarks.isBusy && activeTab != tab {
+                beforeSelect?()
+                if reduceMotion { activeTab = tab }
+                else { withAnimation(ReaderMotion.selectionFeedback) { activeTab = tab } }
             }
         } label: {
-            Label("书签", systemImage: "bookmark")
-                .font(.subheadline.weight(showingBookmarks ? .semibold : .medium))
-                .foregroundStyle(showingBookmarks ? appearance.sealAccent : appearance.secondary)
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(selected ? .semibold : .medium))
+                .foregroundStyle(selected ? selectedTint : appearance.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .background {
-                    if showingBookmarks {
+                    if selected {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(appearance.elevatedSurface)
                             .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
@@ -97,8 +123,8 @@ struct ReaderContentsSheet: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityValue(showingBookmarks ? "已选择" : "")
-        .accessibilityIdentifier("reader.contents.bookmarks")
+        .accessibilityValue(selected ? "已选择" : "")
+        .accessibilityIdentifier(identifier)
         .disabled(!isActive() || bookmarks.isBusy)
     }
 }

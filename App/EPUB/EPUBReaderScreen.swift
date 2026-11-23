@@ -317,7 +317,8 @@ struct EPUBReaderScreen: View {
                     close: { closePanel(session.id) },
                     appearance: appearance,
                     selected: { item in selectNavigationItem(item, session.id) },
-                    bookmarkActions: bookmarkActions(for: session.id)
+                    bookmarkActions: bookmarkActions(for: session.id),
+                    searchActions: searchActions(for: session.id)
                 )
                 .id(session.id) // No query/presented/reveal state shared by quick reopens.
             } else {
@@ -571,6 +572,24 @@ struct EPUBReaderScreen: View {
     private func closePanel(_ id: UUID) {
         mutateTools { _ = $0.closePanel(id: id) }
     }
+    private func searchActions(for panelID: UUID) -> BookSearchActions {
+        BookSearchActions(search: { query in
+            guard panelActive(.directory, panelID), let reader = model.reader else { throw CancellationError() }
+            return try await reader.searchBook(query)
+        }, jump: { hit in
+            guard panelActive(.directory, panelID), let reader = model.reader, let token = model.presentationToken else {
+                throw EPUBError.staleSession
+            }
+            let position = try await reader.resolveSearchHit(hit)
+            try Task.checkCancellation()
+            guard panelActive(.directory, panelID), model.reader === reader, model.presentationToken == token else {
+                throw EPUBError.staleSession
+            }
+            model.navigateExplicitly(path: position.path, fragment: nil, target: position)
+            mutateTools { _ = $0.chapterSelected(id: panelID) }
+        })
+    }
+
     private func bookmarkActions(for panelID: UUID) -> EPUBBookmarkActions {
         let active = { panelActive(.directory, panelID) }
         return EPUBBookmarkActions(list: {

@@ -49,6 +49,52 @@ public actor OpenedEPUBReader {
         guard !closed else { return false }
         return try await store.saveEPUB(session: reading.session, position: position, sequence: sequence, token: token)
     }
+    public func searchBook(_ input: String) async throws -> BookSearchResults {
+        let query = try BookSearchMatcher.query(input)
+        try await requireSearchSession()
+        let package = publication.package
+        var hits: [BookSearchHit] = [], titles: [String: String] = [:]
+        for item in package.navigation where titles[item.path] == nil && !item.title.isEmpty {
+            titles[item.path] = String(item.title.prefix(120))
+        }
+        for (index, path) in package.spine.enumerated() {
+            await Task.yield()
+            try Task.checkCancellation()
+            guard !closed else { throw EPUBError.staleSession }
+            guard let nodes = try package.nodes(at: path) else { throw EPUBError.corruptResource }
+            for (node, text) in nodes.enumerated() {
+                let matches = try BookSearchMatcher.matches(in: text, query: query, limit: BookSearchMatcher.limit + 1 - hits.count)
+                for match in matches {
+                    guard hits.count < BookSearchMatcher.limit else {
+                        try await requireSearchSession()
+                        return BookSearchResults(hits: hits, hasMore: true)
+                    }
+                    let position = EPUBReadingPosition(bookID: book.id, versionID: package.versionID, path: path,
+                                                       node: node, utf16Offset: match.offset)
+                    hits.append(BookSearchHit(chapterTitle: titles[path] ?? "第 \(index + 1) 节", snippet: match.snippet,
+                                              location: .epub(position)))
+                }
+            }
+        }
+        try await requireSearchSession()
+        return BookSearchResults(hits: hits, hasMore: false)
+    }
+
+    private func requireSearchSession() async throws {
+        try Task.checkCancellation()
+        guard !closed, let current = try await store.book(id: book.id),
+              current.activeSession == reading.session.id, current.versionID == book.versionID,
+              !closed else { throw EPUBError.staleSession }
+        try Task.checkCancellation()
+    }
+
+    public func resolveSearchHit(_ hit: BookSearchHit) async throws -> EPUBReadingPosition {
+        try await requireSearchSession()
+        guard case .epub(let position) = hit.location else { throw EPUBError.invalidPosition }
+        try position.validate(in: publication.package)
+        return position
+    }
+
     public func bookmarks() async throws -> [EPUBBookmark] {
         guard !closed else { throw EPUBError.staleSession }
         return try await store.epubBookmarks(session: reading.session)

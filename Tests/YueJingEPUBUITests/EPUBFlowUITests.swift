@@ -323,6 +323,63 @@ final class EPUBFlowUITests: XCTestCase {
 
     // MARK: - Helpers (no helper method name may start with "test")
 
+    @MainActor private func searchHit(_ query: String, epub: Bool, in app: XCUIApplication) -> XCUIElement {
+        openDirectory(app)
+        let tab = app.buttons[epub ? "epub.contents.search" : "reader.contents.search"]
+        waitHittable(tab); tab.tap()
+        let field = app.textFields["book.search.query"]
+        waitHittable(field); field.tap(); field.typeText(query + "\n")
+        let hit = app.buttons["book.search.hit.0"].firstMatch
+        waitHittable(hit)
+        XCTAssertTrue(hit.label.contains(query), "Result must contain the searched text")
+        return hit
+    }
+
+    @MainActor func testTXTSearchResultJumpsToMatchingText() {
+        withEPUBFixture { app in
+            openTXT("TXTTest-Companion-C", expectedMarker: "TXT_COMPANION_START", stage: "search-txt-open", app)
+            let view = viewport(app), word = "TXT_C_LINE_11"
+            let before = Self.parseCanvasValue(view.value as? String ?? "")
+            XCTAssertNotNil(before["raw"])
+            _ = searchHit(word, epub: false, in: app)
+            closePanel(app)
+            XCTAssertEqual(Self.parseCanvasValue(view.value as? String ?? "")["raw"], before["raw"])
+            let hit = searchHit(word, epub: false, in: app)
+            hit.tap()
+            let prefix = "第一章 TXT_COMPANION_START\n" + (1...10).map {
+                "TXT_C_LINE_\($0) 合成对照 TXT 文本，用于验证 EPUB 与 TXT 共存且互不串书。\n"
+            }.joined()
+            let reached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let value = Self.parseCanvasValue(view.value as? String ?? "")
+                return !app.buttons["reader.panel.close"].exists && value["raw"] == String(3 + prefix.utf8.count) &&
+                    value["utf16"] == String(prefix.utf16.count) && value["lineVisible"] == "true" &&
+                    app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", word)).firstMatch.exists
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([reached], timeout: 12), .completed, "TXT viewport: \(String(describing: view.value))")
+        }
+    }
+
+    @MainActor func testEPUBSearchResultJumpsToMatchingText() {
+        withEPUBFixture { app in
+            openEPUB("EPUBTest-Illustrated-A", expectedMarker: "EPUB_CH1_START", stage: "search-epub-open", app)
+            let canvas = readerCanvas(app), word = "EPUB_A_C2_P20"
+            let before = Self.parseCanvasValue(canvas.value as? String ?? "")
+            _ = searchHit(word, epub: true, in: app)
+            closePanel(app)
+            let stayed = Self.parseCanvasValue(canvas.value as? String ?? "")
+            for k in ["path", "node", "offset"] { XCTAssertNotNil(before[k]); XCTAssertEqual(stayed[k], before[k]) }
+            let hit = searchHit(word, epub: true, in: app)
+            hit.tap()
+            let reached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let value = Self.parseCanvasValue(canvas.value as? String ?? "")
+                // h1(0), p1...14, h2(15), p15...20 (16...21). The match starts the node.
+                return !app.buttons["reader.panel.close"].exists && canvas.label.contains(word) &&
+                    value["path"] == "OEBPS/text/ch2.xhtml" && value["node"] == "21" && value["offset"] == "0"
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([reached], timeout: 15), .completed, "EPUB canvas: \(String(describing: canvas.value))")
+        }
+    }
+
     @MainActor private func withEPUBFixture(
         callerName: String = #function,
         _ run: (XCUIApplication) -> Void

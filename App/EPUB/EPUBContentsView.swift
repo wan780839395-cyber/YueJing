@@ -66,9 +66,11 @@ struct EPUBContentsView: View {
     let appearance: ReaderToolAppearance
     let selected: @MainActor (EPUBNavigationItem) -> Void
     var bookmarkActions: EPUBBookmarkActions? = nil
+    var searchActions: BookSearchActions? = nil
     private enum ContentsTab: String {
         case directory
         case bookmarks
+        case search
     }
     @AccessibilityFocusState private var closeFocused: Bool
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -115,8 +117,9 @@ struct EPUBContentsView: View {
         let selectedIndex = Self.currentIndex(in: items, path: currentPath, fragment: currentFragment)
         let visibleIndices = Self.filteredIndices(in: items, query: query)
         let showingBookmarks = (activeTab == .bookmarks && bookmarkActions != nil)
+        let showingSearch = (activeTab == .search && searchActions != nil)
         VStack(spacing: 0) {
-            ReaderPanelHeader(title: showingBookmarks ? "书签" : "目录", appearance: appearance) {
+            ReaderPanelHeader(title: showingBookmarks ? "书签" : (showingSearch ? "搜正文" : "目录"), appearance: appearance) {
                 Button { dismiss() } label: {
                     Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
@@ -129,11 +132,11 @@ struct EPUBContentsView: View {
                 }
                 .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
                 .disabled(!active)
-                .accessibilityLabel(showingBookmarks ? "关闭书签" : "关闭目录")
+                .accessibilityLabel(showingBookmarks ? "关闭书签" : (showingSearch ? "关闭搜正文" : "关闭目录"))
                 .accessibilityFocused($closeFocused)
                 .accessibilityIdentifier("reader.panel.close")
             }
-            if bookmarkActions != nil {
+            if bookmarkActions != nil || searchActions != nil {
                 tabSelector
             }
             if showingBookmarks, let bookmarkActions {
@@ -145,6 +148,15 @@ struct EPUBContentsView: View {
                     actions: bookmarkActions,
                     appearance: appearance,
                     isBusy: $bookmarksBusy
+                )
+            } else if showingSearch, let searchActions {
+                availabilityStatus
+                BookSearchView(
+                    sessionID: sessionID,
+                    active: active,
+                    isPanelActive: { presented && isActive() },
+                    actions: searchActions,
+                    appearance: appearance
                 )
             } else {
                 summaryHeader(currentIndex: selectedIndex)
@@ -195,9 +207,7 @@ struct EPUBContentsView: View {
                         }
                     }
                     Section {
-                        Text(bookmarkActions == nil
-                            ? "当前支持 EPUB 目录与章节/锚点跳转。"
-                            : "支持 EPUB 目录跳转与书签管理；可切换至「书签」记录或回到当前阅读位置。")
+                        Text(scopeNoteText)
                             .font(.caption)
                             .foregroundStyle(appearance.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -284,7 +294,29 @@ struct EPUBContentsView: View {
         .padding(.top, 10)
         .background(appearance.surface)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("目录与书签切换")
+        .accessibilityLabel(tabSelectorLabel)
+    }
+
+    private var tabSelectorLabel: String {
+        switch (bookmarkActions != nil, searchActions != nil) {
+        case (true, true): return "目录、书签与搜正文切换"
+        case (true, false): return "目录与书签切换"
+        case (false, true): return "目录与搜正文切换"
+        case (false, false): return "目录切换"
+        }
+    }
+
+    private var scopeNoteText: String {
+        switch (bookmarkActions != nil, searchActions != nil) {
+        case (false, false):
+            return "当前支持 EPUB 目录与章节/锚点跳转。"
+        case (true, false):
+            return "支持 EPUB 目录跳转与书签管理；可切换至「书签」记录或回到当前阅读位置。"
+        case (false, true):
+            return "支持 EPUB 目录跳转与正文搜索；可切换至「搜正文」查找并跳转到正文位置。"
+        case (true, true):
+            return "支持 EPUB 目录跳转、书签管理与正文搜索；可切换至「书签」或「搜正文」。"
+        }
     }
 
     @ViewBuilder
@@ -296,13 +328,24 @@ struct EPUBContentsView: View {
             selectedTint: appearance.accent,
             identifier: "epub.contents.directory"
         )
-        tabButton(
-            title: "书签",
-            symbol: "bookmark",
-            tab: .bookmarks,
-            selectedTint: appearance.sealAccent,
-            identifier: "epub.contents.bookmarks"
-        )
+        if bookmarkActions != nil {
+            tabButton(
+                title: "书签",
+                symbol: "bookmark",
+                tab: .bookmarks,
+                selectedTint: appearance.sealAccent,
+                identifier: "epub.contents.bookmarks"
+            )
+        }
+        if searchActions != nil {
+            tabButton(
+                title: "搜正文",
+                symbol: "magnifyingglass",
+                tab: .search,
+                selectedTint: appearance.accent,
+                identifier: "epub.contents.search"
+            )
+        }
     }
 
     private func tabButton(
@@ -316,7 +359,7 @@ struct EPUBContentsView: View {
         let disabled = !active || bookmarksBusy
         return Button {
             guard active, !bookmarksBusy, activeTab != tab else { return }
-            if tab == .bookmarks {
+            if tab != .directory {
                 reveal.cancel()
                 searchFocused = false
                 laidOut = false
@@ -352,15 +395,19 @@ struct EPUBContentsView: View {
     }
     private var availabilityStatus: some View {
         let showingBookmarks = (activeTab == .bookmarks && bookmarkActions != nil)
+        let showingSearch = (activeTab == .search && searchActions != nil)
+        let activeText = showingBookmarks ? "书签可操作" : (showingSearch ? "搜正文可操作" : "目录可操作")
+        let inactiveText = showingBookmarks
+            ? "书签暂不可操作。返回前台后可关闭面板并重新打开。"
+            : (showingSearch ? "搜正文暂不可操作。返回前台后可关闭面板并重新打开。" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
+        let recoverText = (showingBookmarks || showingSearch) ? "关闭面板后重开" : "关闭目录后重开"
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(active ? appearance.accent : appearance.sealAccent)
                     .frame(width: 6, height: 6)
                     .accessibilityHidden(true)
-                Text(active
-                    ? (showingBookmarks ? "书签可操作" : "目录可操作")
-                    : (showingBookmarks ? "书签暂不可操作。返回前台后可关闭面板并重新打开。" : "目录暂不可操作。返回前台后可关闭目录并重新打开。"))
+                Text(active ? activeText : inactiveText)
                     .font(.caption2)
                     .foregroundStyle(active ? appearance.secondary : appearance.sealAccent)
                     .accessibilityIdentifier("epub.directory.availability")
@@ -374,7 +421,7 @@ struct EPUBContentsView: View {
                     // In background or after replacement this remains a safe no-op.
                     close()
                 } label: {
-                    Text(showingBookmarks ? "关闭面板后重开" : "关闭目录后重开")
+                    Text(recoverText)
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 14)
                 }

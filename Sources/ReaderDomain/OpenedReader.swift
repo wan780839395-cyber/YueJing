@@ -202,3 +202,38 @@ extension OpenedReader {
         return ReadingAnchor(bookID: book.id, versionID: book.versionID, rawByteOffset: raw.value, lineFraction: 0)
     }
 }
+
+extension OpenedReader {
+    public func searchBook(_ input: String) async throws -> BookSearchResults {
+        let query = try BookSearchMatcher.query(input)
+        try await checkSearchSession()
+        let result = try await scanTXT(query)
+        try await checkSearchSession()
+        return result
+    }
+
+    public func prepareSearchWindow(_ hit: BookSearchHit, width: Double,
+                                    preferences: ReaderPreferences) async throws -> ReadingWindow {
+        try await checkSearchSession()
+        guard case .txt(let anchor) = hit.location, anchor.lineFraction == 0 else { throw LibraryError.invalidAnchor }
+        let target = try await strictBookmarkAnchor(anchor, request: BookmarkRequest())
+        let rendered = try await window(around: target, width: width, preferences: preferences)
+        guard rendered.anchor == target, rendered.slices.contains(where: { slice in
+            slice.lines.contains { $0.range.location.value <= rendered.targetUTF16 && rendered.targetUTF16 < $0.range.end.value }
+        }) else { throw LibraryError.invalidAnchor }
+        try await checkSearchSession()
+        return rendered
+    }
+
+    private func checkSearchSession() async throws {
+        try Task.checkCancellation()
+        guard !closed else { throw DerivedStorageError.closed }
+        let session = reading.session
+        guard session.bookID == book.id, session.versionID == book.versionID,
+              source.metadata.bookID == book.id, source.metadata.versionID == book.versionID,
+              let current = try await store.book(id: session.bookID), current.activeSession == session.id,
+              current.versionID == session.versionID else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard !closed else { throw DerivedStorageError.closed }
+    }
+}
