@@ -5,7 +5,7 @@ from workflow_development import preflight
 
 HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'epub-compat-33',
               'epub-paging-6', 'epub-reading-15', 'epub-diagnostic-a0fbb60',
-              'epub-opening-followup-3', 'epub-author-layout', 'neon-device-022'}
+              'epub-opening-followup-3', 'epub-author-layout', 'neon-device-022', 'neon-device-023'}
 
 
 def admit(scope, acknowledgement):

@@ -20,6 +20,7 @@ on:
           - epub-reading-15
           - epub-diagnostic-a0fbb60
           - neon-device-022
+          - neon-device-023
           - epub-opening-followup-3
           - epub-author-layout
       scope_acknowledgement:
@@ -1002,7 +1003,7 @@ jobs:
 
   epub_diagnostic:
     needs: admission
-    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' }}
+    if: ${{ inputs.validation_scope == 'epub-diagnostic-a0fbb60' || inputs.validation_scope == 'neon-device-022' || inputs.validation_scope == 'neon-device-023' }}
     runs-on: macos-15
     timeout-minutes: 30
     env:

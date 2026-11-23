@@ -14,12 +14,15 @@ ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/validate_t
                      "scripts/epub_diagnostic_package.py", "docs/EPUB_DIAGNOSTIC_PACKAGE.md"))
 
 
-NEON = os.environ.get("VALIDATION_SCOPE") == "neon-device-022"
+NEON = os.environ.get("VALIDATION_SCOPE") in ("neon-device-022", "neon-device-023")
 if NEON:
     BASE = "96e88d8037f8159ab9a4ba4d5609038910a1ba4f"
     SCOPE = "neon-device-022"
     VERSION, BUILD = "0.2.22", "24"
     ALLOWED = frozenset((".github/workflows/task3-validate.yml", "scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
+    if os.environ["VALIDATION_SCOPE"] == "neon-device-023":
+        BASE, SCOPE = "7fa99ef2d21529e4614a1c0845f4424270c39eff", "neon-device-023"
+        VERSION, BUILD = "0.2.23", "25"
 
 
 def git(*args):
