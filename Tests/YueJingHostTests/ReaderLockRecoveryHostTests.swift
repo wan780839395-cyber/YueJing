@@ -134,6 +134,7 @@ struct ReaderLockRecoveryHostTests {
 
             try await finishBookWhileSuspended(audio, speech: model.speech)
 
+            NotificationCenter.default.post(name: UIScene.willEnterForegroundNotification, object: scene)
             foreground = true
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
             model.speech.restoreWhenVisible()
@@ -146,6 +147,13 @@ struct ReaderLockRecoveryHostTests {
             #expect(!model.autoRead.isRunning)
             #expect(model.ready)
             #expect(model.message == nil && model.speech.notice == nil)
+            let target = try #require(model.navigationRequest?.targetPosition)
+            let package = try #require(model.reader?.publication.package)
+            let nodes = try #require(try package.nodes(at: target.path))
+            #expect(model.currentPath == model.spine.last && target.path == model.spine.last)
+            try #require(nodes.indices.contains(target.node))
+            #expect(target.utf16Offset == 0 && nodes[target.node] == audio.texts.last)
+            #expect(model.currentPosition?.path == target.path && model.currentPosition?.node == target.node && model.currentPosition?.utf16Offset == target.utf16Offset)
         }
     }
 
@@ -251,7 +259,31 @@ struct ReaderLockRecoveryHostTests {
             "speechNotice=\(model.debugSpeechNoticeCode)",
             "speechCap=\(model.debugSpeechCaptureOutcome)",
             "sampleCap=\(controller?.debugSpeechSampleOutcome ?? "none")",
-            "bgFail=\(model.debugFirstBackgroundFailure ?? "none")"
+            "bgFail=\(model.debugFirstBackgroundFailure ?? "none")",
+            "phase=\(controller?.debugReadinessPhase ?? "none")",
+            "apply=\(controller?.debugApplyPath ?? "none")",
+            "rebase=\(controller?.debugRebaseOutcome ?? "none")",
+            "cfg=\(controller?.debugConfigureOutcome ?? "none")",
+            "navOut=\(controller?.debugNavigationOutcome ?? "none")",
+            "lastLoc=\(controller?.debugLastLocatorKind ?? "none")",
+            "jsReason=\(controller?.debugLastJSReason ?? "none")",
+            "ctrlActMatch=\(controller?.debugMatchesActiveToken(model.currentToken) ?? false)",
+            "ctrlReqMatch=\(controller?.debugMatchesActiveToken(model.navigationRequest?.token) ?? false)",
+            "ctrlReadyMatch=\(controller?.debugMatchesReadyToken(model.currentToken) ?? false)",
+            "ctrlLoadMatch=\(controller?.debugMatchesLoadedToken(model.currentToken) ?? false)",
+            "hasReqPath=\(controller?.debugContainsPath(model.navigationRequest?.token.path) ?? false)",
+            "renEqSpine=\(controller?.debugRenderedEqualsSpine(model.spine) ?? false)",
+            "renCount=\(controller?.debugRenderedCount ?? -1)",
+            "docLoads=\(controller?.documentLoadCount ?? -1)",
+            "webLoading=\(controller?.debugWebViewLoading ?? false)",
+            "winInFlight=\(controller?.debugWindowInFlight ?? false)",
+            "pendingRestore=\(controller?.debugHasPendingViewportRestore ?? false)",
+            "reqCurMatch=\(model.debugRequestedMatchesCurrentToken)",
+            "reqIdx=\(model.debugRequestedPathIndex ?? -1)",
+            "curIdx=\(model.debugCurrentPathIndex ?? -1)",
+            "pendingSpeech=\(model.debugHasPendingSpeechLocation)",
+            "resume=\(model.debugResumeBranch)",
+            "readyTask=\(model.debugReadyTaskOutcome)"
         ].joined(separator: " ")
     }
 

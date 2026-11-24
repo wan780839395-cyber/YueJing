@@ -169,6 +169,18 @@ final class EPUBReaderViewModel: ObservableObject {
 #if DEBUG
     private(set) var debugSpeechCaptureOutcome = "none"
     private(set) var debugFirstBackgroundFailure: String?
+    private(set) var debugResumeBranch = "none"
+    private(set) var debugReadyTaskOutcome = "none"
+    var debugRequestedMatchesCurrentToken: Bool {
+        navigationRequest?.token != nil && navigationRequest?.token == currentToken
+    }
+    var debugRequestedPathIndex: Int? {
+        navigationRequest.flatMap { spine.firstIndex(of: $0.token.path) }
+    }
+    var debugCurrentPathIndex: Int? {
+        currentPath.flatMap { spine.firstIndex(of: $0) }
+    }
+    var debugHasPendingSpeechLocation: Bool { pendingSpeechLocation != nil }
 
     var debugMessageCode: String {
         guard let message else { return "none" }
@@ -797,6 +809,9 @@ final class EPUBReaderViewModel: ObservableObject {
         promotingVisibleChapter = false
         ready = false
         currentToken = nil
+        #if DEBUG
+        debugReadyTaskOutcome = "none"
+        #endif
         // Reflow stays inside the settings panel. Global loading compacts tools and
         // dismisses that panel; only full loads set it here (explicit jumps set it earlier).
         if reloadDocument { loading = true }
@@ -910,6 +925,9 @@ final class EPUBReaderViewModel: ObservableObject {
                       let activeReader = self.reader else {
                     return
                 }
+                #if DEBUG
+                self.debugReadyTaskOutcome = "started"
+                #endif
                 do {
                     let marked = try await activeReader.markReady(expectedToken)
                     guard self.lifecycle == life,
@@ -917,21 +935,33 @@ final class EPUBReaderViewModel: ObservableObject {
                           !self.closing,
                           !self.suspended,
                           self.currentToken == expectedToken else {
+                        #if DEBUG
+                        self.debugReadyTaskOutcome = "stale_after_mark"
+                        #endif
                         return
                     }
                     guard marked else {
+                        #if DEBUG
+                        self.debugReadyTaskOutcome = "mark_false"
+                        #endif
                         self.rejectUnconfirmedPosition(expectedToken)
                         return
                     }
                     // No suspension between the accepted presentation and publishing ready.
                     let acknowledged = self.webView.controller?.acknowledgePresentation(for: expectedToken)
                     guard acknowledged == true || (acknowledged == nil && self.searchReturn.pendingNavigation == nil) else {
+                        #if DEBUG
+                        self.debugReadyTaskOutcome = "ack_false"
+                        #endif
                         self.handleLoadFailure(EPUBError.invalidPosition, token: expectedToken)
                         return
                     }
                     self.currentPosition = position
                     self.ready = true
                     self.loading = false
+                    #if DEBUG
+                    self.debugReadyTaskOutcome = "completed"
+                    #endif
                     // Commit only the current generation's displayed destination, never its request.
                     if self.searchReturn.pendingNavigation != nil {
                         if self.acceptsSearch { self.searchReturn.confirm(navigation: gen) }
@@ -965,11 +995,17 @@ final class EPUBReaderViewModel: ObservableObject {
                         _ = try await activeReader.save(position, sequence: serial, token: expectedToken)
                     }
                 } catch is CancellationError {
+                    #if DEBUG
+                    self.debugReadyTaskOutcome = "cancelled"
+                    #endif
                     if self.lifecycle == life, self.generation == gen,
                        self.currentToken == expectedToken, !self.ready {
                         self.rejectUnconfirmedPosition(expectedToken)
                     }
                 } catch {
+                    #if DEBUG
+                    self.debugReadyTaskOutcome = "error"
+                    #endif
                     if self.lifecycle == life, self.generation == gen,
                        self.currentToken == expectedToken, !self.ready {
                         self.rejectUnconfirmedPosition(expectedToken)
@@ -1221,19 +1257,38 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func resume() async {
         guard !closing else { return }
-        if suspending { resumeAfterSettling = true; return }
-        guard suspended else { return }
+        if suspending {
+            #if DEBUG
+            debugResumeBranch = "settling"
+            #endif
+            resumeAfterSettling = true; return
+        }
+        guard suspended else {
+            #if DEBUG
+            debugResumeBranch = "not_suspended"
+            #endif
+            return
+        }
         suspended = false
         lifecycle = UUID()
         if let target = pendingSpeechLocation {
+            #if DEBUG
+            debugResumeBranch = "speech_loc"
+            #endif
             pendingSpeechLocation = nil
             navigateExplicitly(path: target.path, fragment: nil, target: target)
             return
         }
         if reader == nil {
+            #if DEBUG
+            debugResumeBranch = "cold_load"
+            #endif
             openingAttempted = false // Preserve existing resume of a suspended opening.
             await load()
         } else if let path = currentPath ?? reader?.publication.package.spine.first {
+            #if DEBUG
+            debugResumeBranch = "chapter_nav"
+            #endif
             await beginChapterNavigation(
                 path: path,
                 targetPosition: currentPosition?.path == path ? currentPosition : nil,

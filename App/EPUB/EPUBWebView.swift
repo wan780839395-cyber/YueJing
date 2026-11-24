@@ -335,6 +335,36 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var fontResourceFailureSummary: String?
 #if DEBUG
     private(set) var debugSpeechSampleOutcome = "none"
+    private(set) var debugApplyPath = "none"
+    private(set) var debugRebaseOutcome = "none"
+    private(set) var debugConfigureOutcome = "none"
+    private(set) var debugNavigationOutcome = "none"
+    private(set) var debugLastLocatorKind = "none"
+    private(set) var debugLastJSReason = "none"
+    var debugReadinessPhase: String { readinessPhase.rawValue }
+    var debugHasActiveRequest: Bool { activeRequest != nil }
+    var debugHasPendingViewportRestore: Bool { pendingViewportRestoreToken != nil }
+    var debugWindowInFlight: Bool { windowInFlight }
+    var debugWebViewLoading: Bool { webView?.isLoading ?? false }
+    var debugRenderedCount: Int { renderedChapterPaths.count }
+    func debugMatchesActiveToken(_ token: EPUBNavigationToken?) -> Bool { token != nil && activeRequest?.token == token }
+    func debugMatchesReadyToken(_ token: EPUBNavigationToken?) -> Bool { token != nil && readyToken == token }
+    func debugMatchesLoadedToken(_ token: EPUBNavigationToken?) -> Bool { token != nil && loadedDocumentToken == token }
+    func debugContainsPath(_ path: String?) -> Bool { path.map(renderedChapterPaths.contains) ?? false }
+    func debugRenderedEqualsSpine(_ spine: [String]) -> Bool { renderedChapterPaths == Set(spine) }
+    private static func debugMapJSReason(_ reason: String?) -> String {
+        guard let reason else { return "none" }
+        switch reason {
+        case "image-layout-not-ready": return "image_layout_not_ready"
+        case "font-not-ready": return "font_not_ready"
+        case "dom-node-count-mismatch": return "dom_node_count_mismatch"
+        case "dom-node-length-mismatch": return "dom_node_length_mismatch"
+        case "target-restore-failed": return "target_restore_failed"
+        case "viewport-scroll-not-settled": return "viewport_scroll_not_settled"
+        case "empty-visible-sample": return "empty_visible_sample"
+        default: return "other"
+        }
+    }
 #endif
     private struct ParkedDocument {
         let request: EPUBNavigationRequest
@@ -589,6 +619,14 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         applyTheme(request.preferences.theme)
         guard activeRequest != request else { return }
         fontResourceFailureSummary = nil
+        #if DEBUG
+        debugApplyPath = "none"
+        debugRebaseOutcome = "none"
+        debugConfigureOutcome = "none"
+        debugNavigationOutcome = "none"
+        debugLastLocatorKind = "none"
+        debugLastJSReason = "none"
+        #endif
         runtimeTrace.record(request.preserveViewport ? .promotion : .navigation)
         let parked = parkedDocument
         let reuseClosed = !request.reloadDocument && parked?.paths.contains(request.token.path) == true &&
@@ -680,9 +718,15 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         if reuseDOM, let previous {
             // The DOM is verified already. Move resource/link URLs to the new capability
             // without admitting the old epoch's URLs or downloading the XHTML again.
+            #if DEBUG
+            debugApplyPath = reuseClosed ? "reuse_closed" : "reuse_dom"
+            #endif
             rebaseLoadedDOM(from: previous.token, to: request, reopening: reuseClosed)
             return
         }
+        #if DEBUG
+        debugApplyPath = "full_load"
+        #endif
         clearAccessibilityCanvas()
         loadedDocumentPath = nil
         loadedDocumentToken = nil
@@ -942,8 +986,17 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         })(\(json));
         """
         webView.__evaluateJavaScript(script, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
-            guard let self, self.activeRequest == request else { return }
+            guard let self else { return }
+            guard self.activeRequest == request else {
+                #if DEBUG
+                if self.debugRebaseOutcome == "none" { self.debugRebaseOutcome = "stale" }
+                #endif
+                return
+            }
             if error != nil && reopening {
+                #if DEBUG
+                self.debugRebaseOutcome = "reopen_retry"
+                #endif
                 // A discarded WebContent process/DOM is recoverable, not a reason to strand opening.
                 self.activeRequest = nil
                 self.loadedDocumentToken = nil
@@ -952,9 +1005,15 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                 return
             }
             if let error {
+                #if DEBUG
+                self.debugRebaseOutcome = "error"
+                #endif
                 self.failReadiness(for: request.token, error: error)
                 return
             }
+            #if DEBUG
+            self.debugRebaseOutcome = "ok"
+            #endif
             self.loadedDocumentToken = request.token
             self.loadedDocumentPath = request.token.path
             self.configureLoadedDOM(for: request)
@@ -980,13 +1039,25 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             let combined = (installBootstrap ? EPUBLocationScript.bootstrapSource + "\n" : "") + motion + invoke
             // Use the public NS_REFINED_FOR_SWIFT ObjC entry point, not libswiftWebKit.
             webView.__evaluateJavaScript(combined, inFrame: nil, in: EPUBLocationScript.world) { [weak self] _, error in
-                guard let error else { return }
+                guard let self else { return }
+                guard let error else {
+                    #if DEBUG
+                    if self.activeRequest?.token == request.token { self.debugConfigureOutcome = "ok" }
+                    #endif
+                    return
+                }
                 Task { @MainActor [weak self] in
                     guard let self, self.activeRequest?.token == request.token else { return }
+                    #if DEBUG
+                    self.debugConfigureOutcome = "js_error"
+                    #endif
                     self.failReadiness(for: request.token, error: error)
                 }
             }
         } catch {
+            #if DEBUG
+            debugConfigureOutcome = "throw"
+            #endif
             failReadiness(for: request.token, error: error)
         }
     }
@@ -1131,6 +1202,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         if payload.kind == .ready {
+            #if DEBUG
+            debugLastLocatorKind = payload.restorationPending ? "ready_pending" : "ready"
+            #endif
             if payload.restorationPending {
                 guard current.readingMode == .scroll, current.targetPosition != nil,
                       !current.preserveViewport else { return }
@@ -1166,6 +1240,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             refreshChapterWindow()
         }
         if payload.kind == .error {
+            #if DEBUG
+            debugLastLocatorKind = "error"
+            debugLastJSReason = Self.debugMapJSReason(payload.reason)
+            #endif
             cancelAutoPage()
             readinessTask?.cancel()
             readinessTask = nil
@@ -1179,6 +1257,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             updateAccessibilityCanvas(with: payload, preferences: current.preferences)
         }
         onLocatorEvent?(payload)
+        #if DEBUG
+        if payload.kind == .scroll { debugLastLocatorKind = "scroll_same" }
+        #endif
     }
 
     /// Read once on demand. Never samples/changes the locator or drives navigation.
@@ -1490,8 +1571,16 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard let navigation, let loadingNavigation, let current = activeRequest, navigation === loadingNavigation,
-              webView.url == EPUBResourceCapability.url(for: current.token) else { return }
+        guard let navigation, let loadingNavigation, navigation === loadingNavigation else { return }
+        guard let current = activeRequest, webView.url == EPUBResourceCapability.url(for: current.token) else {
+            #if DEBUG
+            debugNavigationOutcome = "did_finish_mismatch"
+            #endif
+            return
+        }
+        #if DEBUG
+        debugNavigationOutcome = "did_finish"
+        #endif
         runtimeTrace.record(.documentFinished)
         loadedDocumentPath = current.token.path
         loadedDocumentToken = current.token
@@ -1503,17 +1592,26 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard let navigation, let loadingNavigation, navigation === loadingNavigation else { return }
+        #if DEBUG
+        debugNavigationOutcome = "did_fail"
+        #endif
         handleWebKitNavigationFailure(error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard let navigation, let loadingNavigation, navigation === loadingNavigation else { return }
+        #if DEBUG
+        debugNavigationOutcome = "did_fail_prov"
+        #endif
         handleWebKitNavigationFailure(error)
     }
 
     private func handleWebKitNavigationFailure(_ error: Error) {
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            #if DEBUG
+            debugNavigationOutcome = "cancelled"
+            #endif
             return
         }
         guard let current = activeRequest else { return }
