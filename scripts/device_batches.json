@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "autoread-device-034",
+  "active": "motion-device-035",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -78,6 +78,13 @@
       "build": "36",
       "product": "7eff521c90e2c3be3807eab8159f3dfd3b71a860",
       "plan_sha256": "d6fadfbba1a43aec8074b72bacddcd56d19ecc0b74b071deffdfed3eecf1a84e",
+      "runner": "macos-15-intel"
+    },
+    "motion-device-035": {
+      "version": "0.2.35",
+      "build": "37",
+      "product": "f715d8536c83cff033ce5ea1a3fba8a46be102e8",
+      "plan_sha256": "353cfe77a5ed8bf9c29fff0f89867c9f319830ddf1bc0b414d313904d9f88a10",
       "runner": "macos-15-intel"
     }
   }
