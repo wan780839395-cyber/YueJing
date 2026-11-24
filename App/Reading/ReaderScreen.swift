@@ -8,6 +8,7 @@ struct ReaderScreen: View {
     @ObservedObject var model: ReaderViewModel
     let routeID: UUID
     let onExit: @MainActor () -> Void
+    @StateObject private var autoRead = AutoReadSession()
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
     @State private var confirmedChapter: ConfirmedTXTChapter?
@@ -61,7 +62,23 @@ struct ReaderScreen: View {
 
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
-        return { _ = Task { await model.returnFromSearch() } }
+        return {
+            autoRead.stop()
+            Task { await model.returnFromSearch() }
+        }
+    }
+
+    private var autoReadAvailable: Bool {
+        tools.canInteract && tools.panel == nil && scenePhase == .active && model.autoReadingAvailable
+    }
+
+    private func startAutoReading() {
+        guard autoReadAvailable, let controller = model.viewport.controller else { return }
+        controller.beginAutoReading()
+        autoRead.start(mode: .scroll) { [weak model, weak controller] distance in
+            guard let model, let controller else { return .stop }
+            return model.advanceAutoReading(by: distance, in: controller)
+        }
     }
 
     private func floatingTools(_ metrics: ReaderToolMetrics, _ appearance: ReaderToolAppearance) -> ReaderFloatingToolsView {
@@ -69,7 +86,10 @@ struct ReaderScreen: View {
             directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
             exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
             open: openPanel, focusedControl: $focusedControl, chapterContext: chapterContextText,
-            returnFromSearch: searchReturnAction)
+            returnFromSearch: searchReturnAction,
+            autoReading: autoRead.isRunning,
+            autoReadControl: AnyView(AutoReadControl(session: autoRead, mode: .scroll,
+                available: autoReadAvailable, appearance: appearance, start: startAutoReading)))
     }
 
     var body: some View {
@@ -88,7 +108,7 @@ struct ReaderScreen: View {
                     // END READER DIAGNOSTICS viewport facts
                     onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
                     onSettled: model.scrollingEnded, onApplied: model.windowApplied,
-                    toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction)
+                    toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction, autoRead: autoRead)
                     .allowsHitTesting(!model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
                     .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
                     .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
@@ -218,14 +238,19 @@ struct ReaderScreen: View {
             }
         }
         .onChange(of: scenePhase) { phase in
+            if phase != .active { autoRead.stop() }
             // BEGIN READER DIAGNOSTICS screen scene
             model.viewport.observeDiagnosticScene(phase)
             // END READER DIAGNOSTICS screen scene
-            // Environment phase remains diagnostic only; the attached native scene owns recovery.
+            // Only the attached native scene owns model recovery.
         }
+        .onDisappear { autoRead.stop() }
+        .onChange(of: routeID) { _ in autoRead.stop() }
+        .onChange(of: model.autoReadingAvailable) { if !$0 { autoRead.stop() } }
         .onChange(of: model.loading) { loading in if loading { mutateTools { $0.forceCompact() } } }
         .onChange(of: model.exitSaveFailed) { failed in if failed { mutateTools { $0.forceCompact() } } }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            autoRead.stop()
             Task { await model.releaseReaderMemory() }
         }
         // A sheet/temporary hierarchy change is not an exit. The route owner performs final close.
@@ -242,7 +267,7 @@ struct ReaderScreen: View {
     private func handleNativeScene(_ event: ReaderSceneEvent) {
         guard model.viewport.isCurrent(event, routeID: routeID) else { return }
         if event.active { mutateTools { $0.resume() } }
-        else { mutateTools { $0.suspend() } }
+        else { autoRead.stop(); mutateTools { $0.suspend() } }
         // BEGIN READER DIAGNOSTICS scene tools completion
         model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
         // END READER DIAGNOSTICS scene tools completion
@@ -394,6 +419,7 @@ struct ReaderScreen: View {
         }
     }
     private func openPanel(_ panel: ReadingToolPanel) {
+        autoRead.stop()
         guard !model.exitSaveFailed else { return }
         if panel == .directory, model.window == nil { return }
         if panel == .settings, model.window == nil { return }
@@ -424,6 +450,7 @@ struct ReaderScreen: View {
         case .showAccessibility: mutateTools { $0.show() }
         case .exitAccessibility: exitReader()
         case .scrollingBegan:
+            if autoRead.isRunning { autoRead.stop(); return }
             // BEGIN READER DIAGNOSTICS scrolling observation
             model.viewport.controller?.interactionDiagnostics.scrolling()
             // END READER DIAGNOSTICS scrolling observation
@@ -442,6 +469,7 @@ struct ReaderScreen: View {
         }
     }
     private func exitReader(keepingSavedPosition: Bool = false) {
+        autoRead.stop()
         var request: UUID?
         mutateTools { request = $0.beginExit() }
         guard let request else { return }

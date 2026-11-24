@@ -44,10 +44,13 @@ FILES = {
     "YueJingHostTests/ReaderInteractionInterruptionTests.swift": """interruptedDecelerationRecoversOnSameControllerWithoutMovingAnchor interruptionRevokesOldTouchAndAcceptsFreshIntent momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle viewportInterruptionForwardingIsIdempotentAndDetachedControllerIsInert""",
     "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingHostTests/ReaderSceneAuthorityTests.swift": """nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites""",
+    "YueJingHostTests/AutoReadCadenceTests.swift": """scrollClockAccumulatesSlowStepsWithoutCatchingUpAfterAStall pageClockWaitsForItsIntervalAndBoundsPendingContent openingAnotherReaderRestoresOnlyPaceAndCancelsOldTicks""",
+    "YueJingHostTests/TXTAutoReadingTests.swift": """playbackMovesTableAndBodyTouchOnlyPauses boundaryWaitsForAppliedWindowThenStopsAtEOFAndSavesVisibleProgress""",
+    "YueJingHostTests/EPUBAutoReadHostTests.swift": """epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation""",
     "YueJingHostTests/TXTBodyFontHostTests.swift": """sharedPageSpecimenRendersTheSelectedFaceAtDraftSize bodyCanvasPaintsTheWideAAndRestoresItsDefaultInk reflowAndReopenKeepScrolledTextWithSelectedAndRestoredFont""",
     "YueJingHostTests/ReaderBookmarkTests.swift": """bookmarkVisibleCaptureAndMutationsDoNotSaveProgress bookmarkQueuedCancellationAndOldDismissCannotAffectNewPanel bookmarkPreparationPreservesWindowUntilExactApplication bookmarkReflowAndOwnerReplacementRevokeCapturedAndPreparedPositions txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication""",
     "YueJingHostTests/SearchReturnTests.swift": """epubSearchReturnPreservesFirstLocatorUntilConfirmedReturn""",
-    "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion""",
+    "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion testAutoReadingToolbarStartsChangesPaceAndPauses""",
     "YueJingCanvasTests/ReadingCanvasRenderingTests.swift": """dirtyRegionCoversTheSentinelInEveryThemeAndPreservesOutsidePixels reuseRemovesOldInkAndAccessibilityActionsWithoutResettingTheTheme fractionalResizeRerasterizesToTheSameImageAsAFreshCanvas""",
     "TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift": """automaticDecodeAndChaptersBaseline""",
     "ReaderDomainTests/EPUBLibraryTests.swift": """epubOriginalArchiveAndValidatedResourcesSurviveReopen epubWarmReopenTransfersFolderWithFreshSessionPositionAndPreferences epubOverlappingReadersUseIndependentLeasesAndSessions epubConcurrentWorkspaceTakesConsumeTheSlotOnlyOnce epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime epubWarmPackageMatchIncludesMetadataNotOnlyVersion epubFailedOrCancelledCloseNeverReturnsWorkspace epubFailureAfterWarmTakeDeletesTransferredFolderNotAnUnusedDestination epubCancelledWarmTakeAndImporterDeinitCleanTheirOwnSlot epubDuplicateKeepsProgressAndRepairsMissingArchive epubCancellationBeforeCommitLeavesNoBook epubCancellationAfterCommitReturnsReceipt epubFailedImportCleansOnlyItsWorkspace epubV6MigrationPreservesTXTProgressBookmarksAndPreferences epubCoverThumbnailBoundsAndDamagedFallback epubBooksAndTXTStayIsolated""",
@@ -77,14 +80,14 @@ FILES = {
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 289, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 68,
-          "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 9}
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 76,
+          "YueJingUITests": 13, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 9}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 413  # Declaration identities; the Bool parameter adds one execution (414).
+TOTAL = 422  # Declaration identities; the Bool parameter adds one execution (423).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
 EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 290}
-EXECUTION_TOTAL = 414
+EXECUTION_TOTAL = 423
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

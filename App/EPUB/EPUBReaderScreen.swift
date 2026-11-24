@@ -28,10 +28,12 @@ struct EPUBReaderScreen: View {
     @ObservedObject var model: EPUBReaderViewModel
     let routeID: UUID
     let onExit: @MainActor () -> Void
+    @StateObject private var autoRead = AutoReadSession()
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
     @State private var selectedDetent: PresentationDetent = .large
     @State private var loadingFeedback = EPUBOpeningFeedback.quiet
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -42,7 +44,21 @@ struct EPUBReaderScreen: View {
 
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
-        return { _ = Task { await model.returnFromSearch() } }
+        return { autoRead.stop(); _ = Task { await model.returnFromSearch() } }
+    }
+
+    private var canStartAutoRead: Bool {
+        scenePhase == .active && tools.canInteract && tools.panel == nil &&
+            model.presentationToken != nil && model.autoReadOwner != nil
+    }
+
+    private func startAutoRead() {
+        guard canStartAutoRead, let owner = model.autoReadOwner, let token = model.presentationToken,
+              model.webView.controller?.beginAutoRead(for: token) == true else { return }
+        mutateTools { $0.scrollingBegan() }
+        autoRead.start(mode: model.readingMode == .scroll ? .scroll : .paged) { [weak model] distance in
+            model?.autoReadStep(from: owner, distance: distance) ?? .stop
+        }
     }
 
     private func floatingTools(_ metrics: ReaderToolMetrics, _ appearance: ReaderToolAppearance) -> ReaderFloatingToolsView {
@@ -50,7 +66,11 @@ struct EPUBReaderScreen: View {
             directoryAvailable: model.ready, settingsAvailable: model.ready,
             exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
             open: openPanel, focusedControl: $focusedControl, chapterContext: chapterContextText,
-            returnFromSearch: searchReturnAction)
+            returnFromSearch: searchReturnAction,
+            autoReading: autoRead.isRunning,
+            autoReadControl: AnyView(AutoReadControl(session: autoRead,
+                mode: model.readingMode == .scroll ? .scroll : .paged,
+                available: autoRead.isRunning || canStartAutoRead, appearance: appearance, start: startAutoRead)))
     }
 
     var body: some View {
@@ -72,7 +92,10 @@ struct EPUBReaderScreen: View {
                     handle: model.webView,
                     onLocatorEvent: model.handleLocatorEvent,
                     onLoadFailure: model.handleLoadFailure,
-                    onInternalLink: model.navigateToInternalLink,
+                    onInternalLink: { path, fragment in
+                        guard !autoRead.isRunning, tools.canInteract, tools.panel == nil, model.presentationToken != nil else { return }
+                        model.navigateToInternalLink(path: path, fragment: fragment)
+                    },
                     onChapterBoundary: model.turnChapter,
                     onPreloadFailure: model.handlePreloadFailure,
                     interactionEnabled: model.ready && !model.loading && !model.exitSaveFailed &&
@@ -85,8 +108,17 @@ struct EPUBReaderScreen: View {
                 .accessibilityHidden(!model.ready || model.loading || tools.panel != nil || tools.exitRequest != nil)
                 .accessibilityAction(named: Text("显示阅读工具")) { mutateTools { $0.show() } }
                 .accessibilityAction(named: Text("退出阅读")) { exitReader() }
-                .accessibilityAction(named: Text("下一屏")) { _ = model.webView.controller?.turnPage(.next) }
-                .accessibilityAction(named: Text("上一屏")) { _ = model.webView.controller?.turnPage(.previous) }
+                .accessibilityAction(named: Text("下一屏")) { manualPage(.next) }
+                .accessibilityAction(named: Text("上一屏")) { manualPage(.previous) }
+                .overlay {
+                    if autoRead.isRunning {
+                        // Own the entire first touch, including a link or horizontal edge.
+                        // Removing this sibling after touch-down never replays it into WebKit.
+                        EPUBAutoReadPauseSurface(pause: autoRead.stop)
+                            .ignoresSafeArea(.container, edges: .bottom)
+                            .accessibilityHidden(true)
+                    }
+                }
                 .overlay {
                     if model.openingPerformanceSummary == nil && (!model.ready || model.loading) {
                         Color(uiColor: model.preferences.theme.background)
@@ -235,8 +267,12 @@ struct EPUBReaderScreen: View {
             panelHost(session: session)
         }
         .task(id: routeID) {
+            autoRead.stop()
             await model.load()
         }
+        .onDisappear { autoRead.stop() }
+        .onChange(of: scenePhase) { if $0 != .active { autoRead.stop() } }
+        .onChange(of: model.autoReadOwner) { _ in autoRead.stop() }
         .task(id: model.loading) {
             loadingFeedback = .quiet
             guard model.loading else { return }
@@ -267,6 +303,7 @@ struct EPUBReaderScreen: View {
             if failed { mutateTools { $0.forceCompact() } }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            autoRead.stop()
             mutateTools { $0.suspend() }
             Task { await model.suspend() }
         }
@@ -567,6 +604,7 @@ struct EPUBReaderScreen: View {
 
     private func openPanel(_ panel: ReadingToolPanel) {
         guard !model.exitSaveFailed, model.ready else { return }
+        autoRead.stop()
         lastPanelControl = panel == .directory ? "directory" : "settings"
         mutateTools { $0.open(panel) }
     }
@@ -610,6 +648,11 @@ struct EPUBReaderScreen: View {
         }
     }
 
+    private func manualPage(_ direction: EPUBPageDirection) {
+        if autoRead.isRunning { autoRead.stop(); return }
+        _ = model.webView.controller?.turnPage(direction)
+    }
+
     private func handleToolsInteraction(_ event: ReadingToolsInteraction) {
         switch event {
         case .showAccessibility:
@@ -626,6 +669,7 @@ struct EPUBReaderScreen: View {
     }
 
     private func exitReader(keepingSavedPosition: Bool = false) {
+        autoRead.stop()
         var request: UUID?
         mutateTools { request = $0.beginExit() }
         guard let request else { return }
@@ -644,4 +688,19 @@ struct EPUBReaderScreen: View {
             }
         }
     }
+}
+
+/// A sibling hit target, not another simultaneous WK gesture recognizer. Even a
+/// drag that ends after playback stopped cannot become the reader's page swipe.
+@MainActor
+struct EPUBAutoReadPauseSurface: UIViewRepresentable {
+    let pause: @MainActor () -> Void
+
+    final class Surface: UIView {
+        var pause: (@MainActor () -> Void)?
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { pause?() }
+    }
+
+    func makeUIView(context: Context) -> Surface { Surface() }
+    func updateUIView(_ view: Surface, context: Context) { view.pause = pause }
 }

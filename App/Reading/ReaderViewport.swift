@@ -219,6 +219,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
     let onApplied: @MainActor (UUID) -> Void
     let toolIntent: @MainActor () -> UUID
     let onToolsInteraction: @MainActor (ReadingToolsInteraction) -> Void
+    var autoRead: AutoReadSession? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(handle: handle) }
 
@@ -228,6 +229,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
         handle.observeDiagnosticScene(diagnosticScene)
         // END READER DIAGNOSTICS initial scene
         handle.attach(controller)
+        controller.bindAutoReading(autoRead)
         controller.onAnchor = onAnchor; controller.onExtend = onExtend; controller.onWidth = onWidth
         controller.onSettled = onSettled
         controller.toolIntent = toolIntent; controller.onToolsInteraction = onToolsInteraction
@@ -244,6 +246,7 @@ struct ReaderViewport: UIViewControllerRepresentable {
         controller.interactionDiagnostics.observeOwner(handle.controller === controller)
         // END READER DIAGNOSTICS update owner
         guard handle.controller === controller else { return }
+        controller.bindAutoReading(autoRead)
         handle.configureSceneAuthority(controller, routeID: routeID, onChange: onSceneInteraction)
         controller.toolIntent = toolIntent; controller.onToolsInteraction = onToolsInteraction
         // BEGIN READER DIAGNOSTICS update screen facts

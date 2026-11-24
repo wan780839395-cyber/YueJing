@@ -254,6 +254,8 @@ final class ReaderInteractionDiagnostics {
 @MainActor
 final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
+    private let pauseSurface = TXTAutoReadPauseSurface()
+    func bindAutoReading(_ session: AutoReadSession?) { pauseSurface.session = session }
     private(set) var window: ReadingWindow?
     var onAnchor: (@MainActor (ReadingAnchor, UUID) -> Void)?
     var onExtend: (@MainActor (ReadingAnchor, UUID) -> Void)?
@@ -263,6 +265,9 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
     private var restoring = false
+    // Ignore delegate echoes of our own offset; deliver one exact anchor after the move.
+    private var autoReadOffset: CGFloat?
+    private var autoReadBoundary: (window: UUID, end: Int)?
     private var userInputSinceRestore = false
     private var previousWidth = 0.0
     private let toolsTap = ReadingToolsTapRecognizer()
@@ -380,6 +385,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         table.contentInset = UIEdgeInsets(top: 16, left: 0, bottom: 24, right: 0)
         table.register(ReadingCell.self, forCellReuseIdentifier: "text")
         table.onUserIntent = { [weak self] in
+            self?.autoReadOffset = nil
             self?.userInputSinceRestore = true; self?.onToolsInteraction?(.scrollingBegan)
         }
         toolsTap.addTarget(self, action: #selector(bodyTapped))
@@ -391,6 +397,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         toolsTap.onTouchCancelled = { [weak self] id in self?.cancelToolTouch(id) }
         table.addGestureRecognizer(toolsTap)
         view.addSubview(table)
+        view.addSubview(pauseSurface)
         // BEGIN READER DIAGNOSTICS install
         toolsTap.onDiagnosticEvent = { [weak self] event, id in
             guard let self else { return }
@@ -425,6 +432,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         table.frame = view.bounds
+        pauseSurface.frame = view.bounds
         // BEGIN READER DIAGNOSTICS label frame
         // Last-event facts only; no per-frame/per-pixel recorder or polling.
         // Passive paint only: table frame, content insets and hit-testing stay unchanged.
@@ -449,6 +457,8 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     func detachCallbacks() {
+        if pauseSurface.session?.isRunning == true { pauseSurface.session?.stop() }
+        pauseSurface.session = nil
         revokeSceneBinding()
         sceneHandle = nil; sceneRouteID = nil; onSceneInteraction = nil
         // BEGIN READER DIAGNOSTICS revoke
@@ -507,6 +517,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     func apply(_ value: ReadingWindow, userNavigation: Bool, restoring point: ReaderViewportRestoration? = nil) {
         loadViewIfNeeded()
+        autoReadOffset = nil
         restoring = true; userInputSinceRestore = false; window = value
         table.reloadData(); table.layoutIfNeeded()
         let row = value.slices.firstIndex { $0.range.location.value <= value.targetUTF16 && value.targetUTF16 < $0.range.end.value }
@@ -543,6 +554,39 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         if userNavigation, let visible = actualVisibleAnchor() {
             userInputSinceRestore = true; onAnchor?(visible, value.id)
         }
+    }
+
+    func beginAutoReading() { autoReadBoundary = nil }
+
+    func advanceAutoReading(by distance: CGFloat) -> AutoReadStep {
+        guard interactionContext.active, viewIfLoaded?.window != nil, !interacting, !table.isTracking,
+              !restoring, table.bounds.height > 0, distance.isFinite, distance > 0,
+              let window, let end = window.slices.last?.range.end.value else { return .stop }
+        if let boundary = autoReadBoundary {
+            if boundary.window == window.id { return .waiting }
+            // A fresh UUID alone is not progress. Never cycle through identical windows.
+            guard end > boundary.end else { return .stop }
+            autoReadBoundary = nil
+        }
+        let current = table.contentOffset.y
+        let maximum = max(-table.adjustedContentInset.top,
+                          table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
+        // Fractional row heights can leave less than a physical pixel after UIKit rounds the offset.
+        let halfPixel = 0.5 / max(1, table.traitCollection.displayScale)
+        guard maximum - current > halfPixel else {
+            guard window.hasNext, let visible = actualVisibleAnchor(), let onExtend else { return .stop }
+            autoReadBoundary = (window.id, end)
+            onExtend(visible, window.id)
+            return .waiting
+        }
+        let next = min(maximum, current + distance)
+        autoReadOffset = next
+        table.setContentOffset(CGPoint(x: table.contentOffset.x, y: next), animated: false)
+        autoReadOffset = table.contentOffset.y
+        guard table.contentOffset.y > current, let visible = actualVisibleAnchor() else { return .stop }
+        userInputSinceRestore = true
+        onAnchor?(visible, window.id)
+        return .advanced
     }
 
     var navigationTargetVisible: Bool {
@@ -654,6 +698,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         onToolsInteraction(.exitAccessibility); return true
     }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        autoReadOffset = nil
         userInputSinceRestore = true; interactionContext.draggingBegan()
         // BEGIN READER DIAGNOSTICS drag facts
         sampleInteractionDiagnostics()
@@ -661,6 +706,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         onToolsInteraction?(.scrollingBegan)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if autoReadOffset == scrollView.contentOffset.y { return }
         guard !restoring, userInputSinceRestore, let window, let visible = actualVisibleAnchor() else { return }
         onAnchor?(visible, window.id)
     }
@@ -799,6 +845,19 @@ private final class ReadingToolsTapRecognizer: UITapGestureRecognizer {
         // BEGIN READER DIAGNOSTICS raw reset returned
         onDiagnosticEvent?(.resetReturned, touchID)
         // END READER DIAGNOSTICS raw reset returned
+    }
+}
+
+/// Only wins the initial body hit during playback. UIKit keeps the entire touch
+/// sequence on this sibling, so lifting or dragging cannot also toggle tools or pan.
+@MainActor
+private final class TXTAutoReadPauseSurface: UIView {
+    weak var session: AutoReadSession?
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        session?.isRunning == true && super.point(inside: point, with: event)
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        session?.stop()
     }
 }
 

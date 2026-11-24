@@ -1200,6 +1200,57 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         )
     }
 
+    /// Invalidate a pending edge/centre hit-test before the first scheduled step.
+    func beginAutoRead(for token: EPUBNavigationToken) -> Bool {
+        guard interactionEnabled, activeRequest?.token == token, readyToken == token,
+              readinessPhase == .ready, windowFailedToken != token, pageAnimationToken == nil,
+              let scroll = webView?.scrollView, !scroll.isTracking, !scroll.isDecelerating else { return false }
+        interactionGeneration = UUID()
+        pagePanToken = nil
+        return true
+    }
+
+    /// No asynchronous page command. Locator IPC observes the resulting pixels;
+    /// it does not grant a future timer permission to move this or another epoch.
+    func autoReadStep(for token: EPUBNavigationToken, distance: CGFloat) -> AutoReadStep {
+        guard let request = activeRequest, request.token == token, windowFailedToken != token,
+              let scroll = webView?.scrollView else { return .stop }
+        guard readyToken == token, readinessPhase == .ready, interactionEnabled,
+              !windowInFlight, pageAnimationToken == nil, pageGeometry.valid,
+              scroll.bounds.width > 0, scroll.contentSize.height > 0 else { return .waiting }
+        guard !scroll.isTracking, !scroll.isDecelerating else { return .stop }
+
+        let hasBookEnd = request.publication.package.spine.last.map(renderedChapterPaths.contains) == true
+        switch request.readingMode {
+        case .scroll:
+            guard distance.isFinite, distance > 0 else { return .waiting }
+            let maximum = pageGeometry.maximum
+            let next = min(maximum, scroll.contentOffset.y + distance)
+            if next > scroll.contentOffset.y {
+                scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: next), animated: false)
+                return hasBookEnd && next == maximum ? .stop : .advanced
+            }
+        case .paged:
+            guard scroll.contentSize.width > 0 else { return .waiting }
+            if turnPage(.next, animated: false) {
+                let next = EPUBPageGeometry.horizontalDestination(.next, offset: scroll.contentOffset.x,
+                    contentWidth: scroll.contentSize.width, viewportWidth: scroll.bounds.width)
+                return hasBookEnd && next == nil ? .stop : .advanced
+            }
+        }
+        guard !hasBookEnd else { return .stop }
+        // The end of this DOM need not be the end of the book. Tiny chapters
+        // may all fit on screen without moving the leading locator into a new
+        // chapter. Ask the existing bounded window transaction for more room.
+        let package = request.publication.package
+        let desired = EPUBChapterWindow.paths(in: package, around: token.path, count: windowChapterCount)
+        if Set(desired).isSubset(of: renderedChapterPaths) {
+            windowChapterCount = min(EPUBChapterWindow.maximumChapters, windowChapterCount + EPUBChapterWindow.defaultChapters)
+        }
+        refreshChapterWindow()
+        return .waiting
+    }
+
     @discardableResult
     func turnPage(_ direction: EPUBPageDirection, animated: Bool = true) -> Bool {
         guard interactionEnabled, let token = activeRequest?.token, readyToken == token,

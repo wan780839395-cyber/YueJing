@@ -3,13 +3,15 @@
   "scope": "development-targeted",
   "branch": "dev/workflow-optimization",
   "cases": [
-    {"file":"ReaderDomainTests/LibraryDeletionTests.swift","name":"deleteTXTBookPreservesSameTitleSiblingAndReimportsWithoutReadingState"},
-    {"file":"ReaderDomainTests/LibraryDeletionTests.swift","name":"deleteEPUBBookPreservesSameTitleSiblingAndReimportsWithoutReadingState"},
-    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testShelfTitleSearchPreservesFilterAcrossReadCancelAndDelete"},
-    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testEPUBTypographyNoCoverFallbackAndTXTIsolation"},
-    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testEPUBDirectoryControlsRecoverAfterCancelReopenAndForeground"},
-    {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading"},
-    {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testAccessibilityFontLeavesExitAndPanelControlsReachable"}
+    {"file":"YueJingHostTests/AutoReadCadenceTests.swift","name":"scrollClockAccumulatesSlowStepsWithoutCatchingUpAfterAStall"},
+    {"file":"YueJingHostTests/AutoReadCadenceTests.swift","name":"pageClockWaitsForItsIntervalAndBoundsPendingContent"},
+    {"file":"YueJingHostTests/AutoReadCadenceTests.swift","name":"openingAnotherReaderRestoresOnlyPaceAndCancelsOldTicks"},
+    {"file":"YueJingHostTests/TXTAutoReadingTests.swift","name":"playbackMovesTableAndBodyTouchOnlyPauses"},
+    {"file":"YueJingHostTests/TXTAutoReadingTests.swift","name":"boundaryWaitsForAppliedWindowThenStopsAtEOFAndSavesVisibleProgress"},
+    {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd"},
+    {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor"},
+    {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation"},
+    {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testAutoReadingToolbarStartsChangesPaceAndPauses"}
   ],
   "build_timeout_seconds": 900,
   "test_timeout_seconds": 480,

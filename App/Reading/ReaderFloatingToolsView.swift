@@ -35,6 +35,8 @@ struct ReaderFloatingToolsView: View {
     // Unified chapter panel for TXT and EPUB; nil or blank falls back to neutral unconfirmed text.
     var chapterContext: String? = nil
     var returnFromSearch: (@MainActor () -> Void)? = nil
+    var autoReading = false
+    var autoReadControl: AnyView? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
 
@@ -49,7 +51,10 @@ struct ReaderFloatingToolsView: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            if visible {
+            if autoReading, let autoReadControl, state.canInteract, state.panel == nil, state.exitRequest == nil {
+                dockSurface(cornerRadius: 18) { autoReadControl }
+                    .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
+            } else if visible {
                 VStack(alignment: .trailing, spacing: 8) {
                     if canReturnFromSearch, let returnFromSearch {
                         dockSurface(cornerRadius: 26) {
@@ -66,7 +71,8 @@ struct ReaderFloatingToolsView: View {
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
         .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
         .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: canReturnFromSearch)
-        .allowsHitTesting(visible && state.canInteract).accessibilityHidden(!visible)
+        .allowsHitTesting((visible || autoReading) && state.canInteract && state.panel == nil)
+        .accessibilityHidden(!visible && !autoReading)
     }
 
     private func chapterPanel(_ context: String) -> some View {
@@ -74,9 +80,9 @@ struct ReaderFloatingToolsView: View {
         let topSheen = Color.white.opacity(appearance.theme == .dark ? 0.08 : 0.65)
         return BoundedHeightLayout(maxHeight: maximumHeight) {
             ViewThatFits(in: .vertical) {
-                chapterPanelContent(context)
+                toolContent(context)
                 ScrollView(.vertical) {
-                    chapterPanelContent(context)
+                    toolContent(context)
                 }
                 .frame(height: maximumHeight)
             }
@@ -98,6 +104,17 @@ struct ReaderFloatingToolsView: View {
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private func toolContent(_ context: String) -> some View {
+        VStack(spacing: 0) {
+            chapterPanelContent(context)
+            if let autoReadControl {
+                Divider().padding(.horizontal, 12).accessibilityHidden(true)
+                autoReadControl
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder

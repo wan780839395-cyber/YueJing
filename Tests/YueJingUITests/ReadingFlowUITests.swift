@@ -602,6 +602,24 @@ final class ReadingFlowUITests: XCTestCase {
         for title in ["开源许可", "维护信息", "兼容与范围"] { XCTAssertFalse(app.staticTexts[title].exists, title) }
     }
 
+    @MainActor func testAutoReadingToolbarStartsChangesPaceAndPauses() {
+        withFixture { app in
+            open("UITest-Long-A", app)
+            let play = app.buttons["reader.autoRead.play"], pace = app.buttons["reader.autoRead.pace"]
+            waitHittable(play); XCTAssertEqual(play.label, "自动阅读")
+            let original = pace.value as? String
+            play.tap(); waitHittable(play); XCTAssertEqual(play.label, "暂停自动阅读")
+            waitHittable(pace); pace.tap()
+            let name = original == "快速" ? "适中" : "快速"
+            let choice = app.buttons[name].firstMatch; waitHittable(choice); choice.tap()
+            XCTAssertEqual(pace.value as? String, name)
+            XCTAssertEqual(play.label, "暂停自动阅读")
+            play.tap(); waitHittable(play); XCTAssertEqual(play.label, "自动阅读")
+            if let original { pace.tap(); let old = app.buttons[original].firstMatch; waitHittable(old); old.tap() }
+            exitReader(app)
+        }
+    }
+
     @MainActor private func openDeveloperSwitch(_ app: XCUIApplication) -> XCUIElement {
         let settings = app.buttons["library.tab.settings"]
         waitHittable(settings); settings.tap()

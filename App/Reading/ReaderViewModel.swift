@@ -61,6 +61,8 @@ final class ReaderViewModel: ObservableObject {
     private var openTask: Task<OpenedReader, Error>?
     private var layoutTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var steppingAutoRead = false
+    private var queuedAutoProgress: (ReadingAnchor, Int64)?
     private var settingsTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
     private var openingMeasurements: [ProcessingMeasurement] = []
@@ -170,6 +172,21 @@ final class ReaderViewModel: ObservableObject {
         guard !closing, !exitSaveFailed else { return }
         if reader == nil { await load() } else { await restartReader() }
     }
+    var autoReadingAvailable: Bool {
+        reader != nil && window != nil && !loading && !closing && !suspended && !exitSaveFailed &&
+            message == nil && navigationGate.navigation == nil && returnRequest == nil && bookmarkContext == nil
+    }
+
+    func advanceAutoReading(by distance: CGFloat, in controller: ReaderViewController) -> AutoReadStep {
+        guard autoReadingAvailable, viewport.controller === controller, viewport.interactionActive,
+              let id = window?.id else { return .stop }
+        // A running step must not change positionRevision underneath a pending reflow.
+        guard !layoutNeedsRefresh, controller.window?.id == id, navigationGate.accepts(window: id) else { return .waiting }
+        steppingAutoRead = true
+        defer { steppingAutoRead = false }
+        return controller.advanceAutoReading(by: distance)
+    }
+
     func visibleChanged(_ value: ReadingAnchor, windowID: UUID) {
         guard !closing, !suspended, !exitSaveFailed, let reader,
               navigationGate.accepts(window: windowID),
@@ -181,11 +198,18 @@ final class ReaderViewModel: ObservableObject {
         }
         anchor = value; userPosition = true; sequence += 1
         let serial = sequence, request = lifecycle
+        // Continuous playback updates the in-memory anchor on each move. One pending
+        // checkpoint drains the latest accepted value, including the final move on pause.
+        let auto = steppingAutoRead, alreadyQueued = queuedAutoProgress != nil
+        queuedAutoProgress = auto ? (value, serial) : nil
+        if auto && alreadyQueued { return }
         saveTask?.cancel()
         saveTask = Task {
             do {
-                try await Task.sleep(for: .milliseconds(700)); try Task.checkCancellation()
-                _ = try await reader.saveProgress(value, sequence: serial)
+                try await Task.sleep(for: .milliseconds(auto ? 3000 : 700)); try Task.checkCancellation()
+                let progress = queuedAutoProgress ?? (value, serial)
+                queuedAutoProgress = nil
+                _ = try await reader.saveProgress(progress.0, sequence: progress.1)
             } catch is CancellationError { }
             catch { if lifecycle == request, !closing { message = "位置暂未保存，原记录已保留。" } }
         }
@@ -237,6 +261,7 @@ final class ReaderViewModel: ObservableObject {
         let reliable = userPosition ? viewport.anchor() : nil
         if let reliable, navigationGate.navigation == nil { anchor = reliable }
         saveTask?.cancel(); settingsTask?.cancel()
+        queuedAutoProgress = nil
         sequence += 1; preferencesSequence += 1
         let serial = sequence, settingsSerial = preferencesSequence, settings = preferences.validated
         do {
@@ -275,6 +300,7 @@ final class ReaderViewModel: ObservableObject {
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
+        queuedAutoProgress = nil
         let reliable = userPosition ? viewport.anchor() : nil
         if let reliable { anchor = reliable }
         sequence += 1; preferencesSequence += 1
@@ -296,6 +322,7 @@ final class ReaderViewModel: ObservableObject {
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
+        queuedAutoProgress = nil
         if let reader { try? await reader.close(sequence: sequence + 1) }
         reader = nil; window = nil; chapterTotal = 0; directory.detach()
     }
@@ -307,6 +334,7 @@ final class ReaderViewModel: ObservableObject {
         let request = lifecycle, old = reader
         openTask?.cancel(); openTask = nil; directory.dismiss()
         layoutTask = nil; saveTask?.cancel(); settingsTask?.cancel()
+        queuedAutoProgress = nil
         let reliable = userPosition ? viewport.anchor() : nil
         sequence += 1; preferencesSequence += 1; loading = true
         do {

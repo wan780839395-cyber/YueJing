@@ -148,6 +148,20 @@ final class EPUBReaderViewModel: ObservableObject {
         ready && !loading && !closing && !suspended && !exitSaveFailed ? currentToken : nil
     }
 
+    // Explicit destinations and reflows mint a new origin. Only an observed
+    // promotion in the resident DOM keeps it across the chapter's epoch change.
+    private var documentOrigin: EPUBNavigationToken?
+    var autoReadOwner: EPUBNavigationToken? {
+        guard acceptsSearch, !loading, message == nil, ready || promotingVisibleChapter,
+              let documentOrigin, reader?.reading.session.id == documentOrigin.sessionID else { return nil }
+        return documentOrigin
+    }
+
+    func autoReadStep(from owner: EPUBNavigationToken, distance: CGFloat) -> AutoReadStep {
+        guard autoReadOwner == owner, let controller = webView.controller else { return .stop }
+        guard !promotingVisibleChapter, let token = presentationToken else { return .waiting }
+        return controller.autoReadStep(for: token, distance: distance)
+    }
     private var acceptsSearch: Bool {
         !suspending && !suspended && !closing && closeTask == nil && !exitSaveFailed
     }
@@ -573,6 +587,7 @@ final class EPUBReaderViewModel: ObservableObject {
         do {
             let token = try await reader.beginNavigation(path: path)
             guard !Task.isCancelled, lifecycle == life, generation == gen, !closing, !suspended, self.reader === reader else { return }
+            documentOrigin = token
             currentToken = token
             searchReturn.stage(searchCompletion, navigation: gen)
             currentPath = path
@@ -846,20 +861,26 @@ final class EPUBReaderViewModel: ObservableObject {
 
     /// Capture a crossing that happened immediately before a save/exit, not a speculative preload.
     private func settleVisibleChapter() async {
-        await promotionTask?.value
-        if navigationRequest?.preserveViewport == true {
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-            while !ready, !closing, !suspended, message == nil, ContinuousClock.now < deadline {
-                do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
-            }
+        await awaitVisiblePromotion()
+        guard !closing, !suspended, ready, let token = currentToken else { return }
+        if let sample = await webView.sampleNow(), currentToken == token,
+           sample.sessionID == token.sessionID, sample.epoch == token.epoch,
+           sample.path != token.path,
+           webView.controller?.renderedChapterPaths.contains(sample.path) == true {
+            promoteVisibleChapter(sample, from: token)
         }
-        guard !closing, !suspended, ready, let token = currentToken,
-              let sample = await webView.sampleNow(), currentToken == token,
-              sample.sessionID == token.sessionID, sample.epoch == token.epoch,
-              sample.path != token.path,
-              webView.controller?.renderedChapterPaths.contains(sample.path) == true else { return }
-        promoteVisibleChapter(sample, from: token)
+        // The sample itself, or a concurrent scroll observer during IPC, can
+        // start the handoff. Close/suspend must not outrun its acknowledgement.
+        await awaitVisiblePromotion()
+    }
+
+    private func awaitVisiblePromotion() async {
         await promotionTask?.value
+        guard let request = navigationRequest, request.preserveViewport else { return }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while currentToken == request.token, !ready, !closing, !suspended, message == nil, ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+        }
     }
 
     func handlePreloadFailure() {
@@ -906,7 +927,7 @@ final class EPUBReaderViewModel: ObservableObject {
                rawUTF16Offset: sampled.utf16Offset,
                viewportOffset: sampled.viewportOffset
            ) {
-            if sampled.scrollY > 1 {
+            if sampled.scrollY > 1 || sampled.scrollX > 1 {
                 hasUserPosition = true
             }
             if hasUserPosition {
@@ -1032,7 +1053,7 @@ final class EPUBReaderViewModel: ObservableObject {
                rawUTF16Offset: sampled.utf16Offset,
                viewportOffset: sampled.viewportOffset
            ) {
-            if sampled.scrollY > 1 {
+            if sampled.scrollY > 1 || sampled.scrollX > 1 {
                 hasUserPosition = true
             }
             if hasUserPosition {
