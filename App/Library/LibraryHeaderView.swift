@@ -24,7 +24,7 @@ struct LibraryHeaderView: View {
     var onSelectFilter: ((LibraryShelfFormatFilter) -> Void)? = nil
 
     private var showsInteractiveFilter: Bool {
-        onSelectFilter != nil && txtCount > 0 && epubCount > 0
+        onSelectFilter != nil && (selectedFilter != .all || (txtCount > 0 && epubCount > 0))
     }
 
     var body: some View {

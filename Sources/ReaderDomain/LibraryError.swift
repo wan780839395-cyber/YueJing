@@ -3,6 +3,7 @@ import Foundation
 public enum LibraryError: Error, LocalizedError, Sendable {
     case notTXT, notRegularFile, emptyFile, missingFile, changedFile, missingBook, invalidEncoding, invalidAnchor, closedSession
     case layoutCannotAdvance
+    case bookInUse
 
     public var errorDescription: String? {
         switch self {
@@ -15,6 +16,7 @@ public enum LibraryError: Error, LocalizedError, Sendable {
         case .invalidEncoding: "这本书记录的文字编码无法识别，请重新导入。"
         case .invalidAnchor: "阅读位置与当前书籍或内容版本不匹配。"
         case .closedSession: "阅读会话已结束，旧位置没有写入。"
+        case .bookInUse: "这本书正在使用，请关闭后再删除。"
         case .layoutCannotAdvance: "这段文字包含过长的字符组合，当前无法排版。原文件和阅读位置未改变。"
         }
     }

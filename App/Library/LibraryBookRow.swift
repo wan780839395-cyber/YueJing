@@ -23,6 +23,36 @@ enum LibraryBookMetrics {
         let roundedKB = max(1, Int((value / kb).rounded()))
         return "\(roundedKB) KB"
     }
+    static func encodingLabel(for book: LibraryBook) -> String? {
+        guard book.format == .txt else { return nil }
+        switch book.encodingRaw {
+        case "GB18030-2000": return "GB18030"
+        case "GBK-95": return "GBK"
+        case "": return nil
+        default: return book.encodingRaw
+        }
+    }
+
+    static func shortDate(_ timestamp: Double) -> String {
+        Date(timeIntervalSince1970: timestamp).formatted(date: .numeric, time: .omitted)
+    }
+
+    static func shortTimestamp(_ timestamp: Double) -> String {
+        Date(timeIntervalSince1970: timestamp).formatted(date: .numeric, time: .shortened)
+    }
+
+    static func editionSummary(for book: LibraryBook) -> String {
+        var parts: [String] = []
+        if let encoding = encodingLabel(for: book) {
+            parts.append(encoding)
+        }
+        if let volume = volumeLabel(for: book) {
+            parts.append(volume)
+        }
+        parts.append("入架 " + shortTimestamp(book.addedAt))
+        return parts.joined(separator: " · ")
+    }
+
     static func formatBadge(for book: LibraryBook, hasEmbeddedCover: Bool) -> String {
         switch book.format {
         case .txt:
@@ -39,6 +69,7 @@ struct LibraryBookRow: View {
     let book: LibraryBook
     let appearance: LibraryAppearance
     var coverLoader: (@Sendable (String) async -> Data?)? = nil
+    var showsEditionDetails: Bool = false
     @State private var resolvedCoverKey: String?
 
     private var coverKey: String { book.id + ":" + book.versionID }
@@ -85,6 +116,10 @@ struct LibraryBookRow: View {
                     }
                 }
 
+                if showsEditionDetails {
+                    editionDisambiguator
+                }
+
                 if let date = book.lastReadAt {
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -128,6 +163,22 @@ struct LibraryBookRow: View {
         .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
         .contentShape(RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
     }
+
+    private var editionDisambiguator: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Circle()
+                .fill(appearance.sealAccent)
+                .frame(width: 5, height: 5)
+                .accessibilityHidden(true)
+            Text("同名副本 · \(LibraryBookMetrics.editionSummary(for: book))")
+                .font(.caption2.weight(.medium).monospacedDigit())
+                .foregroundStyle(appearance.foreground.opacity(0.82))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
 }
 
 /// Spotlight folio card for the top book on the shelf (most recently read or newly added).
@@ -136,6 +187,7 @@ struct LibraryHeroBookCard: View {
     let book: LibraryBook
     let appearance: LibraryAppearance
     var coverLoader: (@Sendable (String) async -> Data?)? = nil
+    var showsEditionDetails: Bool = false
     @State private var resolvedCoverKey: String?
     @Environment(\.dynamicTypeSize) private var dynamicType
 
@@ -151,10 +203,10 @@ struct LibraryHeroBookCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 6) {
-                Circle()
+            HStack(alignment: .center, spacing: 7) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                     .fill(hasBeenRead ? appearance.sealAccent : appearance.accent)
-                    .frame(width: 6, height: 6)
+                    .frame(width: 3, height: 13)
                 Text(hasBeenRead ? "案头续读" : "新卷入斋")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(hasBeenRead ? appearance.sealAccent : appearance.accent)
@@ -257,6 +309,22 @@ struct LibraryHeroBookCard: View {
                     in: Capsule()
                 )
 
+            if showsEditionDetails {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Circle()
+                        .fill(appearance.sealAccent)
+                        .frame(width: 5, height: 5)
+                        .accessibilityHidden(true)
+                    Text("同名副本 · \(LibraryBookMetrics.editionSummary(for: book))")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .foregroundStyle(appearance.foreground.opacity(0.82))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
             if let date = book.lastReadAt {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text("最近阅读")
@@ -295,6 +363,7 @@ struct LibraryBookGridCard: View {
     let book: LibraryBook
     let appearance: LibraryAppearance
     var coverLoader: (@Sendable (String) async -> Data?)? = nil
+    var showsEditionDetails: Bool = false
     @State private var resolvedCoverKey: String?
 
     private var coverKey: String { book.id + ":" + book.versionID }
@@ -304,6 +373,7 @@ struct LibraryBookGridCard: View {
         let cached = book.format == .epub && LibraryCoverMemoryCache.shared.image(for: coverKey) != nil
         return LibraryBookMetrics.formatBadge(for: book, hasEmbeddedCover: hasResolved || cached)
     }
+    private var volumeText: String? { LibraryBookMetrics.volumeLabel(for: book) }
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             ZStack {
@@ -331,10 +401,32 @@ struct LibraryBookGridCard: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(formatBadge)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(book.format == .epub ? appearance.accent : appearance.secondary)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(formatBadge)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(book.format == .epub ? appearance.accent : appearance.secondary)
+                        .lineLimit(1)
+                    if let volumeText, !showsEditionDetails {
+                        Text("·")
+                            .font(.caption2)
+                            .foregroundStyle(appearance.secondary.opacity(0.65))
+                            .accessibilityHidden(true)
+                        Text(volumeText)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(appearance.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                if showsEditionDetails {
+                    Text("同名 · \(LibraryBookMetrics.editionSummary(for: book))")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .foregroundStyle(appearance.sealAccent)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
 
                 if let date = book.lastReadAt {
                     HStack(spacing: 4) {

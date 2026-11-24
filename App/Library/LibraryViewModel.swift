@@ -8,6 +8,7 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var service: LibraryService?
     @Published private(set) var books: [LibraryBook] = []
     @Published private(set) var importing = false
+    @Published private(set) var deletingBook = false
     @Published var encodingChoice: EncodingChoice?
     @Published var message: String?
     @Published var notice: LibraryNotice?
@@ -46,7 +47,29 @@ final class LibraryViewModel: ObservableObject {
     }
 
     var canPresentLibraryFeedback: Bool { fileSelection?.dismissalConfirmed ?? true }
-    var canBeginFileSelection: Bool { service != nil && !importing && canPresentLibraryFeedback }
+    var canBeginFileSelection: Bool { service != nil && !importing && !deletingBook && canPresentLibraryFeedback }
+
+    func deleteBook(_ book: LibraryBook) {
+        guard canBeginFileSelection, encodingChoice == nil, message == nil, let service,
+              books.contains(where: { $0.id == book.id && $0.addedAt == book.addedAt && $0.versionID == book.versionID }) else { return }
+        deletingBook = true
+        Task {
+            defer { deletingBook = false }
+            do {
+                try await service.deleteBook(book)
+                // Discard any older shelf snapshot still in flight.
+                reloadGeneration = UUID()
+                books.removeAll { $0.id == book.id }
+                EPUBUserFontPreference.set(nil, bookID: book.format == .txt ? "txt." + book.id : book.id)
+                notice = nil
+            } catch LibraryError.bookInUse {
+                message = "这本书正在使用，请关闭后再删除。"
+            } catch {
+                message = "未能完成删除，请刷新书架后重试。"
+                await reload()
+            }
+        }
+    }
 
     func beginFileSelection() {
         guard canBeginFileSelection else { return }

@@ -401,7 +401,7 @@ struct EPUBReaderScreen: View {
             }
             .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, cornerRadius: 12))
             .accessibilityLabel("关闭兼容排版提示")
-            .accessibilityHint("关闭后仍可在排版设置查看兼容说明")
+            .accessibilityHint("关闭后仍可在阅读设置的常用页查看当前提示")
             .accessibilityIdentifier("epub.compatibility.dismiss")
         }
         .padding(.leading, 18)

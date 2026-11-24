@@ -3,6 +3,20 @@ import Foundation
 /// Rebuildable, single-publication disk cache. Never stores sessions, preferences or progress.
 /// Active readers own separate verified workspaces; only a closed workspace may transfer to a new reader.
 enum EPUBPublicationCache {
+    /// The old single slot is disposable only when its bounded identity marker matches.
+    static func removeIfMatching(version: String, cache: URL) throws {
+        guard try ManagedFile.exists(cache.deletingLastPathComponent(), as: .typeDirectory),
+              try ManagedFile.exists(cache, as: .typeDirectory) else { return }
+        let marker = cache.appendingPathComponent("identity.txt")
+        guard try ManagedFile.exists(marker, as: .typeRegular) else { return }
+        let handle = try FileHandle(forReadingFrom: marker)
+        defer { try? handle.close() }
+        guard version.utf8.count <= 256, try handle.seekToEnd() == UInt64(version.utf8.count) else { return }
+        try handle.seek(toOffset: 0)
+        guard try handle.read(upToCount: 257) == Data(version.utf8) else { return }
+        try ManagedFile.remove(cache, as: .typeDirectory)
+    }
+
     static func restore(package: EPUBPackage, cache: URL, destination: URL) throws -> EPUBPublication? {
         let files = FileManager.default
         guard files.fileExists(atPath: cache.path) else { return nil }

@@ -57,7 +57,7 @@ struct LibrarySettingsContent<Options: View>: View {
                         .font(AppVisualStyle.pageTitleFont)
                         .foregroundStyle(appearance.foreground)
                         .accessibilityAddTraits(.isHeader)
-                    Text("调整管理界面的视觉氛围，查看支持的书籍格式与本地诊断信息。")
+                    Text("调整书架外观，查看支持的书籍格式与版本信息。")
                         .font(.subheadline)
                         .foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -80,6 +80,7 @@ struct LibrarySettingsContent<Options: View>: View {
 struct LibraryManagementOptions: View {
     let appearance: LibraryAppearance
     let appAppearance: AppAppearance
+    @Binding var developerMode: Bool
     let canChange: Bool
     let onAppearance: (AppAppearance) -> Void
     let onOpenFeature: (LibraryPlannedFeature) -> Void
@@ -92,7 +93,7 @@ struct LibraryManagementOptions: View {
         VStack(alignment: .leading, spacing: 22) {
             appearanceSection
             formatsSection
-            localInfoSection
+            aboutSection
         }
     }
 
@@ -234,6 +235,13 @@ struct LibraryManagementOptions: View {
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .background(appearance.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(appearance.accentSoft.opacity(appearance.isDarkSurface ? 0.45 : 0.30))
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(
                         selected ? appearance.accent : appearance.edge.opacity(0.8),
@@ -266,17 +274,14 @@ struct LibraryManagementOptions: View {
         }
     }
 
-    private var localInfoSection: some View {
+    private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("本地信息")
+            sectionTitle("关于阅境")
             VStack(spacing: 0) {
-                settingsActionRow(title: "诊断与耗时", detail: "查看本机导入与打开阶段计时", symbol: "waveform.path.ecg") {
-                    onInformation(.diagnostics)
-                }
-                rowDivider
-                settingsActionRow(title: "开源许可", detail: "GRDB.swift 与 ZIPFoundation · MIT", symbol: "doc.text") {
+                settingsActionRow(title: "开源许可", detail: "查看阅境使用的开源组件及许可", symbol: "doc.text") {
                     onInformation(.license)
                 }
+                .accessibilityIdentifier("library.about.license")
                 rowDivider
                 HStack(spacing: 12) {
                     ZStack {
@@ -304,6 +309,62 @@ struct LibraryManagementOptions: View {
                 .padding(.vertical, 12)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("app.version")
+                rowDivider
+                Toggle(isOn: $developerMode) {
+                    HStack(alignment: .center, spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(developerMode ? appearance.sealSoft : appearance.subtleSurface)
+                            Image(systemName: "wrench.and.screwdriver")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(developerMode ? appearance.sealAccent : appearance.secondary)
+                        }
+                        .frame(width: 34, height: 34)
+                        .accessibilityHidden(true)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text("开发者模式")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(appearance.foreground)
+                                if developerMode && !dynamicType.isAccessibilitySize {
+                                    Text("已开启")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(appearance.sealAccent)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(appearance.sealSoft, in: Capsule())
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            Text("在书架和阅读设置中显示本机诊断入口。")
+                                .font(.caption)
+                                .foregroundStyle(appearance.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .tint(appearance.sealAccent)
+                .disabled(!canChange)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .accessibilityLabel("开发者模式")
+                .accessibilityHint("在书架和阅读设置中显示诊断信息")
+                .accessibilityIdentifier("library.developerMode")
+                if developerMode {
+                    rowDivider
+                    settingsActionRow(
+                        title: "导入诊断",
+                        detail: "查看本次导入的阶段与耗时",
+                        symbol: "waveform.path.ecg",
+                        iconTint: appearance.sealAccent,
+                        iconFill: appearance.sealSoft,
+                        badge: "仅本机"
+                    ) {
+                        onInformation(.diagnostics)
+                    }
+                    .accessibilityIdentifier("library.importDiagnostics")
+                }
             }
             .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
             .overlay {
@@ -314,40 +375,68 @@ struct LibraryManagementOptions: View {
             .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
 
             // Quiet studio colophon signature
-            HStack(spacing: 10) {
-                YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 22)
+            HStack(spacing: 12) {
+                YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("阅境 · 专注本地离线阅读")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(appearance.foreground.opacity(0.85))
+                        .foregroundStyle(appearance.foreground.opacity(0.88))
                     Text("原文件只读保留 · 零云端追踪")
                         .font(.caption2)
                         .foregroundStyle(appearance.secondary)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 6)
-            .padding(.top, 8)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(appearance.subtleSurface.opacity(0.65), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(appearance.edge.opacity(0.6), lineWidth: 0.6)
+                    .allowsHitTesting(false)
+            }
+            .padding(.top, 4)
             .accessibilityElement(children: .combine)
         }
     }
-    private func settingsActionRow(title: String, detail: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func settingsActionRow(
+        title: String,
+        detail: String,
+        symbol: String,
+        iconTint: Color? = nil,
+        iconFill: Color? = nil,
+        badge: String? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let resolvedTint = iconTint ?? appearance.accent
+        let resolvedFill = iconFill ?? appearance.accentSoft
+        return Button(action: action) {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(appearance.accentSoft)
+                        .fill(resolvedFill)
                     Image(systemName: symbol)
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(appearance.accent)
+                        .foregroundStyle(resolvedTint)
                 }
                 .frame(width: 34, height: 34)
                 .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(appearance.foreground)
+                    HStack(spacing: 6) {
+                        Text(title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(appearance.foreground)
+                        if let badge, !dynamicType.isAccessibilitySize {
+                            Text(badge)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(resolvedTint)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(resolvedFill, in: Capsule())
+                                .accessibilityHidden(true)
+                        }
+                    }
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(appearance.secondary)
@@ -367,7 +456,6 @@ struct LibraryManagementOptions: View {
         .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: 0))
         .disabled(!canChange)
     }
-
     private var rowDivider: some View {
         Rectangle()
             .fill(appearance.edge.opacity(0.65))

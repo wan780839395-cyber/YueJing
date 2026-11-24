@@ -82,6 +82,22 @@ actor EPUBContentPool {
         }
         return total
     }
+    private func receipt(in folder: URL) throws -> Record {
+        try Self.requireDirectory(folder)
+        let marker = folder.appendingPathComponent("receipt.json")
+        let v = try marker.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? Int.max) <= 1024 else {
+            throw EPUBError.corruptResource
+        }
+        let input = try FileHandle(forReadingFrom: marker)
+        defer { try? input.close() }
+        let data = try input.read(upToCount: 1025) ?? Data()
+        guard data.count <= 1024 else { throw EPUBError.corruptResource }
+        let record = try JSONDecoder().decode(Record.self, from: data)
+        guard record.bytes >= 0, record.bytes <= EPUBLimits().expandedBytes,
+              DerivedBookFormat.isDigest(record.key), DerivedBookFormat.isDigest(record.packageDigest) else { throw EPUBError.corruptResource }
+        return record
+    }
     private func discover(_ root: URL) throws {
         let files = FileManager.default
         try Self.requireDirectory(root.deletingLastPathComponent())
@@ -93,19 +109,7 @@ actor EPUBContentPool {
         for folder in try files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
             guard UUID(uuidString: folder.lastPathComponent) != nil, entries[folder] == nil else { continue }
             do {
-                try Self.requireDirectory(folder)
-                let marker = folder.appendingPathComponent("receipt.json")
-                let v = try marker.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-                guard v.isRegularFile == true, v.isSymbolicLink != true, (v.fileSize ?? Int.max) <= 1024 else {
-                    throw EPUBError.corruptResource
-                }
-                let input = try FileHandle(forReadingFrom: marker)
-                defer { try? input.close() }
-                let data = try input.read(upToCount: 1025) ?? Data()
-                guard data.count <= 1024 else { throw EPUBError.corruptResource }
-                let record = try JSONDecoder().decode(Record.self, from: data)
-                guard record.bytes >= 0, record.bytes <= EPUBLimits().expandedBytes,
-                      record.key.count == 64, record.packageDigest.count == 64 else { throw EPUBError.corruptResource }
+                let record = try receipt(in: folder)
                 entries[folder] = Entry(root: root, folder: folder, record: record, retained: true)
             } catch {
                 // Invalid cache metadata has no authority; only this unleased generated directory is removed.
@@ -263,10 +267,9 @@ actor EPUBContentPool {
               entry.retired || (!entry.persistent && !entry.retained) else { return }
         // Only generated folders registered under this pool root are ever removed.
         do {
+            try Self.requireDirectory(entry.root.deletingLastPathComponent())
             try Self.requireDirectory(entry.root)
-            if FileManager.default.fileExists(atPath: folder.path) {
-                try FileManager.default.removeItem(at: folder)
-            }
+            try ManagedFile.remove(folder, as: .typeDirectory)
             entries.removeValue(forKey: folder)
         } catch {
             // Keep failed cleanup accounted for and eligible for a later bounded retry.
@@ -294,6 +297,45 @@ actor EPUBContentPool {
 }
 
 extension EPUBContentPool {
+    /// UUIDs identify immutable Ready generations. Even parked/duplicated tokens outlive
+    /// the catalog row; retire instead of unlinking their registered folder.
+    func retireReady(directory: String, root: URL) throws -> Bool {
+        guard UUID(uuidString: directory)?.uuidString == directory else { throw EPUBError.corruptResource }
+        try Self.requireDirectory(root.deletingLastPathComponent())
+        guard try ManagedFile.exists(root, as: .typeDirectory) else { return true }
+        return try retire(folder: root.appendingPathComponent(directory, isDirectory: true))
+    }
+
+    private func retire(folder: URL) throws -> Bool {
+        if entries[folder] != nil {
+            entries[folder]?.persistent = false
+            entries[folder]?.retired = true
+            guard entries[folder]?.tokens.isEmpty == true else { return false }
+        }
+        try ManagedFile.remove(folder, as: .typeDirectory)
+        entries.removeValue(forKey: folder)
+        return true
+    }
+
+    func retireContent(version: String, root: URL) throws -> Bool {
+        guard let id = version.split(separator: ":", maxSplits: 1).first, DerivedBookFormat.isDigest(String(id)) else { throw EPUBError.corruptResource }
+        let key = EPUBResourceStore.digest(Data((String(id) + "\n" + version).utf8))
+        try Self.requireDirectory(root.deletingLastPathComponent())
+        guard try ManagedFile.exists(root, as: .typeDirectory) else { return true }
+        var finished = true
+        for folder in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+            guard UUID(uuidString: folder.lastPathComponent)?.uuidString == folder.lastPathComponent else { continue }
+            // Do not use discover/trim: deleting a book gives no authority over other cache entries.
+            if let entry = entries[folder] {
+                guard entry.root == root, entry.record.key == key else { continue }
+            } else {
+                guard (try? receipt(in: folder))?.key == key else { continue }
+            }
+            if try !retire(folder: folder) { finished = false }
+        }
+        return finished
+    }
+
     /// First-process reconciliation skips every live registered version, including pending database commits.
     /// A stale caller's reference list therefore cannot delete a concurrently published version.
     func reconcileReady(root: URL, referenced: Set<String>) throws {
@@ -306,7 +348,7 @@ extension EPUBContentPool {
             guard UUID(uuidString: folder.lastPathComponent) != nil,
                   !referenced.contains(folder.lastPathComponent), entries[folder] == nil else { continue }
             // Removing a directory entry does not traverse a symlink. Never recursively enumerate unknown names.
-            try files.removeItem(at: folder)
+            if (try? ManagedFile.exists(folder, as: .typeDirectory)) == true { try files.removeItem(at: folder) }
         }
         reconciledReadyRoots.insert(root)
     }

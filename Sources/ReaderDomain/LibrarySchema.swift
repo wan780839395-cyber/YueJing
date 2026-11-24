@@ -106,6 +106,14 @@ enum LibrarySchema {
                     ON epubBookmarks(bookID, versionID, unit, createdAt DESC, id ASC);
                 """)
         }
+        // Not a child of books: these exact unlink obligations survive the catalog commit.
+        migrator.registerMigration("v9-managed-file-removals") { db in
+            try db.execute(sql: """
+                CREATE TABLE managedRemovals (
+                    kind TEXT NOT NULL, name TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(kind, name)
+                ) WITHOUT ROWID
+                """)
+        }
         return migrator
     }
 }

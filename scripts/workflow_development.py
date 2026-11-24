@@ -19,10 +19,11 @@ SCOPE = 'development-targeted'
 PLAN = 'scripts/development_scope.json'
 GENERIC_SIM = 'generic/platform=iOS Simulator'
 SCHEMES = {'ReaderDomainTests': 'ReaderDomain', 'YueJingHostTests': 'YueJingHost',
-           'YueJingEPUBUITests': 'YueJingEPUBUI'}
+           'YueJingEPUBUITests': 'YueJingEPUBUI', 'YueJingUITests': 'YueJingReadingUI'}
 PACKAGE_TARGETS = {'GRDB', 'GRDB_GRDB', 'CSQLite', 'ZIPFoundation', 'ZIPFoundation_ZIPFoundation'}
 DEPENDENCIES = {'ReaderDomain': {'TXTCore', 'ReaderDomain', 'ReaderDomainTests'} | PACKAGE_TARGETS,
                 'YueJingHost': {'TXTCore', 'ReaderDomain', 'YueJing', 'YueJingHostTests'} | PACKAGE_TARGETS,
+                'YueJingReadingUI': {'TXTCore', 'ReaderDomain', 'YueJing', 'YueJingUITests'} | PACKAGE_TARGETS,
                 'YueJingEPUBUI': {'TXTCore', 'ReaderDomain', 'YueJing', 'YueJingEPUBUITests'} | PACKAGE_TARGETS}
 
 class BudgetExhausted(RuntimeError):
@@ -68,7 +69,7 @@ def select(plan):
         target = rel.split('/')[0]
         require(target in SCHEMES and (rel, name) not in seen, 'Unsupported/duplicate declaration')
         seen.add((rel, name))
-        kind = 'ui' if target == 'YueJingEPUBUITests' else ('host' if target == 'YueJingHostTests' else 'domain')
+        kind = 'ui' if target in ('YueJingEPUBUITests', 'YueJingUITests') else ('host' if target == 'YueJingHostTests' else 'domain')
         specs.append(dict(target=target, scheme=SCHEMES[target], kind=kind, pairs=[(rel, name)], cases=[name]))
     return specs
 

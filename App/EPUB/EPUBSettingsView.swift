@@ -3,11 +3,7 @@ import SwiftUI
 
 @MainActor
 struct EPUBSettingsView: View {
-    enum AuxiliaryPage: String, Identifiable {
-        case diagnostics
-        case license
-        var id: String { rawValue }
-    }
+    @AppStorage(DeveloperMode.storageKey) private var developerMode = false
 
     @Binding var preferences: ReaderPreferences
     @Binding var readingMode: EPUBReadingMode
@@ -25,20 +21,18 @@ struct EPUBSettingsView: View {
     let userFontID: String?
     let onUserFontChange: @MainActor (EPUBUserFont?) -> Void
     @State private var draft: ReaderPreferences
-    @State private var info: AuxiliaryPage?
-    @State private var runtimeSummary: String?
+    @State private var showDiagnostics = false
     @State private var showRestore = false
     @State private var previewFontRevision = 0
     private enum SettingsGroup: String { case common, more }
     @State private var settingsGroup: SettingsGroup = .common
     @State private var focusSourceOnAppear = false
-    @State private var auxiliaryReturnFocus: String?
     @AccessibilityFocusState private var controlFocus: String?
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var closeFocused: Bool
-
     init(
         preferences: Binding<ReaderPreferences>,
         readingMode: Binding<EPUBReadingMode>,
@@ -75,39 +69,56 @@ struct EPUBSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
-            ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
-                Button(action: finish) {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .frame(
-                            minWidth: ReaderVisualStyle.panelActionMinimumWidth,
-                            minHeight: ReaderVisualStyle.minimumControlHeight
-                        )
+        GeometryReader { proxy in
+            let pinPreview = settingsGroup == .common
+                && proxy.size.height >= 620
+                && !dynamicType.isAccessibilitySize
+                && verticalSizeClass != .compact
+            VStack(spacing: 10) {
+                ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
+                    Button(action: finish) {
+                        Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .frame(
+                                minWidth: ReaderVisualStyle.panelActionMinimumWidth,
+                                minHeight: ReaderVisualStyle.minimumControlHeight
+                            )
+                    }
+                    .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
+                    .disabled(!isActive())
+                    .accessibilityFocused($closeFocused)
+                    .accessibilityIdentifier("reader.panel.close")
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
-                .disabled(!isActive())
-                .accessibilityFocused($closeFocused)
-                .accessibilityIdentifier("reader.panel.close")
-            }
-            groupSelector
-                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if settingsGroup == .common {
-                        commonContent
-                    } else {
-                        moreContent
+                groupSelector
+                    .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                if pinPreview {
+                    VStack(spacing: 8) {
+                        typographyPreview(compactPinned: true)
+                            .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                        Rectangle()
+                            .fill(appearance.edge.opacity(0.45))
+                            .frame(height: ReaderVisualStyle.panelDividerHeight)
+                            .accessibilityHidden(true)
                     }
                 }
-                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-                .padding(.top, 4)
-                .padding(.bottom, 26)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if settingsGroup == .common {
+                            commonContent(includesPreview: !pinPreview)
+                        } else {
+                            moreContent
+                        }
+                    }
+                    .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                    .padding(.top, 4)
+                    .padding(.bottom, 26)
+                }
+                .id(settingsGroup)
+                .accessibilityIdentifier("reader.settings.scroll")
             }
-            .id(settingsGroup)
-            .accessibilityIdentifier("reader.settings.scroll")
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .foregroundStyle(appearance.foreground)
         .tint(appearance.accent)
@@ -130,58 +141,24 @@ struct EPUBSettingsView: View {
                 ? "只恢复作者文字比例至 100%。保留阅读器行距偏好、当前背景、正文字体和阅读位置。"
                 : "恢复为字号 20、行距 7。保留当前阅读背景与正文字体，不改变阅读位置。")
         }
-        .sheet(item: $info, onDismiss: {
-            if voiceOver, isActive() { controlFocus = auxiliaryReturnFocus }
-        }) { page in
-            NavigationStack {
-                Group {
-                    if page == .diagnostics {
-                        ReaderDiagnosticsView(
-                            openingSummary: [openingSummary, runtimeSummary].compactMap { $0 }.joined(separator: "\n\n"),
-                            fontDiagnostics: fontDiagnostics,
-                            compatibilityDetails: compatibilityDetails,
-                            readerAppearance: appearance
-                        )
-                        .task {
-                            runtimeSummary = nil
-                            guard isActive(), let runtimeDiagnostics else { return }
-                            let value = await runtimeDiagnostics()
-                            guard !Task.isCancelled, isActive() else { return }
-                            runtimeSummary = value
-                        }
-                    } else {
-                        ScrollView {
-                            Text(LibraryLicenseView.bundledLicenseText())
-                                .font(.footnote.monospaced())
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(18)
-                                .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                        .strokeBorder(appearance.edge.opacity(0.75), lineWidth: 0.75)
-                                        .allowsHitTesting(false)
-                                }
-                                .padding(ReaderVisualStyle.panelHorizontalInset)
-                        }
-                        .background(appearance.surface.ignoresSafeArea())
-                        .navigationTitle("GRDB & ZIPFoundation · MIT")
-                        .navigationBarTitleDisplayMode(.inline)
-                    }
-                }
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button { info = nil } label: {
-                            Text("完成").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-                        }
-                        .accessibilityIdentifier("reader.info.close")
-                    }
-                }
+        .onChange(of: developerMode) { enabled in
+            if !enabled { showDiagnostics = false }
+        }
+        .sheet(isPresented: $showDiagnostics, onDismiss: {
+            guard voiceOver, isActive() else { return }
+            if developerMode { controlFocus = "diagnostics" } else { closeFocused = true }
+        }) {
+            if developerMode {
+                ReaderAuxiliarySheet(
+                    openingSummary: openingSummary,
+                    appearance: appearance,
+                    isActive: isActive,
+                    epubUsesAuthorTypography: usesAuthorTypography,
+                    fontDiagnostics: fontDiagnostics,
+                    compatibilityDetails: compatibilityDetails,
+                    runtimeDiagnostics: runtimeDiagnostics
+                )
             }
-            .tint(appearance.accent)
-            .foregroundStyle(appearance.foreground)
-            .environment(\.colorScheme, appearance.theme == .dark ? .dark : .light)
-            .presentationDetents([.large])
         }
         .accessibilityAction(.escape) { finish() }
         .onDisappear { draft = preferences.validated }
@@ -240,17 +217,34 @@ struct EPUBSettingsView: View {
         .accessibilityFocused($controlFocus, equals: "group.\(group.rawValue)")
     }
 
-    private var commonContent: some View {
+    private func typographyPreview(compactPinned: Bool) -> some View {
+        ReaderTypographyPreview(
+            preferences: draft,
+            appearance: appearance,
+            selectedFontID: userFontID,
+            context: usesAuthorTypography ? .epubOriginal : .epubReader,
+            fontReloadRevision: previewFontRevision,
+            compactPinned: compactPinned,
+            isActive: isActive
+        )
+    }
+
+    private func commonContent(includesPreview: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            ReaderTypographyPreview(
-                preferences: draft,
-                appearance: appearance,
-                selectedFontID: userFontID,
-                context: usesAuthorTypography ? .epubOriginal : .epubReader,
-                fontReloadRevision: previewFontRevision,
-                isActive: isActive
-            )
+            if includesPreview {
+                typographyPreview(compactPinned: false)
+            }
             sourceSummary
+            if let compatibilitySummary {
+                Text(compatibilitySummary)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(appearance.foreground)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(appearance.sealAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .accessibilityIdentifier("epub.compatibility.summary")
+            }
             typographySection
             themeSection
             presetsSection
@@ -285,17 +279,28 @@ struct EPUBSettingsView: View {
     }
 
     private var sourceDescription: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("当前有效排版")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(appearance.secondary)
-            Text(usesAuthorTypography ? "作者原始排版" : "阅读器排版")
-                .font(.system(.subheadline, design: .serif).weight(.semibold))
-                .foregroundStyle(appearance.foreground)
-            if let effectiveLayoutMode, effectiveLayoutMode != layoutMode {
-                Text("本章已兼容回退；偏好仍为\(layoutMode.title)")
-                    .font(.caption)
-                    .foregroundStyle(appearance.sealAccent)
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(usesAuthorTypography ? appearance.sealAccent : appearance.accent)
+                .frame(width: 3, height: 32)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("本章排版")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(appearance.secondary)
+                Text(usesAuthorTypography ? "作者原始排版" : "阅读器排版")
+                    .font(.system(.subheadline, design: .serif).weight(.semibold))
+                    .foregroundStyle(appearance.foreground)
+                Text(usesAuthorTypography ? "文字按比例缩放，行高随文字同步" : "字号与行距可独立微调")
+                    .font(.caption2)
+                    .foregroundStyle(appearance.secondary)
+                if let effectiveLayoutMode, effectiveLayoutMode != layoutMode {
+                    Text("你的排版选择仍为\(layoutMode.title)。")
+                        .font(.caption)
+                        .foregroundStyle(appearance.sealAccent)
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -336,7 +341,7 @@ struct EPUBSettingsView: View {
                             if voiceOver { controlFocus = "layout.\(layoutMode.rawValue)" }
                         }
                     }
-                    Text("原始排版保留安全支持的作者样式与未混淆字体；夜间背景优先保障可读性。复杂版式可能简化。")
+                    Text("原始排版尽量保留书中的样式。想自行调整行距，可选择阅读器排版。")
                         .font(.caption).foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     sectionDivider
@@ -348,17 +353,14 @@ struct EPUBSettingsView: View {
                 }
             }
             sectionDivider
-            epubScopeSection
-            sectionDivider
-            ReaderSettingsSection(title: "维护信息", detail: "恢复、诊断与许可", appearance: appearance) {
-                VStack(alignment: .leading, spacing: 10) {
-                    restoreTypographyButton
-                    moreSection
-                    Text("当前版本：\(AppVersion.current.displayText)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(appearance.secondary)
-                        .accessibilityIdentifier("app.version")
-                }
+            Text("设置会自动保存，点“完成”即可继续阅读。")
+                .font(.caption)
+                .foregroundStyle(appearance.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if developerMode {
+                diagnosticsButton
+                    .font(.footnote.weight(.medium))
+                    .disabled(!isActive())
             }
         }
     }
@@ -419,7 +421,7 @@ struct EPUBSettingsView: View {
     }
 
     private var authorScaleSummary: some View {
-        Text("100% 为作者原字号。顶部书页预览仅示意比例、纸色及已选本地字体，不呈现原书内嵌字体或版式。")
+        Text("100% 为原书字号。样张仅供预览，不代表原书版式。")
             .font(.caption).foregroundStyle(appearance.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("epub.authorScale.summary")
@@ -428,7 +430,7 @@ struct EPUBSettingsView: View {
     private var typographySection: some View {
         ReaderSettingsSection(
             title: usesAuthorTypography ? "作者文字" : "文字与行距",
-            detail: usesAuthorTypography ? "调整文字比例，松手应用并恢复文本位置" : "滑动预览，松手应用并按文本锚点恢复",
+            detail: usesAuthorTypography ? "调整文字比例，松手应用" : "滑动预览，松手应用",
             appearance: appearance
         ) {
             VStack(alignment: .leading, spacing: 10) {
@@ -463,6 +465,7 @@ struct EPUBSettingsView: View {
                         commit: commitDraft
                     )
                 }
+                restoreTypographyButton
             }
             .padding(14)
             .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -499,41 +502,6 @@ struct EPUBSettingsView: View {
                         .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
                         .allowsHitTesting(false)
                 }
-            }
-        }
-    }
-
-    private var epubScopeSection: some View {
-        ReaderSettingsSection(title: "兼容与范围", detail: "EPUB 首版 · 可重排阅读与安全限制", appearance: appearance) {
-            VStack(alignment: .leading, spacing: 8) {
-                if let compatibilitySummary {
-                    Text(compatibilitySummary)
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(appearance.foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(appearance.sealAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .accessibilityIdentifier("epub.compatibility.summary")
-                }
-                Text("支持可重排 XHTML、本地静态图片、目录与书签、安全净化的作者 CSS 及未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单及联网资源。")
-                    .font(.caption)
-                    .foregroundStyle(appearance.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("epub.settings.scopeNote")
-                if usesAuthorTypography {
-                    Text("保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
-                        .font(.caption).foregroundStyle(appearance.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
-                    .allowsHitTesting(false)
             }
         }
     }
@@ -625,47 +593,18 @@ struct EPUBSettingsView: View {
         .accessibilityIdentifier("reader.typography.restore")
     }
 
-    private var moreSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { diagnosticsButton; licenseButton; Spacer(minLength: 0) }
-                VStack(alignment: .leading, spacing: 6) { diagnosticsButton; licenseButton }
-            }
-            .font(.footnote.weight(.medium))
-            .disabled(!isActive())
-            Text("加减和快捷排版立即应用；滑杆松手应用并恢复文本锚点。“完成”关闭面板。")
-                .font(.caption)
-                .foregroundStyle(appearance.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     private var diagnosticsButton: some View {
         Button {
-            if isActive() { auxiliaryReturnFocus = "diagnostics"; info = .diagnostics }
+            if developerMode, isActive() { showDiagnostics = true }
         } label: {
-            Label("诊断与耗时", systemImage: "waveform.path.ecg")
+            Label("本书诊断", systemImage: "waveform.path.ecg")
                 .padding(.horizontal, 12)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary, cornerRadius: 12))
         .accessibilityIdentifier("reader.info.diagnostics")
         .accessibilityFocused($controlFocus, equals: "diagnostics")
-    }
-
-    private var licenseButton: some View {
-        Button {
-            if isActive() { auxiliaryReturnFocus = "license"; info = .license }
-        } label: {
-            Label("开源许可", systemImage: "doc.text")
-                .padding(.horizontal, 12)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
-        .accessibilityIdentifier("reader.info.license")
-        .accessibilityFocused($controlFocus, equals: "license")
     }
 
     private func themeButton(_ theme: ReaderTheme) -> some View {

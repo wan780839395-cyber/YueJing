@@ -12,14 +12,15 @@ struct ReaderSettingsView: View {
     let selectedBodyFontID: String?
     let selectBodyFont: @MainActor (EPUBUserFont?) -> Void
     @State private var draft: ReaderPreferences
-    @State private var info: ReaderAuxiliarySheet.Page?
+    @AppStorage(DeveloperMode.storageKey) private var developerMode = false
+    @State private var showDiagnostics = false
     @State private var showRestore = false
     @State private var previewFontRevision = 0
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var closeFocused: Bool
-
     init(
         preferences: Binding<ReaderPreferences>,
         changed: @escaping @MainActor () -> Void,
@@ -42,49 +43,60 @@ struct ReaderSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
-            ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
-                Button(action: finish) {
-                    Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
-                               minHeight: ReaderVisualStyle.minimumControlHeight)
+        GeometryReader { proxy in
+            let pinPreview = proxy.size.height >= 580
+                && !dynamicType.isAccessibilitySize
+                && verticalSizeClass != .compact
+            VStack(spacing: 10) {
+                ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
+                    Button(action: finish) {
+                        Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .frame(minWidth: ReaderVisualStyle.panelActionMinimumWidth,
+                                   minHeight: ReaderVisualStyle.minimumControlHeight)
+                    }
+                    .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
+                    .disabled(!isActive())
+                    .accessibilityFocused($closeFocused)
+                    .accessibilityIdentifier("reader.panel.close")
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary))
-                .disabled(!isActive())
-                .accessibilityFocused($closeFocused)
-                .accessibilityIdentifier("reader.panel.close")
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ReaderTypographyPreview(
-                        preferences: draft,
-                        appearance: appearance,
-                        selectedFontID: selectedBodyFontID,
-                        context: .txt,
-                        fontReloadRevision: previewFontRevision,
-                        isActive: isActive
-                    )
-                    typographySection
-                    themeSection
-                    presetsSection
-                    EPUBUserFontPicker(
-                        selectedID: selectedBodyFontID,
-                        isActive: isActive,
-                        select: handleBodyFontSelection,
-                        appearance: appearance,
-                        context: .txt,
-                        showsSpecimen: false
-                    )
-                    moreSection
+                if pinPreview {
+                    VStack(spacing: 8) {
+                        typographyPreview(compactPinned: true)
+                            .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                        Rectangle()
+                            .fill(appearance.edge.opacity(0.45))
+                            .frame(height: ReaderVisualStyle.panelDividerHeight)
+                            .accessibilityHidden(true)
+                    }
                 }
-                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-                .padding(.top, 4)
-                .padding(.bottom, 26)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !pinPreview {
+                            typographyPreview(compactPinned: false)
+                        }
+                        typographySection
+                        themeSection
+                        presetsSection
+                        EPUBUserFontPicker(
+                            selectedID: selectedBodyFontID,
+                            isActive: isActive,
+                            select: handleBodyFontSelection,
+                            appearance: appearance,
+                            context: .txt,
+                            showsSpecimen: false
+                        )
+                        moreSection
+                    }
+                    .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                    .padding(.top, 4)
+                    .padding(.bottom, 26)
+                }
+                .accessibilityIdentifier("reader.settings.scroll")
             }
-            .accessibilityIdentifier("reader.settings.scroll")
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .foregroundStyle(appearance.foreground)
         .tint(appearance.accent)
@@ -101,14 +113,31 @@ struct ReaderSettingsView: View {
         } message: {
             Text("恢复为字号 20、行距 7。保留当前阅读背景与正文字体，不改变阅读位置。")
         }
-        .sheet(item: $info, onDismiss: {
+        .onChange(of: developerMode) { enabled in
+            if !enabled { showDiagnostics = false }
+        }
+        .sheet(isPresented: $showDiagnostics, onDismiss: {
             if voiceOver, isActive() { closeFocused = true }
-        }) { page in
-            ReaderAuxiliarySheet(page: page, openingSummary: openingSummary, appearance: appearance)
+        }) {
+            if developerMode {
+                ReaderAuxiliarySheet(openingSummary: openingSummary, appearance: appearance, isActive: isActive)
+            }
         }
         .accessibilityAction(.escape) { finish() }
         // An interrupted gesture/dismissal must never write an obsolete panel's draft.
         .onDisappear { draft = preferences.validated }
+    }
+
+    private func typographyPreview(compactPinned: Bool) -> some View {
+        ReaderTypographyPreview(
+            preferences: draft,
+            appearance: appearance,
+            selectedFontID: selectedBodyFontID,
+            context: .txt,
+            fontReloadRevision: previewFontRevision,
+            compactPinned: compactPinned,
+            isActive: isActive
+        )
     }
 
     private var typographySection: some View {
@@ -122,6 +151,7 @@ struct ReaderSettingsView: View {
                     .accessibilityHidden(true)
                 ReaderSettingAdjustment(title: "行距", key: "spacing", value: $draft.lineSpacing, range: 0...20,
                     accent: appearance.accent, isActive: isActive, commit: commitDraft)
+                restoreTypographyButton
             }
             .padding(14)
             .background(appearance.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -150,7 +180,6 @@ struct ReaderSettingsView: View {
                             .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.6)
                             .allowsHitTesting(false)
                     }
-                restoreTypographyButton
             }
         }
     }
@@ -246,40 +275,27 @@ struct ReaderSettingsView: View {
                 .padding(.vertical, 4)
                 .accessibilityHidden(true)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { diagnosticsButton; licenseButton; Spacer(minLength: 0) }
-                VStack(alignment: .leading, spacing: 6) { diagnosticsButton; licenseButton }
-            }
-            .font(.footnote.weight(.medium))
-            .disabled(!isActive())
-
-            Text("预览为示例文字，实际断行以正文为准。加减和快捷排版立即应用；“完成”只关闭，不撤销已应用的设置。")
+            Text("设置会自动保存，点“完成”即可继续阅读。")
                 .font(.caption)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if developerMode {
+                diagnosticsButton
+                    .font(.footnote.weight(.medium))
+                    .disabled(!isActive())
+            }
         }
     }
 
     private var diagnosticsButton: some View {
-        Button { if isActive() { info = .diagnostics } } label: {
-            Label("诊断与耗时", systemImage: "waveform.path.ecg")
+        Button { if developerMode, isActive() { showDiagnostics = true } } label: {
+            Label("本书诊断", systemImage: "waveform.path.ecg")
                 .padding(.horizontal, 12)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary, cornerRadius: 12))
         .accessibilityIdentifier("reader.info.diagnostics")
-    }
-
-    private var licenseButton: some View {
-        Button { if isActive() { info = .license } } label: {
-            Label("开源许可", systemImage: "doc.text")
-                .padding(.horizontal, 12)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 12))
-        .accessibilityIdentifier("reader.info.license")
     }
 
     private func themeButton(_ theme: ReaderTheme) -> some View {

@@ -9,7 +9,6 @@ struct LibrarySidebarView: View {
     let canNavigate: Bool
     let appearance: LibraryAppearance
     let onSection: (LibrarySection) -> Void
-    let onInformation: (LibraryInformationPage) -> Void
     @AccessibilityFocusState.Binding var focusedControl: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -75,14 +74,6 @@ struct LibrarySidebarView: View {
                                 .frame(height: 0.5)
                                 .padding(.horizontal, 8)
                                 .accessibilityHidden(true)
-
-                            sectionCaption("书斋信息")
-                                .padding(.top, 4)
-
-                            VStack(spacing: 4) {
-                                informationButton("诊断与耗时", symbol: "waveform.path.ecg", page: .diagnostics)
-                                informationButton("开源许可", symbol: "doc.text", page: .license)
-                            }
 
                             HStack(spacing: 8) {
                                 Circle()
@@ -154,28 +145,5 @@ struct LibrarySidebarView: View {
             .accessibilityIdentifier("library.sidebar.close")
         }
         .padding(.top, 6)
-    }
-
-    private func informationButton(_ title: String, symbol: String, page: LibraryInformationPage) -> some View {
-        Button { onInformation(page) } label: {
-            HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .frame(width: 24)
-                    .accessibilityHidden(true)
-                Text(title)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(appearance.secondary.opacity(0.6))
-                    .accessibilityHidden(true)
-            }
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(AppControlButtonStyle(foreground: appearance.secondary, cornerRadius: 12))
-        .disabled(!canNavigate)
     }
 }

@@ -440,6 +440,7 @@ def parse_log_for_spec(group, spec, raw, code, timed_out, *, action="test"):
     if kind == "ui":
         files = {rel for rel, _ in spec["pairs"]}
         require(len(files) == 1 and files <= {"YueJingEPUBUITests/EPUBFlowUITests.swift",
+                                             "YueJingUITests/ReadingFlowUITests.swift",
                                              "YueJingEPUBUITests/EPUBFontPickerUITests.swift"}, "Unapproved UI source")
         ui_class = Path(files.pop()).stem
     events = audit.parse_events(text.encode("utf-8"), names, ui=kind == "ui", ui_class=ui_class)

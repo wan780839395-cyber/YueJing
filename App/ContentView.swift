@@ -8,7 +8,9 @@ struct ContentView: View {
     @StateObject private var readerRoutes = BookReadingRouteOwner()
     @State private var plannedNavigation = LibraryPlannedNavigation()
     @AppStorage(AppAppearance.storageKey) private var appAppearanceRawValue = AppAppearance.defaultAppearance.rawValue
+    @AppStorage(DeveloperMode.storageKey) private var developerMode = false
     @State private var selectedSection: LibrarySection = .shelf
+    @State private var shelfQuery = LibraryShelfQuery()
     @State private var drawerPresented = false
     @State private var informationRoute: LibraryInformationRoute?
     @State private var displayedInformation: LibraryInformationPage = .diagnostics
@@ -21,7 +23,7 @@ struct ContentView: View {
     }
     /// New static destinations must not compete with import or reading presentation.
     private var canOpenPlannedFeatures: Bool {
-        model.service != nil && model.canPresentLibraryFeedback && !model.importing
+        model.service != nil && model.canPresentLibraryFeedback && !model.importing && !model.deletingBook
             && model.encodingChoice?.id == nil && model.message == nil
             && readerRoutes.presentation?.id == nil
     }
@@ -93,11 +95,10 @@ struct ContentView: View {
             .navigationDestination(isPresented: informationPresentation) {
                 switch displayedInformation {
                 case .diagnostics:
-                    ReaderDiagnosticsView(
-                        importState: model.importDiagnostics,
-                        importSummary: model.processingSummary,
-                        libraryAppearance: appearance
-                    )
+                    if developerMode {
+                        ReaderDiagnosticsView(importState: model.importDiagnostics,
+                                              importSummary: model.processingSummary, libraryAppearance: appearance)
+                    }
                 case .license:
                     LibraryLicenseView(appearance: appearance)
                 }
@@ -106,8 +107,11 @@ struct ContentView: View {
         .overlay(alignment: .leading) {
             LibrarySidebarView(section: selectedSection, presented: drawerPresentation,
                 canNavigate: canNavigateManagement, appearance: appearance,
-                onSection: selectDrawerSection, onInformation: openDrawerInformation,
+                onSection: selectDrawerSection,
                 focusedControl: $focusedLibraryControl)
+        }
+        .onChange(of: developerMode) { enabled in
+            if !enabled, informationRoute?.page == .diagnostics { informationRoute = nil }
         }
         .onChange(of: drawerPresented) { open in
             focusedLibraryControl = open ? "library.close" : "library.menu"
@@ -167,6 +171,12 @@ struct ContentView: View {
             appearance: appearance,
             coverLoader: model.coverLoader,
             canImport: model.canBeginFileSelection && canChangeManagement,
+            query: $shelfQuery,
+            canManageBooks: canChangeManagement,
+            onDeleteBook: { book in
+                guard selectedSection == .shelf, canChangeManagement else { return }
+                model.deleteBook(book)
+            },
             onOpenBook: { book in
                 guard canChangeManagement else { return }
                 if let service = model.service { readerRoutes.open(book: book, service: service) }
@@ -180,7 +190,7 @@ struct ContentView: View {
 
     private func managementOptions() -> some View {
         LibraryManagementOptions(appearance: appearance, appAppearance: appAppearance,
-            canChange: canChangeManagement, onAppearance: chooseAppearance,
+            developerMode: $developerMode, canChange: canChangeManagement, onAppearance: chooseAppearance,
             onOpenFeature: openPlannedFeature, onInformation: openInformation)
     }
 
@@ -211,14 +221,8 @@ struct ContentView: View {
         drawerPresented = false
     }
 
-    private func openDrawerInformation(_ page: LibraryInformationPage) {
-        guard drawerPresented, canNavigateManagement else { return }
-        drawerPresented = false
-        openInformation(page)
-    }
-
     private func openInformation(_ page: LibraryInformationPage) {
-        guard canChangeManagement else { return }
+        guard canChangeManagement, page != .diagnostics || developerMode else { return }
         displayedInformation = page
         informationRoute = LibraryInformationRoute(page: page)
     }

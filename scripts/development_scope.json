@@ -3,11 +3,13 @@
   "scope": "development-targeted",
   "branch": "dev/workflow-optimization",
   "cases": [
-    {"file": "YueJingHostTests/TXTBodyFontHostTests.swift", "name": "sharedPageSpecimenRendersTheSelectedFaceAtDraftSize"},
-    {"file": "YueJingHostTests/TXTBodyFontHostTests.swift", "name": "bodyCanvasPaintsTheWideAAndRestoresItsDefaultInk"},
-    {"file": "YueJingHostTests/TXTBodyFontHostTests.swift", "name": "reflowAndReopenKeepScrolledTextWithSelectedAndRestoredFont"},
-    {"file": "YueJingHostTests/EPUBFontLoadingHostTests.swift", "name": "userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain"},
-    {"file": "YueJingEPUBUITests/EPUBFontPickerUITests.swift", "name": "testRevisedCardOpensFilesAndReturns"}
+    {"file":"ReaderDomainTests/LibraryDeletionTests.swift","name":"deleteTXTBookPreservesSameTitleSiblingAndReimportsWithoutReadingState"},
+    {"file":"ReaderDomainTests/LibraryDeletionTests.swift","name":"deleteEPUBBookPreservesSameTitleSiblingAndReimportsWithoutReadingState"},
+    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testShelfTitleSearchPreservesFilterAcrossReadCancelAndDelete"},
+    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testEPUBTypographyNoCoverFallbackAndTXTIsolation"},
+    {"file":"YueJingEPUBUITests/EPUBFlowUITests.swift","name":"testEPUBDirectoryControlsRecoverAfterCancelReopenAndForeground"},
+    {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading"},
+    {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testAccessibilityFontLeavesExitAndPanelControlsReachable"}
   ],
   "build_timeout_seconds": 900,
   "test_timeout_seconds": 480,

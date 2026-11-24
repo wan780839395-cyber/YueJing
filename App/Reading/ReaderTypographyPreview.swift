@@ -32,6 +32,7 @@ struct ReaderTypographyPreview: View {
     var selectedFontID: String? = nil
     var context: Context = .txt
     var fontReloadRevision: Int = 0
+    var compactPinned: Bool = false
     var isActive: @MainActor () -> Bool = { true }
 
     @State private var fontState: FontLoadState
@@ -44,6 +45,7 @@ struct ReaderTypographyPreview: View {
         selectedFontID: String? = nil,
         context: Context = .txt,
         fontReloadRevision: Int = 0,
+        compactPinned: Bool = false,
         isActive: @escaping @MainActor () -> Bool = { true }
     ) {
         self.preferences = preferences
@@ -51,6 +53,7 @@ struct ReaderTypographyPreview: View {
         self.selectedFontID = selectedFontID
         self.context = context
         self.fontReloadRevision = fontReloadRevision
+        self.compactPinned = compactPinned
         self.isActive = isActive
         _fontState = State(initialValue: selectedFontID.map { .loading(id: $0) } ?? .defaultFont)
     }
@@ -99,6 +102,22 @@ struct ReaderTypographyPreview: View {
 
     private var paperForeground: Color {
         Color(uiColor: validated.theme.foreground)
+    }
+
+    private var paperAccent: Color {
+        ReaderVisualStyle.accent(for: validated.theme)
+    }
+
+    private var paperAccentSoft: Color {
+        paperAccent.opacity(validated.theme == .dark ? 0.20 : 0.12)
+    }
+
+    private var paperSealAccent: Color {
+        ReaderVisualStyle.sealAccent(for: validated.theme)
+    }
+
+    private var paperEdge: Color {
+        ReaderVisualStyle.edge(for: validated.theme)
     }
 
     private var footerNote: String {
@@ -153,7 +172,7 @@ struct ReaderTypographyPreview: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: compactPinned ? 7 : 10) {
             headerRow
                 .padding(.trailing, 14)
 
@@ -166,20 +185,36 @@ struct ReaderTypographyPreview: View {
 
             ReaderSpecimenText(face: sampleFace, size: samplePointSize, lineSpacing: sampleLineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: compactPinned ? 50 : 62, alignment: .leading)
                 .foregroundStyle(paperForeground)
                 .opacity(isLoadingFont ? 0.52 : 1)
                 .accessibilityHidden(true)
 
             Text(footerNote)
                 .font(.caption2)
-                .foregroundStyle(paperForeground.opacity(0.60))
+                .foregroundStyle(paperForeground.opacity(0.62))
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityHidden(true)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.leading, 22)
+        .padding(.trailing, 18)
+        .padding(.vertical, compactPinned ? 11 : 14)
         .background(Color(uiColor: validated.theme.background), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(alignment: .leading) {
+            // Fine-press folio double-margin proof hairline
+            HStack(spacing: 2.5) {
+                Rectangle()
+                    .fill(paperForeground.opacity(validated.theme == .dark ? 0.16 : 0.13))
+                    .frame(width: 1)
+                Rectangle()
+                    .fill(paperForeground.opacity(validated.theme == .dark ? 0.08 : 0.06))
+                    .frame(width: 0.5)
+            }
+            .padding(.leading, 10)
+            .padding(.vertical, 12)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
         .overlay(alignment: .topTrailing) {
             // Miniature notched bookmark ribbon tucked into the top edge of the sample page
             Path { path in
@@ -190,7 +225,7 @@ struct ReaderTypographyPreview: View {
                 path.addLine(to: CGPoint(x: 0, y: 15))
                 path.closeSubpath()
             }
-            .fill(appearance.sealAccent.opacity(0.88))
+            .fill(paperSealAccent.opacity(0.88))
             .frame(width: 8, height: 15)
             .padding(.trailing, 16)
             .allowsHitTesting(false)
@@ -198,11 +233,11 @@ struct ReaderTypographyPreview: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(appearance.edge.opacity(0.85), lineWidth: 0.85)
+                .strokeBorder(paperEdge.opacity(0.85), lineWidth: 0.85)
                 .allowsHitTesting(false)
         }
-        .shadow(color: appearance.subtleShadow, radius: 8, x: 0, y: 3)
-        .padding(.bottom, 4)
+        .shadow(color: appearance.subtleShadow, radius: compactPinned ? 10 : 8, x: 0, y: 3)
+        .padding(.bottom, compactPinned ? 0 : 4)
         .task(id: LoadKey(fontID: selectedFontID, localRevision: localRevision, externalRevision: fontReloadRevision)) {
             await loadFontIfNeeded()
         }
@@ -255,7 +290,7 @@ struct ReaderTypographyPreview: View {
     private var previewBadge: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(appearance.sealAccent)
+                .fill(paperSealAccent)
                 .frame(width: 6, height: 6)
             Text("书页预览")
                 .font(.caption.weight(.semibold))
@@ -283,15 +318,15 @@ struct ReaderTypographyPreview: View {
             HStack(spacing: 6) {
                 ProgressView()
                     .controlSize(.small)
-                    .tint(appearance.accent)
+                    .tint(paperAccent)
                 Text("正在载入所选字体…")
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(appearance.accent)
+                    .foregroundStyle(paperAccent)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(appearance.accentSoft, in: Capsule())
+            .background(paperAccentSoft, in: Capsule())
 
         case .loaded(_, _, let displayName):
             HStack(spacing: 5) {
@@ -301,10 +336,10 @@ struct ReaderTypographyPreview: View {
                     .font(.caption2.weight(.semibold))
                     .lineLimit(1)
             }
-            .foregroundStyle(appearance.accent)
+            .foregroundStyle(paperAccent)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(appearance.accentSoft, in: Capsule())
+            .background(paperAccentSoft, in: Capsule())
 
         case .failed:
             HStack(spacing: 5) {
@@ -314,10 +349,10 @@ struct ReaderTypographyPreview: View {
                     .font(.caption2.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .foregroundStyle(appearance.sealAccent)
+            .foregroundStyle(paperSealAccent)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(appearance.sealAccent.opacity(validated.theme == .dark ? 0.20 : 0.11), in: Capsule())
+            .background(paperSealAccent.opacity(validated.theme == .dark ? 0.20 : 0.11), in: Capsule())
         }
     }
 

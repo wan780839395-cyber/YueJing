@@ -10,16 +10,23 @@ public actor LibraryStore {
     private var closedSessions: Set<String> = []
     private var derivedBuilds: [String: String] = [:]
     private var derivedReservations: [String: Int] = [:]
-    private var derivedLeases: [UUID: DerivedPointer] = [:]
+    private var derivedLeases: [UUID: DerivedPackPin] = [:]
     private var readerOpens: [String: UUID] = [:]
     private var readerPreferenceSequences: [String: Int64] = [:]
     private var epubSessions: [String: (package: EPUBPackage, token: EPUBNavigationToken?, ready: Bool)] = [:]
 
-    public init(root: URL) throws {
-        self.root = root
+    public init(root suppliedRoot: URL) throws {
+        guard suppliedRoot.isFileURL else { throw LibraryError.notRegularFile }
         let files = FileManager.default
+        try files.createDirectory(at: suppliedRoot, withIntermediateDirectories: true)
+        try EPUBReadyArtifact.requireDirectory(suppliedRoot)
+        // Stable spelling for lease keys (e.g. /var and /private/var) under the trusted library root.
+        let root = suppliedRoot.resolvingSymlinksInPath().standardizedFileURL
+        self.root = root
         try files.createDirectory(at: root.appendingPathComponent("Books"), withIntermediateDirectories: true)
         try files.createDirectory(at: root.appendingPathComponent("Imports"), withIntermediateDirectories: true)
+        try EPUBReadyArtifact.requireDirectory(root.appendingPathComponent("Books"))
+        try EPUBReadyArtifact.requireDirectory(root.appendingPathComponent("Imports"))
         queue = try DatabaseQueue(path: root.appendingPathComponent("library.sqlite").path)
         try LibrarySchema.migrator().migrate(queue)
         try queue.write { db in try db.execute(sql: "UPDATE books SET activeSession = NULL") }
@@ -27,7 +34,8 @@ public actor LibraryStore {
         let bookIDs = try queue.read { db in Set(try String.fetchAll(db, sql: "SELECT id FROM books")) }
         for url in try files.contentsOfDirectory(at: root.appendingPathComponent("Books"), includingPropertiesForKeys: nil) {
             let id = url.deletingPathExtension().lastPathComponent
-            if ["txt", "epub"].contains(url.pathExtension), Self.isBookID(id), !bookIDs.contains(id) { try files.removeItem(at: url) }
+            if ["txt", "epub"].contains(url.pathExtension), Self.isBookID(id), !bookIDs.contains(id),
+               (try? ManagedFile.exists(url, as: .typeRegular)) == true { try? files.removeItem(at: url) }
         }
         for url in try files.contentsOfDirectory(at: root.appendingPathComponent("Imports"), includingPropertiesForKeys: nil) {
             if ["txt", "epub", "epubwork"].contains(url.pathExtension), UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil {
@@ -66,6 +74,10 @@ public actor LibraryStore {
 
     /// No await within the decision/rename/transaction: cancellation and commit have one serial winner.
     public func commitImport(ticket: UUID, proposed: LibraryBook) throws -> ImportReceipt {
+        try commitTXT(ticket: ticket, proposed: proposed, duplicateOnly: false)
+    }
+
+    func commitTXT(ticket: UUID, proposed: LibraryBook, duplicateOnly: Bool) throws -> ImportReceipt {
         switch tickets[ticket] {
         case .committed(let receipt)?: return receipt
         case .open?: break
@@ -75,6 +87,7 @@ public actor LibraryStore {
         let staging = stagingURL(ticket: ticket), destination = try fileURL(bookID: proposed.id)
         let files = FileManager.default
         if let existing = try book(id: proposed.id) {
+            guard existing.format == .txt else { throw LibraryError.changedFile }
             try Task.checkCancellation()
             if !files.fileExists(atPath: destination.path) { try files.moveItem(at: staging, to: destination) }
             else if files.fileExists(atPath: staging.path) { try files.removeItem(at: staging) }
@@ -82,6 +95,8 @@ public actor LibraryStore {
             tickets[ticket] = .committed(receipt)
             return receipt
         }
+        guard !duplicateOnly, proposed.format == .txt else { throw LibraryError.missingBook }
+        try prepareDeletedDestination(kind: .txt, id: proposed.id)
         guard !files.fileExists(atPath: destination.path) else { throw LibraryError.changedFile }
         try files.moveItem(at: staging, to: destination)
         do {
@@ -100,10 +115,15 @@ public actor LibraryStore {
     }
 
     public func beginReading(bookID: String, versionID: String) throws -> ReadingStart {
+        try beginReading(bookID: bookID, versionID: versionID, addedAt: nil)
+    }
+
+    func beginReading(bookID: String, versionID: String, addedAt: Double?) throws -> ReadingStart {
         let token = ReadingSession(id: UUID().uuidString, bookID: bookID, versionID: versionID)
         return try queue.write { db in
             guard let book = try LibraryBook.fetchOne(db, key: bookID) else { throw LibraryError.missingBook }
             guard book.versionID == versionID else { throw LibraryError.invalidAnchor }
+            guard addedAt == nil || book.addedAt == addedAt else { throw LibraryError.missingBook }
             let old = try ProgressRow.fetchOne(db, key: bookID)
             let anchor = old?.anchor(matching: book)
             try db.execute(sql: "UPDATE books SET activeSession = ?, lastReadAt = ? WHERE id = ?",
@@ -247,7 +267,8 @@ extension LibraryStore {
         }
         // Unlinked files can remain allocated while an old reader holds its descriptor.
         var chargedLeases: Set<String> = []
-        for lease in derivedLeases.values where !visiblePacks.contains(lease.generation) {
+        for pin in derivedLeases.values where !visiblePacks.contains(pin.pointer.generation) {
+            let lease = pin.pointer
             if chargedLeases.insert(lease.generation).inserted { occupied = try DerivedBookFormat.add(occupied, lease.byteCount) }
         }
         for bytes in derivedReservations.values { occupied = try DerivedBookFormat.add(occupied, bytes) }
@@ -273,7 +294,7 @@ extension LibraryStore {
             try Task.checkCancellation()
             guard derivedBuilds[id] == nil,
                   let value = try queue.read({ db in try pointer(db, bookID: id) }),
-                  !derivedLeases.values.contains(where: { $0.generation == value.generation }) else { continue }
+                  !derivedLeases.values.contains(where: { $0.pointer.generation == value.generation }) else { continue }
             let url = try derivedURL(generation: value.generation, staging: false)
             var size = 0
             if FileManager.default.fileExists(atPath: url.path) {
@@ -282,7 +303,7 @@ extension LibraryStore {
                 size = actual
             }
             try invalidateDerived(value)
-            if size > 0 { try FileManager.default.removeItem(at: url) }
+            if size > 0, try !DerivedPackPin.unlinkIfUnpinned(url, generation: value.generation) { continue }
             reclaimed = try DerivedBookFormat.add(reclaimed, size)
         }
         // Only cache pointers/recognized ordinary pack files above can be removed. No recursion,
@@ -320,7 +341,7 @@ extension LibraryStore {
             try queue.write { db in
                 guard let current = try LibraryBook.fetchOne(db, key: value.bookID), current.versionID == value.versionID,
                       current.encodingRaw == permit.book.encodingRaw, current.byteCount == permit.book.byteCount,
-                      current.utf16Count == permit.book.utf16Count,
+                      current.utf16Count == permit.book.utf16Count, current.addedAt == permit.book.addedAt,
                       try pointer(db, bookID: value.bookID)?.generation == permit.previousGeneration else {
                     throw DerivedStorageError.staleBuild
                 }
@@ -346,14 +367,17 @@ extension LibraryStore {
     func leaseDerived(bookID: String) throws -> DerivedLease {
         guard let value = try queue.read({ db in try pointer(db, bookID: bookID) }) else { throw DerivedStorageError.missingArtifact }
         try ensureDerivedRoot()
-        let id = UUID(); derivedLeases[id] = value
+        let id = UUID(); derivedLeases[id] = DerivedPackPin(value)
         return DerivedLease(id: id, pointer: value)
     }
     func derivedFileURL(_ lease: DerivedLease) throws -> URL {
-        guard derivedLeases[lease.id] == lease.pointer else { throw DerivedStorageError.closed }
+        guard derivedLeases[lease.id]?.pointer == lease.pointer else { throw DerivedStorageError.closed }
         return try derivedURL(generation: lease.pointer.generation, staging: false)
     }
-    func releaseDerivedLease(_ lease: DerivedLease) { derivedLeases.removeValue(forKey: lease.id) }
+    func releaseDerivedLease(_ lease: DerivedLease) {
+        guard derivedLeases.removeValue(forKey: lease.id) != nil else { return }
+        try? retryLocalRemoval(kind: .pack, name: lease.pointer.generation)
+    }
     func invalidateDerived(_ value: DerivedPointer) throws {
         try queue.write { db in
             try db.execute(sql: "DELETE FROM derivedArtifacts WHERE bookID = ? AND generation = ? AND manifestSHA256 = ?",
@@ -372,12 +396,14 @@ extension LibraryStore {
             if FileManager.default.fileExists(atPath: url.path) { referenced.insert(value.generation) }
             else { try invalidateDerived(value) }
         }
-        referenced.formUnion(derivedLeases.values.map(\.generation))
+        referenced.formUnion(derivedLeases.values.map(\.pointer.generation))
         referenced.formUnion(derivedReservations.keys)
         for url in try FileManager.default.contentsOfDirectory(at: derivedRoot, includingPropertiesForKeys: nil) {
             let name = url.deletingPathExtension().lastPathComponent
             guard ["stage", "pack"].contains(url.pathExtension), DerivedBookFormat.isGeneration(name), !referenced.contains(name) else { continue }
-            try DerivedBookFormat.regularFile(url); try FileManager.default.removeItem(at: url)
+            try DerivedBookFormat.regularFile(url)
+            if url.pathExtension == "pack" { _ = try DerivedPackPin.unlinkIfUnpinned(url, generation: name) }
+            else { try FileManager.default.removeItem(at: url) }
         }
     }
 }
@@ -605,6 +631,7 @@ extension LibraryStore {
         }
         let metadata = try JSONEncoder().encode(package)
         if let ready = package.ready { try EPUBReadyArtifact.validate(ready, package: package) }
+        try prepareDeletedDestination(kind: .epub, id: proposed.id)
         guard !files.fileExists(atPath: destination.path) else { throw LibraryError.changedFile }
         try files.moveItem(at: staging, to: destination)
         do {
@@ -881,5 +908,123 @@ private struct EPUBBookmarkRecord: FetchableRecord, Decodable {
         let position = EPUBReadingPosition(bookID: bookID, versionID: versionID, path: path, node: node,
                                            utf16Offset: utf16Offset, unit: unit, viewportOffset: viewportOffset)
         return EPUBBookmark(id: id, position: position, title: title, createdAt: Date(timeIntervalSince1970: createdAt))
+    }
+}
+
+extension LibraryStore {
+    /// The only destructive catalog decision. No filesystem mutation or suspension before commit.
+    func deleteBook(_ requested: LibraryBook) throws -> [ManagedRemoval] {
+        try Task.checkCancellation()
+        guard readerOpens[requested.id] == nil, derivedBuilds[requested.id] == nil else { throw LibraryError.bookInUse }
+        let token = UUID().uuidString
+        let removals = try queue.write { db -> [ManagedRemoval] in
+            guard Self.isBookID(requested.id), let book = try LibraryBook.fetchOne(db, key: requested.id),
+                  book.versionID == requested.versionID, book.format == requested.format,
+                  book.addedAt == requested.addedAt else { throw LibraryError.missingBook }
+            guard book.activeSession == nil else { throw LibraryError.bookInUse }
+            let discriminator = try String.fetchOne(db, sql: "SELECT format FROM bookFormats WHERE bookID=?", arguments: [book.id])
+            // New TXT imports have no v6 row; migrated TXT and every EPUB do.
+            guard (discriminator ?? "txt") == book.format.rawValue else { throw LibraryError.changedFile }
+            var jobs = [ManagedRemoval(kind: book.format == .txt ? .txt : .epub, name: book.id, token: token)]
+            if let generation = try String.fetchOne(db, sql: "SELECT generation FROM derivedArtifacts WHERE bookID=?", arguments: [book.id]),
+               DerivedBookFormat.isGeneration(generation) {
+                jobs.append(.init(kind: .pack, name: generation, token: token))
+            }
+            if book.format == .epub {
+                if let directory = try String.fetchOne(db, sql: "SELECT directory FROM epubReadyVersions WHERE bookID=?", arguments: [book.id]),
+                   UUID(uuidString: directory)?.uuidString == directory {
+                    jobs.append(.init(kind: .ready, name: directory, token: token))
+                }
+                if book.versionID.hasPrefix(book.id + ":") {
+                    jobs.append(.init(kind: .publication, name: book.versionID, token: token))
+                    jobs.append(.init(kind: .content, name: book.versionID, token: token))
+                }
+            }
+            for job in jobs { try job.enqueue(db) }
+            // All reading state, package/cover, format and index tables reference books ON DELETE CASCADE.
+            guard try LibraryBook.deleteOne(db, key: book.id) else { throw LibraryError.missingBook }
+            try Task.checkCancellation()
+            return jobs
+        }
+        readerOpens.removeValue(forKey: requested.id)
+        derivedBuilds.removeValue(forKey: requested.id) // Staging/reservation stays owned by its producer.
+        epubSessions = epubSessions.filter { $0.value.package.sourceSHA256 != requested.id }
+        return removals
+    }
+
+    func pendingRemovals() throws -> [ManagedRemoval] {
+        try queue.read { try ManagedRemoval.fetchAll($0, sql: "SELECT * FROM managedRemovals") }
+    }
+
+    private func retryLocalRemoval(kind: ManagedRemoval.Kind, name: String) throws {
+        if let job = try queue.read({ try ManagedRemoval.fetchOne($0, sql: "SELECT * FROM managedRemovals WHERE kind=? AND name=?", arguments: [kind.rawValue, name]) }) {
+            _ = try reclaimLocal(job)
+        }
+    }
+
+    /// Don't adopt or overwrite arbitrary orphans. Only retry an unlink authorized by a committed delete.
+    private func prepareDeletedDestination(kind: ManagedRemoval.Kind, id: String) throws {
+        try EPUBReadyArtifact.requireDirectory(root)
+        try EPUBReadyArtifact.requireDirectory(root.appendingPathComponent("Books"))
+        try retryLocalRemoval(kind: kind, name: id)
+    }
+
+    /// Return true only for a pool-owned job that still needs processing. Guard both replay and
+    /// path reuse with the live SQLite record, never with a cached book or a caller-supplied URL.
+    private func reclaimLocal(_ job: ManagedRemoval) throws -> Bool {
+        try queue.write { db in
+            guard try String.fetchOne(db, sql: "SELECT token FROM managedRemovals WHERE kind=? AND name=?",
+                                      arguments: [job.kind.rawValue, job.name]) == job.token else { return false }
+            try EPUBReadyArtifact.requireDirectory(root)
+            switch job.kind {
+            case .txt, .epub:
+                guard Self.isBookID(job.name) else { throw LibraryError.missingBook }
+                if try String.fetchOne(db, sql: "SELECT id FROM books WHERE id=? COLLATE NOCASE", arguments: [job.name]) == nil {
+                    let url = try job.kind == .txt ? fileURL(bookID: job.name) : epubFileURL(bookID: job.name)
+                    if try ManagedFile.exists(url.deletingLastPathComponent(), as: .typeDirectory) {
+                        try ManagedFile.remove(url, as: .typeRegular)
+                    }
+                }
+            case .pack:
+                guard DerivedBookFormat.isGeneration(job.name) else { throw DerivedStorageError.corruptArtifact }
+                if try String.fetchOne(db, sql: "SELECT bookID FROM derivedArtifacts WHERE generation=? COLLATE NOCASE", arguments: [job.name]) == nil,
+                   try ManagedFile.exists(derivedRoot, as: .typeDirectory) {
+                    let url = try derivedURL(generation: job.name, staging: false)
+                    guard try DerivedPackPin.unlinkIfUnpinned(url, generation: job.name) else { return false }
+                }
+            case .ready:
+                guard UUID(uuidString: job.name)?.uuidString == job.name else { throw EPUBError.corruptResource }
+                if try String.fetchOne(db, sql: "SELECT bookID FROM epubReadyVersions WHERE directory=? COLLATE NOCASE", arguments: [job.name]) == nil { return true }
+            case .publication, .content:
+                if try String.fetchOne(db, sql: "SELECT id FROM books WHERE versionID=?", arguments: [job.name]) == nil {
+                    if job.kind == .content { return true }
+                    try EPUBPublicationCache.removeIfMatching(version: job.name, cache: epubCacheURL())
+                }
+            }
+            try job.finish(db)
+            return false
+        }
+    }
+
+    // An unlink failure cannot turn a committed delete into a failed catalog operation. The
+    // ticket is retried on default library open; a source collision is also retried before import.
+    func reclaim(_ jobs: [ManagedRemoval]) async {
+        for job in jobs {
+            do {
+                guard try reclaimLocal(job) else { continue }
+                switch job.kind {
+                case .ready:
+                    guard try await EPUBContentPool.shared.retireReady(directory: job.name, root: epubReadyURL()) else { continue }
+                case .content:
+                    guard try await EPUBContentPool.shared.retireContent(version: job.name, root: epubContentPoolURL()) else { continue }
+                default: continue
+                }
+                try finishPoolRemoval(job)
+            } catch { continue }
+        }
+    }
+
+    private func finishPoolRemoval(_ job: ManagedRemoval) throws {
+        try queue.write { try job.finish($0) }
     }
 }

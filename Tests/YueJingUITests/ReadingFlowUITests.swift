@@ -131,6 +131,33 @@ final class ReadingFlowUITests: XCTestCase {
 
     @MainActor func testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading() {
         withFixture { app in
+            let mode = openDeveloperSwitch(app)
+            guard let original = mode.value as? String, ["0", "1"].contains(original) else {
+                XCTFail("Expected a readable developer mode switch"); return
+            }
+            // The UUID isolates the books, not the App's persisted display preference.
+            addTeardownBlock { @MainActor () async in
+                app.launch()
+                defer { app.terminate() }
+                let restored = self.openDeveloperSwitch(app)
+                if restored.value as? String != original { restored.tap() }
+                XCTAssertEqual(restored.value as? String, original)
+            }
+            if original == "1" { mode.tap() }
+            XCTAssertEqual(mode.value as? String, "0")
+            let imports = app.buttons["library.importDiagnostics"]
+            XCTAssertFalse(imports.exists)
+            checkShelfAbout(app)
+            revealSetting(mode, app, in: app.scrollViews.firstMatch); mode.tap()
+            XCTAssertEqual(mode.value as? String, "1")
+
+            app.terminate(); app.launch() // Same fixture UUID, no preference launch override.
+            XCTAssertEqual(openDeveloperSwitch(app).value as? String, "1")
+            checkShelfAbout(app)
+            revealSetting(imports, app, in: app.scrollViews.firstMatch); imports.tap()
+            let importPage = app.navigationBars["导入诊断"]
+            waitHittable(importPage.buttons.firstMatch); importPage.buttons.firstMatch.tap()
+            waitHittable(app.buttons["library.tab.shelf"]); app.buttons["library.tab.shelf"].tap()
             open("UITest-Long-A", app)
             let frame = viewport(app).frame
             let directory = app.buttons["reader.tools.directory"]
@@ -158,17 +185,28 @@ final class ReadingFlowUITests: XCTestCase {
             assertSameFrame(directory.frame, initialDirectoryFrame)
             assertSameFrame(settings.frame, initialSettingsFrame)
             openSettings(app)
-            for key in ["diagnostics", "license"] {
-                let entry = app.buttons["reader.info.\(key)"]
-                scrollTo(entry, in: app.scrollViews.firstMatch); entry.tap()
-                let done = app.buttons["reader.info.close"]
-                waitHittable(done); done.tap()
-                waitHittable(app.buttons["reader.panel.close"])
-                XCTAssertFalse(app.buttons["reader.exit"].isHittable)
-            }
+            let entry = app.buttons["reader.info.diagnostics"]
+            revealSetting(entry, app)
+            assertNoReaderAbout(app)
+            entry.tap()
+            let done = app.buttons["reader.info.close"]
+            waitHittable(done)
+            XCTAssertTrue(app.navigationBars["本书诊断"].exists)
+            done.tap()
+            waitHittable(app.buttons["reader.panel.close"])
+            XCTAssertFalse(app.buttons["reader.exit"].isHittable)
             closePanel(app)
             XCTAssertTrue(viewport(app).exists)
             waitHittable(app.buttons["reader.exit"])
+            exitReader(app)
+            openDeveloperSwitch(app).tap()
+            XCTAssertEqual(mode.value as? String, "0")
+            XCTAssertFalse(imports.exists)
+            app.buttons["library.tab.shelf"].tap()
+            open("UITest-Long-A", app); openSettings(app)
+            assertNoReaderAbout(app)
+            XCTAssertFalse(entry.exists)
+            closePanel(app)
         }
     }
 
@@ -557,8 +595,37 @@ final class ReadingFlowUITests: XCTestCase {
         return pid
     }
 
-    @MainActor private func revealSetting(_ element: XCUIElement, _ app: XCUIApplication) {
-        let scroll = app.scrollViews["reader.settings.scroll"]
+    @MainActor private func assertNoReaderAbout(_ app: XCUIApplication) {
+        for id in ["reader.info.license", "library.about.license", "app.version", "epub.settings.scopeNote"] {
+            XCTAssertFalse(app.descendants(matching: .any)[id].exists, id)
+        }
+        for title in ["开源许可", "维护信息", "兼容与范围"] { XCTAssertFalse(app.staticTexts[title].exists, title) }
+    }
+
+    @MainActor private func openDeveloperSwitch(_ app: XCUIApplication) -> XCUIElement {
+        let settings = app.buttons["library.tab.settings"]
+        waitHittable(settings); settings.tap()
+        let mode = app.switches["library.developerMode"]
+        revealSetting(mode, app, in: app.scrollViews.firstMatch)
+        return mode
+    }
+
+    @MainActor private func checkShelfAbout(_ app: XCUIApplication) {
+        let scroll = app.scrollViews.firstMatch
+        XCTAssertTrue(scroll.staticTexts["关于阅境"].exists)
+        let version = scroll.descendants(matching: .any)["app.version"]
+        revealSetting(version, app, in: scroll)
+        XCTAssertTrue(version.label.contains("构建"))
+        XCTAssertFalse(version.label.contains("未知"))
+        let license = scroll.buttons["library.about.license"]
+        revealSetting(license, app, in: scroll); license.tap()
+        let back = app.navigationBars["GRDB & ZIPFoundation · MIT"].buttons.firstMatch
+        waitHittable(back); back.tap()
+        waitHittable(app.buttons["library.tab.settings"])
+    }
+
+    @MainActor private func revealSetting(_ element: XCUIElement, _ app: XCUIApplication, in container: XCUIElement? = nil) {
+        let scroll = container ?? app.scrollViews["reader.settings.scroll"]
         for _ in 0..<12 {
             if element.isHittable { break }
             if element.exists && element.frame.midY < scroll.frame.midY {

@@ -19,6 +19,10 @@ struct ProcessedBookCache {
         generation = UUID(); entry = nil; estimatedBytes = 0; selectedBook = nil
     }
 
+    mutating func invalidate(bookID: String) {
+        if selectedBook == bookID { invalidate() }
+    }
+
     mutating func begin(bookID: String? = nil) -> UUID {
         if bookID == nil || selectedBook != bookID { invalidate(); selectedBook = bookID }
         return generation

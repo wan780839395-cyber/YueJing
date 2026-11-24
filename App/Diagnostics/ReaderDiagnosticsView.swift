@@ -8,6 +8,7 @@ struct ReaderDiagnosticsView: View {
     var openingSummary: String?
     var fontDiagnostics: [EPUBFontDiagnostic]?
     var compatibilityDetails: String?
+    var epubUsesAuthorTypography: Bool?
     var libraryAppearance: LibraryAppearance? = nil
     var readerAppearance: ReaderToolAppearance? = nil
     @State private var includeFontNames = false
@@ -131,6 +132,22 @@ struct ReaderDiagnosticsView: View {
                     }
                 }
 
+                if let epubUsesAuthorTypography {
+                    diagnosticCard("兼容与范围", symbol: "book") {
+                        Text("EPUB 首版 · 可重排阅读与安全限制")
+                            .font(.footnote.weight(.medium))
+                        Text("支持可重排 XHTML、本地静态图片、目录与书签、安全净化的作者 CSS 及未混淆 TTF/OTF 字体。原始排版可按比例调整作者文字，行高同比缩放；切换阅读器排版可单独调整行距。复杂容器与表格不保证像素保真，不支持固定版式、DRM、混淆字体、脚本、表单及联网资源。")
+                            .font(.caption).foregroundStyle(secondaryColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("epub.settings.scopeNote")
+                        if epubUsesAuthorTypography {
+                            Text("保留字体、字重和文字层级；行高随文字同比缩放，不单独调整作者行距。仅调整文字，不做整页缩放；作者相对尺寸会随文字重排。")
+                                .font(.caption).foregroundStyle(secondaryColor)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 if let compatibilityDetails {
                     diagnosticCard("兼容记录（历史）", symbol: "doc.text.magnifyingglass") {
                         Text(compatibilityDetails)
@@ -165,7 +182,7 @@ struct ReaderDiagnosticsView: View {
         .background(pageBackground.ignoresSafeArea())
         .foregroundStyle(foregroundColor)
         .tint(accentColor)
-        .navigationTitle("诊断与耗时")
+        .navigationTitle(importState == nil ? "本书诊断" : "导入诊断")
         .navigationBarTitleDisplayMode(.inline)
     }
 

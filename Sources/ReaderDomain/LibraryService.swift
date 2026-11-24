@@ -25,6 +25,7 @@ public actor LibraryService {
         let bookID: String
         let versionID: String
         let encoding: String
+        let addedAt: Double
         let task: Task<DerivedBookMetadata, Error>
         var consumers: Set<UUID>
     }
@@ -37,6 +38,15 @@ public actor LibraryService {
     /// Drops the service's reference and invalidates in-flight publishers. Active readers may retain theirs.
     public func releaseProcessingCache() { processed.invalidate(); readingBuild?.task.cancel() }
 
+    /// Success means the catalog transaction committed. Managed unlinks can be deferred by leases or disk errors.
+    public func deleteBook(_ book: LibraryBook) async throws {
+        let generation = processed.generation
+        let removals = try await store.deleteBook(book)
+        if generation == processed.generation { processed.invalidate(bookID: book.id) }
+        if let build = readingBuild, build.bookID == book.id, build.addedAt == book.addedAt { build.task.cancel() }
+        await store.reclaim(removals)
+    }
+
     func processingReuseStatistics() -> ProcessingReuseStatistics {
         var value = reuse; value.retainedBytes = processed.estimatedBytes; return value
     }
@@ -44,7 +54,9 @@ public actor LibraryService {
     public static func openDefault() async throws -> LibraryService {
         let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                  appropriateFor: nil, create: true).appendingPathComponent("YueJing", isDirectory: true)
-        return LibraryService(store: try LibraryStore(root: folder))
+        let store = try LibraryStore(root: folder)
+        await store.reclaim(try await store.pendingRemovals())
+        return LibraryService(store: store)
     }
 
     public func prepareImport(url: URL, ticket: UUID, measure: ProcessingMeasurementObserver? = nil,
@@ -80,7 +92,7 @@ public actor LibraryService {
         if let existing = try await store.book(id: identity) {
             try check(ticket)
             observe?(.duplicateFound)
-            let receipt = try await store.commitImport(ticket: ticket, proposed: existing)
+            let receipt = try await store.commitTXT(ticket: ticket, proposed: existing, duplicateOnly: true)
             observe?(.committed)
             if let derivedBudget { await persistImported(receipt, document: nil, budget: derivedBudget, measure: measure) }
             return .completed(receipt)
@@ -176,7 +188,7 @@ public actor LibraryService {
             chapters = try await processor.chapters(in: document)
         }
         try Task.checkCancellation()
-        let start = try await store.beginReading(bookID: id, versionID: document.versionID)
+        let start = try await store.beginReading(bookID: id, versionID: document.versionID, addedAt: book.addedAt)
         do {
             try Task.checkCancellation()
             let valid = start.anchor.flatMap { anchor -> ReadingAnchor? in
@@ -393,7 +405,7 @@ extension LibraryService {
             guard let lease else { throw DerivedStorageError.missingArtifact }
             guard let current = try await store.book(id: id), current.versionID == book.versionID,
                   current.encodingRaw == book.encodingRaw, current.byteCount == book.byteCount,
-                  current.utf16Count == book.utf16Count else { throw DerivedStorageError.versionMismatch }
+                  current.utf16Count == book.utf16Count, current.addedAt == book.addedAt else { throw DerivedStorageError.versionMismatch }
             let artifact = try await store.derivedFileURL(lease)
             guard FileManager.default.fileExists(atPath: artifact.path) else { throw DerivedStorageError.missingArtifact }
             return try DerivedBookSource(url: artifact, lease: lease, book: book, budget: budget, store: store)
@@ -460,6 +472,7 @@ extension LibraryService {
             try Task.checkCancellation()
             if var previous = readingBuild {
                 if previous.bookID == id, previous.versionID == book.versionID,
+                   previous.addedAt == book.addedAt,
                    previous.encoding == book.encodingRaw, !previous.consumers.isEmpty, !previous.task.isCancelled {
                     previous.consumers.insert(consumer); readingBuild = previous; operation = previous
                     break
@@ -485,6 +498,7 @@ extension LibraryService {
                                                        measure: measure, evictUnleased: true)
             }
             operation = ReadingBuild(id: token, bookID: id, versionID: book.versionID, encoding: book.encodingRaw,
+                                     addedAt: book.addedAt,
                                      task: task, consumers: [consumer]); readingBuild = operation
             break
         }

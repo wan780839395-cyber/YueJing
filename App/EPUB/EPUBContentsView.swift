@@ -160,7 +160,9 @@ struct EPUBContentsView: View {
                 )
             } else {
                 summaryHeader(currentIndex: selectedIndex)
-                availabilityStatus
+                if !active {
+                    availabilityStatus
+                }
                 searchControls(currentIndex: selectedIndex)
                 ScrollViewReader { proxy in
                     List {
@@ -393,7 +395,7 @@ struct EPUBContentsView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(identifier)
     }
-    private var availabilityStatus: some View {
+    private var availabilityLabels: (active: String, inactive: String, recover: String) {
         let showingBookmarks = (activeTab == .bookmarks && bookmarkActions != nil)
         let showingSearch = (activeTab == .search && searchActions != nil)
         let activeText = showingBookmarks ? "书签可操作" : (showingSearch ? "搜正文可操作" : "目录可操作")
@@ -401,39 +403,84 @@ struct EPUBContentsView: View {
             ? "书签暂不可操作。返回前台后可关闭面板并重新打开。"
             : (showingSearch ? "搜正文暂不可操作。返回前台后可关闭面板并重新打开。" : "目录暂不可操作。返回前台后可关闭目录并重新打开。")
         let recoverText = (showingBookmarks || showingSearch) ? "关闭面板后重开" : "关闭目录后重开"
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(active ? appearance.accent : appearance.sealAccent)
-                    .frame(width: 6, height: 6)
-                    .accessibilityHidden(true)
-                Text(active ? activeText : inactiveText)
-                    .font(.caption2)
-                    .foregroundStyle(active ? appearance.secondary : appearance.sealAccent)
-                    .accessibilityIdentifier("epub.directory.availability")
-                    .accessibilityValue("state=\(access.rawValue);presented=\(presented);scene=\(scenePhase == .active);owner=\(ownerActive);live=\(isActive())")
-            }
-            if !active {
-                Button {
-                    reveal.cancel()
-                    searchFocused = false
-                    // Closing is not a grant: the parent rechecks canInteract + session ID.
-                    // In background or after replacement this remains a safe no-op.
-                    close()
-                } label: {
-                    Text(recoverText)
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 14)
+        return (activeText, inactiveText, recoverText)
+    }
+
+    private var availabilityDiagnosticValue: String {
+        "state=\(access.rawValue);presented=\(presented);scene=\(scenePhase == .active);owner=\(ownerActive);live=\(isActive())"
+    }
+
+    private var quietAvailabilityBadge: some View {
+        let labels = availabilityLabels
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(appearance.accent.opacity(0.8))
+                .frame(width: 5, height: 5)
+                .accessibilityHidden(true)
+            Text(labels.active)
+                .font(.caption2)
+                .foregroundStyle(appearance.secondary.opacity(0.85))
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityIdentifier("epub.directory.availability")
+                .accessibilityValue(availabilityDiagnosticValue)
+        }
+    }
+
+    private var availabilityStatus: some View {
+        let labels = availabilityLabels
+        return Group {
+            if active {
+                HStack(spacing: 6) {
+                    quietAvailabilityBadge
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary))
-                .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
-                .accessibilityIdentifier("epub.directory.recover")
+                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(appearance.sealAccent)
+                            .padding(.top, 2)
+                            .accessibilityHidden(true)
+                        Text(labels.inactive)
+                            .font(.footnote)
+                            .foregroundStyle(appearance.foreground)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("epub.directory.availability")
+                            .accessibilityValue(availabilityDiagnosticValue)
+                    }
+                    Button {
+                        reveal.cancel()
+                        searchFocused = false
+                        // Closing is not a grant: the parent rechecks canInteract + session ID.
+                        // In background or after replacement this remains a safe no-op.
+                        close()
+                    } label: {
+                        Text(labels.recover)
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 14)
+                    }
+                    .buttonStyle(ReaderCompactButtonStyle(tint: appearance.sealAccent, role: .primary))
+                    .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+                    .accessibilityIdentifier("epub.directory.recover")
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(appearance.sealAccent.opacity(appearance.theme == .dark ? 0.16 : 0.09),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(appearance.sealAccent.opacity(0.32), lineWidth: 0.75)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
-        .padding(.top, 6)
-        .padding(.bottom, 2)
         .background(appearance.surface)
     }
 
@@ -454,68 +501,13 @@ struct EPUBContentsView: View {
     }
 
     private func searchControls(currentIndex: Int?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(appearance.accent)
-                    .padding(.leading, 12)
-                    .accessibilityHidden(true)
-                TextField("筛选标题或章节序号", text: Binding(
-                    get: { query },
-                    set: {
-                        guard active else { return }
-                        query = $0
-                        reveal.cancel()
-                    }
-                ))
-                .focused($searchFocused)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .padding(.trailing, query.isEmpty ? 12 : 0)
-                .accessibilityIdentifier("epub.directory.search")
-                if !query.isEmpty {
-                    Button {
-                        guard active else { return }
-                        query = ""
-                        reveal.cancel()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
-                    .accessibilityLabel("清空筛选")
-                    .accessibilityIdentifier("epub.directory.clear")
-                }
-            }
-            .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
-            .background(appearance.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(appearance.edge.opacity(0.8), lineWidth: 0.7)
-                    .allowsHitTesting(false)
-            }
-
-            Button {
-                guard active else { return }
-                query = ""
-                searchFocused = false
-                reveal.request(currentIndex)
-            } label: {
-                Label(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节", systemImage: "scope")
-                    .font(.subheadline.weight(.semibold))
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, minHeight: ReaderVisualStyle.minimumControlHeight, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 14))
-            .disabled(currentIndex == nil)
-            .accessibilityHint(query.isEmpty ? "滚动目录至当前章节，不切换正文" : "先清空筛选，再滚动目录至当前章节，不切换正文")
-            .accessibilityIdentifier("epub.directory.current")
+        let stackControls = dynamicType.isAccessibilitySize || !query.isEmpty
+        // Preserve the editing field (including marked Chinese text) when the controls reflow.
+        let layout = stackControls ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                   : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
+            searchInputField
+            locateCurrentButton(currentIndex: currentIndex, compact: !stackControls)
         }
         .foregroundStyle(appearance.foreground)
         .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
@@ -524,25 +516,106 @@ struct EPUBContentsView: View {
         .disabled(!active)
     }
 
+    private var searchInputField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle((searchFocused || !query.isEmpty) ? appearance.accent : appearance.secondary)
+                .padding(.leading, 12)
+                .accessibilityHidden(true)
+            TextField("筛选标题或章节序号", text: Binding(
+                get: { query },
+                set: {
+                    guard active else { return }
+                    query = $0
+                    reveal.cancel()
+                }
+            ))
+            .focused($searchFocused)
+            .autocorrectionDisabled()
+            .submitLabel(.search)
+            .padding(.trailing, query.isEmpty ? 12 : 0)
+            .accessibilityIdentifier("epub.directory.search")
+            if !query.isEmpty {
+                Button {
+                    guard active else { return }
+                    query = ""
+                    reveal.cancel()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary))
+                .accessibilityLabel("清空筛选")
+                .accessibilityIdentifier("epub.directory.clear")
+            }
+        }
+        .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
+        .background(appearance.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    (searchFocused || !query.isEmpty) ? appearance.accent.opacity(0.55) : appearance.edge.opacity(0.8),
+                    lineWidth: searchFocused ? 1.0 : 0.7
+                )
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func locateCurrentButton(currentIndex: Int?, compact: Bool) -> some View {
+        let visibleTitle = compact
+            ? "当前"
+            : (query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节")
+        return Button {
+            guard active else { return }
+            query = ""
+            searchFocused = false
+            reveal.request(currentIndex)
+        } label: {
+            Label(visibleTitle, systemImage: "scope")
+                .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(compact ? .center : .leading)
+                .fixedSize(horizontal: compact, vertical: true)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: compact ? nil : .infinity,
+                       minHeight: ReaderVisualStyle.minimumControlHeight,
+                       alignment: compact ? .center : .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 14))
+        .disabled(currentIndex == nil)
+        .accessibilityLabel(query.isEmpty ? "定位当前章节" : "清空筛选并定位当前章节")
+        .accessibilityHint(query.isEmpty ? "滚动目录至当前章节，不切换正文" : "先清空筛选，再滚动目录至当前章节，不切换正文")
+        .accessibilityIdentifier("epub.directory.current")
+    }
+
     private func summaryHeader(currentIndex: Int?) -> some View {
         VStack(spacing: 8) {
             if dynamicType.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 6) {
                     totalCountBadge
                     summaryDetailText(currentIndex: currentIndex)
+                    if active { quietAvailabilityBadge }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 12) {
+                    HStack(alignment: .center, spacing: 8) {
                         totalCountBadge
                             .fixedSize(horizontal: true, vertical: false)
-                        Spacer(minLength: 12)
                         summaryDetailText(currentIndex: currentIndex)
                             .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 8)
+                        if active { quietAvailabilityBadge }
                     }
                     VStack(alignment: .leading, spacing: 6) {
-                        totalCountBadge
+                        HStack(alignment: .center, spacing: 8) {
+                            totalCountBadge
+                            Spacer(minLength: 8)
+                            if active { quietAvailabilityBadge }
+                        }
                         summaryDetailText(currentIndex: currentIndex)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -559,7 +632,7 @@ struct EPUBContentsView: View {
                     }
                 }
                 .frame(height: 3)
-                .padding(.top, 2)
+                .padding(.top, 1)
                 .accessibilityHidden(true)
             }
             Rectangle()
@@ -587,9 +660,9 @@ struct EPUBContentsView: View {
     private func summaryDetailText(currentIndex: Int?) -> some View {
         let text: String
         if let currentIndex {
-            text = "当前第 \(currentIndex + 1) 章 · 共 \(items.count) 章"
+            text = "当前第 \(currentIndex + 1) 章"
         } else if !items.isEmpty {
-            text = "未找到当前章节 · 共 \(items.count) 章"
+            text = "未定位当前章节"
         } else {
             text = "暂无章节"
         }
