@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": null,
+  "active": "unified-tools-device-031",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -29,6 +29,13 @@
       "product": "077de6cbe1fca1eaca76bd9ce96244087d0ec673",
       "legacy_source": "f50c2ff934de04526f2bc576002e1e03495b0f36",
       "plan_sha256": "5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f",
+      "runner": "macos-15-intel"
+    },
+    "unified-tools-device-031": {
+      "version": "0.2.31",
+      "build": "33",
+      "product": "d5ad348a69958adf04945dcc69b87f8735294958",
+      "plan_sha256": "19ce7b3b2d14744f52e3dd03c6c09201cf4e3b16c66bbd1b982998c831bcceda",
       "runner": "macos-15-intel"
     }
   }
