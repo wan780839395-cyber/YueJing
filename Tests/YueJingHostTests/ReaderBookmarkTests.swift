@@ -233,6 +233,58 @@ struct ReaderBookmarkTests {
         }
     }
 
+    @Test func txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication() async throws {
+        try await withReader { model, controller, _, _ in
+            let original = try #require(model.window)
+            let table = try #require(controller.view.subviews.first { $0 is UITableView } as? UITableView)
+            let line = try #require(original.slices.first?.lines.dropFirst().first)
+            table.setContentOffset(CGPoint(x: 0, y: CGFloat(line.top) - table.adjustedContentInset.top + 1), animated: false)
+            let origin = try #require(controller.visibleNavigationAnchor())
+            try #require(origin.rawByteOffset == line.rawByteStart && origin.lineFraction > 0)
+
+            @MainActor func select(_ query: String) async throws -> ReadingWindow {
+                let panel = UUID()
+                model.beginBookmarkPanel(panel)
+                defer { model.endBookmarkPanel(panel) }
+                let results = try await model.searchBook(query)
+                let hit = try #require(results.hits.first)
+                let window = try await model.prepareSearchWindow(hit)
+                try #require(model.applyBookmarkWindow(window, presentation: panel))
+                return window
+            }
+
+            let first = try await select("BOOKMARK_LINE_160")
+            model.windowApplied(first.id) // Model installed it; UIKit hasn't.
+            #expect(!model.canReturnFromSearch)
+            apply(first, to: model, controller: controller, navigation: true)
+            try #require(model.canReturnFromSearch)
+            let second = try await select("BOOKMARK_LINE_240")
+            apply(second, to: model, controller: controller, navigation: true)
+
+            await model.returnFromSearch()
+            let interrupted = try #require(model.window)
+            #expect(interrupted.anchor == origin)
+            model.viewport.setInteractionActive(false)
+            apply(interrupted, to: model, controller: controller, navigation: true)
+            model.viewport.setInteractionActive(true)
+            #expect(model.canReturnFromSearch)
+
+            await model.returnFromSearch()
+            let retry = try #require(model.window)
+            #expect(retry.id != interrupted.id && retry.anchor == origin)
+            apply(retry, to: model, controller: controller, navigation: true)
+            #expect(!model.canReturnFromSearch)
+
+            let obsolete = try await select("BOOKMARK_LINE_160")
+            apply(obsolete, to: model, controller: controller, navigation: true)
+            try #require(model.canReturnFromSearch)
+            await model.retry() // Reopens the same book with a new reader session.
+            try await waitUntil { model.window != nil && !model.loading }
+            model.windowApplied(obsolete.id)
+            #expect(model.window?.id != obsolete.id && !model.canReturnFromSearch)
+        }
+    }
+
     private func apply(_ window: ReadingWindow, to model: ReaderViewModel,
                        controller: ReaderViewController, navigation: Bool) {
         // Same ordering as ReaderViewport.updateUIViewController, without appearance fabrication.

@@ -36,7 +36,7 @@ final class EPUBFlowUITests: XCTestCase {
     @MainActor func testEPUBShelfCoverAndDirectoryCrossChapterNavigation() {
         withEPUBFixture { app in
             let illustratedRow = shelfRow(titled: "EPUBTest-Illustrated-A", app)
-            waitHittable(illustratedRow, timeout: 20)
+            waitHittable(illustratedRow, expectedID: "shelf row: EPUBTest-Illustrated-A", timeout: 20)
             let coverLoaded = XCTNSPredicateExpectation(
                 predicate: NSPredicate { _, _ in
                     illustratedRow.exists && illustratedRow.label.contains("EPUB · 封面")
@@ -50,15 +50,13 @@ final class EPUBFlowUITests: XCTestCase {
             // First explicitly hide the initial tools; never retry center taps to mask failure.
             let bottom = viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.94))
             let exit = app.buttons["reader.exit"]
-            if exit.exists && exit.isHittable {
-                viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                    !exit.exists || !exit.isHittable
-                }, object: nil)
-                XCTAssertEqual(waitForPredicates([hidden], timeout: 5), .completed)
-            }
+            let hideDeadline = Date().addingTimeInterval(5)
+            waitHittable(exit, expectedID: "reader.exit", timeout: 5, stage: "before-hide")
+            viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !exit.exists }, object: nil)
+            XCTAssertEqual(waitForPredicates([hidden], timeout: max(0, hideDeadline.timeIntervalSinceNow)), .completed)
             bottom.tap()
-            waitHittable(app.buttons["reader.exit"], timeout: 5)
+            waitHittable(exit, expectedID: "reader.exit", timeout: 5, stage: "bottom-band-reveal")
             openDirectory(app)
             XCTAssertTrue(app.staticTexts["reader.directory.total"].label.contains("4"))
             XCTAssertFalse(app.buttons["reader.contents.bookmarks"].exists)
@@ -66,7 +64,7 @@ final class EPUBFlowUITests: XCTestCase {
             // Full filter/clear/locate coverage belongs to the independent directory recovery test.
 
             let midAnchorChapter = app.buttons["reader.chapter.2"]
-            waitHittable(midAnchorChapter)
+            waitHittable(midAnchorChapter, expectedID: "reader.chapter.2")
             midAnchorChapter.tap()
 
             let canvas = readerCanvas(app)
@@ -85,7 +83,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "epub.opening.feedback").firstMatch.exists)
             Self.captureEvidence(app, testName: name, stage: "after-chapter-jump", expectedBook: "EPUBTest-Illustrated-A")
 
-            showTools(app)
+            revealToolsIfHidden(for: "reader.tools.directory", app)
             openDirectory(app)
             XCTAssertTrue(midAnchorChapter.waitForExistence(timeout: 10))
             XCTAssertEqual(midAnchorChapter.value as? String, "当前章节")
@@ -115,7 +113,7 @@ final class EPUBFlowUITests: XCTestCase {
             selectReadingMode("上下滚动", rawValue: "scroll", app)
             openDirectory(app)
             let chapter2 = app.buttons["reader.chapter.1"]
-            waitHittable(chapter2)
+            waitHittable(chapter2, expectedID: "reader.chapter.1")
             chapter2.tap()
 
             let canvas = readerCanvas(app)
@@ -153,7 +151,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(waitForPredicates([scrolledExpectation], timeout: 12), .completed)
             XCTAssertGreaterThan(scrolledNode, 0)
 
-            showTools(app)
+            revealToolsIfHidden(for: "reader.exit", app)
             scrolledNode = Int(Self.parseCanvasValue(canvas.value as? String ?? "")["node"] ?? "-1") ?? -1
             XCTAssertGreaterThan(scrolledNode, 0)
             exitReader(app, shelfBook: "EPUBTest-Illustrated-A")
@@ -187,15 +185,21 @@ final class EPUBFlowUITests: XCTestCase {
         withEPUBFixture { app in
             let noCoverRow = shelfRow(titled: "EPUBTest-NoCover-B", app)
             let txtRow = shelfRow(titled: "TXTTest-Companion-C", app)
-            waitHittable(noCoverRow, timeout: 20)
-            waitHittable(txtRow, timeout: 10)
+            waitHittable(noCoverRow, expectedID: "shelf row: EPUBTest-NoCover-B", timeout: 20)
+            waitHittable(txtRow, expectedID: "shelf row: TXTTest-Companion-C", timeout: 10)
             XCTAssertTrue(noCoverRow.label.contains("EPUB · 文字占位"))
             XCTAssertTrue(txtRow.label.contains("TXT"))
 
             openEPUB("EPUBTest-NoCover-B", expectedMarker: "EPUB_NOCOVER_START", stage: "open", app)
             let beforeGroups = Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")
             let beforeFrame = viewport(app).frame
-            openSettings(app)
+            // EPUB exposes both primary actions directly, without an expand/collapse tray.
+            let epubDeadline = Date().addingTimeInterval(10)
+            revealDockControl("reader.tools.directory", app, deadline: epubDeadline)
+            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.returnFromSearch"].exists)
+            openSettings(app, deadline: epubDeadline)
             selectSettingsGroup("more", app)
             selectSettingsGroup("common", app)
             closePanel(app)
@@ -208,24 +212,20 @@ final class EPUBFlowUITests: XCTestCase {
             selectLayoutMode("阅读器排版", rawValue: "reader", app)
             openSettings(app)
 
-            let darkButton = app.buttons["reader.theme.dark"]
-            revealSetting(darkButton, app)
+            let darkButton = revealSetting("reader.theme.dark", in: app.buttons, app)
             darkButton.tap()
             XCTAssertEqual(darkButton.value as? String, "已选择")
 
-            let relaxedButton = app.buttons["reader.preset.relaxed"]
-            revealSetting(relaxedButton, app)
+            let relaxedButton = revealSetting("reader.preset.relaxed", in: app.buttons, app)
             relaxedButton.tap()
             XCTAssertEqual(relaxedButton.value as? String, "已选择")
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("24"))
             XCTAssertTrue(app.staticTexts["reader.spacing.value"].label.contains("10"))
 
             selectSettingsGroup("more", app)
-            let scopeNote = app.staticTexts["epub.settings.scopeNote"]
-            revealSetting(scopeNote, app)
+            let scopeNote = revealSetting("epub.settings.scopeNote", in: app.staticTexts, app)
             XCTAssertTrue(scopeNote.exists)
-            let version = app.staticTexts["app.version"]
-            revealSetting(version, app)
+            let version = revealSetting("app.version", in: app.staticTexts, app)
             XCTAssertTrue(version.label.contains("构建"))
             XCTAssertFalse(version.label.contains("未知"))
 
@@ -247,28 +247,38 @@ final class EPUBFlowUITests: XCTestCase {
             // Original mode must offer a real proportional control, not a disabled reader slider.
             selectLayoutMode("原始排版", rawValue: "original", app)
             openSettings(app)
-            let authorIncrease = app.buttons["reader.font.increase"]
-            revealSetting(authorIncrease, app)
+            let authorIncrease = revealSetting("reader.font.increase", in: app.buttons, app)
             XCTAssertTrue(authorIncrease.isEnabled)
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("120%"))
             XCTAssertFalse(app.staticTexts["reader.spacing.value"].exists)
             authorIncrease.tap()
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("125%"))
-            let originalSize = app.buttons["reader.preset.standard"]
-            revealSetting(originalSize, app)
+            let originalSize = revealSetting("reader.preset.standard", in: app.buttons, app)
             originalSize.tap()
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("100%"))
             closePanel(app)
             selectLayoutMode("阅读器排版", rawValue: "reader", app)
             openSettings(app)
-            let retainedSpacing = app.staticTexts["reader.spacing.value"]
-            revealSetting(retainedSpacing, app)
+            let retainedSpacing = revealSetting("reader.spacing.value", in: app.staticTexts, app)
             XCTAssertTrue(retainedSpacing.label.contains("10"))
             closePanel(app)
             exitReader(app, shelfBook: "EPUBTest-NoCover-B")
 
             openTXT("TXTTest-Companion-C", expectedMarker: "TXT_COMPANION_START", stage: "open-txt", app)
-            openDirectory(app)
+            // TXT shares the direct chapter panel with EPUB: both primary actions are directly reachable.
+            let txtDeadline = Date().addingTimeInterval(10)
+            revealDockControl("reader.tools.settings", app, deadline: txtDeadline)
+            revealDockControl("reader.tools.directory", app, deadline: txtDeadline)
+            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.returnFromSearch"].exists)
+            let chapterContext = app.staticTexts["reader.tools.chapterContext"]
+            let chapterReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                chapterContext.exists && chapterContext.label.contains("第一章 TXT_COMPANION_START")
+            }, object: nil)
+            XCTAssertEqual(waitForPredicates([chapterReady], timeout: max(0, txtDeadline.timeIntervalSinceNow)), .completed)
+            XCTAssertFalse(chapterContext.label.contains("TXTTest-Companion-C"))
+            openDirectory(app, deadline: txtDeadline)
             XCTAssertTrue(app.buttons["reader.contents.bookmarks"].waitForExistence(timeout: 10))
             closePanel(app)
             exitReader(app, shelfBook: "TXTTest-Companion-C")
@@ -302,8 +312,8 @@ final class EPUBFlowUITests: XCTestCase {
                 self.readerCanvas(app).exists && self.readerCanvas(app).label.contains("EPUB_CH1_START")
             }, object: nil)
             XCTAssertEqual(waitForPredicates([restored], timeout: 15), .completed)
-            viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            waitHittable(app.buttons["reader.exit"])
+            revealToolsIfHidden(for: "reader.tools.directory", app)
+            waitHittable(app.buttons["reader.exit"], expectedID: "reader.exit")
             openDirectory(app)
             waitDirectoryActive(app)
             XCTAssertFalse(app.buttons["epub.directory.clear"].exists)
@@ -324,13 +334,16 @@ final class EPUBFlowUITests: XCTestCase {
     // MARK: - Helpers (no helper method name may start with "test")
 
     @MainActor private func searchHit(_ query: String, epub: Bool, in app: XCUIApplication) -> XCUIElement {
-        openDirectory(app)
-        let tab = app.buttons[epub ? "epub.contents.search" : "reader.contents.search"]
-        waitHittable(tab); tab.tap()
+        let deadline = Date().addingTimeInterval(10)
+        revealToolsIfHidden(for: "reader.tools.directory", app)
+        tapDirectory(app, deadline: deadline)
+        let tabID = epub ? "epub.contents.search" : "reader.contents.search"
+        let tab = app.buttons[tabID]
+        waitHittable(tab, expectedID: tabID); tab.tap()
         let field = app.textFields["book.search.query"]
-        waitHittable(field); field.tap(); field.typeText(query + "\n")
+        waitHittable(field, expectedID: "book.search.query"); field.tap(); field.typeText(query + "\n")
         let hit = app.buttons["book.search.hit.0"].firstMatch
-        waitHittable(hit)
+        waitHittable(hit, expectedID: "book.search.hit.0")
         XCTAssertTrue(hit.label.contains(query), "Result must contain the searched text")
         return hit
     }
@@ -342,7 +355,7 @@ final class EPUBFlowUITests: XCTestCase {
             let before = Self.parseCanvasValue(view.value as? String ?? "")
             XCTAssertNotNil(before["raw"])
             _ = searchHit(word, epub: false, in: app)
-            closePanel(app)
+            dismissPanel(app)
             XCTAssertEqual(Self.parseCanvasValue(view.value as? String ?? "")["raw"], before["raw"])
             let back = app.buttons["reader.tools.returnFromSearch"]
             XCTAssertFalse(back.exists)
@@ -358,7 +371,7 @@ final class EPUBFlowUITests: XCTestCase {
                     app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", word)).firstMatch.exists
             }, object: nil)
             XCTAssertEqual(waitForPredicates([reached], timeout: 12), .completed, "TXT viewport: \(String(describing: view.value))")
-            showTools(app); waitHittable(back)
+            waitForSearchReturn(app, stage: "first TXT result")
             searchHit("TXT_C_LINE_6", epub: false, in: app).tap()
             let secondRaw = 3 + ("第一章 TXT_COMPANION_START\n" + (1...5).map {
                 "TXT_C_LINE_\($0) 合成对照 TXT 文本，用于验证 EPUB 与 TXT 共存且互不串书。\n"
@@ -367,7 +380,7 @@ final class EPUBFlowUITests: XCTestCase {
                 Self.parseCanvasValue(view.value as? String ?? "")["raw"] == String(secondRaw)
             }, object: nil)
             XCTAssertEqual(waitForPredicates([second], timeout: 12), .completed)
-            showTools(app); waitHittable(back); back.tap()
+            waitForSearchReturn(app, stage: "second TXT result"); back.tap()
             let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                 let now = Self.parseCanvasValue(view.value as? String ?? "")
                 return now["raw"] == before["raw"] && now["utf16"] == before["utf16"] && now["lineVisible"] == "true" && !back.exists
@@ -382,7 +395,7 @@ final class EPUBFlowUITests: XCTestCase {
             let canvas = readerCanvas(app), word = "EPUB_A_C2_P20"
             let before = Self.parseCanvasValue(canvas.value as? String ?? "")
             _ = searchHit(word, epub: true, in: app)
-            closePanel(app)
+            dismissPanel(app)
             let stayed = Self.parseCanvasValue(canvas.value as? String ?? "")
             for k in ["path", "node", "offset"] { XCTAssertNotNil(before[k]); XCTAssertEqual(stayed[k], before[k]) }
             let back = app.buttons["reader.tools.returnFromSearch"]
@@ -396,14 +409,14 @@ final class EPUBFlowUITests: XCTestCase {
                     value["path"] == "OEBPS/text/ch2.xhtml" && value["node"] == "21" && value["offset"] == "0"
             }, object: nil)
             XCTAssertEqual(waitForPredicates([reached], timeout: 15), .completed, "EPUB canvas: \(String(describing: canvas.value))")
-            showTools(app); waitHittable(back)
+            waitForSearchReturn(app, stage: "first EPUB result")
             searchHit("EPUB_A_C2_P25", epub: true, in: app).tap()
             let second = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                 let now = Self.parseCanvasValue(canvas.value as? String ?? "")
                 return now["path"] == "OEBPS/text/ch2.xhtml" && now["node"] == "26" && canvas.label.contains("EPUB_A_C2_P25")
             }, object: nil)
             XCTAssertEqual(waitForPredicates([second], timeout: 15), .completed)
-            showTools(app); waitHittable(back); back.tap()
+            waitForSearchReturn(app, stage: "second EPUB result"); back.tap()
             let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                 let now = Self.parseCanvasValue(canvas.value as? String ?? "")
                 return ["path", "node", "offset"].allSatisfy { now[$0] == before[$0] } &&
@@ -454,7 +467,7 @@ final class EPUBFlowUITests: XCTestCase {
         _ app: XCUIApplication
     ) {
         let row = shelfRow(titled: title, app)
-        waitHittable(row, timeout: 20)
+        waitHittable(row, expectedID: "shelf row: \(title)", timeout: 20, stage: stage)
         row.tap()
         let deadline = Date().addingTimeInterval(20)
         let view = viewport(app)
@@ -471,9 +484,6 @@ final class EPUBFlowUITests: XCTestCase {
         )
         XCTAssertEqual(app.webViews.matching(identifier: "reader.viewport").count, 1,
                        "The EPUB reader must install exactly one interactive WebView")
-        expandCDock(app, deadline: deadline, startsCollapsed: true)
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
-        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.1, deadline.timeIntervalSinceNow))
         Self.captureEvidence(app, testName: name, stage: stage, expectedBook: title)
     }
 
@@ -484,66 +494,20 @@ final class EPUBFlowUITests: XCTestCase {
         _ app: XCUIApplication
     ) {
         let row = shelfRow(titled: title, app)
-        waitHittable(row, timeout: 20)
+        waitHittable(row, expectedID: "shelf row: \(title)", timeout: 20, stage: stage)
         row.tap()
         let deadline = Date().addingTimeInterval(20)
         let marker = app.staticTexts.matching(
             NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", expectedMarker)
         ).firstMatch
         XCTAssertTrue(marker.waitForExistence(timeout: max(0.1, deadline.timeIntervalSinceNow)))
-        expandCDock(app, deadline: deadline, startsCollapsed: true)
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
-        waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.1, deadline.timeIntervalSinceNow))
         Self.captureEvidence(app, testName: name, stage: stage, expectedBook: title)
     }
 
-    @MainActor private func expandCDock(_ app: XCUIApplication, deadline: Date, startsCollapsed: Bool = false) {
-        // EPUB now exposes its two primary actions directly; TXT keeps the original tray.
-        if app.webViews.matching(identifier: "reader.viewport").firstMatch.exists {
-            let directory = app.buttons["reader.tools.directory"]
-            let settings = app.buttons["reader.tools.settings"]
-            revealDockControl(directory, app, deadline: deadline)
-            waitHittable(directory, timeout: max(0.1, deadline.timeIntervalSinceNow))
-            revealDockControl(settings, app, deadline: deadline)
-            waitHittable(settings, timeout: max(0.1, deadline.timeIntervalSinceNow))
-            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
-            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
-            return
-        }
-        let expand = app.buttons["reader.tools.expand"]
-        let collapse = app.buttons["reader.tools.collapse"]
-        if startsCollapsed {
-            waitHittable(expand, timeout: max(0.1, deadline.timeIntervalSinceNow))
-            XCTAssertFalse(collapse.exists)
-        } else {
-            let presented = XCTNSPredicateExpectation(
-                predicate: NSPredicate { _, _ in
-                    (expand.exists && expand.isHittable) || collapse.exists
-                },
-                object: nil
-            )
-            XCTAssertEqual(
-                waitForPredicates([presented], timeout: max(0.1, deadline.timeIntervalSinceNow)),
-                .completed
-            )
-        }
-        if expand.exists && expand.isHittable {
-            expand.tap()
-        }
-        let expanded = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                collapse.exists && !expand.exists
-            },
-            object: nil
-        )
-        XCTAssertEqual(
-            waitForPredicates([expanded], timeout: max(0.1, deadline.timeIntervalSinceNow)),
-            .completed
-        )
-    }
-
-    @MainActor private func revealDockControl(_ button: XCUIElement, _ app: XCUIApplication, deadline: Date) {
-        let scroll = app.scrollViews["reader.tools.scroll"]
+    @MainActor private func revealDockControl(_ id: String, _ app: XCUIApplication, deadline: Date,
+                                              stage: String = #function, file: StaticString = #filePath, line: UInt = #line) {
+        let button = app.buttons[id]
+        let scroll = app.scrollViews.containing(.button, identifier: id).firstMatch
         var readyInBounds = false
         for _ in 0..<3 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
@@ -562,25 +526,23 @@ final class EPUBFlowUITests: XCTestCase {
             }
         }
         if !readyInBounds {
-            waitHittable(button, timeout: max(0.1, deadline.timeIntervalSinceNow))
+            waitHittable(button, expectedID: id, timeout: max(0, deadline.timeIntervalSinceNow), stage: stage, file: file, line: line)
         }
     }
 
     @MainActor private func selectSettingsGroup(_ group: String, _ app: XCUIApplication) {
         let button = app.buttons["epub.settings.group.\(group)"]
-        waitHittable(button)
+        waitHittable(button, expectedID: "epub.settings.group.\(group)")
         button.tap()
         XCTAssertEqual(button.value as? String, "已选择")
         XCTAssertTrue(button.isSelected)
     }
 
-    @MainActor private func openSettings(_ app: XCUIApplication) {
-        let deadline = Date().addingTimeInterval(10)
-        expandCDock(app, deadline: deadline)
-        let button = app.buttons["reader.tools.settings"]
-        revealDockControl(button, app, deadline: deadline)
-        button.tap()
-        waitHittable(app.buttons["reader.panel.close"])
+    @MainActor private func openSettings(_ app: XCUIApplication, deadline: Date = Date().addingTimeInterval(10)) {
+        let id = "reader.tools.settings"
+        revealDockControl(id, app, deadline: deadline)
+        app.buttons[id].tap()
+        waitHittable(app.buttons["reader.panel.close"], expectedID: "reader.panel.close")
     }
 
     @MainActor private func waitDirectoryActive(_ app: XCUIApplication) {
@@ -598,7 +560,7 @@ final class EPUBFlowUITests: XCTestCase {
     @MainActor private func filterDirectory(_ query: String, expectedIndex: Int, _ app: XCUIApplication) {
         waitDirectoryActive(app)
         let search = app.textFields["epub.directory.search"]
-        waitHittable(search)
+        waitHittable(search, expectedID: "epub.directory.search")
         search.tap()
         search.typeText(query)
         let filtered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -620,7 +582,7 @@ final class EPUBFlowUITests: XCTestCase {
         // Locate must really clear an active filter and reveal the current row, without navigation.
         filterDirectory("3", expectedIndex: 2, app)
         let locate = app.buttons["epub.directory.current"]
-        waitHittable(locate)
+        waitHittable(locate, expectedID: "epub.directory.current")
         locate.tap()
         let located = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             let current = app.buttons["reader.chapter.0"]
@@ -630,74 +592,63 @@ final class EPUBFlowUITests: XCTestCase {
         XCTAssertEqual(waitForPredicates([located], timeout: 5), .completed)
     }
 
-    @MainActor private func openDirectory(_ app: XCUIApplication) {
-        let deadline = Date().addingTimeInterval(10)
-        expandCDock(app, deadline: deadline)
-        let button = app.buttons["reader.tools.directory"]
-        revealDockControl(button, app, deadline: deadline)
-        button.tap()
-        waitHittable(app.buttons["reader.panel.close"])
+    @MainActor private func tapDirectory(_ app: XCUIApplication, deadline: Date) {
+        let id = "reader.tools.directory"
+        revealDockControl(id, app, deadline: deadline)
+        app.buttons[id].tap()
+    }
+
+    @MainActor private func openDirectory(_ app: XCUIApplication, deadline: Date = Date().addingTimeInterval(10)) {
+        tapDirectory(app, deadline: deadline)
+        waitHittable(app.buttons["reader.panel.close"], expectedID: "reader.panel.close")
     }
 
     @MainActor private func closePanel(_ app: XCUIApplication) {
         app.buttons["reader.panel.close"].tap()
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: Date().addingTimeInterval(10))
+        revealDockControl("reader.tools.settings", app, deadline: Date().addingTimeInterval(10))
     }
 
-    @MainActor private func hasVisibleDockControl(_ app: XCUIApplication) -> Bool {
-        let screen = app.windows.firstMatch.frame
-        guard !screen.isNull, screen.width > 0, screen.height > 0 else { return false }
-        let scroll = app.scrollViews["reader.tools.scroll"]
-        let trayBounds = scroll.exists ? scroll.frame.intersection(screen) : screen
-        for identifier in ["reader.tools.expand", "reader.tools.directory", "reader.tools.settings", "reader.tools.collapse"] {
-            let button = app.buttons[identifier]
-            guard button.exists, button.isHittable else { continue }
-            let frame = button.frame
-            let bounds = identifier == "reader.tools.expand" ? screen : trayBounds
-            if !frame.isNull, frame.width > 0, frame.height > 0,
-               !bounds.isNull, bounds.width > 0, bounds.height > 0,
-               bounds.contains(CGPoint(x: frame.midX, y: frame.midY)) {
-                return true
-            }
-        }
-        return false
+    @MainActor private func dismissPanel(_ app: XCUIApplication) {
+        let close = app.buttons["reader.panel.close"]
+        close.tap()
+        // The subsequent absence check for returnFromSearch must observe a live dock,
+        // not pass merely because all tools are still hidden during dismissal.
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !close.exists && app.buttons["reader.tools.directory"].exists && app.buttons["reader.tools.settings"].exists
+        }, object: nil)
+        XCTAssertEqual(waitForPredicates([dismissed], timeout: 10), .completed)
     }
 
-    @MainActor private func showTools(_ app: XCUIApplication) {
-        let deadline = Date().addingTimeInterval(20)
-        if !hasVisibleDockControl(app) {
-            viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            let firstTouch = XCTNSPredicateExpectation(
-                predicate: NSPredicate { _, _ in self.hasVisibleDockControl(app) },
-                object: nil
-            )
-            let result = waitForPredicates([firstTouch], timeout: min(10, max(0.1, deadline.timeIntervalSinceNow)))
-            if result != .completed {
-                viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            }
-        }
-        expandCDock(app, deadline: deadline)
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
+    // Used after actions that can hide chrome. A missing/disabled target alone
+    // doesn't mean hidden: a title bar, panel or tray in AX means wait, don't toggle.
+    @MainActor private func revealToolsIfHidden(for id: String, _ app: XCUIApplication) {
+        let view = viewport(app)
+        guard view.exists, !app.buttons[id].exists, !app.buttons["reader.exit"].exists,
+              !app.buttons["reader.panel.close"].exists,
+              !app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reader.tools.")).firstMatch.exists
+        else { return }
+        view.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
+    @MainActor private func waitForSearchReturn(_ app: XCUIApplication, stage: String,
+                                                file: StaticString = #filePath, line: UInt = #line) {
+        let id = "reader.tools.returnFromSearch"
+        revealToolsIfHidden(for: id, app)
+        waitHittable(app.buttons[id], expectedID: id, stage: stage, file: file, line: line)
     }
 
     @MainActor private func exitReader(_ app: XCUIApplication, shelfBook title: String) {
         let deadline = Date().addingTimeInterval(10)
         let exit = app.buttons["reader.exit"]
-        let settings = app.buttons["reader.tools.settings"]
-        revealDockControl(settings, app, deadline: deadline)
-        let ready = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                exit.exists && exit.isHittable && exit.isEnabled && settings.exists && settings.isHittable && settings.isEnabled
-            },
-            object: nil
-        )
-        XCTAssertEqual(waitForPredicates([ready], timeout: max(0.1, deadline.timeIntervalSinceNow)), .completed)
+        waitHittable(exit, expectedID: "reader.exit", timeout: max(0, deadline.timeIntervalSinceNow))
         exit.tap()
-        waitHittable(shelfRow(titled: title, app), timeout: max(0.1, deadline.timeIntervalSinceNow))
+        waitHittable(shelfRow(titled: title, app), expectedID: "shelf row: \(title)", timeout: max(0, deadline.timeIntervalSinceNow))
         XCTAssertFalse(app.staticTexts["暂时无法显示正文"].exists)
     }
 
-    @MainActor private func revealSetting(_ element: XCUIElement, _ app: XCUIApplication) {
+    @MainActor private func revealSetting(_ id: String, in query: XCUIElementQuery, _ app: XCUIApplication,
+                                          stage: String = #function, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let element = query[id]
         let scroll = app.scrollViews["reader.settings.scroll"]
         for _ in 0..<10 {
             if element.exists && element.isHittable { break }
@@ -707,7 +658,8 @@ final class EPUBFlowUITests: XCTestCase {
                 scroll.swipeUp(velocity: .slow)
             }
         }
-        waitHittable(element)
+        waitHittable(element, expectedID: id, stage: stage, file: file, line: line)
+        return element
     }
 
     @MainActor private func waitForPredicates(
@@ -724,16 +676,19 @@ final class EPUBFlowUITests: XCTestCase {
         return XCTWaiter.wait(for: expectations, timeout: max(0, deadline.timeIntervalSinceNow))
     }
 
-    @MainActor private func waitHittable(_ element: XCUIElement, timeout: TimeInterval = 10) {
-        // Avoid the predicate waiter's scheduling delay when the real control is ready.
-        if element.exists && element.isHittable && element.isEnabled { return }
+    @MainActor private func waitHittable(_ element: XCUIElement, expectedID: String, timeout: TimeInterval = 10,
+                                         stage: String = #function, file: StaticString = #filePath, line: UInt = #line) {
         let ready = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
                 element.exists && element.isHittable && element.isEnabled
             },
             object: nil
         )
-        XCTAssertEqual(waitForPredicates([ready], timeout: timeout), .completed)
+        guard waitForPredicates([ready], timeout: timeout) != .completed else { return }
+        let exists = element.exists
+        let details = exists ? "enabled=\(element.isEnabled) hittable=\(element.isHittable) frame=\(element.frame)"
+                             : "enabled=n/a hittable=n/a frame=n/a"
+        XCTFail("stage=\(stage) expectedID=\(expectedID) exists=\(exists) \(details)", file: file, line: line)
     }
 
     private static func parseCanvasValue(_ raw: String) -> [String: String] {
@@ -802,13 +757,11 @@ final class EPUBFlowUITests: XCTestCase {
     }
 
     @MainActor private func selectLayoutMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
-        showTools(app)
         openSettings(app)
         selectSettingsGroup("more", app)
-        let picker = app.descendants(matching: .any).matching(identifier: "epub.layoutMode").firstMatch
-        revealSetting(picker, app)
+        let picker = revealSetting("epub.layoutMode", in: app.descendants(matching: .any), app)
         let option = picker.buttons[title]
-        waitHittable(option)
+        waitHittable(option, expectedID: title)
         option.tap()
         let canvas = readerCanvas(app)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -826,13 +779,11 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(Self.parseCanvasValue(readerCanvas(app).value as? String ?? "")["mode"], rawValue)
             return
         }
-        showTools(app)
         openSettings(app)
         selectSettingsGroup("more", app)
-        let picker = app.descendants(matching: .any).matching(identifier: "epub.readingMode").firstMatch
-        revealSetting(picker, app)
+        let picker = revealSetting("epub.readingMode", in: app.descendants(matching: .any), app)
         let option = picker.buttons[title]
-        waitHittable(option)
+        waitHittable(option, expectedID: title)
         option.tap()
         closePanel(app)
         let canvas = readerCanvas(app)
@@ -840,8 +791,6 @@ final class EPUBFlowUITests: XCTestCase {
             Self.parseCanvasValue(canvas.value as? String ?? "")["mode"] == rawValue
         }, object: nil)
         XCTAssertEqual(waitForPredicates([ready], timeout: 12), .completed)
-        let collapse = app.buttons["reader.tools.collapse"]
-        if collapse.exists && collapse.isHittable { collapse.tap() }
     }
 
     @MainActor private func verifyPagingAndCrossChapterNavigation(_ app: XCUIApplication) {
@@ -879,10 +828,10 @@ final class EPUBFlowUITests: XCTestCase {
         waitFor { abs(coordinate("scrollX") - nextX) <= 2 }
         XCTAssertEqual(coordinate("scrollY"), 0)
 
-        showTools(app)
+        revealToolsIfHidden(for: "reader.tools.directory", app)
         openDirectory(app)
         let chapter3 = app.buttons["reader.chapter.3"]
-        waitHittable(chapter3)
+        waitHittable(chapter3, expectedID: "reader.chapter.3")
         chapter3.tap()
         waitFor {
             Self.parseCanvasValue(canvas.value as? String ?? "")["path"] == "OEBPS/text/ch3.xhtml" &&
@@ -899,6 +848,7 @@ final class EPUBFlowUITests: XCTestCase {
 
         // Return to scrolling with the same text anchor, then arrive at the next chapter
         // in one continuous swipe. No second boundary swipe is issued by the test.
+        revealToolsIfHidden(for: "reader.tools.settings", app)
         selectReadingMode("上下滚动", rawValue: "scroll", app)
         XCTAssertEqual(Self.parseCanvasValue(canvas.value as? String ?? "")["path"], "OEBPS/text/ch2.xhtml")
         // A fast flick can legitimately carry the viewport past the chapter heading.
@@ -918,6 +868,6 @@ final class EPUBFlowUITests: XCTestCase {
         XCTAssertEqual(coordinate("loads"), crossChapterLoads)
         XCTAssertGreaterThanOrEqual(initialLoads, 1)
         Self.captureEvidence(app, testName: name, stage: "after-paging-cross-chapter", expectedBook: "EPUBTest-Illustrated-A")
-        showTools(app)
+        revealToolsIfHidden(for: "reader.exit", app)
     }
 }

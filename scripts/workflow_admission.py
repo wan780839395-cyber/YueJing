@@ -1,7 +1,8 @@
 """Cheap Task3 dispatch admission, before native tool preparation."""
+import json
 import os
 import subprocess
-import task3_test_inventory as inventory
+from device_registry import BATCHES, DEVICE_SCOPES, dispatch_batch
 from workflow_development import preflight
 
 HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'epub-compat-33',
@@ -10,7 +11,7 @@ HISTORICAL = {'host-natural-root-5c88543-exact3', 'reuse-native-205-d2110a9', 'e
 
 
 def admit(scope, acknowledgement):
-    if scope not in HISTORICAL | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027', 'bookmark-device-028', 'search-device-029', 'search-return-device-030'}:
+    if scope not in HISTORICAL | DEVICE_SCOPES | {'full', 'development-targeted', 'woff2-native-024', 'userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'}:
         raise ValueError('Choose an explicit scope; no native work is authorized by the default')
     if scope != 'development-targeted' and acknowledgement != scope:
         raise ValueError('Explicit scope acknowledgement required; historical frozen gates still apply')
@@ -20,9 +21,9 @@ def admit(scope, acknowledgement):
 def main():
     scope = admit(os.environ.get('VALIDATION_SCOPE', ''), os.environ.get('SCOPE_ACKNOWLEDGEMENT', ''))
     if scope == 'full':
-        from bookmark_device_package import BASE
+        from bookmark_device_package import SCOPE
         parents = subprocess.check_output(['git', 'rev-list', '--parents', '-n1', 'HEAD'], text=True).split()[1:]
-        if BASE in parents:
+        if BATCHES[SCOPE].product in parents:
             raise ValueError('This bookmark batch permits targeted development and device-only packaging, not full')
     if scope == 'woff2-native-024':
         env = os.environ
@@ -37,7 +38,7 @@ def main():
             raise ValueError('WOFF2 candidate, branch, package consent or run identity mismatch')
         from run_woff2_native import preflight as native_preflight
         native_preflight()
-    elif scope in ('bookmark-device-028', 'search-device-029', 'search-return-device-030'):
+    elif scope in DEVICE_SCOPES:
         from bookmark_device_package import scope_receipt
         scope_receipt()
     elif scope in ('userfont-native-025', 'fontpicker-native-026', 'fontcopy-native-027'):
@@ -68,6 +69,12 @@ def main():
     else:
         if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or os.environ.get('GITHUB_RUN_ATTEMPT') != '1':
             raise ValueError('Explicit first-attempt dispatch required')
+    if 'GITHUB_OUTPUT' in os.environ:
+        # Older, non-registry diagnostic jobs keep their original hosting contract.
+        route = (dispatch_batch(scope).route() if scope in DEVICE_SCOPES else
+                 dict(batch='', runner='macos-15', architecture='arm64', job_minutes=30, prepare_minutes=5))
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+            print('device_route=' + json.dumps(route, separators=(',', ':')), file=output)
     print('Admitted scope:', scope, '(not a release qualification)')
 
 if __name__ == '__main__':

@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import subprocess
+import sys
 import time
 
 import task3_test_inventory as inventory
@@ -16,6 +17,7 @@ import task3_test_inventory as inventory
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE = 'development-targeted'
 PLAN = 'scripts/development_scope.json'
+GENERIC_SIM = 'generic/platform=iOS Simulator'
 SCHEMES = {'ReaderDomainTests': 'ReaderDomain', 'YueJingHostTests': 'YueJingHost',
            'YueJingEPUBUITests': 'YueJingEPUBUI'}
 PACKAGE_TARGETS = {'GRDB', 'GRDB_GRDB', 'CSQLite', 'ZIPFoundation', 'ZIPFoundation_ZIPFoundation'}
@@ -184,7 +186,7 @@ def dependency_fingerprints(root):
 
 
 def build_identity(root, plan, destination, scheme, tools):
-    require(re.fullmatch(r'platform=iOS Simulator,id=[0-9a-fA-F-]{36}', destination) is not None, 'Invalid simulator destination')
+    require(destination == GENERIC_SIM, 'Invalid generic simulator build destination')
     resolved = root / 'YueJing.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved'
     project = root / 'YueJing.xcodeproj/project.pbxproj'
     generated_scheme = root/'YueJing.xcodeproj/xcshareddata/xcschemes'/f'{scheme}.xcscheme'
@@ -272,7 +274,7 @@ def export_results(folder, bundle, *, deadline, root, runner):
         require(not failures, '; '.join(failures))
 
 
-def execute(plan, destination, output, *, root=ROOT, runner=None, identity_factory=None, parser=None, exporter=None):
+def execute(plan, output, *, root=ROOT, runner=None, identity_factory=None, parser=None, exporter=None):
     from workflow_process import run_logged, ProcessCleanupError
     from workflow_failure_details import failure_details
     import run_epub_freeze_validation as freeze
@@ -331,52 +333,63 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
         if identity_factory is None:
             from workflow_tools import inspect_toolchain
             tools = inspect_toolchain(root, output/'tools')
-            identity_factory = lambda scheme: build_identity(root,plan,destination,scheme,tools)
+            identity_factory = lambda scheme: build_identity(root,plan,GENERIC_SIM,scheme,tools)
         frozen_identities.update({s:copy.deepcopy(identity_factory(s)) for s in dict.fromkeys(x['scheme'] for x in specs)})
         if source_anchor is not None and any(v['source'] != source_anchor for v in frozen_identities.values()):
             raise RuntimeError('Source changed during execution preparation')
         write_json(output/'frozen-inputs.json', frozen_identities)
-        for index, spec in enumerate(specs):
-            active_record = None
-            current = dict(index=index, name=spec['cases'][0], target=spec['target'], status='not_run')
-            result['cases'].append(current)
-            scheme = spec['scheme']
+        blockers = {}
+        for scheme in frozen_identities:
             blocked = sorted(DEPENDENCIES[scheme] & broken)
             if blocked:
-                current.update(status='blocked', blocked_by=blocked)
+                blockers[scheme] = blocked
                 continue
-            derived = root / 'build/development' / scheme
-            products = derived / 'Build/Products'
-            folder = output / f'case-{index+1:02d}'
-            folder.mkdir()
-            if scheme not in builds:
-                build = dict(scheme=scheme, status='not_run')
-                builds[scheme] = build
-                result['builds'].append(build)
-                active_record = build
-                build_folder = output / ('build-' + scheme)
-                build_folder.mkdir()
-                try:
-                    require(not derived.exists(), 'Refuse stale DerivedData; use a fresh checkout')
-                    identity = identity_for(scheme)
-                    build.update(invoke(build_command(scheme, destination, derived, build_folder/'build.xcresult'),
-                                        build_folder/'native.log', plan['build_timeout_seconds'], build))
-                    identity_for(scheme)
-                    if build['exit_code'] != 0 or build['timed_out']:
-                        build['status'] = 'timed_out' if build['timed_out'] else 'failed'
-                        broken.update(failed_targets((build_folder/'native.log').read_text(encoding='utf-8', errors='replace'), scheme))
-                    else:
-                        identity_for(scheme)
-                        build.update(status='passed', identity=identity, products=tree_fingerprints(products))
-                except (ValueError, OSError, subprocess.SubprocessError) as exc:
-                    stop_record(build, 'failed', exc)
-                write_json(build_folder/'receipt.json', build)
+            derived = root/'build/development'/scheme
+            build_folder = output/('build-' + scheme)
+            build_folder.mkdir()
+            active_record = build = dict(scheme=scheme, status='not_run')
+            builds[scheme] = build
+            result['builds'].append(build)
+            try:
+                require(not derived.exists(), 'Refuse stale DerivedData; use a fresh checkout')
+                identity = identity_for(scheme)
+                build.update(invoke(build_command(scheme, GENERIC_SIM, derived, build_folder/'build.xcresult'),
+                                    build_folder/'native.log', plan['build_timeout_seconds'], build))
+                identity_for(scheme)
                 if build['status'] != 'passed':
-                    build['failure_details'] = failure_details('build-'+scheme, logs=[build_folder/'native.log'],
-                        receipts=[build_folder/'receipt.json'], provenance=result['provenance'])
-            if builds[scheme]['status'] != 'passed':
-                current.update(status='blocked', blocked_by=['build-' + scheme])
+                    broken.update(failed_targets((build_folder/'native.log').read_text(encoding='utf-8', errors='replace'), scheme))
+                else:
+                    build.update(identity=identity, products=tree_fingerprints(derived/'Build/Products'))
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                stop_record(build, 'failed', exc)
+            write_json(build_folder/'receipt.json', build)
+            if build['status'] != 'passed':
+                blockers[scheme] = ['build-' + scheme]
+                build['failure_details'] = failure_details('build-'+scheme, logs=[build_folder/'native.log'],
+                    receipts=[build_folder/'receipt.json'], provenance=result['provenance'])
+
+        active_record = None
+        for index, spec in enumerate(specs):
+            row = dict(index=index, name=spec['cases'][0], target=spec['target'], status='not_run')
+            if spec['scheme'] in blockers:
+                row.update(status='blocked', blocked_by=blockers[spec['scheme']])
+            result['cases'].append(row)
+        if any(row['status'] == 'not_run' for row in result['cases']):
+            active_record = result['simulator_setup'] = dict(status='running')
+            destination = prepare_runtime(root, phase='simulator', deadline=start+plan['total_timeout_seconds'])
+            require(preflight(root) == plan, 'Plan changed during simulator preparation')
+            active_record.update(status='passed')
+            result['test_destination'] = destination
+        for index, spec in enumerate(specs):
+            active_record = None
+            current = result['cases'][index]
+            if current['status'] == 'blocked':
                 continue
+            scheme = spec['scheme']
+            derived = root/'build/development'/scheme
+            products = derived/'Build/Products'
+            folder = output/f'case-{index+1:02d}'
+            folder.mkdir()
             try:
                 active_record = current
                 validate_build(builds[scheme], identity_for(scheme), products)
@@ -390,8 +403,13 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
                 identity_for(scheme)
                 if (folder/'test.xcresult').is_dir():
                     before_export = time.monotonic()
-                    exporter(folder, folder/'test.xcresult', deadline=start+plan['total_timeout_seconds'], root=root, runner=runner)
-                    current['export_seconds'] = time.monotonic()-before_export
+                    try:
+                        exporter(folder, folder/'test.xcresult', deadline=start+plan['total_timeout_seconds'], root=root, runner=runner)
+                    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                        current['export_error'] = str(exc)
+                        raise
+                    finally:
+                        current['export_seconds'] = time.monotonic()-before_export
                 if current['status'] == 'passed':
                     validate_build(builds[scheme], identity_for(scheme), products)
                     args = (str(index), spec, raw, current['exit_code'], current['timed_out'])
@@ -400,10 +418,12 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
                     if spec['cases'][0] in inventory.PARAMETERIZED:
                         freeze.parameter_result(json.loads((folder/'xcresult-tests.json').read_text(encoding='utf-8')))
                     current['executions'] = counts['executions']
-                    current['test_body_seconds'] = sum(float(v) for v in re.findall(r'(?:passed after |passed \()([0-9.]+) seconds?', text))
                     write_json(folder/'counts.json', counts)
             except (ValueError, OSError, subprocess.SubprocessError) as exc:
                 current.update(status='timed_out' if current.get('timed_out') or current.get('case_timed_out') else 'failed', error=str(exc))
+            from workflow_case_layers import case_layers
+            current['layers'] = case_layers(folder, current)
+            current['test_body_seconds'] = current['layers']['business']['body_seconds']
             write_json(folder/'execution.json', current)
             if current['status'] != 'passed':
                 current['failure_details'] = failure_details(current['name'], logs=[folder/'native.log'],
@@ -422,6 +442,7 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         result['stopped_reason'] = 'preparation_or_evidence_error'
         result['error'] = str(exc)
+        stop_record(active_record, 'failed', exc)
         stop_record(current, 'failed', exc)
     except (RuntimeError, ProcessCleanupError) as exc:
         stop_record(active_record, 'failed' if isinstance(exc, ProcessCleanupError) else 'blocked', exc)
@@ -440,6 +461,10 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
             if not receipt.exists():
                 write_json(receipt, row)
         for row in result['cases']:
+            if row['status'] == 'not_run' and 'stopped_reason' in result:
+                row['reason'] = result['stopped_reason']
+                if result.get('simulator_setup', {}).get('status') in ('failed', 'blocked'):
+                    row.update(status='blocked', blocked_by=['simulator_setup'])
             if row['status'] == 'running':
                 row.update(status='failed', error='execution aborted without a terminal result')
             folder = output/f'case-{row["index"]+1:02d}'
@@ -453,29 +478,45 @@ def execute(plan, destination, output, *, root=ROOT, runner=None, identity_facto
         write_json(output/'development-summary.json', result)
     return result
 
-def prepare_runtime(root=ROOT):
+def prepare_runtime(root=ROOT, *, phase='all', deadline=None):
+    """Other native scopes keep their one-call warmup/resolve/discover/boot path."""
     from workflow_process import run_logged
     import validate_task3 as validation
     output = root/'artifacts/development/runtime'
-    output.mkdir(parents=True, exist_ok=False)
+    require(phase in ('all', 'resolve', 'simulator'), 'Unknown preparation phase')
+    if phase != 'simulator':
+        output.mkdir(parents=True, exist_ok=False)
     (root/'artifacts/task3').mkdir(parents=True, exist_ok=True)
     times = {}
+    def bounded(seconds):
+        if deadline is None:
+            return seconds
+        remaining = deadline-time.monotonic()
+        if remaining <= 0:
+            raise BudgetExhausted('No total budget remains for simulator setup')
+        return min(seconds, remaining)
     def run(label, command, budget):
         started = time.monotonic()
-        code, timeout = run_logged(command, output/(label+'.log'), budget, cwd=root)
+        code, timeout = run_logged(command, output/(label+'.log'), bounded(budget), cwd=root)
         times[label] = dict(elapsed_seconds=time.monotonic()-started, exit_code=code, timed_out=timeout)
         require(code == 0 and not timeout, 'Runtime preparation failed: '+label)
-    try:
-        # Warm the selected Xcode's simulator service during independent dependency resolution.
-        # Opening the UI is only a hint: still require fresh simctl JSON, selection and bootstatus.
+    def warmup():
         simulator = Path(os.environ['DEVELOPER_DIR']) / 'Applications/Simulator.app'
         started = time.monotonic()
         code, timeout = run_logged(['/usr/bin/open', '-g', '-j', '-a', str(simulator)],
-                                   output/'simulator-warmup.log', 10, cwd=root)
+                                   output/'simulator-warmup.log', bounded(10), cwd=root)
         times['warmup'] = dict(exit_code=code, timed_out=timeout, elapsed_seconds=time.monotonic()-started)
-        run('dependencies', ['xcodebuild', '-resolvePackageDependencies', '-project', 'YueJing.xcodeproj',
-                             '-scheme', 'YueJing', '-clonedSourcePackagesDirPath', 'build/SourcePackages'], 300)
-        validation.resolved()
+    try:
+        if phase == 'all':
+            warmup()
+        if phase != 'simulator':
+            run('dependencies', ['xcodebuild', '-resolvePackageDependencies', '-project', 'YueJing.xcodeproj',
+                                 '-scheme', 'YueJing', '-clonedSourcePackagesDirPath', 'build/SourcePackages'], 300)
+            validation.resolved()
+            if phase == 'resolve':
+                return
+        else:
+            warmup()
         for kind in ('devices', 'runtimes'):
             command = ['xcrun', 'simctl', 'list', kind] + (['available'] if kind == 'devices' else []) + ['-j']
             try:
@@ -484,27 +525,53 @@ def prepare_runtime(root=ROOT):
             except ValueError:
                 # Collect a bounded, read-only service snapshot; do not discard the original error.
                 run_logged(['/bin/launchctl', 'print', f'gui/{os.getuid()}/com.apple.CoreSimulator.CoreSimulatorService'],
-                           output/'simulator-service.log', 5, cwd=root)
+                           output/'simulator-service.log', bounded(5), cwd=root)
                 raise
             (root/'artifacts/task3'/f'{kind}.json').write_bytes((output/(kind+'.log')).read_bytes())
-        validation.select_simulator()
+        if phase == 'simulator':
+            # Include the selector's SDK query and child processes in the remaining deadline.
+            run('selection', [sys.executable, '-B', 'scripts/validate_task3.py', 'select-simulator'], 90)
+        else:
+            validation.select_simulator()
         selected = json.loads((root/'artifacts/task3/simulator-selection.json').read_text())
         udid = selected['udid']
+        if phase == 'simulator':
+            require(re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', udid), 'Invalid selected UDID')
         devices = json.loads((output/'devices.log').read_text())['devices']
         state = next(d['state'] for group in devices.values() for d in group if d['udid'] == udid)
         if state not in ('Booted', 'Booting'):
             run('simulator-boot', ['xcrun', 'simctl', 'boot', udid], 30)
         run('simulator-ready', ['xcrun', 'simctl', 'bootstatus', udid, '-b'], 120)
+        if phase == 'simulator':
+            return 'platform=iOS Simulator,id='+udid
     finally:
-        write_json(output/'timing.json', times)
+        write_json(output/('resolution-timing.json' if phase == 'resolve' else 'timing.json'), times)
 
+
+# Operator guidance only: no credentials, network, scheduling or retry loop.
+RETRY_POLICY = {
+    'unclaimed': (1, 'Confirm no runner started, no live duplicate and capacity restored before one newly approved run.'),
+    'preparation': (1, 'Inspect tool, dependency and simulator logs. Only retry once for a confirmed transient setup failure; fix pin or identity mismatches first.'),
+    'compile': (0, 'Do not rerun unchanged source. Fix the compiler diagnostic and approve the new source/plan.'),
+    'assertion': (0, 'Inspect the first failing assertion and xcresult; reproduce or fix it before a new approved plan.'),
+    'export': (0, 'Keep the original raw xcresult. Retry export once locally on a copy; missing evidence is not a pass.'),
+    'timeout': (0, 'Inspect the exhausted budget and logs. Re-scope or repair; do not extend or loop.'),
+    'cancelled': (0, 'Respect cancellation. No replacement without a fresh operator decision.'),
+    'unknown': (0, 'Preserve receipts and determine the failing stage before requesting another run.'),
+}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('action', choices=['preflight', 'run', 'selection', 'prepare-runtime'])
-    ap.add_argument('--destination')
+    ap.add_argument('action', choices=['preflight', 'run', 'selection', 'retry-advice'])
+    ap.add_argument('--reason', choices=sorted(RETRY_POLICY))
     ap.add_argument('--output', type=Path, default=ROOT/'artifacts/development/execution')
     args = ap.parse_args()
+    if args.action == 'retry-advice':
+        if not args.reason:
+            ap.error('retry-advice requires --reason')
+        limit, advice = RETRY_POLICY[args.reason]
+        print(json.dumps(dict(reason=args.reason, auto_dispatch=False, max_manual_retries_unchanged=limit, advice=advice)))
+        return
     if args.action == 'selection':
         inventory.validate_source(ROOT)
         print(json.dumps(selection_summary(json.loads((ROOT/PLAN).read_text())), indent=2))
@@ -513,10 +580,9 @@ def main():
     if args.action == 'preflight':
         print(json.dumps(selection_summary(plan), indent=2))
         return
-    if args.action == 'prepare-runtime':
-        prepare_runtime()
-        return
-    result = execute(plan, args.destination, args.output)
+    prepare_runtime(ROOT, phase='resolve')
+    plan = preflight()  # Recheck actual source, selection and clean checkout after resolution.
+    result = execute(plan, args.output, root=ROOT)
     raise SystemExit(0 if result['status']=='passed' else 1)
 
 if __name__ == '__main__':

@@ -44,7 +44,8 @@ FILES = {
     "YueJingHostTests/ReaderInteractionInterruptionTests.swift": """interruptedDecelerationRecoversOnSameControllerWithoutMovingAnchor interruptionRevokesOldTouchAndAcceptsFreshIntent momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle viewportInterruptionForwardingIsIdempotentAndDetachedControllerIsInert""",
     "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingHostTests/ReaderSceneAuthorityTests.swift": """nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites""",
-    "YueJingHostTests/ReaderBookmarkTests.swift": """bookmarkVisibleCaptureAndMutationsDoNotSaveProgress bookmarkQueuedCancellationAndOldDismissCannotAffectNewPanel bookmarkPreparationPreservesWindowUntilExactApplication bookmarkReflowAndOwnerReplacementRevokeCapturedAndPreparedPositions""",
+    "YueJingHostTests/ReaderBookmarkTests.swift": """bookmarkVisibleCaptureAndMutationsDoNotSaveProgress bookmarkQueuedCancellationAndOldDismissCannotAffectNewPanel bookmarkPreparationPreservesWindowUntilExactApplication bookmarkReflowAndOwnerReplacementRevokeCapturedAndPreparedPositions txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication""",
+    "YueJingHostTests/SearchReturnTests.swift": """epubSearchReturnPreservesFirstLocatorUntilConfirmedReturn""",
     "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion""",
     "YueJingCanvasTests/ReadingCanvasRenderingTests.swift": """dirtyRegionCoversTheSentinelInEveryThemeAndPreservesOutsidePixels reuseRemovesOldInkAndAccessibilityActionsWithoutResettingTheTheme fractionalResizeRerasterizesToTheSameImageAsAFreshCanvas""",
     "TXTCorePerformanceTests/TXTLargeFilePerformanceTests.swift": """automaticDecodeAndChaptersBaseline""",
@@ -74,14 +75,14 @@ FILES = {
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 287, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 63,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 65,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 8}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 405  # Declaration identities; the Bool parameter adds one execution (406).
+TOTAL = 407  # Declaration identities; the Bool parameter adds one execution (408).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
 EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 288}
-EXECUTION_TOTAL = 406
+EXECUTION_TOTAL = 408
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

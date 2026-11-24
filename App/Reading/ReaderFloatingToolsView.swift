@@ -32,16 +32,19 @@ struct ReaderFloatingToolsView: View {
     let rememberFocus: @MainActor (String) -> Void
     let open: @MainActor (ReadingToolPanel) -> Void
     @AccessibilityFocusState.Binding var focusedControl: String?
-    // nil preserves the TXT edge dock and its existing memberwise call sites.
+    // Unified chapter panel for TXT and EPUB; nil or blank falls back to neutral unconfirmed text.
     var chapterContext: String? = nil
     var returnFromSearch: (@MainActor () -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
-    @State private var trayExpanded = false
 
     private var visible: Bool { state.visible && state.panel == nil }
     private var canReturnFromSearch: Bool {
         returnFromSearch != nil && visible && state.canInteract && state.exitRequest == nil && !exitSaveFailed
+    }
+    private var resolvedChapterContext: String {
+        let trimmed = chapterContext?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "章节尚未确认" : trimmed
     }
 
     var body: some View {
@@ -54,13 +57,8 @@ struct ReaderFloatingToolsView: View {
                         }
                         .transition(.opacity)
                     }
-                    if let chapterContext {
-                        chapterPanel(chapterContext)
-                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
-                    } else {
-                        edgeDock
-                            .transition(.opacity)
-                    }
+                    chapterPanel(resolvedChapterContext)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
                 }
             }
         }
@@ -81,7 +79,6 @@ struct ReaderFloatingToolsView: View {
                     chapterPanelContent(context)
                 }
                 .frame(height: maximumHeight)
-                .accessibilityIdentifier("reader.tools.scroll")
             }
         }
         .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
@@ -105,7 +102,6 @@ struct ReaderFloatingToolsView: View {
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .accessibilityIdentifier("reader.tools.chapterPanel")
     }
 
     @ViewBuilder
@@ -188,6 +184,7 @@ struct ReaderFloatingToolsView: View {
                              key: String, available: Bool, fillsWidth: Bool) -> some View {
         Button {
             guard visible, state.canInteract, available, !exitSaveFailed else { return }
+            rememberFocus(key)
             open(panel)
         } label: {
             Label(title, systemImage: symbol)
@@ -204,64 +201,6 @@ struct ReaderFloatingToolsView: View {
         .accessibilityLabel(accessibilityTitle)
         .accessibilityIdentifier("reader.tools.\(key)")
         .accessibilityFocused($focusedControl, equals: key)
-    }
-
-    private var edgeDock: some View {
-        ZStack(alignment: .bottomTrailing) {
-            if trayExpanded {
-                expandedDock
-                    .transaction { $0.animation = nil }
-                    .transition(.opacity)
-            } else {
-                dockSurface(cornerRadius: 26) { expandButton }
-                    .transaction { $0.animation = nil }
-                    .transition(.opacity)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: trayExpanded)
-        // The inactive controls are absent, not transparent retained AX/hit-test targets.
-        // The stable outer view still owns tray state; no reader/model identity changes.
-    }
-
-    private var expandedDock: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                dockSurface(cornerRadius: 24) {
-                    HStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-            }
-            dockSurface(cornerRadius: 22) {
-                ScrollView(.vertical) {
-                    VStack(spacing: 4) { directoryButton; settingsButton; collapseButton }
-                }
-                .frame(height: min(metrics.compactHeight ? 88 : 220, metrics.controlHeight * 3 + 8))
-                .accessibilityIdentifier("reader.tools.scroll")
-            }
-        }
-    }
-
-    private var expandButton: some View {
-        Button {
-            guard visible, state.canInteract, !exitSaveFailed else { return }
-            trayExpanded = true
-            restoreFocus(to: directoryAvailable ? "directory" : (settingsAvailable ? "settings" : "dock.collapse"))
-        } label: {
-            Label("阅读工具", systemImage: "slider.horizontal.3")
-                .font(dynamicType.isAccessibilitySize ? .body.weight(.semibold) : .subheadline.weight(.semibold))
-                .imageScale(.medium)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14).padding(.vertical, 5)
-                .frame(minWidth: 44, minHeight: metrics.controlHeight)
-                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.accent, role: .primary, cornerRadius: 22))
-        .disabled(exitSaveFailed || !state.canInteract)
-        .accessibilityIdentifier("reader.tools.expand")
-        .accessibilityHint("展开目录和排版工具")
-        .accessibilityFocused($focusedControl, equals: "dock.expand")
     }
 
     private func returnFromSearchButton(action: @escaping @MainActor () -> Void) -> some View {
@@ -283,55 +222,6 @@ struct ReaderFloatingToolsView: View {
         .accessibilityHint("返回搜索跳转前的位置")
         .accessibilityIdentifier("reader.tools.returnFromSearch")
         .accessibilityFocused($focusedControl, equals: "returnFromSearch")
-    }
-
-    private var collapseButton: some View {
-        Button {
-            guard visible, state.canInteract, !exitSaveFailed else { return }
-            trayExpanded = false
-            restoreFocus(to: "dock.expand")
-        } label: {
-            Label("收起", systemImage: "chevron.right")
-                .font(dynamicType.isAccessibilitySize ? .body.weight(.medium) : .subheadline.weight(.medium))
-                .imageScale(.medium)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 4)
-                .frame(minWidth: 44, minHeight: metrics.controlHeight)
-        }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, cornerRadius: 18))
-        .disabled(exitSaveFailed || !state.canInteract)
-        .accessibilityIdentifier("reader.tools.collapse")
-        .accessibilityFocused($focusedControl, equals: "dock.collapse")
-    }
-
-    private func restoreFocus(to target: String) {
-        rememberFocus(target)
-        focusedControl = target
-    }
-
-    private var directoryButton: some View {
-        toolButton("目录", symbol: "list.bullet", panel: .directory, key: "directory")
-            .disabled(!directoryAvailable || exitSaveFailed || !state.canInteract)
-    }
-
-    private var settingsButton: some View {
-        toolButton("排版", symbol: "textformat.size", panel: .settings, key: "settings")
-            .disabled(!settingsAvailable || exitSaveFailed || !state.canInteract)
-            .accessibilityHint("调整字号、行距和阅读背景，立即应用并保存")
-    }
-
-    private func toolButton(_ title: String, symbol: String, panel: ReadingToolPanel, key: String) -> some View {
-        Button { open(panel) } label: {
-            Label(title, systemImage: symbol)
-                .font(dynamicType.isAccessibilitySize ? .body.weight(.semibold) : .subheadline.weight(.semibold))
-                .imageScale(.medium)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 4)
-                .frame(minWidth: 44, minHeight: metrics.controlHeight)
-        }
-        .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, role: .primary, cornerRadius: 18))
-        .accessibilityIdentifier("reader.tools.\(key)")
-        .accessibilityFocused($focusedControl, equals: key)
     }
 
     private func dockSurface<Content: View>(cornerRadius: CGFloat, @ViewBuilder content: () -> Content) -> some View {

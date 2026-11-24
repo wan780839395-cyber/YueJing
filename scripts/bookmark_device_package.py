@@ -1,110 +1,86 @@
-"""Device-only scopes. The separate development run is never a packaging credential."""
+"""Device-only provenance; the separate development run is never a packaging credential."""
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import subprocess
 import sys
-from typing import NamedTuple
 
+from device_registry import BATCHES, HOSTS, REGISTRY_PATH, dispatch_batch, load_registry
 from package_ipa import expected_project_identity
 import validate_task3 as v
 
-SCOPE, VERSION, BUILD = 'bookmark-device-028', '0.2.28', '30'
-BASE = '765fc4e1f09b1d09554b60e2016b1b34bc9aabbb'
-PLAN = '6a618ed99773c0f2ff626c633cefd08b60b1c3a9f60a5c4106a96ac82d780e2d'
-REF = 'refs/heads/dev/workflow-optimization'
-SEARCH = 'search-device-029'
-SEARCH_RETURN = 'search-return-device-030'
+SCOPE = 'bookmark-device-028'  # Historical CLI/API aliases, not release configuration.
+COMMANDS = {'verify-download': SCOPE, 'verify-search-download': 'search-device-029',
+            'verify-search-return-download': 'search-return-device-030'}
 
 
-class Batch(NamedTuple):
-    version: str
-    build: str
-    base: str
-    plan: str
+def git(*args):
+    return subprocess.check_output(['git', *args], cwd=v.ROOT, timeout=30)
 
 
-BATCHES = {SCOPE: Batch(VERSION, BUILD, BASE, PLAN),
-           SEARCH: Batch('0.2.29', '31', '13bb9b05d6dac14a55e5f34b9f683b4b869331df',
-                         '5ff8ec571ff8d613554103737af40096b4bc60eb9c4adbb6b9f7cb65d67d51f8'),
-           SEARCH_RETURN: Batch('0.2.30', '32', '077de6cbe1fca1eaca76bd9ce96244087d0ec673', '5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f')}
-# Both search checkouts need MAX_SEARCH_COMMITS + 1 commits, including the base.
-MAX_SEARCH_COMMITS = 8
-SEARCH_PATHS = frozenset(('.github/workflows/task3-validate.yml', 'project.yml', 'scripts/workflow_tools.py',
-                          'scripts/workflow_admission.py', 'scripts/bookmark_device_package.py',
-                          'scripts/epub_diagnostic_package.py', 'scripts/package_ipa.py', 'scripts/validate_task3.py',
-                          'scripts/workflow_development.py'))
-RETURN_PATHS = frozenset(('.github/workflows/task3-validate.yml', 'project.yml', 'scripts/workflow_tools.py',
-                          'scripts/workflow_admission.py', 'scripts/bookmark_device_package.py',
-                          'scripts/epub_diagnostic_package.py', 'scripts/package_ipa.py'))
+def check_freeze(batch, source):
+    if batch.legacy_source:
+        v.require(source == batch.legacy_source, 'Not the reviewed legacy release commit')
+        return
+    # The freeze commit cannot contain its own SHA. Instead pin its sole parent,
+    # allow ONLY an ordinary registry edit, and match its active contract exactly.
+    v.require(git('rev-list', '--parents', '-n1', source).decode().split() == [source, batch.product],
+              'Expected one direct child of the approved device product')
+    raw = git('diff-tree', '--no-commit-id', '--raw', '-r', '-z', '--no-renames', batch.product, source)
+    v.require(re.fullmatch(rb':100644 100644 [a-f0-9]+ [a-f0-9]+ M\x00' +
+                           re.escape(REGISTRY_PATH.encode()) + rb'\x00', raw), 'Expected registry-only freeze')
+    rows, active = load_registry(json.loads(git('show', source + ':' + REGISTRY_PATH)))
+    v.require(active == batch.key and rows[active] == batch, 'Candidate did not activate this frozen contract')
+    previous, _ = load_registry(json.loads(git('show', batch.product + ':' + REGISTRY_PATH)))
+    v.require(active not in previous and rows == {**previous, active: batch},
+              'Freeze must append one new batch without rewriting earlier contracts')
+    batch.check_plan(git('show', batch.product + ':' + batch.plan_path))
 
 
 def identity(source, run_id, scope=SCOPE):
     batch = BATCHES[scope]
-    v.require(re.fullmatch('[0-9a-f]{40}', batch.base) and re.fullmatch('[0-9a-f]{64}', batch.plan),
-              'Device scope has no frozen product SHA and plan SHA256')
     v.require(re.fullmatch('[0-9a-f]{40}', source) and re.fullmatch('[1-9][0-9]*', run_id),
               'Expected full commit and positive device run ID')
-    return dict(scope=scope, version=batch.version, build=batch.build, source_commit=source, base_commit=batch.base,
-                ref=REF, plan_sha256=batch.plan, run_id=run_id, run_attempt='1', job='epub_diagnostic',
+    check_freeze(batch, source)
+    return dict(scope=scope, version=batch.version, build=batch.build, source_commit=source, base_commit=batch.product,
+                ref=batch.ref, plan_sha256=batch.plan_sha256, run_id=run_id, run_attempt='1', job='epub_diagnostic',
                 qualification='DEVICE_DIAGNOSTIC_ONLY', coverage='UI_NOT_QUALIFIED',
                 native_tests_executed_this_job=0, full_regression_passed=False, release_qualified=False,
                 build_ipa=True, allow_unqualified_ipa=True, validation_reference=None,
-                physical_acceptance='not performed')
+                physical_acceptance='not performed', **({} if batch.legacy_source else {'device_route': batch.route()}))
 
 
-def git(*args):
-    return subprocess.check_output(['git', *args], cwd=v.ROOT, timeout=30).decode()
-
-
-def check_search_chain(source, base, *, max_commits=MAX_SEARCH_COMMITS, paths=SEARCH_PATHS):
-    current = source
-    for _ in range(max_commits):
-        lineage = git('rev-list', '--parents', '-n1', current).split()
-        v.require(len(lineage) == 2 and lineage[0] == current, 'Missing search parent or unexpected merge')
-        parent = lineage[1]
-        # Check each edge, not just the endpoint diff: out-of-scope edits reverted later still fail.
-        raw = git('diff-tree', '--no-commit-id', '--raw', '-r', '-z', '--no-renames', parent, current)
-        entries = raw.split('\0')
-        v.require(len(entries) >= 3 and len(entries) % 2 == 1 and entries[-1] == '', 'Empty or invalid search change')
-        for meta, path in zip(entries[0:-1:2], entries[1:-1:2]):
-            v.require(path in paths and meta.split()[:2] == [':100644', '100644'] and meta.endswith(' M'),
-                      'Expected only edits of approved ordinary files in search candidate history')
-        if parent == base:
-            return
-        current = parent
-    raise ValueError('Frozen search base is outside permitted repair chain')
+def check_host(batch, system, architecture):
+    v.require(system == 'Darwin' and architecture == HOSTS[batch.runner], 'Wrong physical device build host')
 
 
 def scope_receipt():
     env = os.environ
     scope = env.get('VALIDATION_SCOPE')
-    v.require(scope in BATCHES and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
-              and env.get('GITHUB_REPOSITORY') == 'wan780839395-cyber/YueJing' and env.get('GITHUB_REF') == REF
+    batch = dispatch_batch(scope)
+    v.require(env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              and env.get('GITHUB_REPOSITORY') == 'wan780839395-cyber/YueJing' and env.get('GITHUB_REF') == batch.ref
               and env.get('GITHUB_RUN_ATTEMPT') == '1' and env.get('GITHUB_JOB') in ('admission', 'epub_diagnostic')
               and env.get('BUILD_IPA') == env.get('ALLOW_UNQUALIFIED_IPA') == 'true', 'Device dispatch identity differs')
-    batch = BATCHES[scope]
+    if env['GITHUB_JOB'] == 'epub_diagnostic':
+        check_host(batch, platform.system(), platform.machine())
     source = env['GITHUB_SHA']
-    receipt = identity(source, env['GITHUB_RUN_ID'], scope)
     inputs = json.loads(Path(env['GITHUB_EVENT_PATH']).read_bytes())['inputs']
     v.require(inputs.get('validation_scope') == inputs.get('scope_acknowledgement') == scope
-              and inputs.get('development_source_sha') == source and inputs.get('development_plan_sha256') == batch.plan
+              and inputs.get('development_source_sha') == source and inputs.get('development_plan_sha256') == batch.plan_sha256
               and str(inputs.get('build_ipa')).lower() == str(inputs.get('allow_unqualified_ipa')).lower() == 'true'
               and not inputs.get('prior_validation_run'), 'Device dispatch inputs differ')
-    v.require(git('rev-parse', 'HEAD').strip() == source and not git('status', '--porcelain', '--untracked-files=all'),
+    v.require(git('rev-parse', 'HEAD').decode().strip() == source and not git('status', '--porcelain', '--untracked-files=all'),
               'Expected a clean checkout of the approved candidate')
-    if scope == SEARCH:
-        check_search_chain(source, batch.base)
-    elif scope == SEARCH_RETURN:
-        check_search_chain(source, batch.base, max_commits=1, paths={'scripts/bookmark_device_package.py'})
-    else:
-        v.require(git('rev-list', '--parents', '-n1', 'HEAD').split() == [source, batch.base],
-                  'Expected exact direct child of bookmark base')
+    if batch.legacy_source:
+        v.require(git('rev-list', '--parents', '-n1', 'HEAD').decode().split() == [batch.legacy_source, batch.product],
+                  'Unexpected historical release or product source')
+    batch.check_plan((v.ROOT / batch.plan_path).read_bytes())
     project = expected_project_identity()
-    v.require((project['version'], project['build']) == (batch.version, batch.build)
-              and v.digest(v.ROOT / 'scripts/development_scope.json') == batch.plan, 'Version, build or plan drift')
-    return receipt
+    v.require((project['version'], project['build']) == (batch.version, batch.build), 'Version or build drift')
+    return identity(source, env['GITHUB_RUN_ID'], batch.key)
 
 
 def check_gate(scope, hashes):
@@ -115,9 +91,11 @@ def check_gate(scope, hashes):
 
 
 if __name__ == '__main__':
-    commands = {'verify-download': SCOPE, 'verify-search-download': SEARCH,
-                'verify-search-return-download': SEARCH_RETURN}
-    if len(sys.argv) != 6 or sys.argv[1] not in commands:
-        sys.exit('usage: bookmark_device_package.py {' + '|'.join(commands) + '} EXTRACTED_DIR SOURCE_SHA DEVICE_RUN_ID IPA_SHA256')
     from epub_diagnostic_package import verify_download
-    verify_download(*sys.argv[2:], device_scope=commands[sys.argv[1]])
+    if len(sys.argv) == 7 and sys.argv[1] == 'verify-batch-download':
+        verify_download(*sys.argv[3:], device_scope=sys.argv[2])
+    elif len(sys.argv) == 6 and sys.argv[1] in COMMANDS:
+        verify_download(*sys.argv[2:], device_scope=COMMANDS[sys.argv[1]])
+    else:
+        sys.exit('usage: bookmark_device_package.py {verify-batch-download BATCH | ' + '|'.join(COMMANDS) +
+                 '} EXTRACTED_DIR SOURCE_SHA DEVICE_RUN_ID IPA_SHA256')

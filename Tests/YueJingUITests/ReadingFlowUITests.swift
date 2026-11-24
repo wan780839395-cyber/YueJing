@@ -133,30 +133,30 @@ final class ReadingFlowUITests: XCTestCase {
         withFixture { app in
             open("UITest-Long-A", app)
             let frame = viewport(app).frame
-            let collapse = app.buttons["reader.tools.collapse"]
-            waitHittable(collapse)
-            let expandedControlFrame = collapse.frame
-            collapse.tap()
-            let expand = app.buttons["reader.tools.expand"]
-            waitHittable(expand)
-            XCTAssertFalse(collapse.isHittable)
-            XCTAssertFalse(app.buttons["reader.tools.settings"].isHittable)
-            XCTAssertGreaterThanOrEqual(expand.frame.width, 44)
-            XCTAssertGreaterThanOrEqual(expand.frame.height, 44)
-            let compactControlFrame = expand.frame
-            XCTAssertEqual(compactControlFrame.maxX, expandedControlFrame.maxX, accuracy: 0.5)
-            XCTAssertEqual(compactControlFrame.maxY, expandedControlFrame.maxY, accuracy: 0.5)
-            XCTAssertEqual(compactControlFrame.height, expandedControlFrame.height, accuracy: 0.5)
+            let directory = app.buttons["reader.tools.directory"]
+            let settings = app.buttons["reader.tools.settings"]
+            waitHittable(directory)
+            waitHittable(settings)
+            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.returnFromSearch"].exists)
+            XCTAssertGreaterThanOrEqual(directory.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(directory.frame.height, 44)
+            XCTAssertGreaterThanOrEqual(settings.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(settings.frame.height, 44)
+            let chapterContext = app.staticTexts["reader.tools.chapterContext"]
+            XCTAssertTrue(chapterContext.exists)
+            XCTAssertFalse(chapterContext.label.contains("UITest-Long-A"))
+            let initialDirectoryFrame = directory.frame
+            let initialSettingsFrame = settings.frame
             assertSameFrame(viewport(app).frame, frame)
-            expandCDock(app, deadline: Date().addingTimeInterval(10), startsCollapsed: true)
-            waitHittable(app.buttons["reader.tools.settings"])
-            XCTAssertFalse(expand.isHittable)
-            assertSameFrame(viewport(app).frame, frame)
-            assertSameFrame(collapse.frame, expandedControlFrame)
             for _ in 0..<3 {
                 openSettings(app); closePanel(app)
                 openDirectory(app); closePanel(app)
             }
+            assertSameFrame(viewport(app).frame, frame)
+            assertSameFrame(directory.frame, initialDirectoryFrame)
+            assertSameFrame(settings.frame, initialSettingsFrame)
             openSettings(app)
             for key in ["diagnostics", "license"] {
                 let entry = app.buttons["reader.info.\(key)"]
@@ -180,13 +180,16 @@ final class ReadingFlowUITests: XCTestCase {
             open("UITest-Short-B", app)
             XCTAssertGreaterThanOrEqual(app.buttons["reader.exit"].frame.height, 44)
             let dockDeadline = Date().addingTimeInterval(10)
-            let collapse = app.buttons["reader.tools.collapse"]
-            revealDockControl(collapse, app, deadline: dockDeadline)
-            XCTAssertGreaterThanOrEqual(collapse.frame.width, 44)
-            XCTAssertGreaterThanOrEqual(collapse.frame.height, 44)
-            collapse.tap()
-            waitHittable(app.buttons["reader.tools.expand"], timeout: max(0, dockDeadline.timeIntervalSinceNow))
-            XCTAssertFalse(collapse.exists)
+            let directory = app.buttons["reader.tools.directory"]
+            revealDockControl("reader.tools.directory", app, deadline: dockDeadline)
+            XCTAssertGreaterThanOrEqual(directory.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(directory.frame.height, 44)
+            let settings = app.buttons["reader.tools.settings"]
+            revealDockControl("reader.tools.settings", app, deadline: dockDeadline)
+            XCTAssertGreaterThanOrEqual(settings.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(settings.frame.height, 44)
+            XCTAssertFalse(app.buttons["reader.tools.expand"].exists)
+            XCTAssertFalse(app.buttons["reader.tools.collapse"].exists)
             openSettings(app, sharedDeadline: dockDeadline)
             let close = app.buttons["reader.panel.close"]
             XCTAssertGreaterThanOrEqual(close.frame.height, 44)
@@ -620,8 +623,7 @@ final class ReadingFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: max(0.01, deadline.timeIntervalSinceNow)), .completed,
                        "The expected synthetic book must have content geometrically visible in the reader viewport")
         let key = Self.evidenceCase(name)
-        expandCDock(app, deadline: deadline, startsCollapsed: true)
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
+        revealDockControl("reader.tools.settings", app, deadline: deadline)
         let entryDiagnostic = ReadingEntryEvidence.beforeSettings(app, key: key, sharedDeadline: deadline)
         waitHittable(app.buttons["reader.tools.settings"], timeout: max(0.01, deadline.timeIntervalSinceNow), onFailure: {
             if entryDiagnostic { ReadingEntryEvidence.settingsFailed(app, key: key) }
@@ -772,29 +774,9 @@ final class ReadingFlowUITests: XCTestCase {
         XCTAssertEqual(result, .completed, "Reader foreground and previous-App departure must agree within the same return budget")
     }
 
-    @MainActor private func expandCDock(_ app: XCUIApplication, deadline: Date, startsCollapsed: Bool = false) {
-        let expand = app.buttons["reader.tools.expand"], collapse = app.buttons["reader.tools.collapse"]
-        if startsCollapsed {
-            waitHittable(expand, timeout: max(0, deadline.timeIntervalSinceNow))
-            XCTAssertFalse(collapse.exists)
-        } else {
-            let presented = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                (expand.exists && expand.isHittable) || collapse.exists
-            }, object: nil)
-            XCTAssertEqual(XCTWaiter.wait(for: [presented], timeout: max(0, deadline.timeIntervalSinceNow)), .completed,
-                           "The C dock must have a real compact or expanded control before opening a panel")
-        }
-        if expand.exists && expand.isHittable { expand.tap() }
-        let expanded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            collapse.exists && !expand.exists
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: max(0, deadline.timeIntervalSinceNow)), .completed,
-                       "Expansion must replace the compact control; large-text targets may need tool-local scrolling")
-        XCTAssertFalse(expand.exists)
-    }
-
-    @MainActor private func revealDockControl(_ button: XCUIElement, _ app: XCUIApplication, deadline: Date) {
-        let scroll = app.scrollViews["reader.tools.scroll"]
+    @MainActor private func revealDockControl(_ id: String, _ app: XCUIApplication, deadline: Date) {
+        let button = app.buttons[id]
+        let scroll = app.scrollViews.containing(.button, identifier: id).firstMatch
         var readyInBounds = false
         for _ in 0..<3 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
@@ -824,25 +806,23 @@ final class ReadingFlowUITests: XCTestCase {
     @MainActor private func viewport(_ app: XCUIApplication) -> XCUIElement { app.tables["reader.viewport"] }
     @MainActor private func openSettings(_ app: XCUIApplication, sharedDeadline: Date? = nil) {
         let deadline = sharedDeadline ?? Date().addingTimeInterval(10)
-        expandCDock(app, deadline: deadline)
-        let button = app.buttons["reader.tools.settings"]
-        revealDockControl(button, app, deadline: deadline)
-        button.tap() // revealDockControl already proves real-target readiness in this deadline.
+        let id = "reader.tools.settings"
+        revealDockControl(id, app, deadline: deadline)
+        app.buttons[id].tap() // revealDockControl already proves real-target readiness in this deadline.
         waitHittable(app.buttons["reader.panel.close"])
         let exit = app.buttons["reader.exit"]
         XCTAssertFalse(exit.exists && exit.isHittable)
     }
     @MainActor private func openDirectory(_ app: XCUIApplication) {
         let deadline = Date().addingTimeInterval(10)
-        expandCDock(app, deadline: deadline)
-        let button = app.buttons["reader.tools.directory"]
-        revealDockControl(button, app, deadline: deadline)
-        button.tap() // No duplicate AX waiter after the same readiness proof.
+        let id = "reader.tools.directory"
+        revealDockControl(id, app, deadline: deadline)
+        app.buttons[id].tap() // No duplicate AX waiter after the same readiness proof.
         waitHittable(app.buttons["reader.panel.close"])
     }
     @MainActor private func closePanel(_ app: XCUIApplication) {
         app.buttons["reader.panel.close"].tap()
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: Date().addingTimeInterval(10))
+        revealDockControl("reader.tools.settings", app, deadline: Date().addingTimeInterval(10))
     }
     @MainActor private func exitReader(_ app: XCUIApplication, shelfBook title: String = "UITest-Long-A") {
         // Readiness and return-to-shelf share the original ten-second shelf-wait budget.
@@ -853,7 +833,7 @@ final class ReadingFlowUITests: XCTestCase {
             Self.captureEvidence(app, testName: key, stage: "probe-after-show", includeExitReadiness: true, probeDeadline: deadline)
         }
         let exit = app.buttons["reader.exit"], settings = app.buttons["reader.tools.settings"]
-        revealDockControl(settings, app, deadline: deadline)
+        revealDockControl("reader.tools.settings", app, deadline: deadline)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             exit.exists && exit.isHittable && settings.exists && settings.isHittable
         }, object: nil)
@@ -879,13 +859,12 @@ final class ReadingFlowUITests: XCTestCase {
     @MainActor private func hasVisibleDockControl(_ app: XCUIApplication) -> Bool {
         let screen = app.windows.firstMatch.frame
         guard !screen.isNull, screen.width > 0, screen.height > 0 else { return false }
-        let scroll = app.scrollViews["reader.tools.scroll"]
-        let trayBounds = scroll.exists ? scroll.frame.intersection(screen) : screen
-        for identifier in ["reader.tools.expand", "reader.tools.directory", "reader.tools.settings", "reader.tools.collapse"] {
+        for identifier in ["reader.tools.directory", "reader.tools.settings"] {
             let button = app.buttons[identifier]
             guard button.exists, button.isHittable else { continue }
+            let scroll = app.scrollViews.containing(.button, identifier: identifier).firstMatch
+            let bounds = scroll.exists ? scroll.frame.intersection(screen) : screen
             let frame = button.frame
-            let bounds = identifier == "reader.tools.expand" ? screen : trayBounds
             if !frame.isNull, frame.width > 0, frame.height > 0,
                !bounds.isNull, bounds.width > 0, bounds.height > 0,
                bounds.contains(CGPoint(x: frame.midX, y: frame.midY)) { return true }
@@ -907,8 +886,7 @@ final class ReadingFlowUITests: XCTestCase {
                 viewport(app).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             }
         }
-        expandCDock(app, deadline: deadline)
-        revealDockControl(app.buttons["reader.tools.settings"], app, deadline: deadline)
+        revealDockControl("reader.tools.settings", app, deadline: deadline)
     }
     @MainActor private func endMarker(_ text: String, _ app: XCUIApplication) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "reader.text.canvas", text)).firstMatch

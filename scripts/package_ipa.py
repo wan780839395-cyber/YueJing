@@ -11,6 +11,8 @@ import subprocess
 import sys
 import zipfile
 
+from device_registry import DEVICE_SCOPES
+
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "build/DerivedData/Build/Products/Release-iphoneos/YueJing.app"
 OUT = ROOT / "artifacts"
@@ -159,7 +161,7 @@ def main():
         dependency = json.loads((OUT / "task3/app-dependency-gate.json").read_text(encoding="utf-8"))
         require(all(dependency.get(key) == qualified[key] for key in ("source_commit", "run_id", "run_attempt"))
                 and dependency.get("signing") == "unsigned", "Missing same-run strict device dependency gate")
-    if os.environ.get("VALIDATION_SCOPE") in ("bookmark-device-028", "search-device-029", "search-return-device-030"):
+    if os.environ.get("VALIDATION_SCOPE") in DEVICE_SCOPES:
         from bookmark_device_package import check_gate
         from epub_diagnostic_package import validate_saved
         from userfont_package import release_hashes

@@ -4,6 +4,14 @@
   "branch": "dev/workflow-optimization",
   "cases": [
     {
+      "file": "YueJingHostTests/ReaderBookmarkTests.swift",
+      "name": "txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication"
+    },
+    {
+      "file": "YueJingHostTests/SearchReturnTests.swift",
+      "name": "epubSearchReturnPreservesFirstLocatorUntilConfirmedReturn"
+    },
+    {
       "file": "YueJingEPUBUITests/EPUBFlowUITests.swift",
       "name": "testTXTSearchResultJumpsToMatchingText"
     },

@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "active": null,
+  "defaults": {
+    "branch": "dev/workflow-optimization",
+    "runner": "macos-15",
+    "job_minutes": 30,
+    "prepare_minutes": 5,
+    "plan_path": "scripts/development_scope.json"
+  },
+  "batches": {
+    "bookmark-device-028": {
+      "version": "0.2.28",
+      "build": "30",
+      "product": "765fc4e1f09b1d09554b60e2016b1b34bc9aabbb",
+      "legacy_source": "71bb06339341d33b33b5d0ff6dc95165be605de4",
+      "plan_sha256": "6a618ed99773c0f2ff626c633cefd08b60b1c3a9f60a5c4106a96ac82d780e2d"
+    },
+    "search-device-029": {
+      "version": "0.2.29",
+      "build": "31",
+      "product": "13bb9b05d6dac14a55e5f34b9f683b4b869331df",
+      "legacy_source": "d47b450f9dcda93945c7e42a5235e90549c4dc9d",
+      "plan_sha256": "5ff8ec571ff8d613554103737af40096b4bc60eb9c4adbb6b9f7cb65d67d51f8"
+    },
+    "search-return-device-030": {
+      "version": "0.2.30",
+      "build": "32",
+      "product": "077de6cbe1fca1eaca76bd9ce96244087d0ec673",
+      "legacy_source": "f50c2ff934de04526f2bc576002e1e03495b0f36",
+      "plan_sha256": "5fed7bbeec3d1432ad6a0ac1c928f7b34f997c35c6daf649ad887cbb1ce7774f",
+      "runner": "macos-15-intel"
+    }
+  }
+}

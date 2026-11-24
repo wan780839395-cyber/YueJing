@@ -8,6 +8,7 @@ import subprocess
 import sys
 import zipfile
 
+from device_registry import DEVICE_SCOPES, dispatch_batch
 import validate_task3 as v
 
 BASE = "a0fbb605514759286e61cdeb5cd14f85d595697d"
@@ -35,11 +36,10 @@ if WOFF2:
     VERSION, BUILD = "0.2.24", "26"
     ALLOWED = frozenset(("scripts/workflow_admission.py", "scripts/epub_diagnostic_package.py"))
 
-DEVICE_BATCH = os.environ.get("VALIDATION_SCOPE") in ("bookmark-device-028", "search-device-029", "search-return-device-030")
+DEVICE_BATCH = os.environ.get("VALIDATION_SCOPE") in DEVICE_SCOPES
 if DEVICE_BATCH:
-    from bookmark_device_package import BATCHES
-    SCOPE = os.environ["VALIDATION_SCOPE"]
-    VERSION, BUILD = BATCHES[SCOPE].version, BATCHES[SCOPE].build
+    batch = dispatch_batch(os.environ["VALIDATION_SCOPE"])
+    SCOPE, VERSION, BUILD = batch.key, batch.version, batch.build
 
 
 # Exact upstream MIT texts as vendored in the frozen product.

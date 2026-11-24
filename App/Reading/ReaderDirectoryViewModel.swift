@@ -1,11 +1,38 @@
 import Combine
 import Foundation
 import ReaderDomain
+import TXTCore
+
+struct ConfirmedTXTChapter: Equatable, Sendable {
+    let bookID: String
+    let versionID: String
+    let title: String?
+    let rawByteStart: Int
+    let rawByteEnd: Int
+    let isLast: Bool
+
+    func contains(_ anchor: ReadingAnchor) -> Bool {
+        anchor.bookID == bookID && anchor.versionID == versionID &&
+            rawByteStart <= anchor.rawByteOffset &&
+            (anchor.rawByteOffset < rawByteEnd || (isLast && anchor.rawByteOffset == rawByteEnd))
+    }
+}
+
+/// Read-only chrome summary for TXT. Never substitutes the book title when no reliable chapter title exists.
+enum TXTReaderChapterContext {
+    static func title(for confirmed: ConfirmedTXTChapter?, anchor: ReadingAnchor?) -> String? {
+        guard let confirmed, let anchor, confirmed.contains(anchor),
+              let raw = confirmed.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        return raw
+    }
+}
 
 @MainActor
 final class ReaderDirectoryViewModel: ObservableObject {
     @Published private(set) var state = DirectoryPresentation()
     @Published private(set) var ownerRevision = UUID()
+    @Published private(set) var contextRevision = UUID()
     private var reader: OpenedReader?
     private var task: Task<Void, Never>?
     private var presented = false
@@ -18,7 +45,7 @@ final class ReaderDirectoryViewModel: ObservableObject {
     }
     func detach() {
         cancel(); reader = nil; presented = false; manuallyBrowsing = false
-        displayedAnchor = nil; state = DirectoryPresentation(); ownerRevision = UUID(); displayRevision = UUID()
+        displayedAnchor = nil; state = DirectoryPresentation(); ownerRevision = UUID(); displayRevision = UUID(); contextRevision = UUID()
     }
     func dismiss(presentation: UUID? = nil) {
         if let presentation, !state.dismiss(presentation) { return }
@@ -32,6 +59,7 @@ final class ReaderDirectoryViewModel: ObservableObject {
         if let anchor { schedule(.current(anchor), reveal: true) }
     }
     func displayed(_ anchor: ReadingAnchor) {
+        contextRevision = UUID()
         guard displayedAnchor != anchor else {
             // Resume a cancelled first lookup without refreshing a loaded/manual page.
             if presented, !manuallyBrowsing, state.page == nil, !state.loading {
@@ -52,6 +80,50 @@ final class ReaderDirectoryViewModel: ObservableObject {
     }
     func loadPage(_ start: Int) {
         manuallyBrowsing = true; schedule(.page(start), reveal: false)
+    }
+    func cachedChapter(for anchor: ReadingAnchor) -> ConfirmedTXTChapter? {
+        guard let owner = reader,
+              anchor.bookID == owner.reading.session.bookID,
+              anchor.versionID == owner.reading.session.versionID,
+              let page = state.page else { return nil }
+        for (offset, chapter) in page.chapters.enumerated() {
+            let candidate = ConfirmedTXTChapter(
+                bookID: anchor.bookID,
+                versionID: chapter.documentVersion,
+                title: chapter.title,
+                rawByteStart: chapter.rawByteRange.location.value,
+                rawByteEnd: chapter.rawByteRange.end.value,
+                isLast: page.start + offset == page.total - 1
+            )
+            if candidate.contains(anchor) { return candidate }
+        }
+        return nil
+    }
+    func resolveChapter(around anchor: ReadingAnchor) async -> ConfirmedTXTChapter? {
+        guard let owner = reader,
+              anchor.bookID == owner.reading.session.bookID,
+              anchor.versionID == owner.reading.session.versionID else { return nil }
+        if let cached = cachedChapter(for: anchor) { return cached }
+        let revision = ownerRevision
+        do {
+            let page = try await owner.directory(around: anchor)
+            try Task.checkCancellation()
+            guard ownerRevision == revision, reader === owner,
+                  let current = page.currentIndex,
+                  page.chapters.indices.contains(current - page.start) else { return nil }
+            let chapter = page.chapters[current - page.start]
+            let confirmed = ConfirmedTXTChapter(
+                bookID: anchor.bookID,
+                versionID: chapter.documentVersion,
+                title: chapter.title,
+                rawByteStart: chapter.rawByteRange.location.value,
+                rawByteEnd: chapter.rawByteRange.end.value,
+                isLast: current == page.total - 1
+            )
+            return confirmed.contains(anchor) ? confirmed : nil
+        } catch {
+            return nil
+        }
     }
     private func schedule(_ target: DirectoryRequest, reveal: Bool) {
         guard presented, let owner = reader, let id = state.begin(target) else { return }

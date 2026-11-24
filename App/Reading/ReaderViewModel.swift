@@ -28,10 +28,9 @@ final class ReaderViewModel: ObservableObject {
     }
     private var bookmarkContext: BookmarkPanelContext?
     private var preparedJump: (window: UUID, context: BookmarkPanelContext, search: Bool)?
-    private enum SearchEffect { case remember(ReadingAnchor), returned }
-    private var pendingSearchEffect: (navigation: UUID, effect: SearchEffect)?
-    @Published private var searchOrigin: ReadingAnchor?
-    var canReturnFromSearch: Bool { searchOrigin != nil && !closing && !suspended && !exitSaveFailed }
+    private typealias SearchEffect = SearchReturn<ReadingAnchor>.Effect
+    @Published private var searchReturn = SearchReturn<ReadingAnchor>()
+    var canReturnFromSearch: Bool { searchReturn.origin != nil && !closing && !suspended && !exitSaveFailed }
     private var returnRequest: UUID?
     private var searchRequest = UUID()
     private var searchHitIDs: Set<UUID> = []
@@ -145,7 +144,7 @@ final class ReaderViewModel: ObservableObject {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               chapter.documentVersion == reader.reading.session.versionID else { return }
         positionRevision &+= 1
-        pendingSearchEffect = nil
+        searchReturn.cancelPending()
         navigationGate.begin()
         anchor = ReadingAnchor(bookID: bookID, versionID: chapter.documentVersion, rawByteOffset: chapter.rawByteRange.location.value)
         requestWindow()
@@ -186,7 +185,7 @@ final class ReaderViewModel: ObservableObject {
     func suspend() async {
         guard !closing else { return }
         suspended = true; lifecycle = UUID(); generation = UUID()
-        pendingSearchEffect = nil
+        searchReturn.cancelPending()
         endBookmarkPanel()
         let request = lifecycle, owner = reader
         openTask?.cancel(); openTask = nil
@@ -209,7 +208,7 @@ final class ReaderViewModel: ObservableObject {
     func close() async -> Bool {
         guard !closing else { return false }
         closing = true; lifecycle = UUID(); generation = UUID()
-        searchOrigin = nil; pendingSearchEffect = nil
+        searchReturn = .init()
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
@@ -230,7 +229,7 @@ final class ReaderViewModel: ObservableObject {
     }
     func leaveKeepingSavedPosition() async {
         closing = true; lifecycle = UUID(); generation = UUID()
-        searchOrigin = nil; pendingSearchEffect = nil
+        searchReturn = .init()
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
@@ -240,7 +239,7 @@ final class ReaderViewModel: ObservableObject {
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
         lifecycle = UUID(); generation = UUID()
-        searchOrigin = nil; pendingSearchEffect = nil
+        searchReturn = .init()
         endBookmarkPanel()
         let request = lifecycle, old = reader
         openTask?.cancel(); openTask = nil; directory.dismiss()
@@ -301,13 +300,11 @@ final class ReaderViewModel: ObservableObject {
         let navigation = navigationGate.navigation
         let navigationApplied = navigationGate.applied(window: id)
         if let visible = directoryAnchor() {
-            if navigationApplied, let pending = pendingSearchEffect, pending.navigation == navigation {
-                pendingSearchEffect = nil
-                guard viewport.interactionActive, viewport.controller?.navigationTargetVisible == true else { return }
-                switch pending.effect {
-                case .remember(let origin): if searchOrigin == nil { searchOrigin = origin }
-                case .returned: searchOrigin = nil
+            if navigationApplied, let navigation, searchReturn.pendingNavigation == navigation {
+                guard viewport.interactionActive, viewport.controller?.navigationTargetVisible == true else {
+                    searchReturn.cancelPending(); return
                 }
+                searchReturn.confirm(navigation: navigation)
             }
             if navigationApplied { visibleChanged(visible, windowID: id) }
             directory.displayed(visible)
@@ -375,7 +372,7 @@ extension ReaderViewModel {
               rendered.anchor.bookID == jump.context.owner.book.id,
               rendered.anchor.versionID == jump.context.owner.book.versionID else { return false }
         var effect: SearchEffect?
-        if jump.search, searchOrigin == nil {
+        if jump.search, searchReturn.origin == nil {
             // Sample at admission, not when the sheet opened or the query began. Layout can
             // deliver synchronous callbacks, so validate the lease again after sampling.
             let metadata = jump.context.owner.source.metadata
@@ -393,7 +390,7 @@ extension ReaderViewModel {
         layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
         navigationGate.begin()
         guard let navigation = navigationGate.navigation else { return }
-        pendingSearchEffect = effect.map { (navigation, $0) }
+        searchReturn.stage(effect, navigation: navigation)
         navigationGate.expect(window: rendered.id, navigation: navigation)
         anchor = rendered.anchor; layoutNeedsRefresh = false
         viewport.onNextRestoreIsNavigation = true; window = rendered; loading = false
@@ -449,7 +446,7 @@ extension ReaderViewModel {
     }
 
     func returnFromSearch() async {
-        guard !Task.isCancelled, canReturnFromSearch, returnRequest == nil, let origin = searchOrigin,
+        guard !Task.isCancelled, canReturnFromSearch, returnRequest == nil, let origin = searchReturn.origin,
               let reader, bookmarkContext == nil else { return }
         let context = navigationContext(owner: reader, presentation: nil)
         let intent = viewport.controller?.toolIntent?()
@@ -457,7 +454,7 @@ extension ReaderViewModel {
         let request = UUID(); returnRequest = request
         defer { if returnRequest == request { returnRequest = nil } }
         @MainActor func isCurrent() -> Bool {
-            !Task.isCancelled && returnRequest == request && searchOrigin == origin &&
+            !Task.isCancelled && returnRequest == request && searchReturn.origin == origin &&
                 bookmarkPositionIsCurrent(context) && viewport.controller?.toolIntent?() == intent
         }
         do {

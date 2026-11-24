@@ -10,6 +10,8 @@ struct ReaderScreen: View {
     let onExit: @MainActor () -> Void
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
+    @State private var confirmedChapter: ConfirmedTXTChapter?
+    @State private var chapterContextRevision = UUID()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -22,6 +24,41 @@ struct ReaderScreen: View {
     @State private var hitProbe = ReaderHitProbeStore()
     #endif
 
+    private struct ChapterContextKey: Equatable {
+        let routeID: UUID
+        let visible: Bool
+        let loading: Bool
+        let windowID: UUID?
+        let revision: UUID
+        let rawByteOffset: Int?
+    }
+
+    private var chapterContextKey: ChapterContextKey {
+        let toolsVisible = tools.visible && tools.panel == nil
+        let anchor = toolsVisible && !model.loading ? model.directoryAnchor() : nil
+        return ChapterContextKey(
+            routeID: routeID,
+            visible: toolsVisible,
+            loading: model.loading,
+            windowID: model.window?.id,
+            revision: chapterContextRevision,
+            rawByteOffset: anchor?.rawByteOffset
+        )
+    }
+
+    private var chapterContextText: String {
+        guard tools.visible, tools.panel == nil else { return "章节尚未确认" }
+        if model.loading { return "正在确认章节…" }
+        guard let anchor = model.directoryAnchor() else { return "章节尚未确认" }
+        if let title = TXTReaderChapterContext.title(for: confirmedChapter, anchor: anchor) {
+            return title
+        }
+        return TXTReaderChapterContext.title(
+            for: model.directory.cachedChapter(for: anchor),
+            anchor: anchor
+        ) ?? "章节尚未确认"
+    }
+
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
         return { _ = Task { await model.returnFromSearch() } }
@@ -31,7 +68,8 @@ struct ReaderScreen: View {
         ReaderFloatingToolsView(state: tools, metrics: metrics, appearance: appearance,
             directoryAvailable: model.window != nil, settingsAvailable: model.window != nil,
             exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
-            open: openPanel, focusedControl: $focusedControl, returnFromSearch: searchReturnAction)
+            open: openPanel, focusedControl: $focusedControl, chapterContext: chapterContextText,
+            returnFromSearch: searchReturnAction)
     }
 
     var body: some View {
@@ -156,6 +194,21 @@ struct ReaderScreen: View {
                 close: closePanel, selected: selectChapter, selectedBookmark: selectBookmark)
         }
         .task(id: routeID) { await model.load() }
+        .task(id: chapterContextKey) {
+            guard tools.visible, tools.panel == nil, !model.loading,
+                  let anchor = model.directoryAnchor() else { return }
+            if let existing = confirmedChapter, existing.contains(anchor) { return }
+            if let cached = model.directory.cachedChapter(for: anchor) {
+                confirmedChapter = cached
+                return
+            }
+            let resolved = await model.directory.resolveChapter(around: anchor)
+            guard !Task.isCancelled, let current = model.directoryAnchor(),
+                  let resolved, resolved.contains(current) else { return }
+            confirmedChapter = resolved
+        }
+        .onReceive(model.directory.$contextRevision) { chapterContextRevision = $0 }
+        .onReceive(model.directory.$ownerRevision) { _ in confirmedChapter = nil }
         .task(id: tools.intent) {
             let intent = tools.intent
             guard voiceOver, tools.visible, tools.panel == nil else { return }
