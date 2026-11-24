@@ -549,7 +549,9 @@ def prepare_runtime(root=ROOT, *, phase='all', deadline=None):
             require(re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', udid), 'Invalid selected UDID')
         devices = json.loads((root/'artifacts/task3/devices.json').read_bytes())['devices']
         state = next(d['state'] for group in devices.values() for d in group if d['udid'] == udid)
-        if state not in ('Booted', 'Booting'):
+        # bootstatus -b requests boot if necessary, then waits for real readiness.
+        # Avoid a separate short boot request racing the system's asynchronous startup.
+        if phase != 'simulator' and state not in ('Booted', 'Booting'):
             run('simulator-boot', ['xcrun', 'simctl', 'boot', udid], 30)
         run('simulator-ready', ['xcrun', 'simctl', 'bootstatus', udid, '-b'], 120)
         if phase == 'simulator':

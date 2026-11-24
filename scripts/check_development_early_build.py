@@ -119,7 +119,7 @@ def exercise(fault, schemes):
         if (fault == 'app' and DOMAIN not in schemes) or fault in ('cancel', 'deadline'):
             assert trace == before_sim
         else:
-            setup = ['simulator-warmup', 'inventory', 'selection', 'simulator-boot', 'simulator-ready']
+            setup = ['simulator-warmup', 'inventory', 'selection', 'simulator-ready']
             assert trace[len(before_sim):len(before_sim)+len(setup)] == setup
         expected = [('blocked' if s != DOMAIN else 'passed') if fault == 'app' else
                     {'cancel':'not_run','drift':'failed','setup':'blocked','deadline':'blocked','export':'failed','empty-log':'failed'}.get(fault,'passed') for s in schemes]
