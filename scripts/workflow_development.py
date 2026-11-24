@@ -515,8 +515,8 @@ def prepare_runtime(root=ROOT, *, phase='all', deadline=None):
             validation.resolved()
             if phase == 'resolve':
                 return
-        else:
-            warmup()
+        # Do not open Simulator.app before selection in development: its default
+        # device can belong to another runtime. bootstatus below starts the selected UDID.
         kinds = ('inventory',) if phase == 'simulator' else ('devices', 'runtimes')
         for kind in kinds:
             command = (['xcrun', 'simctl', 'list', '-j'] if kind == 'inventory' else

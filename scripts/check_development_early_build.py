@@ -66,10 +66,12 @@ def exercise(fault, schemes):
             else:
                 trace.append(log.stem)
                 if log.stem in ('devices', 'inventory'):
-                    text = json.dumps({'devices': {'ios': [{'udid': UDID, 'state': 'Shutdown'}]}, 'runtimes': [{'identifier': 'ios'}]})
+                    text = json.dumps({'devices': {'newer-ios': [{'udid': '00000000-0000-0000-0000-000000000026', 'state': 'Booting'}],
+                                                   'ios': [{'udid': UDID, 'state': 'Shutdown'}]}, 'runtimes': [{'identifier': 'ios'}]})
                 if cmd[-1] == 'select-simulator':
                     validate_task3.select_simulator()
                 if log.stem == 'simulator-ready':
+                    assert cmd == ['xcrun', 'simctl', 'bootstatus', UDID, '-b']
                     if fault == 'setup':
                         code = 1
                     elif fault == 'drift':
@@ -119,7 +121,8 @@ def exercise(fault, schemes):
         if (fault == 'app' and DOMAIN not in schemes) or fault in ('cancel', 'deadline'):
             assert trace == before_sim
         else:
-            setup = ['simulator-warmup', 'inventory', 'selection', 'simulator-ready']
+            setup = ['inventory', 'selection', 'simulator-ready']
+            assert 'simulator-warmup' not in trace
             assert trace[len(before_sim):len(before_sim)+len(setup)] == setup
         expected = [('blocked' if s != DOMAIN else 'passed') if fault == 'app' else
                     {'cancel':'not_run','drift':'failed','setup':'blocked','deadline':'blocked','export':'failed','empty-log':'failed'}.get(fault,'passed') for s in schemes]
