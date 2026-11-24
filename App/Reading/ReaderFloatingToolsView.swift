@@ -87,18 +87,14 @@ struct ReaderFloatingToolsView: View {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(appearance.elevatedSurface)
                 .shadow(color: appearance.shadow, radius: 16, x: 0, y: 6)
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [topSheen, appearance.edge.opacity(0.85)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.85
-                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(colors: [topSheen, appearance.edge.opacity(0.85)],
+                                           startPoint: .top, endPoint: .bottom),
+                            lineWidth: 0.85
+                        )
+                }
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .center)
