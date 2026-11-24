@@ -300,7 +300,6 @@ private struct AutoReadPlayButtonStyle: ButtonStyle {
     }
 }
 
-@MainActor
 private struct AdaptiveAutoReadLayout: Layout {
     let horizontalSpacing: CGFloat
     let verticalSpacing: CGFloat

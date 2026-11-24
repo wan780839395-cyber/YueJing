@@ -53,7 +53,6 @@ struct ReaderSpeechControl: View {
     }
 }
 
-@MainActor
 private struct AdaptiveSpeechTransportLayout: Layout {
     let horizontalSpacing: CGFloat
     let verticalSpacing: CGFloat

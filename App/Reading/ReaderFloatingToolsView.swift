@@ -351,7 +351,6 @@ private struct ReaderToolsPlaybackSection: View {
     }
 }
 
-@MainActor
 private struct AdaptiveToolsRowLayout: Layout {
     let horizontalSpacing: CGFloat
     let verticalSpacing: CGFloat
