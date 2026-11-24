@@ -20,6 +20,16 @@ struct ReaderSpeechSessionTests {
         try #require(predicate())
     }
 
+    @Test func installedMandarinVoicePrefersQualityWithoutSwitchingDialect() {
+        let voices = [(id: "standard", language: "zh-CN", quality: 1),
+                      (id: "better", language: "zh_Hans_CN", quality: 2),
+                      (id: "hk", language: "zh-HK", quality: 3)]
+        #expect(SystemReaderSpeechAudio.mandarinVoiceID(voices, systemID: "standard") == "better")
+        #expect(SystemReaderSpeechAudio.mandarinVoiceID(voices + [("another", "zh-CN", 2)], systemID: "better") == "better")
+        #expect(SystemReaderSpeechAudio.mandarinVoiceID([], systemID: "standard") == "standard")
+        #expect(SystemReaderSpeechAudio.mandarinVoiceID([], systemID: nil) == nil)
+    }
+
     @Test func builtAppDeclaresAudioBackgroundMode() throws {
         let modes = try #require(Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])
         #expect(modes == ["audio"])

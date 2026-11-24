@@ -35,13 +35,16 @@ struct ReaderFloatingToolsView: View {
     // Unified chapter panel for TXT and EPUB; nil or blank falls back to neutral unconfirmed text.
     var chapterContext: String? = nil
     var returnFromSearch: (@MainActor () -> Void)? = nil
-    var autoReading = false
-    var autoReadControl: AnyView? = nil
-    var speechControl: AnyView? = nil
-    var speechActive = false
-    var switchToAutoRead: (@MainActor () -> Void)? = nil
+    @ObservedObject var autoRead: AutoReadSession
+    let speech: ReaderSpeechSession
+    let autoReadMode: AutoReadMode
+    let autoReadAvailable: Bool
+    let speechAvailable: Bool
+    let startAutoRead: @MainActor () -> Void
+    let startSpeech: @MainActor () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @State private var measuredContentHeight: CGFloat = 0
 
     private var visible: Bool { state.visible && state.panel == nil }
     private var canReturnFromSearch: Bool {
@@ -53,13 +56,23 @@ struct ReaderFloatingToolsView: View {
     }
 
     var body: some View {
+        let allowAnimation = !reduceMotion && !state.suspended
         ZStack(alignment: .bottomTrailing) {
-            if autoReading, let autoReadControl, state.canInteract, state.panel == nil, state.exitRequest == nil {
+            if autoRead.isRunning, state.canInteract, state.panel == nil, state.exitRequest == nil {
                 dockSurface(cornerRadius: 18) {
-                    HStack(spacing: 4) { autoReadControl; speechControl }
+                    HStack(spacing: 4) {
+                        AutoReadControl(
+                            session: autoRead,
+                            mode: autoReadMode,
+                            available: true,
+                            appearance: appearance,
+                            start: startAutoRead
+                        )
+                        ReaderSpeechControl(session: speech, available: speechAvailable, start: startSpeech)
+                    }
                 }
-                    .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
-            } else if visible {
+                .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
+            } else if visible, state.canInteract {
                 VStack(alignment: .trailing, spacing: 8) {
                     if canReturnFromSearch, let returnFromSearch {
                         dockSurface(cornerRadius: 26) {
@@ -68,28 +81,42 @@ struct ReaderFloatingToolsView: View {
                         .transition(.opacity)
                     }
                     chapterPanel(resolvedChapterContext)
-                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)))
+                        .transition(allowAnimation ? .opacity.combined(with: .offset(y: ReaderMotion.hiddenTravel)) : .identity)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .foregroundStyle(appearance.foreground).tint(appearance.accent)
-        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
-        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: canReturnFromSearch)
-        .allowsHitTesting((visible || autoReading) && state.canInteract && state.panel == nil)
-        .accessibilityHidden(!visible && !autoReading)
+        .animation(allowAnimation ? ReaderMotion.toolVisibility : nil, value: visible)
+        .animation(allowAnimation ? ReaderMotion.toolVisibility : nil, value: canReturnFromSearch)
+        .transaction { transaction in
+            if !allowAnimation { transaction.animation = nil }
+        }
+        .allowsHitTesting((visible || autoRead.isRunning) && state.canInteract && state.panel == nil)
+        .accessibilityHidden(!visible && !autoRead.isRunning)
     }
 
     private func chapterPanel(_ context: String) -> some View {
         let maximumHeight: CGFloat = metrics.compactHeight ? 144 : (dynamicType.isAccessibilitySize ? 300 : 240)
         let topSheen = Color.white.opacity(appearance.theme == .dark ? 0.08 : 0.65)
+        let needsScroll = measuredContentHeight > maximumHeight + 0.5
         return BoundedHeightLayout(maxHeight: maximumHeight) {
-            ViewThatFits(in: .vertical) {
-                toolContent(context)
-                ScrollView(.vertical) {
-                    toolContent(context)
+            Group {
+                if needsScroll {
+                    ScrollView(.vertical) {
+                        measuredToolContent(context)
+                    }
+                    .frame(height: maximumHeight)
+                } else {
+                    measuredToolContent(context)
                 }
-                .frame(height: maximumHeight)
+            }
+            .transaction { transaction in transaction.animation = nil }
+            .onPreferenceChange(ToolContentHeightKey.self) { height in
+                guard visible, state.canInteract else { return }
+                if abs(measuredContentHeight - height) > 0.5 {
+                    measuredContentHeight = height
+                }
             }
         }
         .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
@@ -111,25 +138,31 @@ struct ReaderFloatingToolsView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
+    private func measuredToolContent(_ context: String) -> some View {
+        toolContent(context)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ToolContentHeightKey.self, value: proxy.size.height)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+    }
+
     private func toolContent(_ context: String) -> some View {
         VStack(spacing: 0) {
             chapterPanelContent(context)
-            if autoReadControl != nil || speechControl != nil {
-                Divider().padding(.horizontal, 12).accessibilityHidden(true)
-                if speechActive {
-                    speechControl
-                    if let switchToAutoRead {
-                        Button("切换为自动阅读", action: switchToAutoRead)
-                            .font(.footnote).frame(minHeight: 44)
-                    }
-                } else {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 2) { autoReadControl; speechControl }
-                            .fixedSize(horizontal: true, vertical: false)
-                        VStack(spacing: 0) { autoReadControl; speechControl }
-                    }
-                }
-            }
+            Divider().padding(.horizontal, 12).accessibilityHidden(true)
+            ReaderToolsPlaybackSection(
+                autoRead: autoRead,
+                speech: speech,
+                autoReadMode: autoReadMode,
+                autoReadAvailable: autoReadAvailable,
+                speechAvailable: speechAvailable,
+                appearance: appearance,
+                startAutoRead: startAutoRead,
+                startSpeech: startSpeech
+            )
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -272,5 +305,100 @@ struct ReaderFloatingToolsView: View {
                     }
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
+    }
+}
+
+private struct ToolContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+@MainActor
+private struct ReaderToolsPlaybackSection: View {
+    @ObservedObject var autoRead: AutoReadSession
+    @ObservedObject var speech: ReaderSpeechSession
+    let autoReadMode: AutoReadMode
+    let autoReadAvailable: Bool
+    let speechAvailable: Bool
+    let appearance: ReaderToolAppearance
+    let startAutoRead: @MainActor () -> Void
+    let startSpeech: @MainActor () -> Void
+
+    var body: some View {
+        if speech.isActive {
+            VStack(spacing: 0) {
+                ReaderSpeechControl(session: speech, available: speechAvailable, start: startSpeech)
+                if autoReadAvailable {
+                    Button("切换为自动阅读", action: startAutoRead)
+                        .font(.footnote)
+                        .frame(minHeight: 44)
+                }
+            }
+        } else {
+            AdaptiveToolsRowLayout(horizontalSpacing: 2, verticalSpacing: 0) {
+                AutoReadControl(
+                    session: autoRead,
+                    mode: autoReadMode,
+                    available: autoReadAvailable,
+                    appearance: appearance,
+                    start: startAutoRead
+                )
+                ReaderSpeechControl(session: speech, available: speechAvailable, start: startSpeech)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct AdaptiveToolsRowLayout: Layout {
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count == 2 else { return .zero }
+        let first = subviews[0].sizeThatFits(.unspecified)
+        let second = subviews[1].sizeThatFits(.unspecified)
+        let horizontalWidth = first.width + horizontalSpacing + second.width
+        if let proposedWidth = proposal.width, proposedWidth.isFinite, horizontalWidth > proposedWidth + 0.5 {
+            let wrappedFirst = subviews[0].sizeThatFits(ProposedViewSize(width: proposedWidth, height: nil))
+            let wrappedSecond = subviews[1].sizeThatFits(ProposedViewSize(width: proposedWidth, height: nil))
+            return CGSize(
+                width: min(proposedWidth, max(wrappedFirst.width, wrappedSecond.width)),
+                height: wrappedFirst.height + verticalSpacing + wrappedSecond.height
+            )
+        }
+        return CGSize(width: horizontalWidth, height: max(first.height, second.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 2 else { return }
+        let first = subviews[0].sizeThatFits(.unspecified)
+        let second = subviews[1].sizeThatFits(.unspecified)
+        let horizontalWidth = first.width + horizontalSpacing + second.width
+        if horizontalWidth > bounds.width + 0.5 {
+            let wrappedFirst = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            let wrappedSecond = subviews[1].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            subviews[0].place(
+                at: CGPoint(x: bounds.midX - wrappedFirst.width / 2, y: bounds.minY),
+                proposal: ProposedViewSize(width: wrappedFirst.width, height: wrappedFirst.height)
+            )
+            subviews[1].place(
+                at: CGPoint(x: bounds.midX - wrappedSecond.width / 2, y: bounds.minY + wrappedFirst.height + verticalSpacing),
+                proposal: ProposedViewSize(width: wrappedSecond.width, height: wrappedSecond.height)
+            )
+        } else {
+            let totalWidth = first.width + horizontalSpacing + second.width
+            let startX = bounds.midX - totalWidth / 2
+            subviews[0].place(
+                at: CGPoint(x: startX, y: bounds.midY - first.height / 2),
+                proposal: ProposedViewSize(width: first.width, height: first.height)
+            )
+            subviews[1].place(
+                at: CGPoint(x: startX + first.width + horizontalSpacing, y: bounds.midY - second.height / 2),
+                proposal: ProposedViewSize(width: second.width, height: second.height)
+            )
+        }
     }
 }

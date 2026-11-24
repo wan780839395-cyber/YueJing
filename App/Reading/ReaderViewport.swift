@@ -80,6 +80,16 @@ final class ReaderViewportHandle {
             event.owner == ObjectIdentifier(controller) && event.binding == sceneBinding &&
             event.revision == sceneRevision && controller.matchesSceneBinding(event.binding)
     }
+    func isSceneActiveForControls(routeID: UUID) -> Bool {
+        guard interactionActive, let controller, ownsSceneController(controller, routeID: routeID) else {
+            return false
+        }
+        guard let scene = controller.viewIfLoaded?.window?.windowScene else { return false }
+        return scene.activationState == .foregroundActive
+    }
+    var isNativeSceneForegroundActive: Bool {
+        interactionActive && controller?.viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive
+    }
     func scheduleModelSceneTransition(_ event: ReaderSceneEvent, routeID: UUID,
                                      apply: @escaping @MainActor (Bool) async -> Void) {
         guard isCurrent(event, routeID: routeID) else { return }

@@ -31,6 +31,28 @@ struct TXTSpeechCursorTests {
         }
     }
 
+    @Test func narrationKeepsDecimalsAndClosingQuotesAndPrefersClauseBoundaries() throws {
+        let dialogue = "她问：“真是 3.14 吗？！”下一句。"[...]
+        let end = try #require(NarrationPhrase.end(in: dialogue, limit: 256))
+        #expect(dialogue[..<end] == "她问：“真是 3.14 吗？！”")
+        let clause = "甲乙丙丁，戊己庚辛壬。"[...]
+        let split = try #require(NarrationPhrase.end(in: clause, limit: 8))
+        #expect(clause[..<split] == "甲乙丙丁，")
+        #expect(clause[split...] == "戊己庚辛壬。")
+    }
+
+    @Test func nextNarrationSentenceIsNotCutAtPreviousStorageWindow() async throws {
+        let first = String(repeating: "甲", count: 249) + "。"
+        let second = "她说：“这瓶水只要 3.14 元。”"
+        let f = try await DerivedBookFixture(bytes: Data((first + second + "尾").utf8)); defer { f.remove() }
+        let reader = try await f.service.openReader(id: f.book.id, budget: DerivedBookFixture.limits(read: 256))
+        let cursor = TXTSpeechCursor(source: reader.source, origin: ReadingAnchor(bookID: f.book.id,
+            versionID: f.book.versionID, rawByteOffset: 0))
+        let a = try #require(try await cursor.next()), b = try #require(try await cursor.next())
+        #expect(a.text == first && b.text == second && b.anchor.rawByteOffset == first.utf8.count)
+        try await reader.close()
+    }
+
     @Test func oversizedGraphemeAndCancellationNeverSkipOrRepeatSpeechScalars() async throws {
         // The first 256-unit probe lands inside a supplementary combining mark.
         let text = "e" + String(repeating: "\u{1D165}", count: 500) + "。尾"

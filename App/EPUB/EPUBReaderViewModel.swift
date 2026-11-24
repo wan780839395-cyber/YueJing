@@ -106,6 +106,8 @@ final class EPUBReaderViewModel: ObservableObject {
     @Published private(set) var loadingStage = "正在校验并准备书籍…"
 
     let webView: EPUBWebViewHandle
+    let autoRead: AutoReadSession
+    let speech: ReaderSpeechSession
     private let rendererCache: EPUBWarmRendererCache?
     private let rendererGeneration: UUID
     private let bookID: String
@@ -131,9 +133,10 @@ final class EPUBReaderViewModel: ObservableObject {
     private var onSpeechRevoked: (@MainActor () -> Void)?
     private var pendingSpeechLocation: EPUBReadingPosition?
     private var resumeAfterSettling = false
-    private var suspending = false
-    private var closing = false
-    private var suspended = false
+    @Published private(set) var suspending = false
+    @Published private(set) var closing = false
+    @Published private(set) var suspended = false
+    @Published private(set) var sceneReadyRevision: UInt64 = 0
     private var shouldPersistOnReady = false
     private var hasUserPosition = false
     private var openTask: Task<OpenedEPUBReader, Error>?
@@ -155,7 +158,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     // Explicit destinations and reflows mint a new origin. Only an observed
     // promotion in the resident DOM keeps it across the chapter's epoch change.
-    private var documentOrigin: EPUBNavigationToken?
+    @Published private(set) var documentOrigin: EPUBNavigationToken?
     var autoReadOwner: EPUBNavigationToken? {
         guard acceptsSearch, !loading, message == nil, ready || promotingVisibleChapter,
               let documentOrigin, reader?.reading.session.id == documentOrigin.sessionID else { return nil }
@@ -171,6 +174,33 @@ final class EPUBReaderViewModel: ObservableObject {
         pendingSpeechLocation = nil
         onSpeechRevoked = nil
         stop?()
+    }
+
+    func noteViewportReadiness() {
+        sceneReadyRevision &+= 1
+    }
+
+    func startSpeech() {
+        guard let source = speechSource(onRevoke: { [weak self] in
+            self?.speech.stop(restorePosition: false)
+        }) else { return }
+        speech.start(next: source)
+    }
+
+    func startAutoRead() -> Bool {
+        guard !suspending, !suspended, !closing, closeTask == nil, !exitSaveFailed,
+              let owner = autoReadOwner, let token = presentationToken,
+              webView.controller?.beginAutoRead(for: token) == true else { return false }
+        revokeSpeech()
+        autoRead.start(mode: readingMode == .scroll ? .scroll : .paged) { [weak self] distance in
+            self?.autoReadStep(from: owner, distance: distance) ?? .stop
+        }
+        return true
+    }
+
+    func stopAutoRead() {
+        webView.controller?.cancelAutoPage()
+        autoRead.stop()
     }
 
     func speechSource(onRevoke: @escaping @MainActor () -> Void) -> ReaderSpeechSession.Source? {
@@ -232,9 +262,12 @@ final class EPUBReaderViewModel: ObservableObject {
 
     init(bookID: String, service: LibraryService, readingMode: EPUBReadingMode? = nil,
          rendererCache: EPUBWarmRendererCache? = nil, openingIntent: ContinuousClock.Instant? = nil,
-         processOpenOrdinal: Int? = nil, openingTitle: String? = nil, layoutMode: EPUBLayoutMode? = nil) {
+         processOpenOrdinal: Int? = nil, openingTitle: String? = nil, layoutMode: EPUBLayoutMode? = nil,
+         autoRead: AutoReadSession? = nil, speech: ReaderSpeechSession? = nil) {
         self.bookID = bookID
         self.service = service
+        self.autoRead = autoRead ?? AutoReadSession()
+        self.speech = speech ?? ReaderSpeechSession()
         self.rendererCache = rendererCache
         let retained = rendererCache?.take(bookID: bookID, service: service)
         rendererGeneration = retained?.generation ?? UUID()
@@ -1024,7 +1057,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func suspend() async {
         guard !closing, !suspended, !suspending else { return }
-        webView.controller?.cancelAutoPage()
+        stopAutoRead()
         suspending = true
         openingObservation.interrupt(.background)
         openingPresentationSummary = openingObservation.summary
@@ -1089,10 +1122,11 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func close() async -> Bool {
         if let closeTask { return await closeTask.value }
+        stopAutoRead()
         revokeSpeech()
-        webView.controller?.cancelAutoPage()
         let task = Task { @MainActor in await self.performClose() }
         closeTask = task
+        sceneReadyRevision &+= 1
         return await task.value
     }
 
@@ -1187,6 +1221,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func leaveKeepingSavedPosition() async {
+        stopAutoRead()
         revokeSpeech()
         recordReopenReason(.abandoned)
         closing = true

@@ -23,6 +23,8 @@ final class ReaderViewModel: ObservableObject {
     let viewport = ReaderViewportHandle()
     let directory = ReaderDirectoryViewModel()
     let bookmarks = ReaderBookmarksViewModel()
+    let autoRead: AutoReadSession
+    let speech: ReaderSpeechSession
     private struct BookmarkPanelContext {
         let presentation: UUID? // nil is a toolbar navigation lease, not a directory lease.
         let life: UUID
@@ -53,9 +55,10 @@ final class ReaderViewModel: ObservableObject {
     private var generation = UUID()
     private var lifecycle = UUID()
     private var positionRevision: UInt64 = 0
-    private var layoutNeedsRefresh = false
-    private var closing = false
-    private var suspended = false
+    @Published private(set) var layoutNeedsRefresh = false
+    @Published private(set) var closing = false
+    @Published private(set) var suspended = false
+    @Published private(set) var readinessRevision: UInt64 = 0
     private var automaticRecoveryUsed = false
     private var navigationGate = ReadingNavigationGate()
     private var openTask: Task<OpenedReader, Error>?
@@ -73,13 +76,20 @@ final class ReaderViewModel: ObservableObject {
     private var openingMeasurements: [ProcessingMeasurement] = []
 
     init(bookID: String, service: LibraryService, fontStore: EPUBUserFontStore = .shared,
-         fontDefaults: UserDefaults = .standard) {
+         fontDefaults: UserDefaults = .standard,
+         autoRead: AutoReadSession? = nil, speech: ReaderSpeechSession? = nil) {
         self.bookID = bookID; self.service = service
         self.fontStore = fontStore; self.fontDefaults = fontDefaults
+        self.autoRead = autoRead ?? AutoReadSession()
+        self.speech = speech ?? ReaderSpeechSession()
         fontRemoval = EPUBUserFontPreference.removed.sink { [weak self] id in
             guard let self, self.selectedBodyFontID == id else { return }
             self.applyFont(nil, id: nil)
         }
+    }
+
+    func noteViewportReadiness() {
+        readinessRevision &+= 1
     }
 
     private nonisolated static func readBodyFont(_ id: String, from store: EPUBUserFontStore) async throws -> TXTBodyFont {
@@ -149,7 +159,7 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
             openTask = nil; reader = opened; title = opened.book.title
-            navigationGate.reset()
+            navigationGate.reset(); readinessRevision &+= 1
             preferences = opened.preferences
             automaticRecoveryUsed = automaticRecoveryUsed || opened.cacheDisposition == .rebuilt
             anchor = opened.reading.anchor ?? ReadingAnchor(bookID: bookID, versionID: opened.source.metadata.versionID,
@@ -201,9 +211,13 @@ final class ReaderViewModel: ObservableObject {
               heard.versionID == owner.book.versionID, !closing, !exitSaveFailed else { return }
         speechID = nil
         positionRevision &+= 1; searchReturn.cancelPending(); navigationGate.begin()
-        pendingSpeechAnchor = heard; anchor = heard
+        pendingSpeechAnchor = heard; anchor = heard; readinessRevision &+= 1
         // If locked, resume() renders this target. Close/flush must not sample stale pixels.
         requestWindow()
+    }
+
+    func startSpeech() {
+        startSpeech(speech)
     }
 
     func startSpeech(_ session: ReaderSpeechSession) {
@@ -221,8 +235,18 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
+    func startAutoReading() {
+        guard autoReadingAvailable, !speech.isActive, viewport.interactionActive,
+              let controller = viewport.controller else { return }
+        controller.beginAutoReading()
+        autoRead.start(mode: .scroll) { [weak self, weak controller] distance in
+            guard let self, let controller else { return .stop }
+            return self.advanceAutoReading(by: distance, in: controller)
+        }
+    }
+
     private func stopSpeech(restore: Bool) {
-        speechSession?.stop(restorePosition: restore)
+        (speechSession ?? speech).stop(restorePosition: restore)
         speechID = nil; speechSession = nil
     }
 
@@ -233,7 +257,7 @@ final class ReaderViewModel: ObservableObject {
         pendingSpeechAnchor = nil; layoutTask?.cancel(); generation = UUID()
         navigationGate.reset(); navigationGate.applied(window: displayed.id)
         viewport.onNextRestoreIsNavigation = false; layoutNeedsRefresh = false
-        anchor = viewport.anchor(); window = displayed
+        anchor = viewport.anchor(); window = displayed; readinessRevision &+= 1
     }
 
     func advanceAutoReading(by distance: CGFloat, in controller: ReaderViewController) -> AutoReadStep {
@@ -292,7 +316,7 @@ final class ReaderViewModel: ObservableObject {
         beginManualNavigation()
         positionRevision &+= 1
         searchReturn.cancelPending()
-        navigationGate.begin()
+        navigationGate.begin(); readinessRevision &+= 1
         anchor = ReadingAnchor(bookID: bookID, versionID: chapter.documentVersion, rawByteOffset: chapter.rawByteRange.location.value)
         requestWindow()
     }
@@ -332,6 +356,7 @@ final class ReaderViewModel: ObservableObject {
     }
     func suspend() async {
         guard !closing else { return }
+        autoRead.stop()
         suspended = true; lifecycle = UUID(); generation = UUID()
         searchReturn.cancelPending()
         endBookmarkPanel()
@@ -355,6 +380,7 @@ final class ReaderViewModel: ObservableObject {
     }
     func close() async -> Bool {
         guard !closing else { return false }
+        autoRead.stop()
         stopSpeech(restore: true)
         closing = true; lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
@@ -378,6 +404,7 @@ final class ReaderViewModel: ObservableObject {
         }
     }
     func leaveKeepingSavedPosition() async {
+        autoRead.stop()
         stopSpeech(restore: false)
         closing = true; lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
@@ -390,6 +417,7 @@ final class ReaderViewModel: ObservableObject {
     }
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
+        autoRead.stop()
         stopSpeech(restore: false)
         lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
@@ -458,7 +486,7 @@ final class ReaderViewModel: ObservableObject {
     /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
         guard !closing, !suspended, window?.id == id, viewport.controller?.window?.id == id else { return }
-        if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel() }
+        if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel(notify: false) }
         let navigation = navigationGate.navigation
         let navigationApplied = navigationGate.applied(window: id)
         if navigationApplied { pendingSpeechAnchor = nil }
@@ -472,15 +500,22 @@ final class ReaderViewModel: ObservableObject {
             if navigationApplied { visibleChanged(visible, windowID: id) }
             directory.displayed(visible)
         }
-        guard navigationGate.navigation == nil else { return }
-        guard let started = openingStarted else { return }
-        openingStarted = nil
-        let elapsed = started.duration(to: ContinuousClock().now).components
-        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
-        let summary = String(format: "打开请求→窗口已应用 %.3fs\n", seconds)
-            + ProcessingMeasurement.summary(openingMeasurements) + "\n进程重启/正文首绘未测；仅本地摘要。"
         let request = lifecycle
-        Task { if lifecycle == request, !closing { openingPerformanceSummary = summary } }
+        let summary: String?
+        if navigationGate.navigation == nil, let started = openingStarted {
+            openingStarted = nil
+            let elapsed = started.duration(to: ContinuousClock().now).components
+            let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            summary = String(format: "打开请求→窗口已应用 %.3fs\n", seconds)
+                + ProcessingMeasurement.summary(openingMeasurements) + "\n进程重启/正文首绘未测；仅本地摘要。"
+        } else {
+            summary = nil
+        }
+        Task { @MainActor [weak self] in
+            guard let self, self.lifecycle == request, !self.closing else { return }
+            if let summary { self.openingPerformanceSummary = summary }
+            self.readinessRevision &+= 1
+        }
     }
 }
 
@@ -493,7 +528,7 @@ extension ReaderViewModel {
         // Build the lease afterwards, then validate it against the now-current window.
         let visible = viewport.controller?.bookmarkAnchor()
         let context = navigationContext(owner: owner, presentation: presentation)
-        bookmarkContext = context
+        bookmarkContext = context; readinessRevision &+= 1
         let captured = bookmarkPositionIsCurrent(context) ? visible : nil
         bookmarks.present(reader: owner, anchor: captured, presentation: presentation,
             current: { [weak self] in self?.bookmarkOwnerIsCurrent(context) ?? false },
@@ -505,11 +540,12 @@ extension ReaderViewModel {
               bookmarkOwnerIsCurrent(context), !bookmarks.isBusy else { return }
         beginBookmarkPanel(presentation)
     }
-    func endBookmarkPanel(_ presentation: UUID? = nil) {
+    func endBookmarkPanel(_ presentation: UUID? = nil, notify: Bool = true) {
         if let presentation, bookmarkContext?.presentation != presentation { return }
         bookmarks.dismiss(presentation: presentation)
         searchRequest = UUID(); searchHitIDs = []
         bookmarkContext = nil; preparedJump = nil; returnRequest = nil
+        if notify { readinessRevision &+= 1 }
     }
     func prepareBookmarkWindow(id: String, presentation: UUID,
                                request: BookmarkRequest) async throws -> ReadingWindow {
@@ -553,7 +589,7 @@ extension ReaderViewModel {
     }
     private func applyNavigationWindow(_ rendered: ReadingWindow, effect: SearchEffect?) {
         layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
-        navigationGate.begin()
+        navigationGate.begin(); readinessRevision &+= 1
         guard let navigation = navigationGate.navigation else { return }
         searchReturn.stage(effect, navigation: navigation)
         navigationGate.expect(window: rendered.id, navigation: navigation)
@@ -618,8 +654,8 @@ extension ReaderViewModel {
         let context = navigationContext(owner: reader, presentation: nil)
         let intent = viewport.controller?.toolIntent?()
         guard bookmarkPositionIsCurrent(context) else { return }
-        let request = UUID(); returnRequest = request
-        defer { if returnRequest == request { returnRequest = nil } }
+        let request = UUID(); returnRequest = request; readinessRevision &+= 1
+        defer { if returnRequest == request { returnRequest = nil; readinessRevision &+= 1 } }
         @MainActor func isCurrent() -> Bool {
             !Task.isCancelled && returnRequest == request && searchReturn.origin == origin &&
                 bookmarkPositionIsCurrent(context) && viewport.controller?.toolIntent?() == intent

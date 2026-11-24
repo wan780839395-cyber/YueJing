@@ -46,19 +46,13 @@ actor EPUBSpeechCursor {
                 continue
             }
             let text = nodes[node]
-            var end = index ?? text.startIndex
-            let start = end, startOffset = offset
-            while end < text.endIndex {
-                let character = text[end]
-                let next = text.index(after: end)
-                let width = text[end..<next].utf16.count
-                guard width <= Self.maxUTF16 else { throw EPUBError.limitExceeded }
-                if offset - startOffset + width > Self.maxUTF16 { break }
-                offset += width
-                end = next
-                if character.isNewline || "。！？.!?".contains(character) { break }
+            let start = index ?? text.startIndex, startOffset = offset
+            guard start < text.endIndex else { node += 1; offset = 0; index = nil; continue }
+            guard let end = NarrationPhrase.end(in: text[start...], limit: Self.maxUTF16) else {
+                throw EPUBError.limitExceeded
             }
             let slice = text[start..<end]
+            offset += slice.utf16.count
             let spoken = slice.drop(while: { $0.isWhitespace })
             let position = EPUBReadingPosition(bookID: package.sourceSHA256, versionID: package.versionID,
                 path: path, node: node, utf16Offset: startOffset + text[start..<spoken.startIndex].utf16.count)

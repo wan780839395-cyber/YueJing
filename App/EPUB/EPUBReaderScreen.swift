@@ -28,8 +28,6 @@ struct EPUBReaderScreen: View {
     @ObservedObject var model: EPUBReaderViewModel
     let routeID: UUID
     let onExit: @MainActor () -> Void
-    @StateObject private var autoRead = AutoReadSession()
-    @StateObject private var speech = ReaderSpeechSession()
     @State private var autoAfterSpeech: UUID?
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
@@ -46,47 +44,42 @@ struct EPUBReaderScreen: View {
 
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
-        return { stopAutoRead(); model.revokeSpeech(); _ = Task { await model.returnFromSearch() } }
+        return { autoAfterSpeech = nil; stopAutoRead(); model.revokeSpeech(); _ = Task { await model.returnFromSearch() } }
+    }
+
+    private var isSceneActive: Bool {
+        model.webView.isSceneActiveForControls(routeID: routeID)
     }
 
     private var canStartAutoRead: Bool {
-        scenePhase == .active && tools.canInteract && tools.panel == nil &&
+        isSceneActive && tools.canInteract && tools.panel == nil &&
             model.presentationToken != nil && model.autoReadOwner != nil
     }
 
-    private var canStartSpeech: Bool {
-        !speech.isActive && scenePhase == .active && tools.canInteract &&
-            tools.panel == nil && model.presentationToken != nil && model.autoReadOwner != nil
+    private var speechAvailable: Bool {
+        isSceneActive && tools.canInteract && tools.panel == nil &&
+            model.presentationToken != nil && model.autoReadOwner != nil
     }
 
     private func startSpeech() {
-        guard canStartSpeech else { return }
+        guard !model.speech.isActive, speechAvailable else { return }
         autoAfterSpeech = nil
         stopAutoRead()
-        guard let source = model.speechSource(onRevoke: { [weak speech] in
-            speech?.stop(restorePosition: false)
-        }) else { return }
-        speech.start(next: source)
+        model.startSpeech()
     }
 
     private func stopAutoRead() {
-        model.webView.controller?.cancelAutoPage()
-        autoRead.stop()
+        model.stopAutoRead()
     }
 
     private func startAutoRead() {
         guard canStartAutoRead else { return }
-        if speech.isActive {
-            speech.stop()
+        if model.speech.isActive {
+            model.speech.stop()
             if model.loading { autoAfterSpeech = model.speechRestoreID; return }
         }
-        guard canStartAutoRead, let owner = model.autoReadOwner, let token = model.presentationToken,
-              model.webView.controller?.beginAutoRead(for: token) == true else { return }
-        model.revokeSpeech()
+        guard canStartAutoRead, !model.speech.isActive, model.startAutoRead() else { return }
         mutateTools { $0.scrollingBegan() }
-        autoRead.start(mode: model.readingMode == .scroll ? .scroll : .paged) { [weak model] distance in
-            model?.autoReadStep(from: owner, distance: distance) ?? .stop
-        }
     }
 
     private func floatingTools(_ metrics: ReaderToolMetrics, _ appearance: ReaderToolAppearance) -> ReaderFloatingToolsView {
@@ -95,12 +88,13 @@ struct EPUBReaderScreen: View {
             exitSaveFailed: model.exitSaveFailed, rememberFocus: { lastPanelControl = $0 },
             open: openPanel, focusedControl: $focusedControl, chapterContext: chapterContextText,
             returnFromSearch: searchReturnAction,
-            autoReading: autoRead.isRunning,
-            autoReadControl: AnyView(AutoReadControl(session: autoRead,
-                mode: model.readingMode == .scroll ? .scroll : .paged,
-                available: autoRead.isRunning || canStartAutoRead, appearance: appearance, start: startAutoRead)),
-            speechControl: AnyView(ReaderSpeechControl(session: speech, available: canStartSpeech, start: startSpeech)),
-            speechActive: speech.isActive, switchToAutoRead: canStartAutoRead ? startAutoRead : nil)
+            autoRead: model.autoRead,
+            speech: model.speech,
+            autoReadMode: model.readingMode == .scroll ? .scroll : .paged,
+            autoReadAvailable: canStartAutoRead,
+            speechAvailable: speechAvailable,
+            startAutoRead: startAutoRead,
+            startSpeech: startSpeech)
     }
 
     var body: some View {
@@ -120,10 +114,12 @@ struct EPUBReaderScreen: View {
                     request: model.navigationRequest,
                     preferences: model.preferences,
                     handle: model.webView,
+                    routeID: routeID,
+                    onSceneInteraction: handleNativeScene,
                     onLocatorEvent: model.handleLocatorEvent,
                     onLoadFailure: model.handleLoadFailure,
                     onInternalLink: { path, fragment in
-                        guard !autoRead.isRunning, tools.canInteract, tools.panel == nil, model.presentationToken != nil else { return }
+                        guard !model.autoRead.isRunning, tools.canInteract, tools.panel == nil, model.presentationToken != nil else { return }
                         model.navigateToInternalLink(path: path, fragment: fragment)
                     },
                     onChapterBoundary: model.turnChapter,
@@ -141,13 +137,7 @@ struct EPUBReaderScreen: View {
                 .accessibilityAction(named: Text("下一屏")) { manualPage(.next) }
                 .accessibilityAction(named: Text("上一屏")) { manualPage(.previous) }
                 .overlay {
-                    if autoRead.isRunning {
-                        // Own the entire first touch, including a link or horizontal edge.
-                        // Removing this sibling after touch-down never replays it into WebKit.
-                        EPUBAutoReadPauseSurface(pause: stopAutoRead)
-                            .ignoresSafeArea(.container, edges: .bottom)
-                            .accessibilityHidden(true)
-                    }
+                    EPUBAutoReadPauseOverlay(autoRead: model.autoRead, pause: stopAutoRead)
                 }
                 .overlay {
                     if model.openingPerformanceSummary == nil && (!model.ready || model.loading) {
@@ -258,11 +248,11 @@ struct EPUBReaderScreen: View {
                 ZStack {
                     if tools.visible && tools.panel == nil {
                         edgeScrims(theme: model.preferences.theme)
-                            .transition(.opacity)
+                            .transition(reduceMotion || tools.suspended ? .identity : .opacity)
                     }
                 }
-                .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: tools.visible && tools.panel == nil)
-                .allowsHitTesting(false)
+                .animation(reduceMotion || tools.suspended ? nil : ReaderMotion.toolVisibility, value: tools.visible && tools.panel == nil)
+                .transaction { if reduceMotion || tools.suspended { $0.animation = nil } }
                 .accessibilityHidden(true)
 
                 VStack(spacing: 0) {
@@ -297,24 +287,31 @@ struct EPUBReaderScreen: View {
             panelHost(session: session)
         }
         .task(id: routeID) {
+            autoAfterSpeech = nil
             stopAutoRead()
             model.revokeSpeech()
             await model.load()
         }
         .modifier(ReadingTimeTracking(owner: routeID, readable: tools.canInteract && tools.panel == nil &&
             model.acceptsCanvasTouch && model.message == nil))
-        .onDisappear { autoAfterSpeech = nil; stopAutoRead(); model.revokeSpeech() }
+        .onDisappear { autoAfterSpeech = nil; stopAutoRead() } // Route owner, not disappearance, closes speech.
         // Covers every stop source, including the shared control and its wait watchdog.
-        .onReceive(autoRead.$isRunning) { running in
+        .onReceive(model.autoRead.$isRunning) { running in
             if !running { model.webView.controller?.cancelAutoPage() }
         }
-        .onChange(of: scenePhase) { if $0 != .active { autoAfterSpeech = nil; stopAutoRead() } }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active, !model.webView.isNativeSceneForegroundActive {
+                autoAfterSpeech = nil
+                stopAutoRead()
+            }
+        }
         .task(id: model.presentationToken) {
             guard let pending = autoAfterSpeech, model.presentationToken != nil else { return }
             autoAfterSpeech = nil
-            if pending == model.speechRestoreID, !Task.isCancelled, !speech.isActive { startAutoRead() }
+            guard canStartAutoRead, !model.speech.isActive else { return }
+            if pending == model.speechRestoreID, !Task.isCancelled { startAutoRead() }
         }
-        .onChange(of: model.autoReadOwner) { _ in stopAutoRead() }
+        .onChange(of: model.autoReadOwner) { _ in if model.autoRead.isRunning { stopAutoRead() } }
         .task(id: model.loading) {
             loadingFeedback = .quiet
             guard model.loading else { return }
@@ -330,9 +327,9 @@ struct EPUBReaderScreen: View {
         }
         .task(id: tools.intent) {
             let intent = tools.intent
-            guard voiceOver, tools.visible, tools.panel == nil else { return }
+            guard voiceOver, tools.canInteract, tools.visible, tools.panel == nil, isSceneActive else { return }
             await Task.yield()
-            if !Task.isCancelled, tools.intent == intent, tools.panel == nil {
+            if !Task.isCancelled, tools.intent == intent, tools.canInteract, tools.visible, tools.panel == nil, isSceneActive {
                 focusedControl = lastPanelControl ?? "back"
             }
         }
@@ -344,16 +341,9 @@ struct EPUBReaderScreen: View {
         .onChange(of: model.exitSaveFailed) { failed in
             if failed { mutateTools { $0.forceCompact() } }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            stopAutoRead()
-            mutateTools { $0.suspend() }
-            Task { await model.suspend() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            mutateTools { $0.resume() }
-            Task { await model.resume() }
-        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            autoAfterSpeech = nil
+            stopAutoRead()
             Task { await model.releaseReaderMemory() }
         }
         .alert(
@@ -509,15 +499,27 @@ struct EPUBReaderScreen: View {
         .accessibilityIdentifier("epub.compatibility.notice")
     }
 
+    private func handleNativeScene(_ event: EPUBSceneEvent) {
+        guard model.webView.isCurrent(event, routeID: routeID) else { return }
+        if event.active { mutateTools { $0.resume() } }
+        else { autoAfterSpeech = nil; stopAutoRead(); mutateTools { $0.suspend() } }
+        model.noteViewportReadiness()
+        model.webView.scheduleModelSceneTransition(event, routeID: routeID) { active in
+            if active { await model.resume() } else { await model.suspend() }
+        }
+    }
+
     private func titleBar(metrics: ReaderToolMetrics, appearance: ReaderToolAppearance) -> some View {
         let visible = tools.visible && tools.panel == nil
+        let allowAnimation = !reduceMotion && !tools.suspended
         return ZStack {
             if visible {
                 titleBarContent(metrics: metrics, appearance: appearance)
-                    .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: -ReaderMotion.hiddenTravel)))
+                    .transition(allowAnimation ? .opacity.combined(with: .offset(y: -ReaderMotion.hiddenTravel)) : .identity)
             }
         }
-        .animation(reduceMotion ? nil : ReaderMotion.toolVisibility, value: visible)
+        .animation(allowAnimation ? ReaderMotion.toolVisibility : nil, value: visible)
+        .transaction { if !allowAnimation { $0.animation = nil } }
         .allowsHitTesting(visible && tools.canInteract)
         .accessibilityHidden(!visible)
     }
@@ -646,6 +648,7 @@ struct EPUBReaderScreen: View {
 
     private func openPanel(_ panel: ReadingToolPanel) {
         guard !model.exitSaveFailed, model.ready else { return }
+        autoAfterSpeech = nil
         stopAutoRead()
         model.revokeSpeech()
         lastPanelControl = panel == .directory ? "directory" : "settings"
@@ -692,7 +695,8 @@ struct EPUBReaderScreen: View {
     }
 
     private func manualPage(_ direction: EPUBPageDirection) {
-        if autoRead.isRunning { stopAutoRead(); return }
+        autoAfterSpeech = nil
+        if model.autoRead.isRunning { stopAutoRead(); return }
         model.revokeSpeech()
         _ = model.webView.controller?.turnPage(direction)
     }
@@ -704,6 +708,7 @@ struct EPUBReaderScreen: View {
         case .exitAccessibility:
             exitReader()
         case .scrollingBegan:
+            autoAfterSpeech = nil
             model.revokeSpeech()
             guard model.ready, !model.loading, tools.panel == nil else { return }
             mutateTools { $0.scrollingBegan() }
@@ -714,6 +719,7 @@ struct EPUBReaderScreen: View {
     }
 
     private func exitReader(keepingSavedPosition: Bool = false) {
+        autoAfterSpeech = nil
         stopAutoRead()
         var request: UUID?
         mutateTools { request = $0.beginExit() }
@@ -749,4 +755,20 @@ struct EPUBAutoReadPauseSurface: UIViewRepresentable {
 
     func makeUIView(context: Context) -> Surface { Surface() }
     func updateUIView(_ view: Surface, context: Context) { view.pause = pause }
+}
+
+@MainActor
+private struct EPUBAutoReadPauseOverlay: View {
+    @ObservedObject var autoRead: AutoReadSession
+    let pause: @MainActor () -> Void
+
+    var body: some View {
+        if autoRead.isRunning {
+            // Own the entire first touch, including a link or horizontal edge.
+            // Removing this sibling after touch-down never replays it into WebKit.
+            EPUBAutoReadPauseSurface(pause: pause)
+                .ignoresSafeArea(.container, edges: .bottom)
+                .accessibilityHidden(true)
+        }
+    }
 }

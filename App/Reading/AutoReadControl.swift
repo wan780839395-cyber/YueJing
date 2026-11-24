@@ -77,27 +77,18 @@ struct AutoReadControl: View {
             if dynamicType.isAccessibilitySize {
                 stackedLayout
             } else {
-                ViewThatFits(in: .horizontal) {
-                    horizontalLayout(compactPace: false)
-                    if mode == .scroll {
-                        horizontalLayout(compactPace: true)
-                    }
-                    stackedLayout
+                AdaptiveAutoReadLayout(
+                    horizontalSpacing: session.isRunning ? 6 : 8,
+                    verticalSpacing: 6,
+                    expandGap: !session.isRunning
+                ) {
+                    playControl(fillsWidth: false)
+                    paceMenu(style: .regular)
                 }
             }
         }
         .padding(.horizontal, session.isRunning ? 0 : (dynamicType.isAccessibilitySize ? 16 : 8))
         .padding(.vertical, session.isRunning ? 0 : (dynamicType.isAccessibilitySize ? 10 : 6))
-    }
-
-    private func horizontalLayout(compactPace: Bool) -> some View {
-        HStack(spacing: session.isRunning ? 6 : 8) {
-            playControl(fillsWidth: false)
-            if !session.isRunning {
-                Spacer(minLength: 8)
-            }
-            paceMenu(style: compactPace ? .compact : .regular)
-        }
     }
 
     private var stackedLayout: some View {
@@ -306,5 +297,57 @@ private struct AutoReadPlayButtonStyle: ButtonStyle {
                     }
             }
             .opacity(isEnabled ? 1 : 0.38)
+    }
+}
+
+@MainActor
+private struct AdaptiveAutoReadLayout: Layout {
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+    let expandGap: Bool
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count == 2 else { return .zero }
+        let first = subviews[0].sizeThatFits(.unspecified)
+        let second = subviews[1].sizeThatFits(.unspecified)
+        let requiredHorizontal = first.width + horizontalSpacing + second.width
+        if let proposedWidth = proposal.width, proposedWidth.isFinite, requiredHorizontal > proposedWidth + 0.5 {
+            let wrappedFirst = subviews[0].sizeThatFits(ProposedViewSize(width: proposedWidth, height: nil))
+            let wrappedSecond = subviews[1].sizeThatFits(ProposedViewSize(width: proposedWidth, height: nil))
+            return CGSize(
+                width: min(proposedWidth, max(wrappedFirst.width, wrappedSecond.width)),
+                height: wrappedFirst.height + verticalSpacing + wrappedSecond.height
+            )
+        }
+        let width: CGFloat
+        if expandGap, let proposedWidth = proposal.width, proposedWidth.isFinite {
+            width = max(requiredHorizontal, proposedWidth)
+        } else {
+            width = requiredHorizontal
+        }
+        return CGSize(width: width, height: max(first.height, second.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 2 else { return }
+        let first = subviews[0].sizeThatFits(.unspecified)
+        let second = subviews[1].sizeThatFits(.unspecified)
+        let requiredHorizontal = first.width + horizontalSpacing + second.width
+        if requiredHorizontal > bounds.width + 0.5 {
+            let wrappedFirst = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            let wrappedSecond = subviews[1].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY),
+                              proposal: ProposedViewSize(width: wrappedFirst.width, height: wrappedFirst.height))
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + wrappedFirst.height + verticalSpacing),
+                              proposal: ProposedViewSize(width: wrappedSecond.width, height: wrappedSecond.height))
+        } else {
+            let firstY = bounds.midY - first.height / 2
+            let secondY = bounds.midY - second.height / 2
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: firstY),
+                              proposal: ProposedViewSize(width: first.width, height: first.height))
+            let secondX = expandGap ? (bounds.maxX - second.width) : (bounds.minX + first.width + horizontalSpacing)
+            subviews[1].place(at: CGPoint(x: secondX, y: secondY),
+                              proposal: ProposedViewSize(width: second.width, height: second.height))
+        }
     }
 }

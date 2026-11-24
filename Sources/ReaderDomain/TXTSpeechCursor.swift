@@ -34,7 +34,11 @@ public actor TXTSpeechCursor {
         if let offset { start = offset }
         else { start = try await source.utf16Offset(for: RawByteOffset(origin.rawByteOffset)).value }
         guard start < metadata.utf16Count else { return nil }
-        if remainder.isEmpty {
+        // If a previous sentence left just the tail of the old read window, do not
+        // speak that tail as a new phrase merely because the storage window ends.
+        let buffered = remainder.utf16.count
+        let atBufferEdge = NarrationPhrase.end(in: remainder, limit: Self.windowUnits) == remainder.endIndex
+        if remainder.isEmpty || (atBufferEdge && buffered < Self.windowUnits && start + buffered < metadata.utf16Count) {
             let probe = start + min(Self.windowUnits, metadata.utf16Count - start)
             var end = try await source.composedStart(at: probe)
             if end <= start {
@@ -48,8 +52,10 @@ public actor TXTSpeechCursor {
             let page = try await source.text(in: range)
             remainder = page.text[...]
         }
-        let end = remainder.firstIndex(where: { "。！？.!?\n\u{2028}\u{2029}".contains($0) })
-            .map { remainder.index(after: $0) } ?? remainder.endIndex
+        guard let end = NarrationPhrase.end(in: remainder, limit: Self.windowUnits,
+                continues: remainder.utf16.count < metadata.utf16Count - start) else {
+            throw LibraryError.invalidAnchor
+        }
         let text = String(remainder[..<end])
         let raw = try await source.rawByteOffset(for: UTF16Offset(start))
         try Task.checkCancellation()

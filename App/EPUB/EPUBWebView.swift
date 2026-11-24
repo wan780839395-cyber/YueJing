@@ -35,15 +35,144 @@ struct EPUBNavigationRequest: Equatable {
     }
 }
 
+struct EPUBSceneEvent: Equatable {
+    let routeID: UUID
+    let owner: ObjectIdentifier
+    let binding: UUID
+    let revision: UUID
+    let active: Bool
+}
+
 /// Handle bridging EPUBReaderViewModel and the live EPUBWebViewController.
 @MainActor
 final class EPUBWebViewHandle {
     weak var controller: EPUBWebViewController?
     private(set) var latestPayload: EPUBLocatorPayload?
     private var preparedController: EPUBWebViewController?
+    private(set) var interactionActive = true
+    private var nativeRouteID: UUID?
+    private var sceneBinding: UUID?
+    private var sceneRevision = UUID()
+    private var acceptedSceneActive: Bool?
+    private struct ModelSceneRequest {
+        let event: EPUBSceneEvent
+        let apply: @MainActor (Bool) async -> Void
+    }
+    private struct ModelSceneTransition {
+        let id: UUID
+        let request: ModelSceneRequest
+        var started = false
+    }
+    private var completedModelPhase: Bool? = true
+    private var modelSceneRouteID: UUID?
+    private var pendingModelScene: ModelSceneRequest?
+    private var modelSceneTransition: ModelSceneTransition?
+    private(set) var modelSceneTask: Task<Void, Never>?
 
     init(preparedController: EPUBWebViewController? = nil) {
         self.preparedController = preparedController
+    }
+
+    func configureSceneAuthority(_ value: EPUBWebViewController, routeID: UUID,
+                                onChange: @escaping @MainActor (EPUBSceneEvent) -> Void) {
+        guard controller === value else { return }
+        if let modelSceneRouteID, modelSceneRouteID != routeID {
+            modelSceneTask?.cancel(); pendingModelScene = nil; completedModelPhase = nil
+        }
+        modelSceneRouteID = routeID
+        nativeRouteID = routeID
+        value.prepareSceneAuthority(handle: self, routeID: routeID)
+        value.onSceneInteraction = onChange
+    }
+
+    func ownsSceneController(_ value: EPUBWebViewController, routeID: UUID) -> Bool {
+        controller === value && nativeRouteID == routeID
+    }
+
+    func beginSceneBinding(_ value: EPUBWebViewController, routeID: UUID, binding: UUID) -> Bool {
+        guard ownsSceneController(value, routeID: routeID) else { return false }
+        sceneBinding = binding; sceneRevision = UUID(); acceptedSceneActive = nil
+        return true
+    }
+
+    func endSceneBinding(_ value: EPUBWebViewController, binding: UUID) {
+        guard controller === value, sceneBinding == binding else { return }
+        sceneBinding = nil; sceneRevision = UUID(); acceptedSceneActive = nil
+        pendingModelScene = nil
+    }
+
+    @discardableResult
+    func acceptScenePhase(_ active: Bool, from value: EPUBWebViewController, scene: UIWindowScene,
+                          routeID: UUID, binding: UUID) -> Bool {
+        guard ownsSceneController(value, routeID: routeID), sceneBinding == binding,
+              value.matchesSceneBinding(binding, scene: scene),
+              !active || scene.activationState == .foregroundActive,
+              acceptedSceneActive != active else { return false }
+        acceptedSceneActive = active; sceneRevision = UUID()
+        interactionActive = active
+        let event = EPUBSceneEvent(routeID: routeID, owner: ObjectIdentifier(value),
+                                   binding: binding, revision: sceneRevision, active: active)
+        value.onSceneInteraction?(event)
+        return true
+    }
+
+    func isCurrent(_ event: EPUBSceneEvent, routeID: UUID) -> Bool {
+        guard let controller else { return false }
+        return event.routeID == routeID && nativeRouteID == routeID &&
+            event.owner == ObjectIdentifier(controller) && event.binding == sceneBinding &&
+            event.revision == sceneRevision && controller.matchesSceneBinding(event.binding)
+    }
+
+    func isSceneActiveForControls(routeID: UUID) -> Bool {
+        guard interactionActive, let controller, ownsSceneController(controller, routeID: routeID) else {
+            return false
+        }
+        guard let scene = controller.viewIfLoaded?.window?.windowScene else { return false }
+        return scene.activationState == .foregroundActive
+    }
+
+    var isNativeSceneForegroundActive: Bool {
+        interactionActive && controller?.viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive
+    }
+
+    func scheduleModelSceneTransition(_ event: EPUBSceneEvent, routeID: UUID,
+                                     apply: @escaping @MainActor (Bool) async -> Void) {
+        guard isCurrent(event, routeID: routeID) else { return }
+        pendingModelScene = ModelSceneRequest(event: event, apply: apply)
+        if let running = modelSceneTransition {
+            if running.request.event.routeID != routeID || running.request.event.active != event.active {
+                modelSceneTask?.cancel()
+            }
+            return
+        }
+        startModelSceneTransition()
+    }
+
+    private func startModelSceneTransition() {
+        guard modelSceneTransition == nil, let request = pendingModelScene else { return }
+        pendingModelScene = nil
+        let event = request.event
+        guard isCurrent(event, routeID: event.routeID), completedModelPhase != event.active else { return }
+        let id = UUID()
+        modelSceneTransition = ModelSceneTransition(id: id, request: request)
+        modelSceneTask = Task { [weak self] in
+            guard let self else { return }
+            guard !Task.isCancelled, self.isCurrent(event, routeID: event.routeID) else {
+                self.finishModelSceneTransition(id, completed: false); return
+            }
+            self.modelSceneTransition?.started = true
+            await request.apply(event.active)
+            self.finishModelSceneTransition(id, completed: !Task.isCancelled)
+        }
+    }
+
+    private func finishModelSceneTransition(_ id: UUID, completed: Bool) {
+        guard let running = modelSceneTransition, running.id == id else { return }
+        if running.started, running.request.event.routeID == modelSceneRouteID {
+            completedModelPhase = completed ? running.request.event.active : nil
+        }
+        modelSceneTask = nil; modelSceneTransition = nil
+        startModelSceneTransition()
     }
 
     func makeController() -> EPUBWebViewController {
@@ -69,6 +198,8 @@ final class EPUBWebViewHandle {
 
     func releaseParkedController(_ value: EPUBWebViewController) {
         guard controller === value else { return }
+        nativeRouteID = nil; sceneBinding = nil; sceneRevision = UUID(); acceptedSceneActive = nil
+        pendingModelScene = nil
         controller = nil // Old SwiftUI dismantle must not invalidate a transferred renderer.
         latestPayload = nil
     }
@@ -77,11 +208,17 @@ final class EPUBWebViewHandle {
         if let old = controller, old !== value {
             old.detachCallbacks()
         }
+        if controller !== value {
+            nativeRouteID = nil; sceneBinding = nil; sceneRevision = UUID(); acceptedSceneActive = nil
+            pendingModelScene = nil
+        }
         controller = value
     }
 
     func detach(_ value: EPUBWebViewController) {
         guard controller === value else { return }
+        nativeRouteID = nil; sceneBinding = nil; sceneRevision = UUID(); acceptedSceneActive = nil
+        pendingModelScene = nil
         value.detachCallbacks()
         controller = nil
     }
@@ -230,6 +367,93 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     var onInternalLink: (@MainActor (String, String?) -> Void)?
     var toolIntent: (@MainActor () -> UUID)?
     var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
+    private weak var sceneHandle: EPUBWebViewHandle?
+    private var sceneRouteID: UUID?
+    private weak var boundScene: UIWindowScene?
+    private(set) var sceneBindingID: UUID?
+    var onSceneInteraction: (@MainActor (EPUBSceneEvent) -> Void)?
+    private var sceneObservation: SceneObservation?
+
+    @MainActor
+    private final class SceneObservation: NSObject {
+        private weak var owner: EPUBWebViewController?
+        private weak var scene: UIWindowScene?
+        private let routeID: UUID
+        private let binding: UUID
+        init(owner: EPUBWebViewController, scene: UIWindowScene, routeID: UUID, binding: UUID) {
+            self.owner = owner; self.scene = scene; self.routeID = routeID; self.binding = binding
+            super.init()
+            for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(receive(_:)), name: name, object: scene)
+            }
+        }
+        @objc private func receive(_ notification: Notification) {
+            owner?.sceneLifecycleChanged(notification, routeID: routeID, binding: binding)
+        }
+        func stop() {
+            if let scene {
+                for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
+                    NotificationCenter.default.removeObserver(self, name: name, object: scene)
+                }
+            }
+            owner = nil
+        }
+    }
+
+    func prepareSceneAuthority(handle: EPUBWebViewHandle, routeID: UUID) {
+        guard sceneHandle !== handle || sceneRouteID != routeID else { return }
+        revokeSceneBinding()
+        sceneHandle = handle; sceneRouteID = routeID
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        bindCurrentScene()
+    }
+
+    private func bindCurrentScene() {
+        guard let sceneHandle, let sceneRouteID,
+              sceneHandle.ownsSceneController(self, routeID: sceneRouteID) else { return }
+        guard let scene = viewIfLoaded?.window?.windowScene else { revokeSceneBinding(); return }
+        if boundScene !== scene || sceneBindingID == nil {
+            revokeSceneBinding()
+            let binding = UUID()
+            guard sceneHandle.beginSceneBinding(self, routeID: sceneRouteID, binding: binding) else { return }
+            boundScene = scene; sceneBindingID = binding
+            sceneObservation = SceneObservation(owner: self, scene: scene, routeID: sceneRouteID, binding: binding)
+        }
+        forwardScenePhase(scene.activationState == .foregroundActive, scene: scene)
+    }
+
+    func matchesSceneBinding(_ binding: UUID, scene: UIWindowScene? = nil) -> Bool {
+        guard sceneBindingID == binding, let boundScene,
+              viewIfLoaded?.window?.windowScene === boundScene else { return false }
+        return scene == nil || scene === boundScene
+    }
+
+    private func sceneLifecycleChanged(_ notification: Notification, routeID: UUID, binding: UUID) {
+        guard routeID == sceneRouteID, binding == sceneBindingID,
+              let scene = notification.object as? UIWindowScene, scene === boundScene else { return }
+        switch notification.name {
+        case UIScene.didActivateNotification:
+            guard scene.activationState == .foregroundActive else { return }
+            forwardScenePhase(true, scene: scene)
+        case UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification:
+            forwardScenePhase(false, scene: scene)
+        default: return
+        }
+    }
+
+    private func forwardScenePhase(_ active: Bool, scene: UIWindowScene) {
+        guard let sceneRouteID, let binding = sceneBindingID else { return }
+        sceneHandle?.acceptScenePhase(active, from: self, scene: scene, routeID: sceneRouteID, binding: binding)
+    }
+
+    private func revokeSceneBinding() {
+        sceneObservation?.stop(); sceneObservation = nil
+        if let binding = sceneBindingID { sceneHandle?.endSceneBinding(self, binding: binding) }
+        boundScene = nil; sceneBindingID = nil
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -626,6 +850,8 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     func detachCallbacks() {
         cancelAutoPage()
         discardParkedState()
+        revokeSceneBinding()
+        sceneHandle = nil; sceneRouteID = nil; onSceneInteraction = nil
         nativeScrollActive = false
         interactionEnabled = false
         readinessTask?.cancel()
@@ -1545,6 +1771,8 @@ struct EPUBWebView: UIViewControllerRepresentable {
     let request: EPUBNavigationRequest?
     let preferences: ReaderPreferences
     let handle: EPUBWebViewHandle
+    let routeID: UUID
+    let onSceneInteraction: @MainActor (EPUBSceneEvent) -> Void
     let onLocatorEvent: @MainActor (EPUBLocatorPayload) -> Void
     let onLoadFailure: @MainActor (Error, EPUBNavigationToken) -> Void
     let onInternalLink: @MainActor (String, String?) -> Void
@@ -1569,11 +1797,13 @@ struct EPUBWebView: UIViewControllerRepresentable {
         controller.toolIntent = toolIntent
         controller.onToolsInteraction = onToolsInteraction
         controller.applyTheme(preferences.theme)
+        handle.configureSceneAuthority(controller, routeID: routeID, onChange: onSceneInteraction)
         return controller
     }
 
     func updateUIViewController(_ controller: EPUBWebViewController, context: Context) {
         guard handle.controller === controller else { return }
+        handle.configureSceneAuthority(controller, routeID: routeID, onChange: onSceneInteraction)
         controller.onLocatorEvent = onLocatorEvent
         controller.onLoadFailure = onLoadFailure
         controller.onInternalLink = onInternalLink
