@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "lock-device-037",
+  "active": "lock-device-037-r2",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -98,6 +98,13 @@
       "version": "0.2.37",
       "build": "39",
       "product": "0d1542e03020b90c02bcd5576d65b4a18c243b3e",
+      "plan_sha256": "36873ad723aa9911a0ac72f0d0f8137618b72b75d44c7f97c95673ef10d4b280",
+      "runner": "macos-15-intel"
+    },
+    "lock-device-037-r2": {
+      "version": "0.2.37",
+      "build": "39",
+      "product": "30eeeef579ba089637b0908be01b99deedbd2911",
       "plan_sha256": "36873ad723aa9911a0ac72f0d0f8137618b72b75d44c7f97c95673ef10d4b280",
       "runner": "macos-15-intel"
     }
