@@ -1981,7 +1981,7 @@ enum EPUBLocationScript {
             windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,
             sampleSpeechStart: function() {
-                if (!state.ready || state.suppressingReflow || state.syncing) { return null; }
+                if (!state.ready || state.suppressingReflow || state.syncing) { return {transient: true}; }
                 var sample = sampleVisible(null, true);
                 if (!sample) { return null; }
                 // Do not substitute preserveTargetAnchor or lastAnchor for the visible text.

@@ -166,6 +166,65 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     private(set) var speechRestoreID: UUID?
+#if DEBUG
+    private(set) var debugSpeechCaptureOutcome = "none"
+    private(set) var debugFirstBackgroundFailure: String?
+
+    var debugMessageCode: String {
+        guard let message else { return "none" }
+        switch message {
+        case "保存未完成，已保存记录仍保留。": return "flush_save_failed"
+        case "阅读设置暂未保存。": return "settings_save_failed"
+        case "位置暂未保存，原记录已保留。": return "scroll_save_failed"
+        case "最后保存失败，未覆盖已保存记录。请返回书架后重新打开。": return "close_save_failed"
+        case "章节内容校验或定位未通过，原阅读位置已保留。": return "locator_error"
+        case "章节定位坐标无效，未写入进度。": return "invalid_position"
+        case "相邻章节预载未完成，当前正文与已保存位置保留。可通过目录重试该章。": return "preload_failed"
+        case "章节加载未能及时完成，可重试打开；原书与已保存位置保留。": return "load_timed_out"
+        case "尚未取得当前阅读位置，本次未更换字体。": return "font_target_missing"
+        case "旧位置与当前章节版本不匹配，已从开头显示；未覆盖旧记录。": return "incompatible_progress"
+        case "这本书没有可显示的章节内容。": return "empty_spine"
+        case "跨章位置交接未完成，已保存记录保留。请重试打开。": return "chapter_handoff_failed"
+        default: return "other"
+        }
+    }
+
+    var debugSpeechNoticeCode: String {
+        guard let notice = speech.notice else { return "none" }
+        switch notice {
+        case "声音暂不可用，请检查音频输出后继续。": return "audio_unavailable"
+        case "未能读取下一段正文。": return "next_passage_failed"
+        case "当前位置没有可朗读的正文。": return "no_speakable_text"
+        default: return "other"
+        }
+    }
+
+    private func recordDebugBackgroundFailure(_ source: String, error: Error) {
+        guard debugFirstBackgroundFailure == nil else { return }
+        let category: String
+        if error is CancellationError {
+            category = "cancellation"
+        } else if let epubError = error as? EPUBError {
+            switch epubError {
+            case .invalidArchive: category = "epub_invalid_archive"
+            case .unsafePath: category = "epub_unsafe_path"
+            case .limitExceeded: category = "epub_limit_exceeded"
+            case .invalidPackage: category = "epub_invalid_package"
+            case .unsupportedContent: category = "epub_unsupported_content"
+            case .corruptResource: category = "epub_corrupt_resource"
+            case .invalidPosition: category = "epub_invalid_position"
+            case .staleSession: category = "epub_stale_session"
+            }
+        } else if error is LibraryError {
+            category = "library_error"
+        } else if let urlError = error as? URLError {
+            category = "url_\(urlError.code.rawValue)"
+        } else {
+            category = "other_error"
+        }
+        debugFirstBackgroundFailure = "\(source):\(category)"
+    }
+#endif
 
     func revokeSpeech() {
         speechRestoreID = nil
@@ -205,26 +264,87 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func speechSource(onRevoke: @escaping @MainActor () -> Void) -> ReaderSpeechSession.Source? {
         guard acceptsSearch, message == nil, let token = presentationToken, let reader,
-              reader.reading.session.id == token.sessionID else { return nil }
+              reader.reading.session.id == token.sessionID else {
+            #if DEBUG
+            debugSpeechCaptureOutcome = "source_rejected"
+            #endif
+            return nil
+        }
         revokeSpeech()
         let owner = UUID()
         speechID = owner
         onSpeechRevoked = onRevoke
         var cursor: EPUBSpeechCursor?
         return { [weak self] in
-            guard let self, self.speechID == owner, self.reader === reader else { throw CancellationError() }
-            if cursor == nil {
-                guard self.presentationToken == token, let controller = self.webView.controller,
-                      let sample = await controller.sampleSpeechStart(for: token),
-                      self.speechID == owner, self.acceptsSearch, self.presentationToken == token,
-                      self.webView.controller === controller, sample.path == token.path else { throw EPUBError.invalidPosition }
-                cursor = try EPUBSpeechCursor(package: reader.publication.package, path: sample.path,
-                                              node: sample.node, rawOffset: sample.utf16Offset)
+            guard let self, self.speechID == owner, self.reader === reader else {
+                #if DEBUG
+                self?.debugSpeechCaptureOutcome = "revoked_before_capture"
+                #endif
+                throw CancellationError()
             }
-            let passage = try await cursor?.next()
+            if cursor == nil {
+                guard self.presentationToken == token, let controller = self.webView.controller else {
+                    #if DEBUG
+                    self.debugSpeechCaptureOutcome = "sample_invalid_token"
+                    #endif
+                    throw EPUBError.invalidPosition
+                }
+                guard let sample = await controller.sampleSpeechStart(for: token) else {
+                    #if DEBUG
+                    self.debugSpeechCaptureOutcome = "sample_nil"
+                    #endif
+                    throw EPUBError.invalidPosition
+                }
+                guard self.speechID == owner, self.acceptsSearch, self.presentationToken == token,
+                      self.webView.controller === controller else {
+                    #if DEBUG
+                    self.debugSpeechCaptureOutcome = "sample_invalid_token"
+                    #endif
+                    throw EPUBError.invalidPosition
+                }
+                guard sample.path == token.path else {
+                    #if DEBUG
+                    self.debugSpeechCaptureOutcome = "sample_wrong_path"
+                    #endif
+                    throw EPUBError.invalidPosition
+                }
+                do {
+                    cursor = try EPUBSpeechCursor(package: reader.publication.package, path: sample.path,
+                                                  node: sample.node, rawOffset: sample.utf16Offset)
+                } catch {
+                    #if DEBUG
+                    self.debugSpeechCaptureOutcome = "cursor_init_failed"
+                    #endif
+                    throw error
+                }
+            }
+            let passage: EPUBSpeechCursor.Passage?
+            do {
+                passage = try await cursor?.next()
+            } catch {
+                #if DEBUG
+                if !(error is CancellationError) {
+                    self.debugSpeechCaptureOutcome = "cursor_failed"
+                }
+                #endif
+                throw error
+            }
             try Task.checkCancellation()
-            guard self.speechID == owner, self.reader === reader else { throw CancellationError() }
-            guard let passage else { return nil }
+            guard self.speechID == owner, self.reader === reader else {
+                #if DEBUG
+                self.debugSpeechCaptureOutcome = "revoked_after_cursor"
+                #endif
+                throw CancellationError()
+            }
+            guard let passage else {
+                #if DEBUG
+                self.debugSpeechCaptureOutcome = "cursor_empty"
+                #endif
+                return nil
+            }
+            #if DEBUG
+            self.debugSpeechCaptureOutcome = "captured"
+            #endif
             return ReaderSpeechChunk(text: passage.text) { [weak self] in
                 guard let self, self.speechID == owner, self.reader === reader,
                       !self.closing, self.closeTask == nil, !self.exitSaveFailed else { return }
@@ -623,6 +743,9 @@ final class EPUBReaderViewModel: ObservableObject {
             } catch is CancellationError {
             } catch {
                 if let self, self.lifecycle == life, !self.closing {
+                    #if DEBUG
+                    self.recordDebugBackgroundFailure("settings", error: error)
+                    #endif
                     self.message = "阅读设置暂未保存。"
                 }
             }
@@ -893,6 +1016,9 @@ final class EPUBReaderViewModel: ObservableObject {
                 } catch is CancellationError {
                 } catch {
                     if let self, self.lifecycle == life, !self.closing {
+                        #if DEBUG
+                        self.recordDebugBackgroundFailure("scroll_save", error: error)
+                        #endif
                         self.message = "位置暂未保存，原记录已保留。"
                     }
                 }
@@ -1041,8 +1167,12 @@ final class EPUBReaderViewModel: ObservableObject {
             }
             guard lifecycle == life, !closing else { return }
             _ = try await reader.savePreferences(settings, sequence: prefSerial)
+        } catch is CancellationError {
         } catch {
             if lifecycle == life, !closing {
+                #if DEBUG
+                recordDebugBackgroundFailure("flush", error: error)
+                #endif
                 message = "保存未完成，已保存记录仍保留。"
             }
         }

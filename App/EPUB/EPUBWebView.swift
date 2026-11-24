@@ -140,7 +140,8 @@ final class EPUBWebViewHandle {
         guard isCurrent(event, routeID: routeID) else { return }
         pendingModelScene = ModelSceneRequest(event: event, apply: apply)
         if let running = modelSceneTransition {
-            if running.request.event.routeID != routeID || running.request.event.active != event.active {
+            if running.request.event.routeID != routeID ||
+               (running.request.event.active != event.active && (!running.started || running.request.event.active)) {
                 modelSceneTask?.cancel()
             }
             return
@@ -332,6 +333,9 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private var nativeScrollActive = false
     private var runtimeTrace = EPUBRuntimeTrace()
     private var fontResourceFailureSummary: String?
+#if DEBUG
+    private(set) var debugSpeechSampleOutcome = "none"
+#endif
     private struct ParkedDocument {
         let request: EPUBNavigationRequest
         let paths: Set<String>
@@ -1220,16 +1224,120 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         } while true
     }
 
-    func sampleSpeechStart(for token: EPUBNavigationToken) async -> EPUBLocatorPayload? {
-        guard readyToken == token, let request = activeRequest, request.token == token, webView != nil else { return nil }
-        return await sampleVisibleOnce(for: request, speechStart: true)
+    private enum SpeechStartProbe: Sendable {
+        case payload(EPUBLocatorPayload)
+        case transient
+        case unavailable
     }
 
-    private func sampleVisibleOnce(for current: EPUBNavigationRequest, speechStart: Bool = false) async -> EPUBLocatorPayload? {
-        let sample = speechStart ? "sampleSpeechStart" : "sampleNow"
-        return await withCheckedContinuation { continuation in
+    func sampleSpeechStart(for token: EPUBNavigationToken) async -> EPUBLocatorPayload? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(1500))
+        repeat {
+            guard !Task.isCancelled else {
+                #if DEBUG
+                debugSpeechSampleOutcome = "cancelled"
+                #endif
+                return nil
+            }
+            guard readyToken == token, let request = activeRequest, request.token == token, webView != nil else {
+                #if DEBUG
+                debugSpeechSampleOutcome = "not_ready_token"
+                #endif
+                return nil
+            }
+            switch await probeSpeechStartOnce(for: request) {
+            case .payload(let payload):
+                return payload
+            case .unavailable:
+                return nil
+            case .transient:
+                guard ContinuousClock.now < deadline else {
+                    #if DEBUG
+                    debugSpeechSampleOutcome = "transient_timeout"
+                    #endif
+                    return nil
+                }
+                do { try await Task.sleep(for: .milliseconds(10)) } catch {
+                    #if DEBUG
+                    debugSpeechSampleOutcome = "cancelled"
+                    #endif
+                    return nil
+                }
+            }
+        } while true
+    }
+
+    private func probeSpeechStartOnce(for current: EPUBNavigationRequest) async -> SpeechStartProbe {
+        await withCheckedContinuation { continuation in
             webView.__evaluateJavaScript(
-                "window.__yjEpub && window.__yjEpub.\(sample) ? window.__yjEpub.\(sample)() : null;",
+                "window.__yjEpub && window.__yjEpub.sampleSpeechStart ? window.__yjEpub.sampleSpeechStart() : null;",
+                inFrame: nil,
+                in: EPUBLocationScript.world
+            ) { [weak self] raw, error in
+                guard let self else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard error == nil, let raw else {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "js_error"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard self.activeRequest?.token == current.token,
+                      self.readyToken == current.token else {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "not_ready_token"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                if let dict = raw as? [String: Any], dict["transient"] as? Bool == true {
+                    continuation.resume(returning: .transient)
+                    return
+                }
+                if raw is NSNull {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "null_no_visible"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard let payload = EPUBLocationScript.parseMessage(raw) else {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "parse_failed"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard payload.sessionID == current.token.sessionID,
+                      payload.epoch == current.token.epoch else {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "token_mismatch"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard self.renderedChapterPaths.contains(payload.path) else {
+                    #if DEBUG
+                    self.debugSpeechSampleOutcome = "unrendered_path"
+                    #endif
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                #if DEBUG
+                self.debugSpeechSampleOutcome = "ok"
+                #endif
+                continuation.resume(returning: .payload(payload))
+            }
+        }
+    }
+
+    private func sampleVisibleOnce(for current: EPUBNavigationRequest) async -> EPUBLocatorPayload? {
+        await withCheckedContinuation { continuation in
+            webView.__evaluateJavaScript(
+                "window.__yjEpub && window.__yjEpub.sampleNow ? window.__yjEpub.sampleNow() : null;",
                 inFrame: nil,
                 in: EPUBLocationScript.world
             ) { [weak self] raw, error in
@@ -1242,7 +1350,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                     continuation.resume(returning: nil)
                     return
                 }
-                if !speechStart { self.updateAccessibilityCanvas(with: payload, preferences: current.preferences) }
+                self.updateAccessibilityCanvas(with: payload, preferences: current.preferences)
                 continuation.resume(returning: payload)
             }
         }

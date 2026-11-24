@@ -123,6 +123,7 @@ struct ReaderLockRecoveryHostTests {
         try await withEPUBUI(autoRead: autoRead, speech: speech) { model, routeID, scene in
             model.startSpeech()
             try await waitUntil("epubSpeechStart", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) { model.speech.isActive && !audio.texts.isEmpty }
+            #expect(model.speech.notice == nil && model.message == nil)
 
             foreground = false
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
@@ -144,6 +145,7 @@ struct ReaderLockRecoveryHostTests {
             }
             #expect(!model.autoRead.isRunning)
             #expect(model.ready)
+            #expect(model.message == nil && model.speech.notice == nil)
         }
     }
 
@@ -170,6 +172,7 @@ struct ReaderLockRecoveryHostTests {
             }
             #expect(publishedChanges > 0)
             #expect(!model.autoRead.isRunning)
+            #expect(model.message == nil)
 
             // 2) Auto-read STARTED before lock -> stops on lock, recovers availability on unlock, never auto-starts.
             try #require(model.startAutoRead())
@@ -184,6 +187,12 @@ struct ReaderLockRecoveryHostTests {
                 model.autoReadOwner != nil
             }
             #expect(!model.autoRead.isRunning)
+            #expect(model.message == nil && model.debugFirstBackgroundFailure == nil)
+
+            let cancelledFlush = Task { @MainActor in await model.flush() }
+            cancelledFlush.cancel()
+            await cancelledFlush.value
+            #expect(model.message == nil && model.autoReadOwner != nil)
 
             // 3) Stale routeID and close reject readiness.
             #expect(!model.webView.isSceneActiveForControls(routeID: UUID()))
@@ -237,7 +246,12 @@ struct ReaderLockRecoveryHostTests {
             "ctrl=\(controller != nil)",
             "ctrlWin=\(hasWindow)",
             "ctrlSceneState=\(boundSceneState)",
-            "hasReadinessFailure=\(controller?.lastReadinessFailure != nil)"
+            "hasReadinessFailure=\(controller?.lastReadinessFailure != nil)",
+            "msgCode=\(model.debugMessageCode)",
+            "speechNotice=\(model.debugSpeechNoticeCode)",
+            "speechCap=\(model.debugSpeechCaptureOutcome)",
+            "sampleCap=\(controller?.debugSpeechSampleOutcome ?? "none")",
+            "bgFail=\(model.debugFirstBackgroundFailure ?? "none")"
         ].joined(separator: " ")
     }
 
