@@ -33,12 +33,12 @@ struct ReaderLockRecoveryHostTests {
         let autoRead = AutoReadSession()
         try await withTXTUI(autoRead: autoRead, speech: speech) { model, routeID, scene in
             model.startSpeech()
-            try await waitUntil { model.speech.isActive && !audio.texts.isEmpty }
+            try await waitUntil("txtSpeechStart") { model.speech.isActive && !audio.texts.isEmpty }
 
             foreground = false
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
             NotificationCenter.default.post(name: UIScene.didEnterBackgroundNotification, object: scene)
-            try await waitUntil { model.suspended && !model.viewport.isSceneActiveForControls(routeID: routeID) }
+            try await waitUntil("txtSpeechSuspend") { model.suspended && !model.viewport.isSceneActiveForControls(routeID: routeID) }
             #expect(model.speech.isActive)
             #expect(!model.autoRead.isRunning)
 
@@ -47,7 +47,7 @@ struct ReaderLockRecoveryHostTests {
             foreground = true
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
             model.speech.restoreWhenVisible()
-            try await waitUntil {
+            try await waitUntil("txtSpeechResume") {
                 !model.suspended &&
                 model.viewport.isSceneActiveForControls(routeID: routeID) &&
                 model.autoReadingAvailable
@@ -69,12 +69,12 @@ struct ReaderLockRecoveryHostTests {
             // 1) Auto-read NOT started before lock -> recovers availability on unlock without auto-starting.
             try #require(model.autoReadingAvailable && model.viewport.isSceneActiveForControls(routeID: routeID))
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
-            try await waitUntil { model.suspended && !model.viewport.isSceneActiveForControls(routeID: routeID) }
+            try await waitUntil("txtAutoReadIdleSuspend") { model.suspended && !model.viewport.isSceneActiveForControls(routeID: routeID) }
             #expect(!model.autoReadingAvailable)
 
             let beforeUnlock = publishedChanges
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
-            try await waitUntil {
+            try await waitUntil("txtAutoReadIdleResume") {
                 !model.suspended &&
                 model.viewport.isSceneActiveForControls(routeID: routeID) &&
                 model.autoReadingAvailable
@@ -84,11 +84,11 @@ struct ReaderLockRecoveryHostTests {
 
             // 2) Auto-read STARTED before lock -> stops on lock, recovers button availability on unlock, never auto-starts.
             model.startAutoReading()
-            try await waitUntil { model.autoRead.isRunning }
+            try await waitUntil("txtAutoReadRunning") { model.autoRead.isRunning }
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
-            try await waitUntil { model.suspended && !model.autoRead.isRunning }
+            try await waitUntil("txtAutoReadSuspend") { model.suspended && !model.autoRead.isRunning }
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
-            try await waitUntil {
+            try await waitUntil("txtAutoReadResume") {
                 !model.suspended &&
                 model.viewport.isSceneActiveForControls(routeID: routeID) &&
                 model.autoReadingAvailable
@@ -122,12 +122,12 @@ struct ReaderLockRecoveryHostTests {
         let autoRead = AutoReadSession()
         try await withEPUBUI(autoRead: autoRead, speech: speech) { model, routeID, scene in
             model.startSpeech()
-            try await waitUntil { model.speech.isActive && !audio.texts.isEmpty }
+            try await waitUntil("epubSpeechStart", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) { model.speech.isActive && !audio.texts.isEmpty }
 
             foreground = false
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
             NotificationCenter.default.post(name: UIScene.didEnterBackgroundNotification, object: scene)
-            try await waitUntil { model.suspended && !model.webView.isSceneActiveForControls(routeID: routeID) }
+            try await waitUntil("epubSpeechSuspend", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) { model.suspended && !model.webView.isSceneActiveForControls(routeID: routeID) }
             #expect(model.speech.isActive)
             #expect(!model.autoRead.isRunning)
 
@@ -136,7 +136,7 @@ struct ReaderLockRecoveryHostTests {
             foreground = true
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
             model.speech.restoreWhenVisible()
-            try await waitUntil {
+            try await waitUntil("epubSpeechResume", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) {
                 !model.suspended &&
                 model.webView.isSceneActiveForControls(routeID: routeID) &&
                 model.presentationToken != nil &&
@@ -161,7 +161,7 @@ struct ReaderLockRecoveryHostTests {
             try #require(model.webView.isSceneActiveForControls(routeID: routeID))
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
-            try await waitUntil {
+            try await waitUntil("epubAutoReadQuickLockUnlock", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) {
                 model.webView.modelSceneTask == nil &&
                 !model.suspended &&
                 model.webView.isSceneActiveForControls(routeID: routeID) &&
@@ -173,11 +173,11 @@ struct ReaderLockRecoveryHostTests {
 
             // 2) Auto-read STARTED before lock -> stops on lock, recovers availability on unlock, never auto-starts.
             try #require(model.startAutoRead())
-            try await waitUntil { model.autoRead.isRunning }
+            try await waitUntil("epubAutoReadRunning", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) { model.autoRead.isRunning }
             NotificationCenter.default.post(name: UIScene.willDeactivateNotification, object: scene)
-            try await waitUntil { model.suspended && !model.autoRead.isRunning }
+            try await waitUntil("epubAutoReadSuspend", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) { model.suspended && !model.autoRead.isRunning }
             NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
-            try await waitUntil {
+            try await waitUntil("epubAutoReadResume", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) {
                 !model.suspended &&
                 model.webView.isSceneActiveForControls(routeID: routeID) &&
                 model.presentationToken != nil &&
@@ -192,12 +192,53 @@ struct ReaderLockRecoveryHostTests {
         }
     }
 
-    private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    private func waitUntil(
+        _ label: String,
+        diagnostics: @MainActor () -> String = { "" },
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(15))
         }
-        try #require(condition())
+        let ok = condition()
+        let summary = ok ? "" : {
+            let details = diagnostics()
+            let text = details.isEmpty ? label : "\(label): \(details)"
+            print("LOCK_RECOVERY_WAIT_TIMEOUT \(text) line=\(sourceLocation.line)")
+            return text
+        }()
+        try #require(ok, "\(summary)", sourceLocation: sourceLocation)
+    }
+
+    private func epubDiagnostics(_ model: EPUBReaderViewModel, routeID: UUID, scene: UIWindowScene) -> String {
+        let controller = model.webView.controller
+        let hasWindow = controller?.viewIfLoaded?.window != nil
+        let boundSceneState = controller?.viewIfLoaded?.window?.windowScene?.activationState.rawValue ?? -1
+        return [
+            "ready=\(model.ready)",
+            "loading=\(model.loading)",
+            "suspended=\(model.suspended)",
+            "suspending=\(model.suspending)",
+            "closing=\(model.closing)",
+            "req=\(model.navigationRequest != nil)",
+            "curTok=\(model.currentToken != nil)",
+            "origin=\(model.documentOrigin != nil)",
+            "presTok=\(model.presentationToken != nil)",
+            "autoOwner=\(model.autoReadOwner != nil)",
+            "autoRun=\(model.autoRead.isRunning)",
+            "speechActive=\(model.speech.isActive)",
+            "hasMessage=\(model.message != nil)",
+            "sceneActive=\(model.webView.isSceneActiveForControls(routeID: routeID))",
+            "interActive=\(model.webView.interactionActive)",
+            "sceneTask=\(model.webView.modelSceneTask != nil)",
+            "sceneState=\(scene.activationState.rawValue)",
+            "ctrl=\(controller != nil)",
+            "ctrlWin=\(hasWindow)",
+            "ctrlSceneState=\(boundSceneState)",
+            "hasReadinessFailure=\(controller?.lastReadinessFailure != nil)"
+        ].joined(separator: " ")
     }
 
     private func withTXTUI(autoRead: AutoReadSession, speech: ReaderSpeechSession,
@@ -229,7 +270,7 @@ struct ReaderLockRecoveryHostTests {
             host.isHidden = true
             host.rootViewController = nil
         }
-        try await waitUntil {
+        try await waitUntil("txtInitialReady") {
             model.window != nil &&
             !model.loading &&
             model.viewport.isSceneActiveForControls(routeID: routeID) &&
@@ -268,7 +309,7 @@ struct ReaderLockRecoveryHostTests {
             host.isHidden = true
             host.rootViewController = nil
         }
-        try await waitUntil {
+        try await waitUntil("epubInitialReady", diagnostics: { epubDiagnostics(model, routeID: routeID, scene: scene) }) {
             model.ready &&
             !model.loading &&
             model.presentationToken != nil &&
