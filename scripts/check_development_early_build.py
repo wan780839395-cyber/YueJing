@@ -65,8 +65,8 @@ def exercise(fault, schemes):
                     Path(cmd[cmd.index('-resultBundlePath')+1]).mkdir()
             else:
                 trace.append(log.stem)
-                if log.stem == 'devices':
-                    text = json.dumps({'devices': {'ios': [{'udid': UDID, 'state': 'Shutdown'}]}})
+                if log.stem in ('devices', 'inventory'):
+                    text = json.dumps({'devices': {'ios': [{'udid': UDID, 'state': 'Shutdown'}]}, 'runtimes': [{'identifier': 'ios'}]})
                 if cmd[-1] == 'select-simulator':
                     validate_task3.select_simulator()
                 if log.stem == 'simulator-ready':
@@ -119,7 +119,7 @@ def exercise(fault, schemes):
         if (fault == 'app' and DOMAIN not in schemes) or fault in ('cancel', 'deadline'):
             assert trace == before_sim
         else:
-            setup = ['simulator-warmup', 'devices', 'runtimes', 'selection', 'simulator-boot', 'simulator-ready']
+            setup = ['simulator-warmup', 'inventory', 'selection', 'simulator-boot', 'simulator-ready']
             assert trace[len(before_sim):len(before_sim)+len(setup)] == setup
         expected = [('blocked' if s != DOMAIN else 'passed') if fault == 'app' else
                     {'cancel':'not_run','drift':'failed','setup':'blocked','deadline':'blocked','export':'failed','empty-log':'failed'}.get(fault,'passed') for s in schemes]

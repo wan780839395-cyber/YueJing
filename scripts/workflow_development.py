@@ -517,17 +517,27 @@ def prepare_runtime(root=ROOT, *, phase='all', deadline=None):
                 return
         else:
             warmup()
-        for kind in ('devices', 'runtimes'):
-            command = ['xcrun', 'simctl', 'list', kind] + (['available'] if kind == 'devices' else []) + ['-j']
+        kinds = ('inventory',) if phase == 'simulator' else ('devices', 'runtimes')
+        for kind in kinds:
+            command = (['xcrun', 'simctl', 'list', '-j'] if kind == 'inventory' else
+                       ['xcrun', 'simctl', 'list', kind] + (['available'] if kind == 'devices' else []) + ['-j'])
             try:
                 # Cold CoreSimulator discovery is infrastructure, not a test-case allowance.
-                run(kind, command, 120 if kind == 'devices' else 30)
+                run(kind, command, 30 if kind == 'runtimes' else 120)
             except ValueError:
                 # Collect a bounded, read-only service snapshot; do not discard the original error.
                 run_logged(['/bin/launchctl', 'print', f'gui/{os.getuid()}/com.apple.CoreSimulator.CoreSimulatorService'],
                            output/'simulator-service.log', bounded(5), cwd=root)
                 raise
-            (root/'artifacts/task3'/f'{kind}.json').write_bytes((output/(kind+'.log')).read_bytes())
+            raw = (output/(kind+'.log')).read_bytes()
+            if kind == 'inventory':
+                snapshot = json.loads(raw)
+                require(isinstance(snapshot.get('devices'), dict) and isinstance(snapshot.get('runtimes'), list),
+                        'Missing simulator inventory sections')
+                for section in ('devices', 'runtimes'):
+                    write_json(root/'artifacts/task3'/f'{section}.json', {section: snapshot[section]})
+            else:
+                (root/'artifacts/task3'/f'{kind}.json').write_bytes(raw)
         if phase == 'simulator':
             # Include the selector's SDK query and child processes in the remaining deadline.
             run('selection', [sys.executable, '-B', 'scripts/validate_task3.py', 'select-simulator'], 90)
@@ -537,7 +547,7 @@ def prepare_runtime(root=ROOT, *, phase='all', deadline=None):
         udid = selected['udid']
         if phase == 'simulator':
             require(re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', udid), 'Invalid selected UDID')
-        devices = json.loads((output/'devices.log').read_text())['devices']
+        devices = json.loads((root/'artifacts/task3/devices.json').read_bytes())['devices']
         state = next(d['state'] for group in devices.values() for d in group if d['udid'] == udid)
         if state not in ('Booted', 'Booting'):
             run('simulator-boot', ['xcrun', 'simctl', 'boot', udid], 30)
