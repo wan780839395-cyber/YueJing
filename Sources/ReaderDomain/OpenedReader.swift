@@ -62,9 +62,11 @@ public actor OpenedReader {
         return values
     }
     public func window(around anchor: ReadingAnchor, width: Double, preferences: ReaderPreferences,
+                       bodyFont: TXTBodyFont? = nil,
                        measure: ProcessingMeasurementObserver? = nil) async throws -> ReadingWindow {
         guard !closed else { throw DerivedStorageError.closed }
-        let value = try await engine.window(around: anchor, width: width, preferences: preferences, measure: measure)
+        let value = try await engine.window(around: anchor, width: width, preferences: preferences,
+                                            bodyFont: bodyFont, measure: measure)
         try Task.checkCancellation(); guard !closed else { throw DerivedStorageError.closed }; return value
     }
     public func savePreferences(_ value: ReaderPreferences, sequence: Int64) async throws -> Bool {
@@ -213,17 +215,17 @@ extension OpenedReader {
     }
 
     public func prepareSearchWindow(_ hit: BookSearchHit, width: Double,
-                                    preferences: ReaderPreferences) async throws -> ReadingWindow {
+                                    preferences: ReaderPreferences, bodyFont: TXTBodyFont? = nil) async throws -> ReadingWindow {
         guard case .txt(let anchor) = hit.location, anchor.lineFraction == 0 else { throw LibraryError.invalidAnchor }
-        return try await prepareSearchReturnWindow(around: anchor, width: width, preferences: preferences)
+        return try await prepareSearchReturnWindow(around: anchor, width: width, preferences: preferences, bodyFont: bodyFont)
     }
 
     public func prepareSearchReturnWindow(around target: ReadingAnchor, width: Double,
-                                          preferences: ReaderPreferences) async throws -> ReadingWindow {
+                                          preferences: ReaderPreferences, bodyFont: TXTBodyFont? = nil) async throws -> ReadingWindow {
         try await checkSearchSession()
         // Validate the exact raw boundary, but render the original fraction (bookmarks use zero).
         _ = try await strictBookmarkAnchor(target, request: BookmarkRequest())
-        let rendered = try await window(around: target, width: width, preferences: preferences)
+        let rendered = try await window(around: target, width: width, preferences: preferences, bodyFont: bodyFont)
         guard rendered.anchor == target, rendered.slices.contains(where: { slice in
             slice.lines.contains { $0.range.location.value <= rendered.targetUTF16 && rendered.targetUTF16 < $0.range.end.value }
         }) else { throw LibraryError.invalidAnchor }

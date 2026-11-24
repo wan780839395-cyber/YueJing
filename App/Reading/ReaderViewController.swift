@@ -605,7 +605,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         guard let cell = tableView.dequeueReusableCell(withIdentifier: "text", for: indexPath) as? ReadingCell,
               let window, window.slices.indices.contains(indexPath.row) else { return UITableViewCell() }
-        cell.render(window.slices[indexPath.row], preferences: window.preferences)
+        cell.render(window.slices[indexPath.row], preferences: window.preferences, bodyFont: window.bodyFont)
         cell.setToolActions([
             UIAccessibilityCustomAction(name: "显示阅读工具", target: self, selector: #selector(showToolsAccessibility)),
             UIAccessibilityCustomAction(name: "退出阅读", target: self, selector: #selector(exitAccessibility))

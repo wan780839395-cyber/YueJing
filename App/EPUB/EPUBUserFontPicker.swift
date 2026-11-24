@@ -4,10 +4,78 @@ import SwiftUI
 
 @MainActor
 struct EPUBUserFontPicker: View {
+    enum Context: Equatable, Sendable {
+        case epub
+        case txt
+
+        var defaultOptionTitle: String {
+            switch self {
+            case .epub: return "跟随原书"
+            case .txt: return "系统默认"
+            }
+        }
+
+        var sectionDetail: LocalizedStringKey {
+            switch self {
+            case .epub: return "仅对本书生效，可随时切回原书字体"
+            case .txt: return "仅对本书生效，可随时切回系统默认字体"
+            }
+        }
+
+        var resetAccessibilityLabel: String {
+            switch self {
+            case .epub: return "切回跟随原书字体"
+            case .txt: return "切回系统默认字体"
+            }
+        }
+
+        var emptySelectionHint: String {
+            switch self {
+            case .epub: return "当前暂无已导入字体，可选择跟随原书或从下方导入"
+            case .txt: return "当前暂无已导入字体，可保持系统默认或从下方导入"
+            }
+        }
+
+        var populatedSelectionHint: String {
+            switch self {
+            case .epub: return "轻点选择跟随原书或已导入字体"
+            case .txt: return "轻点选择系统默认或已导入字体"
+            }
+        }
+
+        var deleteAlertMessage: String {
+            switch self {
+            case .epub: return "仅删除阅境字体库中的副本，不影响原字体文件。使用它的所有书籍将跟随原书字体。"
+            case .txt: return "仅删除阅境字体库中的副本，不影响原字体文件。使用它的书籍将恢复默认字体（EPUB 将跟随原书）。"
+            }
+        }
+
+        var previewFailureNotice: String {
+            switch self {
+            case .epub: return "无法预览所选字体，可选择跟随原书。"
+            case .txt: return "无法预览所选字体，可切回系统默认。"
+            }
+        }
+
+        var unavailableFontNotice: String {
+            switch self {
+            case .epub: return "所选字体不可用，可重新导入或选择跟随原书。"
+            case .txt: return "所选字体不可用，可重新导入或切回系统默认。"
+            }
+        }
+    }
+
+    private struct PreviewKey: Equatable {
+        let selectedID: String?
+        let showsSpecimen: Bool
+    }
+
     let selectedID: String?
     let isActive: @MainActor () -> Bool
     let select: @MainActor (EPUBUserFont?) -> Void
     let appearance: ReaderToolAppearance
+    let context: Context
+    let showsSpecimen: Bool
     @State private var fonts: [EPUBUserFont] = []
     @State private var attempt: EPUBFontFilePicker.Attempt?
     // A provider may dismiss its sheet before delivering the delegate callback.
@@ -22,8 +90,24 @@ struct EPUBUserFontPicker: View {
     @State private var preview: Font?
     @State private var importTask: Task<Void, Never>?
 
+    init(
+        selectedID: String?,
+        isActive: @escaping @MainActor () -> Bool,
+        select: @escaping @MainActor (EPUBUserFont?) -> Void,
+        appearance: ReaderToolAppearance,
+        context: Context = .epub,
+        showsSpecimen: Bool = true
+    ) {
+        self.selectedID = selectedID
+        self.isActive = isActive
+        self.select = select
+        self.appearance = appearance
+        self.context = context
+        self.showsSpecimen = showsSpecimen
+    }
+
     private var selectionName: String {
-        guard let selectedID else { return "跟随原书" }
+        guard let selectedID else { return context.defaultOptionTitle }
         return fonts.first { $0.id == selectedID }?.displayName ?? (loading ? "正在读取字体…" : "所选字体不可用")
     }
 
@@ -31,6 +115,7 @@ struct EPUBUserFontPicker: View {
         EPUBUserFontCard(selectionName: selectionName, fonts: fonts, selectedID: selectedID, preview: preview,
             isLoading: loading, isImporting: importing, isDeleting: deleting,
             notice: notice, isError: isError, appearance: appearance,
+            context: context, showsSpecimen: showsSpecimen, isActive: isActive(),
             select: { font in
                 guard isActive(), !importing, !deleting, font.map({ fonts.contains($0) }) != false else { return }
                 notice = nil; isError = false; select(font)
@@ -44,7 +129,7 @@ struct EPUBUserFontPicker: View {
             })
         .alert(item: $pendingRemoval) { font in
             Alert(title: Text("删除“\(font.displayName)”？"),
-                  message: Text("仅删除阅境字体库中的副本，不影响原字体文件。使用它的所有书籍将跟随原书字体。"),
+                  message: Text(context.deleteAlertMessage),
                   primaryButton: .destructive(Text("删除")) { removeConfirmed(font) },
                   secondaryButton: .cancel(Text("取消")))
         }
@@ -55,18 +140,18 @@ struct EPUBUserFontPicker: View {
             listRevision = UUID()
         }
         .task(id: listRevision) { await refreshList() }
-        .task(id: selectedID) {
+        .task(id: PreviewKey(selectedID: selectedID, showsSpecimen: showsSpecimen)) {
             preview = nil
-            guard let selectedID else { return }
+            guard showsSpecimen, let selectedID else { return }
             do {
                 let bytes = try await EPUBUserFontStore.shared.data(for: selectedID)
                 guard !Task.isCancelled, isActive() else { return }
                 guard let provider = CGDataProvider(data: bytes as CFData), let face = CGFont(provider) else {
-                    report("无法预览所选字体，可选择跟随原书。", error: true); return
+                    report(context.previewFailureNotice, error: true); return
                 }
                 preview = Font(CTFontCreateWithGraphicsFont(face, 19, nil, nil))
             } catch {
-                if !Task.isCancelled, isActive() { report("所选字体不可用，可重新导入或选择跟随原书。", error: true) }
+                if !Task.isCancelled, isActive() { report(context.unavailableFontNotice, error: true) }
             }
         }
         .sheet(item: $attempt) { presented in

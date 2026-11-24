@@ -1106,7 +1106,7 @@ struct EPUBFontLoadingHostTests {
         #expect(widthCustomAAAA > widthFallbackAAAA * 2.0)
     }
 
-    private static func makeSyntheticGeometricFontData() throws -> Data {
+    static func makeSyntheticGeometricFontData() throws -> Data {
         let data = try #require(
             Data(base64Encoded: syntheticGeometricFontBase64, options: [.ignoreUnknownCharacters])
         )

@@ -28,6 +28,7 @@ struct EPUBSettingsView: View {
     @State private var info: AuxiliaryPage?
     @State private var runtimeSummary: String?
     @State private var showRestore = false
+    @State private var previewFontRevision = 0
     private enum SettingsGroup: String { case common, more }
     @State private var settingsGroup: SettingsGroup = .common
     @State private var focusSourceOnAppear = false
@@ -126,8 +127,8 @@ struct EPUBSettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text(usesAuthorTypography
-                ? "只恢复作者文字比例至 100%。保留阅读器行距偏好、当前背景和阅读位置。"
-                : "恢复为字号 20、行距 7。保留当前阅读背景，不改变阅读位置。")
+                ? "只恢复作者文字比例至 100%。保留阅读器行距偏好、当前背景、正文字体和阅读位置。"
+                : "恢复为字号 20、行距 7。保留当前阅读背景与正文字体，不改变阅读位置。")
         }
         .sheet(item: $info, onDismiss: {
             if voiceOver, isActive() { controlFocus = auxiliaryReturnFocus }
@@ -241,15 +242,26 @@ struct EPUBSettingsView: View {
 
     private var commonContent: some View {
         VStack(alignment: .leading, spacing: 10) {
+            ReaderTypographyPreview(
+                preferences: draft,
+                appearance: appearance,
+                selectedFontID: userFontID,
+                context: usesAuthorTypography ? .epubOriginal : .epubReader,
+                fontReloadRevision: previewFontRevision,
+                isActive: isActive
+            )
             sourceSummary
-            if !usesAuthorTypography {
-                ReaderTypographyPreview(preferences: draft, appearance: appearance)
-            }
             typographySection
-            presetsSection
             themeSection
-            EPUBUserFontPicker(selectedID: userFontID, isActive: isActive,
-                               select: onUserFontChange, appearance: appearance)
+            presetsSection
+            EPUBUserFontPicker(
+                selectedID: userFontID,
+                isActive: isActive,
+                select: handleUserFontChange,
+                appearance: appearance,
+                context: .epub,
+                showsSpecimen: false
+            )
         }
     }
 
@@ -407,7 +419,7 @@ struct EPUBSettingsView: View {
     }
 
     private var authorScaleSummary: some View {
-        Text("100% 为作者原字号。这里只显示比例，不预览书内字体或版式。")
+        Text("100% 为作者原字号。顶部书页预览仅示意比例、纸色及已选本地字体，不呈现原书内嵌字体或版式。")
             .font(.caption).foregroundStyle(appearance.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("epub.authorScale.summary")
@@ -736,6 +748,12 @@ struct EPUBSettingsView: View {
         case .standard: return "原字号"
         case .relaxed: return "较大"
         }
+    }
+
+    private func handleUserFontChange(_ font: EPUBUserFont?) {
+        guard isActive() else { return }
+        previewFontRevision &+= 1
+        onUserFontChange(font)
     }
 
     private func apply(_ preset: ReaderTypographyPreset) {

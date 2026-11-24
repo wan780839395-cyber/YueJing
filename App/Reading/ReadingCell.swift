@@ -12,10 +12,10 @@ final class ReadingCell: UITableViewCell {
     required init?(coder: NSCoder) { return nil }
     override func layoutSubviews() { super.layoutSubviews(); canvas.frame = contentView.bounds }
     override func prepareForReuse() { super.prepareForReuse(); canvas.clear() }
-    func render(_ slice: ReadingSlice, preferences: ReaderPreferences) {
+    func render(_ slice: ReadingSlice, preferences: ReaderPreferences, bodyFont: TXTBodyFont? = nil) {
         backgroundColor = preferences.theme.background
         contentView.backgroundColor = preferences.theme.background
-        canvas.render(slice, preferences: preferences)
+        canvas.render(slice, preferences: preferences, bodyFont: bodyFont)
     }
     func setToolActions(_ actions: [UIAccessibilityCustomAction]) { canvas.accessibilityCustomActions = actions }
 
@@ -32,6 +32,7 @@ final class ReadingCell: UITableViewCell {
 private final class ReadingCanvas: UIView {
     private var slice: ReadingSlice?
     private var preferences = ReaderPreferences()
+    private var font: CTFont?
     #if DEBUG
     private(set) var drawSequence = 0
     private(set) var lastDrawBounds = CGRect.zero
@@ -45,13 +46,15 @@ private final class ReadingCanvas: UIView {
         accessibilityIdentifier = "reader.text.canvas"
     }
     required init?(coder: NSCoder) { return nil }
-    func render(_ value: ReadingSlice, preferences: ReaderPreferences) {
+    func render(_ value: ReadingSlice, preferences: ReaderPreferences, bodyFont: TXTBodyFont?) {
+        let size = CGFloat(preferences.fontSize)
+        font = bodyFont?.makeCTFont(size: size) ?? CTFontCreateWithName("PingFangSC-Regular" as CFString, size, nil)
         slice = value; self.preferences = preferences; backgroundColor = preferences.theme.background
         accessibilityLabel = value.lines.map(\.text).joined()
         setNeedsDisplay()
     }
     func clear() {
-        slice = nil; accessibilityLabel = nil; accessibilityCustomActions = nil
+        slice = nil; font = nil; accessibilityLabel = nil; accessibilityCustomActions = nil
         setNeedsDisplay()
     }
     override func draw(_ rect: CGRect) {
@@ -68,8 +71,7 @@ private final class ReadingCanvas: UIView {
         context.setFillColor(preferences.theme.background.cgColor)
         context.fill(rect)
         context.restoreGState()
-        guard let slice else { return }
-        let font = CTFontCreateWithName("PingFangSC-Regular" as CFString, CGFloat(preferences.fontSize), nil)
+        guard let slice, let font else { return }
         context.saveGState(); defer { context.restoreGState() }
         context.textMatrix = .identity
         context.translateBy(x: 20, y: bounds.height); context.scaleBy(x: 1, y: -1)

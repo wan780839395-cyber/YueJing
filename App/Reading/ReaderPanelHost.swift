@@ -39,7 +39,10 @@ struct ReaderPanelHost: View {
                 ReaderSettingsView(preferences: settings, changed: {
                     if active(.settings, session.id) { model.settingsChanged() }
                 }, openingSummary: model.openingPerformanceSummary,
-                    isActive: { active(.settings, session.id) }, close: { close(session.id) }, appearance: appearance)
+                    isActive: { active(.settings, session.id) }, close: { close(session.id) }, appearance: appearance,
+                    selectedBodyFontID: model.selectedBodyFontID, selectBodyFont: { font in
+                        model.selectBodyFont(font, isActive: { active(.settings, session.id) })
+                    })
             }
         }
         .padding(.top, ReaderVisualStyle.panelTopInset)

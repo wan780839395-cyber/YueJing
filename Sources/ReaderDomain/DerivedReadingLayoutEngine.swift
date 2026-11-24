@@ -12,6 +12,7 @@ public actor DerivedReadingLayoutEngine {
     public init(source: DerivedBookSource) { self.source = source }
 
     public func window(around anchor: ReadingAnchor, width: Double, preferences: ReaderPreferences,
+                       bodyFont: TXTBodyFont? = nil,
                        measure: ProcessingMeasurementObserver? = nil) async throws -> ReadingWindow {
         let began = ContinuousClock().now
         defer { ProcessingMeasurement.finish(.layout, since: began, observe: measure) }
@@ -23,7 +24,8 @@ public actor DerivedReadingLayoutEngine {
         let target = try await source.utf16Offset(for: RawByteOffset(anchor.rawByteOffset)).value
         try Task.checkCancellation()
         let settings = preferences.validated
-        let font = CTFontCreateWithName("PingFangSC-Regular" as CFString, CGFloat(settings.fontSize), nil)
+        let size = CGFloat(settings.fontSize)
+        let font = bodyFont?.makeCTFont(size: size) ?? CTFontCreateWithName("PingFangSC-Regular" as CFString, size, nil)
         var start = try await source.composedStart(at: max(0, target - 2 * targetSliceLength))
         var values = try await slices(starting: start, font: font, width: width, settings: settings)
         if !values.contains(where: { $0.range.location.value <= target &&
@@ -37,7 +39,7 @@ public actor DerivedReadingLayoutEngine {
         measure?(ProcessingMeasurement(phase: .rangeRead, seconds: 0,
             bytes: max(0, after.payloadBytesRead - before.payloadBytesRead), logicalBytes: after.retainedLogicalBytes,
             budgetBytes: after.maximumWorkingBytes))
-        return ReadingWindow(id: UUID(), anchor: anchor, targetUTF16: target, preferences: settings, slices: values,
+        return ReadingWindow(id: UUID(), anchor: anchor, targetUTF16: target, preferences: settings, bodyFont: bodyFont, slices: values,
             hasPrevious: start > 0, hasNext: (values.last?.range.end.value ?? 0) < metadata.utf16Count)
     }
     private func slices(starting start: Int, font: CTFont, width: Double,

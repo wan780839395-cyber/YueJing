@@ -13,10 +13,12 @@ struct EPUBUserFontCard: View {
     let notice: String?
     let isError: Bool
     let appearance: ReaderToolAppearance
-    let select: (EPUBUserFont?) -> Void
-    let openFiles: () -> Void
-    let requestRemoval: (EPUBUserFont) -> Void
-
+    var context: EPUBUserFontPicker.Context = .epub
+    var showsSpecimen: Bool = true
+    var isActive: Bool = true
+    let select: @MainActor (EPUBUserFont?) -> Void
+    let openFiles: @MainActor () -> Void
+    let requestRemoval: @MainActor (EPUBUserFont) -> Void
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -32,30 +34,29 @@ struct EPUBUserFontCard: View {
     }
 
     private var specimenStatusText: String {
-        if selectedID == nil { return "跟随原书" }
+        if selectedID == nil { return context.defaultOptionTitle }
         if preview != nil { return selectionName }
         return isLoading ? "正在载入样张…" : "默认字形示例"
     }
 
     private var specimenAccessibilityLabel: String {
-        let prefix = selectedID == nil ? "字体样张，当前跟随原书" : "字体样张，\(selectionName)"
+        let prefix = selectedID == nil ? "字体样张，当前\(context.defaultOptionTitle)" : "字体样张，\(selectionName)"
         return "\(prefix)：山间有风，书中有光。Aa 123"
     }
 
     var body: some View {
         ReaderSettingsSection(
             title: "正文字体",
-            detail: "仅对本书生效，可随时切回原书字体",
+            detail: context.sectionDetail,
             appearance: appearance
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 fontSelectionMenu
 
-                if hasCustomSelection {
+                if showsSpecimen && hasCustomSelection {
                     specimenCard
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
                 }
-
                 if isLoading && fonts.isEmpty {
                     loadingRow
                 } else if !isLoading && fonts.isEmpty {
@@ -77,7 +78,7 @@ struct EPUBUserFontCard: View {
                         Label(isDeleting ? "正在删除…" : "从字体库删除…", systemImage: "trash")
                             .frame(minHeight: ReaderVisualStyle.minimumControlHeight)
                     }
-                    .disabled(isLoading || isImporting || isDeleting)
+                    .disabled(!isActive || isLoading || isImporting || isDeleting)
                     .accessibilityIdentifier("epub.font.removeMenu")
                     footnoteSummary
                 }
@@ -93,7 +94,7 @@ struct EPUBUserFontCard: View {
                     .strokeBorder(appearance.edge.opacity(0.7), lineWidth: 0.65)
                     .allowsHitTesting(false)
             }
-            .animation(reduceMotion ? nil : ReaderMotion.selectionFeedback, value: hasCustomSelection)
+            .animation(reduceMotion ? nil : ReaderMotion.selectionFeedback, value: showsSpecimen && hasCustomSelection)
         }
     }
 
@@ -103,9 +104,9 @@ struct EPUBUserFontCard: View {
                 select(nil)
             } label: {
                 if selectedID == nil {
-                    Label("跟随原书", systemImage: "checkmark")
+                    Label(context.defaultOptionTitle, systemImage: "checkmark")
                 } else {
-                    Text("跟随原书")
+                    Text(context.defaultOptionTitle)
                 }
             }
             if !fonts.isEmpty {
@@ -181,11 +182,11 @@ struct EPUBUserFontCard: View {
             .shadow(color: appearance.subtleShadow, radius: 4, x: 0, y: 1)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .disabled(isImporting || isDeleting)
-        .opacity(isImporting || isDeleting ? 0.55 : 1)
+        .disabled(!isActive || isImporting || isDeleting)
+        .opacity(!isActive || isImporting || isDeleting ? 0.55 : 1)
         .accessibilityLabel("当前书的正文字体")
         .accessibilityValue(isLoading ? "\(selectionName)，正在读取字体库" : selectionName)
-        .accessibilityHint(fonts.isEmpty ? "当前暂无已导入字体，可选择跟随原书或从下方导入" : "轻点选择跟随原书或已导入字体")
+        .accessibilityHint(fonts.isEmpty ? context.emptySelectionHint : context.populatedSelectionHint)
         .accessibilityIdentifier("epub.font.selection")
     }
 
@@ -344,7 +345,7 @@ struct EPUBUserFontCard: View {
     }
 
     private var importButton: some View {
-        Button(action: openFiles) {
+        Button { openFiles() } label: {
             Group {
                 if isImporting {
                     HStack(spacing: 8) {
@@ -371,7 +372,7 @@ struct EPUBUserFontCard: View {
                 .strokeBorder(appearance.accent.opacity(0.32), lineWidth: 0.75)
                 .allowsHitTesting(false)
         }
-        .disabled(isImporting || isDeleting)
+        .disabled(!isActive || isImporting || isDeleting)
         .accessibilityLabel(isImporting ? "正在导入字体" : "从文件导入字体")
         .accessibilityHint("打开系统文件选取本机或 iCloud 中已下载的 TTF 或 OTF 字体")
         .accessibilityIdentifier("epub.font.import")
@@ -379,7 +380,7 @@ struct EPUBUserFontCard: View {
 
     private var followOriginalButton: some View {
         Button { select(nil) } label: {
-            Label("跟随原书", systemImage: "arrow.uturn.backward")
+            Label(context.defaultOptionTitle, systemImage: "arrow.uturn.backward")
                 .font(.subheadline.weight(.medium))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -389,8 +390,8 @@ struct EPUBUserFontCard: View {
                        minHeight: ReaderVisualStyle.minimumControlHeight)
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.secondary, role: .primary, cornerRadius: 14))
-        .disabled(isImporting || isDeleting)
-        .accessibilityLabel("切回跟随原书字体")
+        .disabled(!isActive || isImporting || isDeleting)
+        .accessibilityLabel(context.resetAccessibilityLabel)
         .accessibilityIdentifier("epub.font.followOriginal")
     }
 

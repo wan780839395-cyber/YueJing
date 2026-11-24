@@ -44,6 +44,7 @@ FILES = {
     "YueJingHostTests/ReaderInteractionInterruptionTests.swift": """interruptedDecelerationRecoversOnSameControllerWithoutMovingAnchor interruptionRevokesOldTouchAndAcceptsFreshIntent momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle viewportInterruptionForwardingIsIdempotentAndDetachedControllerIsInert""",
     "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingHostTests/ReaderSceneAuthorityTests.swift": """nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites""",
+    "YueJingHostTests/TXTBodyFontHostTests.swift": """sharedPageSpecimenRendersTheSelectedFaceAtDraftSize bodyCanvasPaintsTheWideAAndRestoresItsDefaultInk reflowAndReopenKeepScrolledTextWithSelectedAndRestoredFont""",
     "YueJingHostTests/ReaderBookmarkTests.swift": """bookmarkVisibleCaptureAndMutationsDoNotSaveProgress bookmarkQueuedCancellationAndOldDismissCannotAffectNewPanel bookmarkPreparationPreservesWindowUntilExactApplication bookmarkReflowAndOwnerReplacementRevokeCapturedAndPreparedPositions txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication""",
     "YueJingHostTests/SearchReturnTests.swift": """epubSearchReturnPreservesFirstLocatorUntilConfirmedReturn""",
     "YueJingUITests/ReadingFlowUITests.swift": """testSettingsCloseThenScrollExitAndReopenSameAndOtherBook testReaderThemeDoesNotChangeShelfEnvironment testDirectoryPagingCurrentChapterAndReentryAfterSettings testFullViewportStaysStableAndLongAndShortBookLastLinesFit testRepeatedPanelsAndAuxiliarySheetsReturnOnlyToReading testAccessibilityFontLeavesExitAndPanelControlsReachable testTypographySliderPresetsAndConfirmedRestore testTypographyAndChapterSurviveProcessRelaunch testOtherAppRoundTripRestoresCentralTapAndWindowUpdates testBookmarksPersistIsolateAndJumpAfterRelaunch testNearbyBookmarksKeepIndependentNamesAndExactJumps testBookmarksAccessibilityCloseAndConfirmedDeletion""",
@@ -75,14 +76,14 @@ FILES = {
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 287, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 65,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 68,
           "YueJingUITests": 12, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 8}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 407  # Declaration identities; the Bool parameter adds one execution (408).
+TOTAL = 410  # Declaration identities; the Bool parameter adds one execution (411).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
 EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 288}
-EXECUTION_TOTAL = 408
+EXECUTION_TOTAL = 411
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

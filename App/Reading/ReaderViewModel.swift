@@ -8,6 +8,13 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var title = "正在打开"
     @Published private(set) var chapterTotal = 0
     @Published private(set) var window: ReadingWindow?
+    @Published private(set) var selectedBodyFontID: String?
+    private var bodyFont: TXTBodyFont?
+    private let fontStore: EPUBUserFontStore
+    private let fontDefaults: UserDefaults
+    private var fontTask: Task<Void, Never>?
+    private var fontRemoval: AnyCancellable?
+    private var fontBookKey: String { "txt." + bookID }
     @Published var preferences = ReaderPreferences()
     @Published private(set) var loading = true
     @Published private(set) var exitSaveFailed = false
@@ -58,7 +65,52 @@ final class ReaderViewModel: ObservableObject {
     private var openingStarted: ContinuousClock.Instant?
     private var openingMeasurements: [ProcessingMeasurement] = []
 
-    init(bookID: String, service: LibraryService) { self.bookID = bookID; self.service = service }
+    init(bookID: String, service: LibraryService, fontStore: EPUBUserFontStore = .shared,
+         fontDefaults: UserDefaults = .standard) {
+        self.bookID = bookID; self.service = service
+        self.fontStore = fontStore; self.fontDefaults = fontDefaults
+        fontRemoval = EPUBUserFontPreference.removed.sink { [weak self] id in
+            guard let self, self.selectedBodyFontID == id else { return }
+            self.applyFont(nil, id: nil)
+        }
+    }
+
+    private nonisolated static func readBodyFont(_ id: String, from store: EPUBUserFontStore) async throws -> TXTBodyFont {
+        let data = try await store.data(for: id)
+        try Task.checkCancellation()
+        guard let font = TXTBodyFont(data: data) else { throw EPUBError.corruptResource }
+        return font
+    }
+
+    func selectBodyFont(_ record: EPUBUserFont?, isActive: @escaping @MainActor () -> Bool = { true }) {
+        guard let owner = reader, isActive(), !closing, !suspended, !exitSaveFailed else { return }
+        fontTask?.cancel()
+        let id = record?.id
+        guard id != selectedBodyFontID else { return }
+        guard let id else {
+            EPUBUserFontPreference.set(nil, bookID: fontBookKey, defaults: fontDefaults)
+            applyFont(nil, id: nil); return
+        }
+        let life = lifecycle, selection = EPUBUserFontPreference.selectionValue(id, defaults: fontDefaults)
+        fontTask = Task {
+            do {
+                let face = try await Self.readBodyFont(id, from: fontStore)
+                guard !Task.isCancelled, isActive(), lifecycle == life, reader === owner, !closing, !suspended,
+                      !exitSaveFailed, selection == EPUBUserFontPreference.selectionValue(id, defaults: fontDefaults) else { return }
+                EPUBUserFontPreference.set(id, bookID: fontBookKey, defaults: fontDefaults)
+                applyFont(face, id: id)
+            } catch {
+                if !Task.isCancelled, isActive(), lifecycle == life { message = "无法使用所选字体，已保留原排版。" }
+            }
+        }
+    }
+
+    private func applyFont(_ face: TXTBodyFont?, id: String?) {
+        // After a reflow this returns the original semantic target, not the new line start.
+        if navigationGate.navigation == nil, let visible = directoryAnchor() { anchor = visible }
+        bodyFont = face; selectedBodyFontID = id
+        requestWindow()
+    }
 
     func load() async {
         guard reader == nil, openTask == nil, !closing, !suspended else { return }
@@ -75,8 +127,19 @@ final class ReaderViewModel: ObservableObject {
                 try? await opened.close(); return
             }
             let measurements = await timing.finish()
+            let savedFont = EPUBUserFontPreference.restored(bookID: fontBookKey, defaults: fontDefaults)
+            var restoredFace: TXTBodyFont?
+            if let savedFont { restoredFace = try? await Self.readBodyFont(savedFont, from: fontStore) }
             guard lifecycle == request, !closing, !suspended, !Task.isCancelled else {
                 try? await opened.close(); return
+            }
+            bodyFont = nil; selectedBodyFontID = nil
+            if let savedFont, EPUBUserFontPreference.restored(bookID: fontBookKey, defaults: fontDefaults) == savedFont {
+                if let restoredFace { bodyFont = restoredFace; selectedBodyFontID = savedFont }
+                else {
+                    EPUBUserFontPreference.set(nil, bookID: fontBookKey, defaults: fontDefaults)
+                    message = "所选字体不可用，已恢复默认字体。"
+                }
             }
             openTask = nil; reader = opened; title = opened.book.title
             navigationGate.reset()
@@ -275,7 +338,8 @@ final class ReaderViewModel: ObservableObject {
         layoutTask = Task {
             defer { timing?.end() }
             do {
-                let rendered = try await reader.window(around: anchor, width: currentWidth, preferences: settings, measure: timing?.observer)
+                let rendered = try await reader.window(around: anchor, width: currentWidth, preferences: settings,
+                                                       bodyFont: bodyFont, measure: timing?.observer)
                 let measurements = await timing?.finish() ?? []
                 try Task.checkCancellation()
                 guard request == generation, life == lifecycle, !closing, !suspended, self.reader === reader else { return }
@@ -359,7 +423,7 @@ extension ReaderViewModel {
         let target = try await context.owner.bookmarkAnchor(id: id, request: request)
         try request.check()
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
-        let rendered = try await context.owner.window(around: target, width: width, preferences: preferences)
+        let rendered = try await context.owner.window(around: target, width: width, preferences: preferences, bodyFont: bodyFont)
         try request.check()
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         preparedJump = (rendered.id, context, false)
@@ -438,7 +502,7 @@ extension ReaderViewModel {
         let context = navigationContext(owner: panel.owner, presentation: panel.presentation)
         preparedJump = nil
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
-        let rendered = try await panel.owner.prepareSearchWindow(hit, width: width, preferences: preferences)
+        let rendered = try await panel.owner.prepareSearchWindow(hit, width: width, preferences: preferences, bodyFont: bodyFont)
         try Task.checkCancellation()
         guard searchRequest == request, bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
         preparedJump = (rendered.id, context, true)
@@ -458,7 +522,7 @@ extension ReaderViewModel {
                 bookmarkPositionIsCurrent(context) && viewport.controller?.toolIntent?() == intent
         }
         do {
-            let rendered = try await reader.prepareSearchReturnWindow(around: origin, width: width, preferences: preferences)
+            let rendered = try await reader.prepareSearchReturnWindow(around: origin, width: width, preferences: preferences, bodyFont: bodyFont)
             guard isCurrent() else { return }
             applyNavigationWindow(rendered, effect: .returned)
         } catch is CancellationError { }

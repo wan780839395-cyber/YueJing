@@ -9,25 +9,41 @@ struct ReaderSettingsView: View {
     let isActive: @MainActor () -> Bool
     let close: @MainActor () -> Void
     let appearance: ReaderToolAppearance
+    let selectedBodyFontID: String?
+    let selectBodyFont: @MainActor (EPUBUserFont?) -> Void
     @State private var draft: ReaderPreferences
     @State private var info: ReaderAuxiliarySheet.Page?
     @State private var showRestore = false
+    @State private var previewFontRevision = 0
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var closeFocused: Bool
 
-    init(preferences: Binding<ReaderPreferences>, changed: @escaping @MainActor () -> Void,
-         openingSummary: String? = nil, isActive: @escaping @MainActor () -> Bool,
-         close: @escaping @MainActor () -> Void, appearance: ReaderToolAppearance) {
-        _preferences = preferences; self.changed = changed; self.openingSummary = openingSummary
-        self.isActive = isActive; self.close = close; self.appearance = appearance
+    init(
+        preferences: Binding<ReaderPreferences>,
+        changed: @escaping @MainActor () -> Void,
+        openingSummary: String? = nil,
+        isActive: @escaping @MainActor () -> Bool,
+        close: @escaping @MainActor () -> Void,
+        appearance: ReaderToolAppearance,
+        selectedBodyFontID: String? = nil,
+        selectBodyFont: @escaping @MainActor (EPUBUserFont?) -> Void = { _ in }
+    ) {
+        _preferences = preferences
+        self.changed = changed
+        self.openingSummary = openingSummary
+        self.isActive = isActive
+        self.close = close
+        self.appearance = appearance
+        self.selectedBodyFontID = selectedBodyFontID
+        self.selectBodyFont = selectBodyFont
         _draft = State(initialValue: preferences.wrappedValue.validated)
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            ReaderPanelHeader(title: "排版", appearance: appearance) {
+        VStack(spacing: 10) {
+            ReaderPanelHeader(title: "阅读设置", appearance: appearance) {
                 Button(action: finish) {
                     Text("完成").font(ReaderVisualStyle.panelActionFont.weight(.semibold))
                         .fixedSize(horizontal: true, vertical: false)
@@ -43,10 +59,25 @@ struct ReaderSettingsView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    ReaderTypographyPreview(preferences: draft, appearance: appearance)
+                    ReaderTypographyPreview(
+                        preferences: draft,
+                        appearance: appearance,
+                        selectedFontID: selectedBodyFontID,
+                        context: .txt,
+                        fontReloadRevision: previewFontRevision,
+                        isActive: isActive
+                    )
                     typographySection
                     themeSection
                     presetsSection
+                    EPUBUserFontPicker(
+                        selectedID: selectedBodyFontID,
+                        isActive: isActive,
+                        select: handleBodyFontSelection,
+                        appearance: appearance,
+                        context: .txt,
+                        showsSpecimen: false
+                    )
                     moreSection
                 }
                 .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
@@ -55,6 +86,9 @@ struct ReaderSettingsView: View {
             }
             .accessibilityIdentifier("reader.settings.scroll")
         }
+        .foregroundStyle(appearance.foreground)
+        .tint(appearance.accent)
+        .background(appearance.surface)
         .onChange(of: preferences) { value in draft = value.validated }
         .task {
             guard voiceOver else { return }
@@ -65,7 +99,7 @@ struct ReaderSettingsView: View {
             Button("恢复字号与行距") { apply(.standard) }
             Button("取消", role: .cancel) { }
         } message: {
-            Text("恢复为字号 20、行距 7。保留当前阅读背景，不改变阅读位置。")
+            Text("恢复为字号 20、行距 7。保留当前阅读背景与正文字体，不改变阅读位置。")
         }
         .sheet(item: $info, onDismiss: {
             if voiceOver, isActive() { closeFocused = true }
@@ -300,21 +334,31 @@ struct ReaderSettingsView: View {
             }
             .padding(6)
             .frame(minWidth: 84, maxWidth: .infinity, minHeight: 74)
-            .background {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(selected ? appearance.selection : appearance.card.opacity(0.55))
-                    .allowsHitTesting(false)
-                    .animation(selectionAnimation, value: selectionMotionKey)
-                    .transaction { if reduceMotion { $0.animation = nil } }
-            }
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(ReaderCompactButtonStyle(tint: appearance.foreground, cornerRadius: 16))
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(selected ? appearance.selectedControl : appearance.card.opacity(0.55))
+                .opacity(isActive() ? 1 : 0.4)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .animation(selectionAnimation, value: selectionMotionKey)
+                .transaction { transaction in
+                    if reduceMotion { transaction.animation = nil }
+                }
+        }
         .disabled(!isActive())
         .accessibilityLabel(theme.title)
         .accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("reader.theme.\(theme.rawValue)")
+    }
+
+    private func handleBodyFontSelection(_ font: EPUBUserFont?) {
+        guard isActive() else { return }
+        previewFontRevision &+= 1
+        selectBodyFont(font)
     }
 
     private func apply(_ preset: ReaderTypographyPreset) {

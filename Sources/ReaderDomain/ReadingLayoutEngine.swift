@@ -14,6 +14,7 @@ public actor ReadingLayoutEngine {
     public init(bookID: String, document: TXTDocument) { self.bookID = bookID; self.document = document }
 
     public func window(around anchor: ReadingAnchor, width: Double, preferences: ReaderPreferences,
+                       bodyFont: TXTBodyFont? = nil,
                        measure: ProcessingMeasurementObserver? = nil) throws -> ReadingWindow {
         let started = ContinuousClock().now
         defer { ProcessingMeasurement.finish(.layout, since: started, observe: measure) }
@@ -24,7 +25,8 @@ public actor ReadingLayoutEngine {
         if source == nil { source = document.text as NSString }
         guard let source else { throw LibraryError.layoutCannotAdvance }
         let settings = preferences.validated
-        let font = CTFontCreateWithName("PingFangSC-Regular" as CFString, CGFloat(settings.fontSize), nil)
+        let size = CGFloat(settings.fontSize)
+        let font = bodyFont?.makeCTFont(size: size) ?? CTFontCreateWithName("PingFangSC-Regular" as CFString, size, nil)
         var start = composedStart(max(0, target - 2 * targetSliceLength), source: source)
         var slices = try slices(starting: start, source: source, font: font, width: width, settings: settings)
         if !slices.contains(where: { $0.range.location.value <= target &&
@@ -32,7 +34,7 @@ public actor ReadingLayoutEngine {
             start = composedStart(min(target, document.utf16Count - 1), source: source)
             slices = try self.slices(starting: start, source: source, font: font, width: width, settings: settings)
         }
-        return ReadingWindow(id: UUID(), anchor: anchor, targetUTF16: target, preferences: settings, slices: slices,
+        return ReadingWindow(id: UUID(), anchor: anchor, targetUTF16: target, preferences: settings, bodyFont: bodyFont, slices: slices,
                              hasPrevious: start > 0, hasNext: (slices.last?.range.end.value ?? 0) < document.utf16Count)
     }
 
