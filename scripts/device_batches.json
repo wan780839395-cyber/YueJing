@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "motion-device-035",
+  "active": "speech-device-036",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -85,6 +85,13 @@
       "build": "37",
       "product": "f715d8536c83cff033ce5ea1a3fba8a46be102e8",
       "plan_sha256": "353cfe77a5ed8bf9c29fff0f89867c9f319830ddf1bc0b414d313904d9f88a10",
+      "runner": "macos-15-intel"
+    },
+    "speech-device-036": {
+      "version": "0.2.36",
+      "build": "38",
+      "product": "9b6719a02f7823738deff6c64f0f93f2dd13fa75",
+      "plan_sha256": "656567ad4ebd30acc73d9aaebf762e55ed229d09a852740c8c051a41126ac339",
       "runner": "macos-15-intel"
     }
   }
