@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "txt-font-device-032",
+  "active": "txt-font-device-032-r1",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -42,6 +42,13 @@
       "version": "0.2.32",
       "build": "34",
       "product": "715b9fde5a4229c0f24a9ff829dcf22c30df5786",
+      "plan_sha256": "09a63f2c2eb708e677c35265a1fcc8e78709e94112450ca0256229221c0c8603",
+      "runner": "macos-15-intel"
+    },
+    "txt-font-device-032-r1": {
+      "version": "0.2.32",
+      "build": "34",
+      "product": "7bc8b0a008f2283598e41aef25d14759c91fae3d",
       "plan_sha256": "09a63f2c2eb708e677c35265a1fcc8e78709e94112450ca0256229221c0c8603",
       "runner": "macos-15-intel"
     }
