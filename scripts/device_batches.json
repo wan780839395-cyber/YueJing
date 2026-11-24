@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "speech-device-036",
+  "active": "lock-device-037",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -92,6 +92,13 @@
       "build": "38",
       "product": "9b6719a02f7823738deff6c64f0f93f2dd13fa75",
       "plan_sha256": "656567ad4ebd30acc73d9aaebf762e55ed229d09a852740c8c051a41126ac339",
+      "runner": "macos-15-intel"
+    },
+    "lock-device-037": {
+      "version": "0.2.37",
+      "build": "39",
+      "product": "0d1542e03020b90c02bcd5576d65b4a18c243b3e",
+      "plan_sha256": "36873ad723aa9911a0ac72f0d0f8137618b72b75d44c7f97c95673ef10d4b280",
       "runner": "macos-15-intel"
     }
   }
