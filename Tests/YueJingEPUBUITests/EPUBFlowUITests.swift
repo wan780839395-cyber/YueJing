@@ -731,7 +731,16 @@ final class EPUBFlowUITests: XCTestCase {
         let scroll = scrollView ?? app.scrollViews["reader.settings.scroll"]
         for _ in 0..<10 {
             if element.exists && element.isHittable { break }
-            if element.exists && element.frame.midY < scroll.frame.midY {
+            let bounds = scroll.frame
+            let offset = element.exists ? element.frame.midY - bounds.midY : CGFloat.infinity
+            if abs(offset) <= bounds.height {
+                // A full swipe can fling a nearby row past the opposite edge on SE.
+                // Drag the scroll view's inset, not a setting, and release at rest.
+                let upper = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.25))
+                let lower = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.75))
+                (offset < 0 ? upper : lower).press(forDuration: 0.05, thenDragTo: offset < 0 ? lower : upper,
+                                                  withVelocity: .slow, thenHoldForDuration: 0.3)
+            } else if offset < 0 {
                 scroll.swipeDown(velocity: .slow)
             } else {
                 scroll.swipeUp(velocity: .slow)

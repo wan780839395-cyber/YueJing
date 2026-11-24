@@ -215,7 +215,7 @@ final class ReadingFlowUITests: XCTestCase {
             let probe = app.staticTexts["ui.fixture.shelf.scheme"]
             XCTAssertTrue(probe.waitForExistence(timeout: 15))
             XCTAssertTrue((probe.value as? String)?.contains("accessibility") == true)
-            open("UITest-Short-B", app)
+            open("UITest-Short-B", app, revealShelfRow: true)
             XCTAssertGreaterThanOrEqual(app.buttons["reader.exit"].frame.height, 44)
             let dockDeadline = Date().addingTimeInterval(10)
             let directory = app.buttons["reader.tools.directory"]
@@ -668,9 +668,18 @@ final class ReadingFlowUITests: XCTestCase {
         }
         app.launch(); run(app)
     }
-    @MainActor private func open(_ title: String, _ app: XCUIApplication) {
+    @MainActor private func open(_ title: String, _ app: XCUIApplication, revealShelfRow: Bool = false) {
         let book = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch
-        waitHittable(book, timeout: 20); book.tap()
+        let shelfDeadline = Date().addingTimeInterval(20)
+        if revealShelfRow {
+            let shelf = app.scrollViews.containing(.textField, identifier: "library.shelf.search").firstMatch
+            for _ in 0..<4 where Date() < shelfDeadline {
+                if book.exists && book.isHittable { break }
+                guard shelf.exists else { break }
+                shelf.swipeUp(velocity: .slow)
+            }
+        }
+        waitHittable(book, timeout: max(0.01, shelfDeadline.timeIntervalSinceNow)); book.tap()
         // Content and tools share the original 20-second post-tap budget.
         let deadline = Date().addingTimeInterval(20)
         let marker = title == "UITest-Long-A" ? "UI_A_C" : "UI-END-B"

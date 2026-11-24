@@ -29,7 +29,8 @@ struct ReaderToolAppearance {
 
     var secondary: Color {
         let color = theme.foreground
-        return Color(uiColor: UIColor { traits in
+        // SwiftUI may resolve the dynamic color on its async renderer, not MainActor.
+        return Color(uiColor: UIColor { @Sendable traits in
             color.withAlphaComponent(traits.accessibilityContrast == .high ? 1 : 0.72)
         })
     }
