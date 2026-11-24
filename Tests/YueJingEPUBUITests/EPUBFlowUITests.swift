@@ -193,7 +193,9 @@ final class EPUBFlowUITests: XCTestCase {
             guard let original = mode.value as? String, ["0", "1"].contains(original) else {
                 XCTFail("Expected a readable developer mode switch"); return
             }
+            var restoredOnShelf = false
             addTeardownBlock { @MainActor () async in
+                guard !restoredOnShelf else { return }
                 app.launch()
                 defer { app.terminate() }
                 let restored = self.openDeveloperSwitch(app)
@@ -233,8 +235,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(mode.value as? String, "1")
             app.buttons["library.tab.shelf"].tap()
             openEPUB("EPUBTest-NoCover-B", expectedMarker: "EPUB_NOCOVER_START", stage: "developer-reopen", app)
-            selectLayoutMode("阅读器排版", rawValue: "reader", app)
-            openSettings(app)
+            selectLayoutMode("阅读器排版", rawValue: "reader", app, returnToCommon: true)
             assertNoReaderAbout(app)
 
             let darkButton = revealSetting("reader.theme.dark", in: app.buttons, app)
@@ -255,7 +256,7 @@ final class EPUBFlowUITests: XCTestCase {
             waitHittable(done, expectedID: "reader.info.close")
             XCTAssertTrue(app.navigationBars["本书诊断"].exists)
             let scope = revealSetting("epub.settings.scopeNote", in: app.staticTexts, app,
-                                      scrollView: app.scrollViews.firstMatch)
+                                      scrollView: app.scrollViews.containing(.staticText, identifier: "epub.settings.scopeNote").firstMatch)
             XCTAssertTrue(scope.label.contains("可重排"))
             done.tap()
             waitHittable(app.buttons["reader.panel.close"], expectedID: "reader.panel.close")
@@ -278,8 +279,7 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertEqual(waitForPredicates([updatedTypography], timeout: 10), .completed)
 
             // Original mode must offer a real proportional control, not a disabled reader slider.
-            selectLayoutMode("原始排版", rawValue: "original", app)
-            openSettings(app)
+            selectLayoutMode("原始排版", rawValue: "original", app, returnToCommon: true)
             let authorIncrease = revealSetting("reader.font.increase", in: app.buttons, app)
             XCTAssertTrue(authorIncrease.isEnabled)
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("120%"))
@@ -290,8 +290,7 @@ final class EPUBFlowUITests: XCTestCase {
             originalSize.tap()
             XCTAssertTrue(app.staticTexts["reader.font.value"].label.contains("100%"))
             closePanel(app)
-            selectLayoutMode("阅读器排版", rawValue: "reader", app)
-            openSettings(app)
+            selectLayoutMode("阅读器排版", rawValue: "reader", app, returnToCommon: true)
             let retainedSpacing = revealSetting("reader.spacing.value", in: app.staticTexts, app)
             XCTAssertTrue(retainedSpacing.label.contains("10"))
             closePanel(app)
@@ -315,6 +314,11 @@ final class EPUBFlowUITests: XCTestCase {
             XCTAssertTrue(app.buttons["reader.contents.bookmarks"].waitForExistence(timeout: 10))
             closePanel(app)
             exitReader(app, shelfBook: "TXTTest-Companion-C")
+            let restore = openDeveloperSwitch(app)
+            if restore.value as? String != original { restore.tap() }
+            let restoredValue = restore.value as? String
+            XCTAssertEqual(restoredValue, original)
+            restoredOnShelf = restoredValue == original
         }
     }
 
@@ -498,10 +502,10 @@ final class EPUBFlowUITests: XCTestCase {
     }
 
     @MainActor private func assertNoReaderAbout(_ app: XCUIApplication) {
-        for id in ["reader.info.license", "library.about.license", "app.version", "epub.settings.scopeNote"] {
-            XCTAssertFalse(app.descendants(matching: .any)[id].exists, id)
-        }
-        for title in ["开源许可", "维护信息", "兼容与范围"] { XCTAssertFalse(app.staticTexts[title].exists, title) }
+        let ids = ["reader.info.license", "library.about.license", "app.version", "epub.settings.scopeNote"]
+        let titles = ["开源许可", "维护信息", "兼容与范围"]
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier IN %@", ids)).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label IN %@", titles)).firstMatch.exists)
     }
 
     @MainActor private func withEPUBFixture(
@@ -844,7 +848,8 @@ final class EPUBFlowUITests: XCTestCase {
         }
     }
 
-    @MainActor private func selectLayoutMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
+    @MainActor private func selectLayoutMode(_ title: String, rawValue: String, _ app: XCUIApplication,
+                                             returnToCommon: Bool = false) {
         openSettings(app)
         selectSettingsGroup("more", app)
         let picker = revealSetting("epub.layoutMode", in: app.descendants(matching: .any), app)
@@ -857,7 +862,7 @@ final class EPUBFlowUITests: XCTestCase {
         }, object: nil)
         XCTAssertEqual(waitForPredicates([ready], timeout: 12), .completed)
         XCTAssertTrue(option.isSelected)
-        closePanel(app)
+        if returnToCommon { selectSettingsGroup("common", app) } else { closePanel(app) }
     }
 
     @MainActor private func selectReadingMode(_ title: String, rawValue: String, _ app: XCUIApplication) {
