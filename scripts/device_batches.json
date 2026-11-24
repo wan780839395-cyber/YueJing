@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "shelf-device-033",
+  "active": "shelf-device-033-r1",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -56,6 +56,13 @@
       "version": "0.2.33",
       "build": "35",
       "product": "b80157083bdf05c160f0a4ce51b96270ce2ef208",
+      "plan_sha256": "f6cbd27697cbc5d7587f0712c01176e392d449b74ba61271c1db1c06b0e2b903",
+      "runner": "macos-15-intel"
+    },
+    "shelf-device-033-r1": {
+      "version": "0.2.33",
+      "build": "35",
+      "product": "a58284bc3ce93ce4c92329bcadcf90e11abec95d",
       "plan_sha256": "f6cbd27697cbc5d7587f0712c01176e392d449b74ba61271c1db1c06b0e2b903",
       "runner": "macos-15-intel"
     }
