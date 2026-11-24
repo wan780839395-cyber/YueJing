@@ -436,7 +436,13 @@ def parse_log_for_spec(group, spec, raw, code, timed_out, *, action="test"):
     require(isinstance(raw, bytes) and raw, "Missing native log")
     names, kind = spec["cases"], spec["kind"]
     text, arguments = inventory.parameter_events(raw.decode("utf-8"), names)
-    events = audit.parse_events(text.encode("utf-8"), names, ui=kind == "ui", ui_class="EPUBFlowUITests")
+    ui_class = "EPUBFlowUITests"
+    if kind == "ui":
+        files = {rel for rel, _ in spec["pairs"]}
+        require(len(files) == 1 and files <= {"YueJingEPUBUITests/EPUBFlowUITests.swift",
+                                             "YueJingEPUBUITests/EPUBFontPickerUITests.swift"}, "Unapproved UI source")
+        ui_class = Path(files.pop()).stem
+    events = audit.parse_events(text.encode("utf-8"), names, ui=kind == "ui", ui_class=ui_class)
     # Signature-only adapter is explicit; line numbers and argument rows refer to ORIGINAL raw bytes.
     events["raw_sha256"] = compat.digest_bytes(raw)
     events["signature_adapter"] = sorted(arguments)
@@ -465,7 +471,7 @@ def parse_log_for_spec(group, spec, raw, code, timed_out, *, action="test"):
         require(not other["unexpected"] and not other["derived_starts"]
                 and all(row["line"] in ui_lines for row in other["unknown_test_lines"]), "Unexpected Swift tests in UI group")
         require(summaries in ([], [("0", "passed")]), "Unexpected Swift summary in UI group")
-        finishes = re.findall(r"Test Case '-\[(?:\w+\.)?EPUBFlowUITests (test\w+)\]' passed \(([0-9.]+) seconds?\)", text)
+        finishes = re.findall(rf"Test Case '-\[{audit.UI_OWNERS[ui_class]} (test\w+)\]' passed \(([0-9.]+) seconds?\)", text)
         xc = re.findall(r"Executed (\d+) tests?, (?:(\d+) tests? skipped and )?(?:with )?(\d+) failures? \((\d+) unexpected\)", text)
         require(xc and all(n == "1" and skip in ("", "0") and failed == unexpected == "0" for n, skip, failed, unexpected in xc), "UI summary differs")
     require(sorted(n for n, _ in finishes) == sorted(names) and all(float(t) <= 180 for _, t in finishes), "Case identity/duration differs")

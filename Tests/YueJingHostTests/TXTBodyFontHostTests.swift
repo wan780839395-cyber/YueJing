@@ -61,17 +61,28 @@ struct TXTBodyFontHostTests {
         try (Data([0xef, 0xbb, 0xbf]) + Data(text.utf8)).write(to: source)
         try EPUBFontLoadingHostTests.makeSyntheticGeometricFontData().write(to: ttf)
         let store = EPUBUserFontStore(root: library), font = try await store.importFont(from: ttf)
-        let service = LibraryService(store: try LibraryStore(root: managed))
-        let result = try await service.prepareReadingImport(url: source, ticket: UUID(), budget: ReaderStoragePolicy.budget())
-        guard case .completed(let receipt) = result else { Issue.record("BOM fixture did not import"); return }
+        weak var previousStore: LibraryStore?
+        let bookID: String
+        do {
+            let db = try LibraryStore(root: managed); previousStore = db
+            let service = LibraryService(store: db)
+            let result = try await service.prepareReadingImport(url: source, ticket: UUID(), budget: ReaderStoragePolicy.budget())
+            guard case .completed(let receipt) = result else { Issue.record("BOM fixture did not import"); return }
+            bookID = receipt.book.id
+        }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let host = UIWindow(windowScene: scene)
         host.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
         defer { host.isHidden = true; host.rootViewController = nil }
 
-        func open() async throws -> (ReaderViewModel, ReaderViewController) {
-            let reopened = LibraryService(store: try LibraryStore(root: managed))
-            let m = ReaderViewModel(bookID: receipt.book.id, service: reopened,
+        func withReader<T>(_ check: @MainActor (ReaderViewModel, ReaderViewController) async throws -> T) async throws -> T {
+            // A cold open starts only after prior asynchronous session cleanup releases SQLite.
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while previousStore != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            try #require(previousStore == nil)
+            let db = try LibraryStore(root: managed); previousStore = db
+            let reopened = LibraryService(store: db)
+            let m = ReaderViewModel(bookID: bookID, service: reopened,
                 fontStore: EPUBUserFontStore(root: library), fontDefaults: defaults)
             let vc = ReaderViewController()
             host.rootViewController = vc; host.isHidden = false
@@ -79,37 +90,41 @@ struct TXTBodyFontHostTests {
             vc.onAnchor = { [weak m] in m?.visibleChanged($0, windowID: $1) }
             m.resized(390); await m.load()
             _ = try await applyNext(m, vc, after: nil)
-            return (m, vc)
+            defer { host.rootViewController = nil }
+            let value = try await check(m, vc)
+            try #require(await m.close())
+            return value
         }
-        let (m, vc) = try await open()
-        let initial = try #require(m.window), table = try #require(vc.view.subviews.compactMap { $0 as? UITableView }.first)
-        vc.scrollViewWillBeginDragging(table)
-        table.setContentOffset(CGPoint(x: 0, y: 529), animated: false)
-        vc.scrollViewDidScroll(table); vc.scrollViewDidEndDragging(table, willDecelerate: false)
-        let target = try #require(vc.restorableAnchor())
-        try #require(target.rawByteOffset > 3 + prefix.utf8.count)
-        let utf16 = prefix.utf16.count + target.rawByteOffset - 3 - prefix.utf8.count
-        let originalWidth = maxLine(initial)
-        m.selectBodyFont(font)
-        let wide = try await applyNext(m, vc, after: initial.id)
-        #expect(wide.anchor == target && wide.targetUTF16 == utf16 && vc.navigationTargetVisible)
-        #expect(vc.restorableAnchor() == target && m.selectedBodyFontID == font.id)
-        #expect(maxLine(wide) < originalWidth && maxLine(wide) == 7) // 350pt / (2.5em * 20pt)
-        try #require(await m.close())
-
-        let (second, vc2) = try await open(), coldWide = try #require(second.window)
-        #expect(second.selectedBodyFontID == font.id && maxLine(coldWide) == maxLine(wide))
-        #expect(coldWide.targetUTF16 == utf16 && vc2.restorableAnchor() == target && vc2.navigationTargetVisible)
-        second.selectBodyFont(nil)
-        let restored = try await applyNext(second, vc2, after: coldWide.id)
-        #expect(restored.targetUTF16 == utf16 && vc2.restorableAnchor() == target && vc2.navigationTargetVisible)
-        #expect(maxLine(restored) == originalWidth && second.selectedBodyFontID == nil)
-        try #require(await second.close())
-
-        let (third, vc3) = try await open(), coldDefault = try #require(third.window)
-        #expect(third.selectedBodyFontID == nil && maxLine(coldDefault) == originalWidth)
-        #expect(coldDefault.targetUTF16 == utf16 && vc3.restorableAnchor() == target && vc3.navigationTargetVisible)
-        #expect(await third.close())
+        let (target, utf16, originalWidth, wideWidth) = try await withReader { m, vc in
+            let initial = try #require(m.window), table = try #require(vc.view.subviews.compactMap { $0 as? UITableView }.first)
+            vc.scrollViewWillBeginDragging(table)
+            table.setContentOffset(CGPoint(x: 0, y: 529), animated: false)
+            vc.scrollViewDidScroll(table); vc.scrollViewDidEndDragging(table, willDecelerate: false)
+            let target = try #require(vc.restorableAnchor())
+            try #require(target.rawByteOffset > 3 + prefix.utf8.count)
+            let utf16 = prefix.utf16.count + target.rawByteOffset - 3 - prefix.utf8.count
+            let originalWidth = maxLine(initial)
+            m.selectBodyFont(font)
+            let wide = try await applyNext(m, vc, after: initial.id)
+            #expect(wide.anchor == target && wide.targetUTF16 == utf16 && vc.navigationTargetVisible)
+            #expect(vc.restorableAnchor() == target && m.selectedBodyFontID == font.id)
+            #expect(maxLine(wide) < originalWidth && maxLine(wide) == 7)
+            return (target, utf16, originalWidth, maxLine(wide))
+        }
+        try await withReader { second, vc2 in
+            let coldWide = try #require(second.window)
+            #expect(second.selectedBodyFontID == font.id && maxLine(coldWide) == wideWidth)
+            #expect(coldWide.targetUTF16 == utf16 && vc2.restorableAnchor() == target && vc2.navigationTargetVisible)
+            second.selectBodyFont(nil)
+            let restored = try await applyNext(second, vc2, after: coldWide.id)
+            #expect(restored.targetUTF16 == utf16 && vc2.restorableAnchor() == target && vc2.navigationTargetVisible)
+            #expect(maxLine(restored) == originalWidth && second.selectedBodyFontID == nil)
+        }
+        try await withReader { third, vc3 in
+            let coldDefault = try #require(third.window)
+            #expect(third.selectedBodyFontID == nil && maxLine(coldDefault) == originalWidth)
+            #expect(coldDefault.targetUTF16 == utf16 && vc3.restorableAnchor() == target && vc3.navigationTargetVisible)
+        }
     }
 
     private func maxLine(_ window: ReadingWindow) -> Int {

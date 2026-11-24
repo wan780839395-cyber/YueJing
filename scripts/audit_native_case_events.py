@@ -7,8 +7,11 @@ import re
 
 EVENT = re.compile(r"\bTest (\w+)\(\) (started|passed|failed|skipped)\b")
 ISSUE = re.compile(r"^(?:✘ )?Test (\w+)\(\) recorded an issue at (.+)$")
-UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?ReadingFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
-EPUB_UI_EVENT = re.compile(r"Test Case '-\[(?:\w+\.)?EPUBFlowUITests (test\w+)\]' (started|passed|failed|skipped)\b")
+UI_OWNERS = {
+    "ReadingFlowUITests": r"(?:\w+\.)?ReadingFlowUITests",
+    "EPUBFlowUITests": r"(?:\w+\.)?EPUBFlowUITests",
+    "EPUBFontPickerUITests": r"YueJingEPUBUITests\.EPUBFontPickerUITests",
+}
 # Only the observed UIKit warning is admissible, and only inside a START record.
 BROKEN_START = re.compile(
     r"^(?:◇ )?Test (?P<prefix>[A-Za-z_]\w*)"
@@ -31,9 +34,9 @@ def parse_events(raw, names, ui=False, ui_class="ReadingFlowUITests"):
     events = {n: dict(starts=[], finishes=[], skips=[], issues=[]) for n in names}
     unexpected, unknown, derived = [], [], []
     consumed = set()
-    if ui_class not in ("ReadingFlowUITests", "EPUBFlowUITests"):
+    if ui_class not in UI_OWNERS:
         raise ValueError('Unapproved UI class')
-    pattern = (EPUB_UI_EVENT if ui_class == "EPUBFlowUITests" else UI_EVENT) if ui else EVENT
+    pattern = re.compile(rf"Test Case '-\[{UI_OWNERS[ui_class]} (test\w+)\]' (started|passed|failed|skipped)\b") if ui else EVENT
     for i, line in enumerate(lines):
         if i in consumed:
             continue
