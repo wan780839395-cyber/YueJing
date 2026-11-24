@@ -132,6 +132,7 @@ struct ContentView: View {
                 }
             }
             .id(route.id)
+            .environment(\.readingTimeBook, route.bookID)
         }
         .task { await model.start() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in

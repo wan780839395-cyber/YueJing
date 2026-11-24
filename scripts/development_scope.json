@@ -11,6 +11,9 @@
     {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd"},
     {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor"},
     {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation"},
+    {"file":"YueJingHostTests/ReadingTimeLedgerTests.swift","name":"readingTimeSplitsMidnightAndDoesNotResumeFromDisk"},
+    {"file":"YueJingHostTests/ReadingTimeLedgerTests.swift","name":"readingTimeExcludesPausedTimeAndRejectsStaleRouteUpdates"},
+    {"file":"YueJingHostTests/ReadingTimeLedgerTests.swift","name":"changingWallTimeDoesNotManufactureReadingHours"},
     {"file":"YueJingUITests/ReadingFlowUITests.swift","name":"testAutoReadingToolbarStartsChangesPaceAndPauses"}
   ],
   "build_timeout_seconds": 900,

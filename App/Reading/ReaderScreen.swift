@@ -244,6 +244,8 @@ struct ReaderScreen: View {
             // END READER DIAGNOSTICS screen scene
             // Only the attached native scene owns model recovery.
         }
+        .modifier(ReadingTimeTracking(owner: routeID, readable: tools.canInteract && tools.panel == nil &&
+            model.window != nil && !model.loading && model.message == nil && !model.exitSaveFailed))
         .onDisappear { autoRead.stop() }
         .onChange(of: routeID) { _ in autoRead.stop() }
         .onChange(of: model.autoReadingAvailable) { if !$0 { autoRead.stop() } }

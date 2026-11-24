@@ -161,6 +161,13 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     private(set) var deniedNavigations: [String] = []
     private var readyToken: EPUBNavigationToken?
     private var pageAnimationToken: EPUBNavigationToken?
+    // Owned by activeRequest, independent of manual page animation. Only a confirmed
+    // landing receipt may cross a preserveViewport promotion (never a motion command).
+    private enum AutoPage: Equatable {
+        case idle, sliding(CGFloat), awaitingLocator(CGFloat), landed
+    }
+    private var autoPage = AutoPage.idle
+    private var frozenAutoX: CGFloat?
     private var dragOrigin: (token: EPUBNavigationToken, offset: CGFloat)?
     private var pagePan: UIPanGestureRecognizer?
     private var pagePanToken: EPUBNavigationToken?
@@ -368,6 +375,10 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             loadedDocumentToken?.sessionID == request.token.sessionID &&
             previous?.publication.package == request.publication.package &&
             previous?.publication.resourceRoot == request.publication.resourceRoot)
+        if !(reuseDOM && !reuseClosed && request.preserveViewport && autoPage == .landed) {
+            cancelAutoPage()
+        }
+        frozenAutoX = nil
         if parked != nil || webView.navigationDelegate == nil { restoreCallbacks() }
         parkedDocument = nil // One take; fallback/retry cannot reuse a stale closed document.
         parkedLease = nil // The newly verified reader now owns an independent resource lease.
@@ -503,6 +514,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     private func failReadiness(for token: EPUBNavigationToken, error: Error, revokeReady: Bool = false) {
         guard activeRequest?.token == token, revokeReady || readyToken != token || pendingPresentationToken == token else { return }
+        cancelAutoPage()
         readinessTask?.cancel()
         readinessTask = nil
         loadTask?.cancel()
@@ -612,6 +624,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     func detachCallbacks() {
+        cancelAutoPage()
         discardParkedState()
         nativeScrollActive = false
         interactionEnabled = false
@@ -867,6 +880,19 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         guard let current = activeRequest,
               payload.sessionID == current.token.sessionID,
               payload.epoch == current.token.epoch else { return }
+        if payload.kind == .scroll {
+            switch autoPage {
+            case .sliding: return // Intermediate columns must not save/promote a chapter.
+            case .awaitingLocator(let x):
+                guard abs(CGFloat(payload.scrollX) - x) < 1,
+                      abs(webView.scrollView.contentOffset.x - x) < 1 else { return }
+                autoPage = .landed
+            case .idle, .landed: break
+            }
+            // Ignore IPC queued before the animation stopped at these pixels.
+            if let x = frozenAutoX, abs(webView.scrollView.contentOffset.x - x) < 1,
+               abs(CGFloat(payload.scrollX) - x) >= 1 { return }
+        }
         if payload.path != current.token.path {
             // This is an observation, never a save authority. The model mints a new epoch.
             guard payload.kind == .scroll, interactionEnabled,
@@ -910,6 +936,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             refreshChapterWindow()
         }
         if payload.kind == .error {
+            cancelAutoPage()
             readinessTask?.cancel()
             readinessTask = nil
             readyToken = nil
@@ -1150,6 +1177,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             return
         }
         guard let current = activeRequest else { return }
+        cancelAutoPage()
         readinessTask?.cancel()
         readinessTask = nil
         loadedDocumentPath = nil
@@ -1203,15 +1231,15 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
     /// Invalidate a pending edge/centre hit-test before the first scheduled step.
     func beginAutoRead(for token: EPUBNavigationToken) -> Bool {
         guard interactionEnabled, activeRequest?.token == token, readyToken == token,
-              readinessPhase == .ready, windowFailedToken != token, pageAnimationToken == nil,
+              readinessPhase == .ready, windowFailedToken != token, pageAnimationToken == nil, autoPage == .idle,
               let scroll = webView?.scrollView, !scroll.isTracking, !scroll.isDecelerating else { return false }
         interactionGeneration = UUID()
         pagePanToken = nil
         return true
     }
 
-    /// No asynchronous page command. Locator IPC observes the resulting pixels;
-    /// it does not grant a future timer permission to move this or another epoch.
+    /// The timer polls a single outstanding turn. A poll consuming its landing
+    /// receipt starts the next full interval; it never moves a second page.
     func autoReadStep(for token: EPUBNavigationToken, distance: CGFloat) -> AutoReadStep {
         guard let request = activeRequest, request.token == token, windowFailedToken != token,
               let scroll = webView?.scrollView else { return .stop }
@@ -1232,10 +1260,26 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
             }
         case .paged:
             guard scroll.contentSize.width > 0 else { return .waiting }
-            if turnPage(.next, animated: false) {
-                let next = EPUBPageGeometry.horizontalDestination(.next, offset: scroll.contentOffset.x,
-                    contentWidth: scroll.contentSize.width, viewportWidth: scroll.bounds.width)
-                return hasBookEnd && next == nil ? .stop : .advanced
+            let width = scroll.bounds.width, x = scroll.contentOffset.x
+            // A pause can leave two columns visible. Resume at the very next
+            // column boundary (not nearest + 1), clamping a partial final column.
+            let next = min(((max(0, x) + 0.5) / width).rounded(.down) * width + width,
+                           max(0, scroll.contentSize.width - width))
+            let canAdvance = next - x > 0.5
+            switch autoPage {
+            case .sliding, .awaitingLocator: return .waiting
+            case .landed:
+                autoPage = .idle
+                return hasBookEnd && !canAdvance ? .stop : .advanced
+            case .idle: break
+            }
+            if canAdvance {
+                let animate = !UIAccessibility.isReduceMotionEnabled
+                autoPage = animate ? .sliding(next) : .awaitingLocator(next)
+                frozenAutoX = next
+                scroll.setContentOffset(CGPoint(x: next, y: 0), animated: animate)
+                if !animate { reportVisiblePosition(for: token) }
+                return .waiting
             }
         }
         guard !hasBookEnd else { return .stop }
@@ -1251,10 +1295,25 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         return .waiting
     }
 
+    /// Revoke first: stopping UIKit can itself deliver a scroll callback. Do not
+    /// snap to either page; the locator must sample the text actually left visible.
+    func cancelAutoPage() {
+        let phase = autoPage
+        autoPage = .idle
+        guard phase != .idle, let scroll = webView?.scrollView else { return }
+        if case .sliding = phase {
+            let visible = scroll.layer.presentation()?.bounds.origin ?? scroll.contentOffset
+            frozenAutoX = visible.x
+            scroll.setContentOffset(visible, animated: false)
+        }
+        if let token = readyToken { reportVisiblePosition(for: token) }
+    }
+
     @discardableResult
     func turnPage(_ direction: EPUBPageDirection, animated: Bool = true) -> Bool {
         guard interactionEnabled, let token = activeRequest?.token, readyToken == token,
-              pageAnimationToken == nil, webView != nil, pageGeometry.valid else { return false }
+              pageAnimationToken == nil, autoPage == .idle, webView != nil, pageGeometry.valid else { return false }
+        frozenAutoX = nil
         let scroll = webView.scrollView
         let horizontal = activeRequest?.readingMode == .paged
         let destination = horizontal
@@ -1280,13 +1339,21 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
 
     private func reportVisiblePosition(for token: EPUBNavigationToken) {
         Task { @MainActor [weak self] in
-            guard let self, let payload = await self.sampleVisibleNow(),
+            guard let self, self.activeRequest?.token == token, self.readyToken == token,
+                  let payload = await self.sampleVisibleNow(),
                   self.activeRequest?.token == token, self.readyToken == token else { return }
             self.receiveLocatorPayload(payload)
         }
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        if case .sliding(let x) = autoPage {
+            guard let token = readyToken, activeRequest?.token == token,
+                  scrollView === webView.scrollView, abs(scrollView.contentOffset.x - x) < 1 else { return }
+            autoPage = .awaitingLocator(x)
+            reportVisiblePosition(for: token)
+            return
+        }
         guard let token = pageAnimationToken else { return }
         pageAnimationToken = nil
         reportVisiblePosition(for: token)

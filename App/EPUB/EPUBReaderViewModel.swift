@@ -478,6 +478,7 @@ final class EPUBReaderViewModel: ObservableObject {
         }
         // Revoke old observations before scheduling: a queued scroll promotion must not
         // cancel this explicit user destination or overwrite its pending fragment.
+        webView.controller?.cancelAutoPage()
         ready = false
         loading = true
         loadingStage = "正在定位目标章节…"
@@ -571,6 +572,7 @@ final class EPUBReaderViewModel: ObservableObject {
         searchCompletion: SearchCompletion? = nil
     ) async {
         guard !Task.isCancelled, let reader, !closing, !suspended, !exitSaveFailed else { return }
+        webView.controller?.cancelAutoPage()
         promotionTask?.cancel()
         promotionTask = nil
         saveTask?.cancel()
@@ -890,6 +892,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func handleLoadFailure(_ error: Error, token: EPUBNavigationToken) {
         guard !closing, !suspended, currentToken == token else { return }
+        webView.controller?.cancelAutoPage()
         promotingVisibleChapter = false
         // Revoke callback ownership before any suspended markReady/save continuation resumes.
         generation = UUID()
@@ -962,6 +965,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func suspend() async {
         guard !closing, !suspended, !suspending else { return }
+        webView.controller?.cancelAutoPage()
         suspending = true
         openingObservation.interrupt(.background)
         openingPresentationSummary = openingObservation.summary
@@ -1019,6 +1023,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func close() async -> Bool {
         if let closeTask { return await closeTask.value }
+        webView.controller?.cancelAutoPage()
         let task = Task { @MainActor in await self.performClose() }
         closeTask = task
         return await task.value

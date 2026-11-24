@@ -198,8 +198,8 @@ final class ReaderViewModel: ObservableObject {
         }
         anchor = value; userPosition = true; sequence += 1
         let serial = sequence, request = lifecycle
-        // Continuous playback updates the in-memory anchor on each move. One pending
-        // checkpoint drains the latest accepted value, including the final move on pause.
+        // Sampled playback anchors share one pending checkpoint. A pause between
+        // samples delivers its final exact anchor through the normal save path.
         let auto = steppingAutoRead, alreadyQueued = queuedAutoProgress != nil
         queuedAutoProgress = auto ? (value, serial) : nil
         if auto && alreadyQueued { return }
@@ -357,6 +357,9 @@ final class ReaderViewModel: ObservableObject {
         } else { message = ReaderStoragePolicy.failureMessage(error); loading = false }
     }
     private func requestWindow() {
+        // Reflow between playback samples must start at the current pixels. Never
+        // substitute a displayed anchor for an explicit navigation destination.
+        if navigationGate.navigation == nil { viewport.controller?.flushAutoReadAnchor() }
         guard let reader, let anchor, !closing, !suspended, !exitSaveFailed, width >= 80 else { return }
         bookmarks.invalidatePosition(); preparedJump = nil
         layoutTask?.cancel(); generation = UUID(); layoutNeedsRefresh = true

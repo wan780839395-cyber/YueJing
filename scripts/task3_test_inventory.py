@@ -44,6 +44,7 @@ FILES = {
     "YueJingHostTests/ReaderInteractionInterruptionTests.swift": """interruptedDecelerationRecoversOnSameControllerWithoutMovingAnchor interruptionRevokesOldTouchAndAcceptsFreshIntent momentumAtTouchBeginStillStopsBeforeANewIdleTouchCanToggle viewportInterruptionForwardingIsIdempotentAndDetachedControllerIsInert""",
     "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingHostTests/ReaderSceneAuthorityTests.swift": """nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites""",
+    "YueJingHostTests/ReadingTimeLedgerTests.swift": """readingTimeSplitsMidnightAndDoesNotResumeFromDisk readingTimeExcludesPausedTimeAndRejectsStaleRouteUpdates changingWallTimeDoesNotManufactureReadingHours""",
     "YueJingHostTests/AutoReadCadenceTests.swift": """scrollClockAccumulatesSlowStepsWithoutCatchingUpAfterAStall pageClockWaitsForItsIntervalAndBoundsPendingContent openingAnotherReaderRestoresOnlyPaceAndCancelsOldTicks""",
     "YueJingHostTests/TXTAutoReadingTests.swift": """playbackMovesTableAndBodyTouchOnlyPauses boundaryWaitsForAppliedWindowThenStopsAtEOFAndSavesVisibleProgress""",
     "YueJingHostTests/EPUBAutoReadHostTests.swift": """epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation""",
@@ -80,14 +81,14 @@ FILES = {
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 289, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 76,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 79,
           "YueJingUITests": 13, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 9}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 422  # Declaration identities; the Bool parameter adds one execution (423).
+TOTAL = 425  # Declaration identities; the Bool parameter adds one execution (426).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
 EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 290}
-EXECUTION_TOTAL = 423
+EXECUTION_TOTAL = 426
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

@@ -44,12 +44,17 @@ struct EPUBReaderScreen: View {
 
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
-        return { autoRead.stop(); _ = Task { await model.returnFromSearch() } }
+        return { stopAutoRead(); _ = Task { await model.returnFromSearch() } }
     }
 
     private var canStartAutoRead: Bool {
         scenePhase == .active && tools.canInteract && tools.panel == nil &&
             model.presentationToken != nil && model.autoReadOwner != nil
+    }
+
+    private func stopAutoRead() {
+        model.webView.controller?.cancelAutoPage()
+        autoRead.stop()
     }
 
     private func startAutoRead() {
@@ -114,7 +119,7 @@ struct EPUBReaderScreen: View {
                     if autoRead.isRunning {
                         // Own the entire first touch, including a link or horizontal edge.
                         // Removing this sibling after touch-down never replays it into WebKit.
-                        EPUBAutoReadPauseSurface(pause: autoRead.stop)
+                        EPUBAutoReadPauseSurface(pause: stopAutoRead)
                             .ignoresSafeArea(.container, edges: .bottom)
                             .accessibilityHidden(true)
                     }
@@ -267,12 +272,18 @@ struct EPUBReaderScreen: View {
             panelHost(session: session)
         }
         .task(id: routeID) {
-            autoRead.stop()
+            stopAutoRead()
             await model.load()
         }
-        .onDisappear { autoRead.stop() }
-        .onChange(of: scenePhase) { if $0 != .active { autoRead.stop() } }
-        .onChange(of: model.autoReadOwner) { _ in autoRead.stop() }
+        .modifier(ReadingTimeTracking(owner: routeID, readable: tools.canInteract && tools.panel == nil &&
+            model.acceptsCanvasTouch && model.message == nil))
+        .onDisappear { stopAutoRead() }
+        // Covers every stop source, including the shared control and its wait watchdog.
+        .onReceive(autoRead.$isRunning) { running in
+            if !running { model.webView.controller?.cancelAutoPage() }
+        }
+        .onChange(of: scenePhase) { if $0 != .active { stopAutoRead() } }
+        .onChange(of: model.autoReadOwner) { _ in stopAutoRead() }
         .task(id: model.loading) {
             loadingFeedback = .quiet
             guard model.loading else { return }
@@ -303,7 +314,7 @@ struct EPUBReaderScreen: View {
             if failed { mutateTools { $0.forceCompact() } }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            autoRead.stop()
+            stopAutoRead()
             mutateTools { $0.suspend() }
             Task { await model.suspend() }
         }
@@ -604,7 +615,7 @@ struct EPUBReaderScreen: View {
 
     private func openPanel(_ panel: ReadingToolPanel) {
         guard !model.exitSaveFailed, model.ready else { return }
-        autoRead.stop()
+        stopAutoRead()
         lastPanelControl = panel == .directory ? "directory" : "settings"
         mutateTools { $0.open(panel) }
     }
@@ -649,7 +660,7 @@ struct EPUBReaderScreen: View {
     }
 
     private func manualPage(_ direction: EPUBPageDirection) {
-        if autoRead.isRunning { autoRead.stop(); return }
+        if autoRead.isRunning { stopAutoRead(); return }
         _ = model.webView.controller?.turnPage(direction)
     }
 
@@ -669,7 +680,7 @@ struct EPUBReaderScreen: View {
     }
 
     private func exitReader(keepingSavedPosition: Bool = false) {
-        autoRead.stop()
+        stopAutoRead()
         var request: UUID?
         mutateTools { request = $0.beginExit() }
         guard let request else { return }

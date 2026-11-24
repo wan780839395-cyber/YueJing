@@ -57,6 +57,7 @@ final class LibraryViewModel: ObservableObject {
             defer { deletingBook = false }
             do {
                 try await service.deleteBook(book)
+                ReadingTimeLedger.shared.forget(book: book.id)
                 // Discard any older shelf snapshot still in flight.
                 reloadGeneration = UUID()
                 books.removeAll { $0.id == book.id }

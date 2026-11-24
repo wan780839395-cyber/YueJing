@@ -12,10 +12,23 @@ struct TXTAutoReadingTests {
             let session = AutoReadSession()
             defer { session.stop() }
             controller.bindAutoReading(session)
+            var anchors: [ReadingAnchor] = []
+            controller.onAnchor = { value, windowID in
+                anchors.append(value)
+                model.visibleChanged(value, windowID: windowID)
+            }
             let start = table.contentOffset.y
             controller.beginAutoReading()
             session.start(mode: .scroll) { model.advanceAutoReading(by: $0, in: controller) }
             try await waitUntil { table.contentOffset.y >= start + 2 }
+            // Feed a burst of real one-pixel moves before the next display callback.
+            let samples = anchors.count
+            let pixel = 1 / max(1, table.traitCollection.displayScale)
+            for _ in 0..<12 {
+                try #require(model.advanceAutoReading(by: pixel, in: controller) == .advanced)
+            }
+            #expect(anchors.count - samples < 12)
+            let expected = try #require(controller.visibleNavigationAnchor())
             let moved = table.contentOffset.y
             let point = CGPoint(x: 3, y: controller.view.bounds.midY)
             let bodyHit = try #require(controller.view.hitTest(point, with: nil))
@@ -25,6 +38,7 @@ struct TXTAutoReadingTests {
             // Exercise the actual hit target's touch-down handler, not a synthetic table pan.
             bodyHit.touchesBegan([], with: nil)
             #expect(!session.isRunning)
+            #expect(anchors.last == expected)
             try await Task.sleep(for: .milliseconds(150))
             #expect(table.contentOffset.y == moved && toolEvents == 0)
             let manualHit = try #require(controller.view.hitTest(point, with: nil))

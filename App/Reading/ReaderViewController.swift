@@ -1,3 +1,4 @@
+import Combine
 import ReaderDomain
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
@@ -255,7 +256,15 @@ final class ReaderInteractionDiagnostics {
 final class ReaderViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
     private let table = ReadingTableView(frame: .zero, style: .plain)
     private let pauseSurface = TXTAutoReadPauseSurface()
-    func bindAutoReading(_ session: AutoReadSession?) { pauseSurface.session = session }
+    private var playbackObservation: AnyCancellable?
+    func bindAutoReading(_ session: AutoReadSession?) {
+        guard pauseSurface.session !== session else { return }
+        flushAutoReadAnchor()
+        pauseSurface.session = session
+        playbackObservation = session?.$isRunning.dropFirst().sink { [weak self] running in
+            if !running { self?.flushAutoReadAnchor() }
+        }
+    }
     private(set) var window: ReadingWindow?
     var onAnchor: (@MainActor (ReadingAnchor, UUID) -> Void)?
     var onExtend: (@MainActor (ReadingAnchor, UUID) -> Void)?
@@ -265,7 +274,10 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
     private var restoring = false
-    // Ignore delegate echoes of our own offset; deliver one exact anchor after the move.
+    // Ignore synchronous (possibly pixel-rounded) and deferred delegate echoes.
+    private var settingAutoOffset = false
+    private var autoAnchorPending = false
+    private var nextAutoSample: TimeInterval = 0
     private var autoReadOffset: CGFloat?
     private var autoReadBoundary: (window: UUID, end: Int)?
     private var userInputSinceRestore = false
@@ -458,7 +470,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
 
     func detachCallbacks() {
         if pauseSurface.session?.isRunning == true { pauseSurface.session?.stop() }
-        pauseSurface.session = nil
+        bindAutoReading(nil)
         revokeSceneBinding()
         sceneHandle = nil; sceneRouteID = nil; onSceneInteraction = nil
         // BEGIN READER DIAGNOSTICS revoke
@@ -518,6 +530,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     func apply(_ value: ReadingWindow, userNavigation: Bool, restoring point: ReaderViewportRestoration? = nil) {
         loadViewIfNeeded()
         autoReadOffset = nil
+        autoAnchorPending = false; nextAutoSample = 0
         restoring = true; userInputSinceRestore = false; window = value
         table.reloadData(); table.layoutIfNeeded()
         let row = value.slices.firstIndex { $0.range.location.value <= value.targetUTF16 && value.targetUTF16 < $0.range.end.value }
@@ -556,7 +569,16 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         }
     }
 
-    func beginAutoReading() { autoReadBoundary = nil }
+    func beginAutoReading() { autoReadBoundary = nil; nextAutoSample = 0 }
+
+    @discardableResult
+    func flushAutoReadAnchor() -> Bool {
+        guard autoAnchorPending else { return true }
+        guard let window, let visible = actualVisibleAnchor() else { return false }
+        autoAnchorPending = false
+        onAnchor?(visible, window.id)
+        return true
+    }
 
     func advanceAutoReading(by distance: CGFloat) -> AutoReadStep {
         guard interactionContext.active, viewIfLoaded?.window != nil, !interacting, !table.isTracking,
@@ -580,12 +602,17 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
             return .waiting
         }
         let next = min(maximum, current + distance)
-        autoReadOffset = next
+        settingAutoOffset = true
         table.setContentOffset(CGPoint(x: table.contentOffset.x, y: next), animated: false)
         autoReadOffset = table.contentOffset.y
-        guard table.contentOffset.y > current, let visible = actualVisibleAnchor() else { return .stop }
-        userInputSinceRestore = true
-        onAnchor?(visible, window.id)
+        settingAutoOffset = false
+        guard table.contentOffset.y > current else { return .stop }
+        userInputSinceRestore = true; autoAnchorPending = true
+        let now = CACurrentMediaTime()
+        if now >= nextAutoSample || next == maximum {
+            nextAutoSample = now + 0.25
+            guard flushAutoReadAnchor() else { return .stop }
+        }
         return .advanced
     }
 
@@ -706,7 +733,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         onToolsInteraction?(.scrollingBegan)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        if autoReadOffset == scrollView.contentOffset.y { return }
+        if settingAutoOffset || autoReadOffset == scrollView.contentOffset.y { return }
         guard !restoring, userInputSinceRestore, let window, let visible = actualVisibleAnchor() else { return }
         onAnchor?(visible, window.id)
     }

@@ -88,6 +88,7 @@ struct ReaderSettingsView: View {
                             context: .txt,
                             showsSpecimen: false
                         )
+                        ReadingTimeSummary()
                         moreSection
                     }
                     .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)

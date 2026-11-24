@@ -256,6 +256,7 @@ struct EPUBSettingsView: View {
                 context: .epub,
                 showsSpecimen: false
             )
+            ReadingTimeSummary()
         }
     }
 

@@ -29,10 +29,12 @@ struct EPUBAutoReadHostTests {
                         }
                         let before = scroll.contentOffset
                         let firstStep = model.autoReadStep(from: owner, distance: mode == .paged ? 0 : 3)
-                        try #require(firstStep == .advanced)
                         if mode == .paged {
+                            try #require(firstStep == .waiting)
+                            try await requireOneLanding(model, owner: owner)
                             #expect(abs(scroll.contentOffset.x - before.x - scroll.bounds.width) < 1)
                         } else {
+                            try #require(firstStep == .advanced)
                             #expect(abs(scroll.contentOffset.y - before.y - 3) < 1)
                         }
                         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
@@ -44,6 +46,9 @@ struct EPUBAutoReadHostTests {
                         }
                         try #require(step == .stop)
                         try await until { model.ready && model.currentPosition?.path == model.spine.last }
+                        if mode == .paged {
+                            #expect(abs(scroll.contentOffset.x + scroll.bounds.width - scroll.contentSize.width) < 1)
+                        }
                         #expect(model.autoReadOwner == owner && model.presentationToken != first)
                         #expect(checkedHandoff)
                         #expect(controller.documentLoadCount == 1)
@@ -70,15 +75,31 @@ struct EPUBAutoReadHostTests {
                 // A manual edge hit-test that hasn't replied must not turn after start.
                 controller.handleViewportTap(at: edge)
                 try #require(controller.beginAutoRead(for: token))
-                try #require(model.autoReadStep(from: owner, distance: 0) == .advanced)
-                let pausedOffset = scroll.contentOffset
+                let startX = scroll.contentOffset.x
+                try #require(model.autoReadStep(from: owner, distance: 0) == .waiting)
+                try await requireOneLanding(model, owner: owner)
+                try #require(abs(scroll.contentOffset.x - startX - scroll.bounds.width) < 1)
+                let landedX = scroll.contentOffset.x
                 let session = AutoReadSession()
                 session.start(mode: .paged) { model.autoReadStep(from: owner, distance: $0) }
+                try #require(model.autoReadStep(from: owner, distance: 0) == .waiting)
+                if !UIAccessibility.isReduceMotionEnabled {
+                    try await until { scroll.contentOffset.x > landedX + 1 && scroll.contentOffset.x < landedX + scroll.bounds.width - 1 }
+                } else {
+                    #expect(abs(scroll.contentOffset.x - landedX - scroll.bounds.width) < 1)
+                }
                 let shield = EPUBAutoReadPauseSurface.Surface(frame: controller.view.bounds)
-                shield.pause = session.stop
+                shield.pause = {
+                    session.stop()
+                    controller.cancelAutoPage()
+                }
                 controller.view.addSubview(shield)
                 #expect(controller.view.hitTest(edge, with: nil) === shield)
                 shield.touchesBegan([], with: nil)
+                let pausedOffset = scroll.contentOffset
+                if !UIAccessibility.isReduceMotionEnabled {
+                    #expect(pausedOffset.x > landedX && pausedOffset.x < landedX + scroll.bounds.width)
+                }
                 shield.removeFromSuperview()
                 #expect(!session.isRunning)
                 try await until {
@@ -106,30 +127,59 @@ struct EPUBAutoReadHostTests {
     }
 
     @Test func epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation() async throws {
-        try await withBook { service, id in
-            try await withReader(service, id, .scroll, .original) { model, controller in
-                let owner = try #require(model.autoReadOwner)
-                let old = try #require(model.presentationToken)
-                let path = try #require(model.spine.last)
-                model.navigateExplicitly(path: path, fragment: nil, target: nil)
-                #expect(model.autoReadStep(from: owner, distance: 4) == .stop)
-                try await until { model.ready && model.presentationToken?.path == path }
-                let offset = controller.webView.scrollView.contentOffset
-                #expect(controller.autoReadStep(for: old, distance: 4) == .stop)
-                #expect(model.autoReadStep(from: owner, distance: 4) == .stop)
-                #expect(controller.webView.scrollView.contentOffset == offset)
-                let current = try #require(model.autoReadOwner)
-                await model.suspend()
-                #expect(model.autoReadStep(from: current, distance: 4) == .stop)
-                await model.resume()
-                try await until { model.presentationToken != nil }
-                #expect(model.autoReadStep(from: current, distance: 4) == .stop)
-                let live = try #require(model.presentationToken)
-                model.handleLoadFailure(EPUBError.invalidPosition, token: live)
-                #expect(model.autoReadOwner == nil)
-                #expect(await model.close())
+        for mode in EPUBReadingMode.allCases {
+            try await withBook { service, id in
+                try await withReader(service, id, mode, .original) { model, controller in
+                    let owner = try #require(model.autoReadOwner)
+                    let old = try #require(model.presentationToken)
+                    let path = try #require(model.spine.last)
+                    let scroll = controller.webView.scrollView
+                    if mode == .paged {
+                        try #require(controller.beginAutoRead(for: old))
+                        try #require(model.autoReadStep(from: owner, distance: 0) == .waiting)
+                    }
+                    model.navigateExplicitly(path: path, fragment: nil, target: nil)
+                    #expect(model.autoReadStep(from: owner, distance: 4) == .stop)
+                    try await until { model.ready && model.presentationToken?.path == path }
+                    let offset = scroll.contentOffset
+                    #expect(controller.autoReadStep(for: old, distance: 4) == .stop)
+                    #expect(model.autoReadStep(from: owner, distance: 4) == .stop)
+                    #expect(scroll.contentOffset == offset)
+                    let current = try #require(model.autoReadOwner)
+                    if mode == .paged {
+                        try await until { controller.renderedChapterPaths.count == model.spine.count }
+                        let token = try #require(model.presentationToken)
+                        try #require(controller.beginAutoRead(for: token))
+                        try #require(model.autoReadStep(from: current, distance: 0) == .waiting)
+                    }
+                    await model.suspend()
+                    #expect(model.autoReadStep(from: current, distance: 4) == .stop)
+                    if mode == .paged {
+                        let sample = try #require(await controller.sampleVisibleNow())
+                        let saved = try #require(model.currentPosition)
+                        #expect(saved.path == sample.path && saved.node == sample.node && saved.utf16Offset == sample.utf16Offset)
+                    }
+                    await model.resume()
+                    try await until { model.presentationToken != nil }
+                    #expect(model.autoReadStep(from: current, distance: 4) == .stop)
+                    let live = try #require(model.presentationToken)
+                    model.handleLoadFailure(EPUBError.invalidPosition, token: live)
+                    #expect(model.autoReadOwner == nil)
+                    #expect(await model.close())
+                }
             }
         }
+    }
+
+    /// Poll the same action as the clock. No synthetic delegate callback or assumed animation duration.
+    private func requireOneLanding(_ model: EPUBReaderViewModel, owner: EPUBNavigationToken) async throws {
+        var result = model.autoReadStep(from: owner, distance: 0)
+        try #require(result == .waiting) // No second command on the same run-loop turn.
+        try await until {
+            if result == .waiting { result = model.autoReadStep(from: owner, distance: 0) }
+            return result != .waiting
+        }
+        try #require(result == .advanced)
     }
 
     private func until(_ condition: @MainActor () -> Bool) async throws {

@@ -92,6 +92,7 @@ struct LibraryManagementOptions: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             appearanceSection
+            ReadingTimeSummary()
             formatsSection
             aboutSection
         }
