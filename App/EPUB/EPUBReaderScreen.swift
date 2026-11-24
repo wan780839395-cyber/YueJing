@@ -29,6 +29,8 @@ struct EPUBReaderScreen: View {
     let routeID: UUID
     let onExit: @MainActor () -> Void
     @StateObject private var autoRead = AutoReadSession()
+    @StateObject private var speech = ReaderSpeechSession()
+    @State private var autoAfterSpeech: UUID?
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
     @State private var selectedDetent: PresentationDetent = .large
@@ -44,12 +46,27 @@ struct EPUBReaderScreen: View {
 
     private var searchReturnAction: (@MainActor () -> Void)? {
         guard model.canReturnFromSearch else { return nil }
-        return { stopAutoRead(); _ = Task { await model.returnFromSearch() } }
+        return { stopAutoRead(); model.revokeSpeech(); _ = Task { await model.returnFromSearch() } }
     }
 
     private var canStartAutoRead: Bool {
         scenePhase == .active && tools.canInteract && tools.panel == nil &&
             model.presentationToken != nil && model.autoReadOwner != nil
+    }
+
+    private var canStartSpeech: Bool {
+        !speech.isActive && scenePhase == .active && tools.canInteract &&
+            tools.panel == nil && model.presentationToken != nil && model.autoReadOwner != nil
+    }
+
+    private func startSpeech() {
+        guard canStartSpeech else { return }
+        autoAfterSpeech = nil
+        stopAutoRead()
+        guard let source = model.speechSource(onRevoke: { [weak speech] in
+            speech?.stop(restorePosition: false)
+        }) else { return }
+        speech.start(next: source)
     }
 
     private func stopAutoRead() {
@@ -58,8 +75,14 @@ struct EPUBReaderScreen: View {
     }
 
     private func startAutoRead() {
+        guard canStartAutoRead else { return }
+        if speech.isActive {
+            speech.stop()
+            if model.loading { autoAfterSpeech = model.speechRestoreID; return }
+        }
         guard canStartAutoRead, let owner = model.autoReadOwner, let token = model.presentationToken,
               model.webView.controller?.beginAutoRead(for: token) == true else { return }
+        model.revokeSpeech()
         mutateTools { $0.scrollingBegan() }
         autoRead.start(mode: model.readingMode == .scroll ? .scroll : .paged) { [weak model] distance in
             model?.autoReadStep(from: owner, distance: distance) ?? .stop
@@ -75,7 +98,9 @@ struct EPUBReaderScreen: View {
             autoReading: autoRead.isRunning,
             autoReadControl: AnyView(AutoReadControl(session: autoRead,
                 mode: model.readingMode == .scroll ? .scroll : .paged,
-                available: autoRead.isRunning || canStartAutoRead, appearance: appearance, start: startAutoRead)))
+                available: autoRead.isRunning || canStartAutoRead, appearance: appearance, start: startAutoRead)),
+            speechControl: AnyView(ReaderSpeechControl(session: speech, available: canStartSpeech, start: startSpeech)),
+            speechActive: speech.isActive, switchToAutoRead: canStartAutoRead ? startAutoRead : nil)
     }
 
     var body: some View {
@@ -273,16 +298,22 @@ struct EPUBReaderScreen: View {
         }
         .task(id: routeID) {
             stopAutoRead()
+            model.revokeSpeech()
             await model.load()
         }
         .modifier(ReadingTimeTracking(owner: routeID, readable: tools.canInteract && tools.panel == nil &&
             model.acceptsCanvasTouch && model.message == nil))
-        .onDisappear { stopAutoRead() }
+        .onDisappear { autoAfterSpeech = nil; stopAutoRead(); model.revokeSpeech() }
         // Covers every stop source, including the shared control and its wait watchdog.
         .onReceive(autoRead.$isRunning) { running in
             if !running { model.webView.controller?.cancelAutoPage() }
         }
-        .onChange(of: scenePhase) { if $0 != .active { stopAutoRead() } }
+        .onChange(of: scenePhase) { if $0 != .active { autoAfterSpeech = nil; stopAutoRead() } }
+        .task(id: model.presentationToken) {
+            guard let pending = autoAfterSpeech, model.presentationToken != nil else { return }
+            autoAfterSpeech = nil
+            if pending == model.speechRestoreID, !Task.isCancelled, !speech.isActive { startAutoRead() }
+        }
         .onChange(of: model.autoReadOwner) { _ in stopAutoRead() }
         .task(id: model.loading) {
             loadingFeedback = .quiet
@@ -616,6 +647,7 @@ struct EPUBReaderScreen: View {
     private func openPanel(_ panel: ReadingToolPanel) {
         guard !model.exitSaveFailed, model.ready else { return }
         stopAutoRead()
+        model.revokeSpeech()
         lastPanelControl = panel == .directory ? "directory" : "settings"
         mutateTools { $0.open(panel) }
     }
@@ -661,6 +693,7 @@ struct EPUBReaderScreen: View {
 
     private func manualPage(_ direction: EPUBPageDirection) {
         if autoRead.isRunning { stopAutoRead(); return }
+        model.revokeSpeech()
         _ = model.webView.controller?.turnPage(direction)
     }
 
@@ -671,6 +704,7 @@ struct EPUBReaderScreen: View {
         case .exitAccessibility:
             exitReader()
         case .scrollingBegan:
+            model.revokeSpeech()
             guard model.ready, !model.loading, tools.panel == nil else { return }
             mutateTools { $0.scrollingBegan() }
         case .tap(let expected, let decision):
@@ -684,6 +718,7 @@ struct EPUBReaderScreen: View {
         var request: UUID?
         mutateTools { request = $0.beginExit() }
         guard let request else { return }
+        model.revokeSpeech()
         Task {
             let succeeded: Bool
             if keepingSavedPosition {

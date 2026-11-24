@@ -37,6 +37,9 @@ struct ReaderFloatingToolsView: View {
     var returnFromSearch: (@MainActor () -> Void)? = nil
     var autoReading = false
     var autoReadControl: AnyView? = nil
+    var speechControl: AnyView? = nil
+    var speechActive = false
+    var switchToAutoRead: (@MainActor () -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
 
@@ -52,7 +55,9 @@ struct ReaderFloatingToolsView: View {
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if autoReading, let autoReadControl, state.canInteract, state.panel == nil, state.exitRequest == nil {
-                dockSurface(cornerRadius: 18) { autoReadControl }
+                dockSurface(cornerRadius: 18) {
+                    HStack(spacing: 4) { autoReadControl; speechControl }
+                }
                     .frame(maxWidth: ReaderVisualStyle.toolPanelMaximumWidth)
             } else if visible {
                 VStack(alignment: .trailing, spacing: 8) {
@@ -109,9 +114,21 @@ struct ReaderFloatingToolsView: View {
     private func toolContent(_ context: String) -> some View {
         VStack(spacing: 0) {
             chapterPanelContent(context)
-            if let autoReadControl {
+            if autoReadControl != nil || speechControl != nil {
                 Divider().padding(.horizontal, 12).accessibilityHidden(true)
-                autoReadControl
+                if speechActive {
+                    speechControl
+                    if let switchToAutoRead {
+                        Button("切换为自动阅读", action: switchToAutoRead)
+                            .font(.footnote).frame(minHeight: 44)
+                    }
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 2) { autoReadControl; speechControl }
+                            .fixedSize(horizontal: true, vertical: false)
+                        VStack(spacing: 0) { autoReadControl; speechControl }
+                    }
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)

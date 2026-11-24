@@ -9,6 +9,8 @@ struct ReaderScreen: View {
     let routeID: UUID
     let onExit: @MainActor () -> Void
     @StateObject private var autoRead = AutoReadSession()
+    @StateObject private var speech = ReaderSpeechSession()
+    @State private var autoAfterSpeech: UUID?
     @State private var tools = ReadingToolsPresentation()
     @State private var lastPanelControl: String?
     @State private var confirmedChapter: ConfirmedTXTChapter?
@@ -72,8 +74,41 @@ struct ReaderScreen: View {
         tools.canInteract && tools.panel == nil && scenePhase == .active && model.autoReadingAvailable
     }
 
+    private var speechAvailable: Bool {
+        tools.canInteract && tools.panel == nil && scenePhase == .active && model.speechAvailable
+    }
+
+    private func startSpeech() {
+        guard speechAvailable else { return }
+        autoAfterSpeech = nil
+        autoRead.stop()
+        model.startSpeech(speech)
+    }
+
     private func startAutoReading() {
-        guard autoReadAvailable, let controller = model.viewport.controller else { return }
+        guard autoReadAvailable else { return }
+        if speech.isActive {
+            speech.stop() // locate synchronously admits the jump; layout is asynchronous.
+            if let navigation = model.speechNavigation { autoAfterSpeech = navigation; return }
+        }
+        beginAutoReading()
+    }
+
+    private func windowApplied(_ id: UUID) {
+        let navigation = model.speechNavigation
+        model.windowApplied(id)
+        guard let navigation, autoAfterSpeech == navigation, model.speechNavigation == nil else { return }
+        Task { @MainActor in
+            guard autoAfterSpeech == navigation else { return }
+            autoAfterSpeech = nil
+            guard model.window?.id == id, model.viewport.controller?.navigationTargetVisible == true else { return }
+            beginAutoReading()
+        }
+    }
+
+    private func beginAutoReading() {
+        guard autoReadAvailable, !speech.isActive, model.viewport.interactionActive,
+              let controller = model.viewport.controller else { return }
         controller.beginAutoReading()
         autoRead.start(mode: .scroll) { [weak model, weak controller] distance in
             guard let model, let controller else { return .stop }
@@ -89,7 +124,9 @@ struct ReaderScreen: View {
             returnFromSearch: searchReturnAction,
             autoReading: autoRead.isRunning,
             autoReadControl: AnyView(AutoReadControl(session: autoRead, mode: .scroll,
-                available: autoReadAvailable, appearance: appearance, start: startAutoReading)))
+                available: autoReadAvailable, appearance: appearance, start: startAutoReading)),
+            speechControl: AnyView(ReaderSpeechControl(session: speech, available: speechAvailable, start: startSpeech)),
+            speechActive: speech.isActive, switchToAutoRead: autoReadAvailable ? startAutoReading : nil)
     }
 
     var body: some View {
@@ -107,7 +144,7 @@ struct ReaderScreen: View {
                     diagnosticSaveFailed: model.exitSaveFailed, diagnosticScene: scenePhase,
                     // END READER DIAGNOSTICS viewport facts
                     onAnchor: model.visibleChanged, onExtend: model.extendWindow, onWidth: model.resized,
-                    onSettled: model.scrollingEnded, onApplied: model.windowApplied,
+                    onSettled: model.scrollingEnded, onApplied: windowApplied,
                     toolIntent: { tools.intent }, onToolsInteraction: handleToolsInteraction, autoRead: autoRead)
                     .allowsHitTesting(!model.exitSaveFailed && tools.exitRequest == nil && tools.panel == nil)
                     .accessibilityHidden(tools.panel != nil || tools.exitRequest != nil)
@@ -238,7 +275,7 @@ struct ReaderScreen: View {
             }
         }
         .onChange(of: scenePhase) { phase in
-            if phase != .active { autoRead.stop() }
+            if phase != .active { autoAfterSpeech = nil; autoRead.stop() }
             // BEGIN READER DIAGNOSTICS screen scene
             model.viewport.observeDiagnosticScene(phase)
             // END READER DIAGNOSTICS screen scene
@@ -246,8 +283,8 @@ struct ReaderScreen: View {
         }
         .modifier(ReadingTimeTracking(owner: routeID, readable: tools.canInteract && tools.panel == nil &&
             model.window != nil && !model.loading && model.message == nil && !model.exitSaveFailed))
-        .onDisappear { autoRead.stop() }
-        .onChange(of: routeID) { _ in autoRead.stop() }
+        .onDisappear { autoAfterSpeech = nil; autoRead.stop() } // Route owner, not disappearance, closes speech.
+        .onChange(of: routeID) { _ in autoAfterSpeech = nil; autoRead.stop(); speech.stop(restorePosition: false) }
         .onChange(of: model.autoReadingAvailable) { if !$0 { autoRead.stop() } }
         .onChange(of: model.loading) { loading in if loading { mutateTools { $0.forceCompact() } } }
         .onChange(of: model.exitSaveFailed) { failed in if failed { mutateTools { $0.forceCompact() } } }
@@ -269,7 +306,7 @@ struct ReaderScreen: View {
     private func handleNativeScene(_ event: ReaderSceneEvent) {
         guard model.viewport.isCurrent(event, routeID: routeID) else { return }
         if event.active { mutateTools { $0.resume() } }
-        else { autoRead.stop(); mutateTools { $0.suspend() } }
+        else { autoAfterSpeech = nil; autoRead.stop(); mutateTools { $0.suspend() } }
         // BEGIN READER DIAGNOSTICS scene tools completion
         model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
         // END READER DIAGNOSTICS scene tools completion
@@ -421,6 +458,7 @@ struct ReaderScreen: View {
         }
     }
     private func openPanel(_ panel: ReadingToolPanel) {
+        autoAfterSpeech = nil
         autoRead.stop()
         guard !model.exitSaveFailed else { return }
         if panel == .directory, model.window == nil { return }
@@ -452,6 +490,8 @@ struct ReaderScreen: View {
         case .showAccessibility: mutateTools { $0.show() }
         case .exitAccessibility: exitReader()
         case .scrollingBegan:
+            autoAfterSpeech = nil
+            model.beginManualNavigation()
             if autoRead.isRunning { autoRead.stop(); return }
             // BEGIN READER DIAGNOSTICS scrolling observation
             model.viewport.controller?.interactionDiagnostics.scrolling()
@@ -472,9 +512,11 @@ struct ReaderScreen: View {
     }
     private func exitReader(keepingSavedPosition: Bool = false) {
         autoRead.stop()
+        autoAfterSpeech = nil
         var request: UUID?
         mutateTools { request = $0.beginExit() }
         guard let request else { return }
+        speech.stop(restorePosition: !keepingSavedPosition)
         Task {
             let succeeded: Bool
             if keepingSavedPosition { await model.leaveKeepingSavedPosition(); succeeded = true }

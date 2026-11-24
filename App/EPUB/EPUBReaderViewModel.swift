@@ -126,6 +126,11 @@ final class EPUBReaderViewModel: ObservableObject {
     private var generation = UUID() {
         didSet { searchReturn.cancelPending() }
     }
+    // A playback belongs to the route/reader, not to a WK epoch (resume mints a new one).
+    private var speechID: UUID?
+    private var onSpeechRevoked: (@MainActor () -> Void)?
+    private var pendingSpeechLocation: EPUBReadingPosition?
+    private var resumeAfterSettling = false
     private var suspending = false
     private var closing = false
     private var suspended = false
@@ -155,6 +160,55 @@ final class EPUBReaderViewModel: ObservableObject {
         guard acceptsSearch, !loading, message == nil, ready || promotingVisibleChapter,
               let documentOrigin, reader?.reading.session.id == documentOrigin.sessionID else { return nil }
         return documentOrigin
+    }
+
+    private(set) var speechRestoreID: UUID?
+
+    func revokeSpeech() {
+        speechRestoreID = nil
+        let stop = onSpeechRevoked
+        speechID = nil
+        pendingSpeechLocation = nil
+        onSpeechRevoked = nil
+        stop?()
+    }
+
+    func speechSource(onRevoke: @escaping @MainActor () -> Void) -> ReaderSpeechSession.Source? {
+        guard acceptsSearch, message == nil, let token = presentationToken, let reader,
+              reader.reading.session.id == token.sessionID else { return nil }
+        revokeSpeech()
+        let owner = UUID()
+        speechID = owner
+        onSpeechRevoked = onRevoke
+        var cursor: EPUBSpeechCursor?
+        return { [weak self] in
+            guard let self, self.speechID == owner, self.reader === reader else { throw CancellationError() }
+            if cursor == nil {
+                guard self.presentationToken == token, let controller = self.webView.controller,
+                      let sample = await controller.sampleSpeechStart(for: token),
+                      self.speechID == owner, self.acceptsSearch, self.presentationToken == token,
+                      self.webView.controller === controller, sample.path == token.path else { throw EPUBError.invalidPosition }
+                cursor = try EPUBSpeechCursor(package: reader.publication.package, path: sample.path,
+                                              node: sample.node, rawOffset: sample.utf16Offset)
+            }
+            let passage = try await cursor?.next()
+            try Task.checkCancellation()
+            guard self.speechID == owner, self.reader === reader else { throw CancellationError() }
+            guard let passage else { return nil }
+            return ReaderSpeechChunk(text: passage.text) { [weak self] in
+                guard let self, self.speechID == owner, self.reader === reader,
+                      !self.closing, self.closeTask == nil, !self.exitSaveFailed else { return }
+                // Single-use. Navigation must not re-enter stop() during its own locate callback.
+                self.onSpeechRevoked = nil
+                self.speechID = nil
+                if self.suspending || self.suspended {
+                    self.pendingSpeechLocation = passage.position
+                } else {
+                    self.navigateExplicitly(path: passage.position.path, fragment: nil, target: passage.position)
+                    self.speechRestoreID = owner
+                }
+            }
+        }
     }
 
     func autoReadStep(from owner: EPUBNavigationToken, distance: CGFloat) -> AutoReadStep {
@@ -246,6 +300,7 @@ final class EPUBReaderViewModel: ObservableObject {
         let selectionValue = id.map { EPUBUserFontPreference.selectionValue($0) }
         guard (id != userFontID || removedFromPresentation), id.map(EPUBUserFontPreference.validID) != false,
               let reader, let token = currentToken, ready, !closing, !suspended, !exitSaveFailed else { return }
+        revokeSpeech()
         let life = lifecycle
         navigationTask?.cancel()
         navigationTask = Task { @MainActor [weak self] in
@@ -381,6 +436,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func retry() async {
         guard !closing, !exitSaveFailed else { return }
+        revokeSpeech()
         openingObservation.interrupt(.retry)
         openingPresentationSummary = openingObservation.summary
         if reader == nil {
@@ -412,6 +468,7 @@ final class EPUBReaderViewModel: ObservableObject {
         let nextIndex = index + direction.rawValue
         let paths = reader.publication.package.spine
         guard paths.indices.contains(nextIndex) else { return false }
+        revokeSpeech()
         // Close the old epoch's UI admission synchronously, before the task can suspend.
         ready = false
         currentToken = nil
@@ -478,6 +535,7 @@ final class EPUBReaderViewModel: ObservableObject {
         }
         // Revoke old observations before scheduling: a queued scroll promotion must not
         // cancel this explicit user destination or overwrite its pending fragment.
+        revokeSpeech()
         webView.controller?.cancelAutoPage()
         ready = false
         loading = true
@@ -516,6 +574,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 navigationRequest?.layoutMode != layoutMode else { return }
         let targetPath = currentPath ?? currentPosition?.path ?? reader.publication.package.spine.first
         guard let path = targetPath else { return }
+        revokeSpeech()
         let preserved = currentPosition?.path == path ? currentPosition : nil
 
         settingsTask?.cancel()
@@ -994,13 +1053,20 @@ final class EPUBReaderViewModel: ObservableObject {
             }
         }
         await flush()
+        if resumeAfterSettling { resumeAfterSettling = false; await resume() }
     }
 
     func resume() async {
         guard !closing else { return }
+        if suspending { resumeAfterSettling = true; return }
         guard suspended else { return }
         suspended = false
         lifecycle = UUID()
+        if let target = pendingSpeechLocation {
+            pendingSpeechLocation = nil
+            navigateExplicitly(path: target.path, fragment: nil, target: target)
+            return
+        }
         if reader == nil {
             openingAttempted = false // Preserve existing resume of a suspended opening.
             await load()
@@ -1023,6 +1089,7 @@ final class EPUBReaderViewModel: ObservableObject {
 
     func close() async -> Bool {
         if let closeTask { return await closeTask.value }
+        revokeSpeech()
         webView.controller?.cancelAutoPage()
         let task = Task { @MainActor in await self.performClose() }
         closeTask = task
@@ -1120,6 +1187,7 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     func leaveKeepingSavedPosition() async {
+        revokeSpeech()
         recordReopenReason(.abandoned)
         closing = true
         lifecycle = UUID()

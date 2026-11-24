@@ -87,6 +87,51 @@ struct TXTAutoReadingTests {
         }
     }
 
+    @Test func speechPullsFromVisibleLineWhileSuspendedAndRestoresFinalFragment() async throws {
+        try await withReader { model, controller, table, service, book in
+            let initial = try #require(model.window)
+            table.setContentOffset(CGPoint(x: 0, y: 240), animated: false)
+            let visible = try #require(controller.visibleNavigationAnchor())
+            try #require(visible.rawByteOffset > initial.anchor.rawByteOffset)
+            let lease = try #require(model.makeSpeechCursor())
+            await model.suspend(); model.viewport.detach(controller)
+            let first = try #require(try await lease.cursor.next())
+            #expect(first.anchor.rawByteOffset == visible.rawByteOffset)
+            var heard = first.anchor
+            while let fragment = try await lease.cursor.next() { heard = fragment.anchor }
+            model.restoreSpeech(heard, lease: lease.id)
+            try #require(model.speechNavigation != nil && model.window?.id == initial.id)
+            model.viewport.attach(controller); await model.resume()
+            try await waitUntil { model.window?.id != initial.id }
+            let restored = try #require(model.window)
+            #expect(restored.anchor == heard)
+            controller.apply(restored, userNavigation: model.viewport.onNextRestoreIsNavigation)
+            model.viewport.applied(controller); model.windowApplied(restored.id)
+            #expect(controller.navigationTargetVisible && model.speechNavigation == nil)
+            try #require(await model.close())
+            let reopened = try await service.openReader(id: book.id, budget: ReaderStoragePolicy.budget())
+            #expect(reopened.reading.anchor == heard)
+            try await reopened.close()
+        }
+    }
+
+    @Test func manualNavigationRevokesPendingSpeechLayoutAndLateLocate() async throws {
+        try await withReader { model, controller, _, _, _ in
+            let displayed = try #require(controller.window)
+            let old = try #require(model.makeSpeechCursor())
+            let current = try #require(model.makeSpeechCursor())
+            let fragment = try #require(try await current.cursor.next())
+            model.restoreSpeech(fragment.anchor, lease: old.id)
+            #expect(model.speechNavigation == nil)
+            model.restoreSpeech(fragment.anchor, lease: current.id)
+            try await waitUntil { model.window?.id != displayed.id } // Layout published, not yet applied.
+            model.beginManualNavigation()
+            model.restoreSpeech(fragment.anchor, lease: current.id)
+            #expect(model.window?.id == displayed.id && model.speechNavigation == nil)
+            #expect(model.speechAvailable)
+        }
+    }
+
     private func apply(_ window: ReadingWindow, _ model: ReaderViewModel, _ controller: ReaderViewController) {
         controller.apply(window, userNavigation: false)
         model.viewport.applied(controller)

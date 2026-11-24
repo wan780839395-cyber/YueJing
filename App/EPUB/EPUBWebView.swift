@@ -994,10 +994,16 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         } while true
     }
 
-    private func sampleVisibleOnce(for current: EPUBNavigationRequest) async -> EPUBLocatorPayload? {
+    func sampleSpeechStart(for token: EPUBNavigationToken) async -> EPUBLocatorPayload? {
+        guard readyToken == token, let request = activeRequest, request.token == token, webView != nil else { return nil }
+        return await sampleVisibleOnce(for: request, speechStart: true)
+    }
+
+    private func sampleVisibleOnce(for current: EPUBNavigationRequest, speechStart: Bool = false) async -> EPUBLocatorPayload? {
+        let sample = speechStart ? "sampleSpeechStart" : "sampleNow"
         return await withCheckedContinuation { continuation in
             webView.__evaluateJavaScript(
-                "window.__yjEpub && window.__yjEpub.sampleNow ? window.__yjEpub.sampleNow() : null;",
+                "window.__yjEpub && window.__yjEpub.\(sample) ? window.__yjEpub.\(sample)() : null;",
                 inFrame: nil,
                 in: EPUBLocationScript.world
             ) { [weak self] raw, error in
@@ -1010,7 +1016,7 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
                     continuation.resume(returning: nil)
                     return
                 }
-                self.updateAccessibilityCanvas(with: payload, preferences: current.preferences)
+                if !speechStart { self.updateAccessibilityCanvas(with: payload, preferences: current.preferences) }
                 continuation.resume(returning: payload)
             }
         }

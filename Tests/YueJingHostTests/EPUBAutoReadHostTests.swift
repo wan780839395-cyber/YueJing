@@ -171,6 +171,98 @@ struct EPUBAutoReadHostTests {
         }
     }
 
+    @Test func epubSpeechCursorBoundsUTF16AndSkipsImageAndEmptyChapters() async throws {
+        let long = String(repeating: "😀", count: 300)
+        let package = EPUBPackage(sourceSHA256: "fixture", title: "", spine: ["a", "image", "blank", "b"],
+            navigation: [], resources: [], textNodes: ["a": ["not spoken", "甲😀。 后句！"],
+                "image": ["图片页"], "blank": ["空白页"], "b": [" \n", long]], coverPath: nil)
+        let cursor = try EPUBSpeechCursor(package: package, path: "a", node: 1, rawOffset: 2)
+        let first = try #require(try await cursor.next())
+        #expect(first.text == "😀。" && first.position.node == 1 && first.position.utf16Offset == 1)
+        let second = try #require(try await cursor.next())
+        #expect(second.text == "后句！" && second.position.utf16Offset == 5)
+        var joined = ""
+        while let chunk = try await cursor.next() {
+            try chunk.position.validate(in: package)
+            #expect(chunk.position.path == "b" && chunk.position.node == 1)
+            #expect(chunk.position.utf16Offset == joined.utf16.count && chunk.text.utf16.count <= 280)
+            joined += chunk.text
+        }
+        #expect(joined == long)
+        #expect(try await cursor.next() == nil)
+    }
+
+    @Test func epubSpeechContinuesWhileSuspendedAndRestoresLastSentenceAtEOF() async throws {
+        try await withBook { service, id in
+            try await withReader(service, id, .scroll, .reader) { model, controller in
+                let middle = model.spine[1]
+                model.navigateExplicitly(path: middle, fragment: "sec-mid", target: nil)
+                try await until { model.presentationToken?.path == middle }
+                let owner = try #require(model.presentationToken)
+                let sample = try #require(await controller.sampleSpeechStart(for: owner))
+                let package = try #require(model.reader?.publication.package)
+                let oracle = try EPUBSpeechCursor(package: package, path: middle, node: sample.node, rawOffset: sample.utf16Offset)
+                let expected = try #require(try await oracle.next())
+                let source = try #require(model.speechSource { Issue.record("Locking must not revoke playback") })
+                var last = try #require(try await source())
+                #expect(last.text == expected.text)
+                await model.suspend()
+                let offset = controller.webView.scrollView.contentOffset
+                let loads = controller.documentLoadCount
+                while let chunk = try await source() { last = chunk }
+                #expect(last.text == "EPUB_CH3_END 第三章末尾。")
+                #expect(controller.documentLoadCount == loads && controller.webView.scrollView.contentOffset == offset)
+                #expect(model.currentToken == owner)
+                // The session's deferred location may arrive before the reader's resume handler.
+                last.locate()
+                #expect(model.currentPath == middle)
+                await model.resume()
+                try await until { model.presentationToken?.path == model.spine.last }
+                let target = try #require(model.navigationRequest?.targetPosition)
+                let nodes = try #require(try package.nodes(at: target.path))
+                #expect(nodes[target.node] == last.text && target.utf16Offset == 0)
+                #expect(await model.close())
+            }
+        }
+    }
+
+    @Test func epubSpeechRefusesCachedAnchorWhenViewportHasNoVisibleLocator() async throws {
+        try await withBook { service, id in
+            try await withReader(service, id, .scroll, .original) { model, controller in
+                let token = try #require(model.presentationToken)
+                _ = try #require(await controller.sampleVisibleNow())
+                let source = try #require(model.speechSource { })
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("document.body.style.display = 'none'")
+                #expect(await controller.sampleSpeechStart(for: token) == nil)
+                await #expect(throws: EPUBError.invalidPosition) { _ = try await source() }
+                _ = try await controller.evaluateLocatorJavaScriptForTesting("document.body.style.removeProperty('display')")
+                #expect(await model.close())
+            }
+        }
+    }
+
+    @Test func epubSpeechRejectsLateSourceAndLocateAfterNavigationOrExit() async throws {
+        try await withBook { service, id in
+            try await withReader(service, id, .paged, .original) { model, _ in
+                var stops = 0
+                let old = try #require(model.speechSource { stops += 1 })
+                let heard = try #require(try await old())
+                let path = try #require(model.spine.last)
+                model.navigateExplicitly(path: path, fragment: nil, target: nil)
+                heard.locate()
+                #expect(stops == 1)
+                await #expect(throws: CancellationError.self) { _ = try await old() }
+                try await until { model.presentationToken?.path == path }
+                let live = try #require(model.speechSource { stops += 1 })
+                let final = try #require(try await live())
+                #expect(await model.close())
+                final.locate()
+                #expect(stops == 2 && model.navigationRequest == nil)
+                await #expect(throws: CancellationError.self) { _ = try await live() }
+            }
+        }
+    }
+
     /// Poll the same action as the clock. No synthetic delegate callback or assumed animation duration.
     private func requireOneLanding(_ model: EPUBReaderViewModel, owner: EPUBNavigationToken) async throws {
         var result = model.autoReadStep(from: owner, distance: 0)

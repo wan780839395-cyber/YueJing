@@ -39,29 +39,39 @@ struct ReadingTimeTracking: ViewModifier {
 
 @MainActor
 struct ReadingTimeSummary: View {
+    enum Scope { case today, currentBook }
+    let scope: Scope
     @Environment(\.readingTimeBook) private var book
     @ObservedObject private var ledger = ReadingTimeLedger.shared
 
+    init(scope: Scope) { self.scope = scope }
+
     var body: some View {
-        // Only the statistics view refreshes; never invalidate the reading canvas just to show a clock.
-        TimelineView(.periodic(from: .now, by: 60)) { _ in
-            let snapshot = ledger.snapshot(book: book)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("阅读时长").font(.headline).accessibilityAddTraits(.isHeader)
-                metric("今日阅读", snapshot.today, id: "readingTime.today")
-                if book != nil { metric("本书累计", snapshot.book, id: "readingTime.book") }
+        switch scope {
+        case .today:
+            // Keep the date fresh if the settings stay open across midnight.
+            TimelineView(.periodic(from: .now, by: 60)) { _ in
+                Text("今日已读 \(durationText(ledger.snapshot(book: nil).today))")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("readingTime.today")
             }
-            .padding(.vertical, 8)
+        case .currentBook:
+            if let book {
+                Text("这本书已读 \(durationText(ledger.snapshot(book: book).book))")
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("readingTime.book")
+            }
         }
     }
-    private func metric(_ label: String, _ duration: TimeInterval, id: String) -> some View {
+
+    private func durationText(_ duration: TimeInterval) -> String {
+        guard duration > 0 else { return "0 分钟" }
         let minutes = Int(duration / 60)
-        let value = duration <= 0 ? "0 分钟" : minutes == 0 ? "不足 1 分钟" : minutes < 60 ? "\(minutes) 分钟" : "\(minutes / 60) 小时 \(minutes % 60) 分钟"
-        return HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Text(value).monospacedDigit()
-        }
-        .font(.subheadline).accessibilityElement(children: .combine).accessibilityIdentifier(id)
+        guard minutes > 0 else { return "不足 1 分钟" }
+        guard minutes >= 60 else { return "\(minutes) 分钟" }
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(minutes / 60) 小时" : "\(minutes / 60) 小时 \(remainder) 分钟"
     }
 }

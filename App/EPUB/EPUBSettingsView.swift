@@ -110,6 +110,8 @@ struct EPUBSettingsView: View {
                         } else {
                             moreContent
                         }
+                        ReadingTimeSummary(scope: .currentBook)
+                            .foregroundStyle(appearance.secondary)
                     }
                     .padding(.horizontal, ReaderVisualStyle.panelHorizontalInset)
                     .padding(.top, 4)
@@ -256,7 +258,6 @@ struct EPUBSettingsView: View {
                 context: .epub,
                 showsSpecimen: false
             )
-            ReadingTimeSummary()
         }
     }
 

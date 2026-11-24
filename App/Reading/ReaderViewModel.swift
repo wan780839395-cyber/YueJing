@@ -63,6 +63,11 @@ final class ReaderViewModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var steppingAutoRead = false
     private var queuedAutoProgress: (ReadingAnchor, Int64)?
+    // A playback lease follows the opened book, not the scene/layout lifecycle (lock changes both).
+    private var speechID: UUID?
+    private var speechSession: ReaderSpeechSession?
+    private var pendingSpeechAnchor: ReadingAnchor?
+    var speechNavigation: UUID? { pendingSpeechAnchor == nil ? nil : navigationGate.navigation }
     private var settingsTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
     private var openingMeasurements: [ProcessingMeasurement] = []
@@ -177,6 +182,60 @@ final class ReaderViewModel: ObservableObject {
             message == nil && navigationGate.navigation == nil && returnRequest == nil && bookmarkContext == nil
     }
 
+    var speechAvailable: Bool {
+        guard autoReadingAvailable, !layoutNeedsRefresh, viewport.interactionActive, !viewport.interacting,
+              let id = window?.id, viewport.controller?.window?.id == id else { return false }
+        return navigationGate.accepts(window: id)
+    }
+
+    func makeSpeechCursor() -> (cursor: TXTSpeechCursor, id: UUID)? {
+        guard speechAvailable, let owner = reader, let origin = viewport.controller?.visibleNavigationAnchor(),
+              speechAvailable, origin.bookID == owner.book.id, origin.versionID == owner.book.versionID else { return nil }
+        let id = UUID()
+        speechID = id
+        return (TXTSpeechCursor(source: owner.source, origin: origin), id)
+    }
+
+    func restoreSpeech(_ heard: ReadingAnchor, lease: UUID) {
+        guard speechID == lease, let owner = reader, heard.bookID == owner.book.id,
+              heard.versionID == owner.book.versionID, !closing, !exitSaveFailed else { return }
+        speechID = nil
+        positionRevision &+= 1; searchReturn.cancelPending(); navigationGate.begin()
+        pendingSpeechAnchor = heard; anchor = heard
+        // If locked, resume() renders this target. Close/flush must not sample stale pixels.
+        requestWindow()
+    }
+
+    func startSpeech(_ session: ReaderSpeechSession) {
+        guard let (cursor, token) = makeSpeechCursor(), let owner = reader else { return }
+        speechSession = session
+        session.start { [weak self, weak owner] in
+            guard let self, let owner, speechID == token, reader === owner else { throw CancellationError() }
+            let fragment = try await cursor.next()
+            try Task.checkCancellation()
+            guard speechID == token, reader === owner else { throw CancellationError() }
+            guard let fragment else { return nil }
+            return ReaderSpeechChunk(text: fragment.text) { [weak self] in
+                self?.restoreSpeech(fragment.anchor, lease: token)
+            }
+        }
+    }
+
+    private func stopSpeech(restore: Bool) {
+        speechSession?.stop(restorePosition: restore)
+        speechID = nil; speechSession = nil
+    }
+
+    /// Explicit input wins even between locate() and application of its async layout.
+    func beginManualNavigation() {
+        stopSpeech(restore: false)
+        guard pendingSpeechAnchor != nil, let displayed = viewport.controller?.window else { return }
+        pendingSpeechAnchor = nil; layoutTask?.cancel(); generation = UUID()
+        navigationGate.reset(); navigationGate.applied(window: displayed.id)
+        viewport.onNextRestoreIsNavigation = false; layoutNeedsRefresh = false
+        anchor = viewport.anchor(); window = displayed
+    }
+
     func advanceAutoReading(by distance: CGFloat, in controller: ReaderViewController) -> AutoReadStep {
         guard autoReadingAvailable, viewport.controller === controller, viewport.interactionActive,
               let id = window?.id else { return .stop }
@@ -230,6 +289,7 @@ final class ReaderViewModel: ObservableObject {
     func go(to chapter: TXTChapter) {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               chapter.documentVersion == reader.reading.session.versionID else { return }
+        beginManualNavigation()
         positionRevision &+= 1
         searchReturn.cancelPending()
         navigationGate.begin()
@@ -258,7 +318,7 @@ final class ReaderViewModel: ObservableObject {
     func flush() async {
         guard !closing, let reader else { return }
         let request = lifecycle
-        let reliable = userPosition ? viewport.anchor() : nil
+        let reliable = pendingSpeechAnchor ?? (userPosition ? viewport.anchor() : nil)
         if let reliable, navigationGate.navigation == nil { anchor = reliable }
         saveTask?.cancel(); settingsTask?.cancel()
         queuedAutoProgress = nil
@@ -295,13 +355,14 @@ final class ReaderViewModel: ObservableObject {
     }
     func close() async -> Bool {
         guard !closing else { return false }
+        stopSpeech(restore: true)
         closing = true; lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
         endBookmarkPanel()
         openTask?.cancel(); openTask = nil; layoutTask?.cancel(); directory.dismiss()
         saveTask?.cancel(); settingsTask?.cancel()
         queuedAutoProgress = nil
-        let reliable = userPosition ? viewport.anchor() : nil
+        let reliable = pendingSpeechAnchor ?? (userPosition ? viewport.anchor() : nil)
         if let reliable { anchor = reliable }
         sequence += 1; preferencesSequence += 1
         let old = reader
@@ -317,6 +378,7 @@ final class ReaderViewModel: ObservableObject {
         }
     }
     func leaveKeepingSavedPosition() async {
+        stopSpeech(restore: false)
         closing = true; lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
         endBookmarkPanel()
@@ -328,6 +390,7 @@ final class ReaderViewModel: ObservableObject {
     }
     private func restartReader() async {
         guard !closing, !suspended, !exitSaveFailed else { return }
+        stopSpeech(restore: false)
         lifecycle = UUID(); generation = UUID()
         searchReturn = .init()
         endBookmarkPanel()
@@ -335,13 +398,14 @@ final class ReaderViewModel: ObservableObject {
         openTask?.cancel(); openTask = nil; directory.dismiss()
         layoutTask = nil; saveTask?.cancel(); settingsTask?.cancel()
         queuedAutoProgress = nil
-        let reliable = userPosition ? viewport.anchor() : nil
+        let reliable = pendingSpeechAnchor ?? (userPosition ? viewport.anchor() : nil)
         sequence += 1; preferencesSequence += 1; loading = true
         do {
             if let old { try await old.close(anchor: reliable, sequence: sequence,
                                               preferences: preferences.validated, preferencesSequence: preferencesSequence) }
             guard lifecycle == request, !closing, !suspended else { return }
             reader = nil; window = nil; chapterTotal = 0; directory.detach(); userPosition = false
+            pendingSpeechAnchor = nil
             await load()
         } catch {
             guard lifecycle == request else { return }
@@ -380,7 +444,10 @@ final class ReaderViewModel: ObservableObject {
                 layoutNeedsRefresh = false; openingMeasurements.append(contentsOf: measurements)
                 let isNavigation = navigation != nil && navigationGate.navigation == navigation
                 if isNavigation, let navigation { navigationGate.expect(window: rendered.id, navigation: navigation) }
-                viewport.onNextRestoreIsNavigation = isNavigation; window = rendered; loading = false
+                // The gate still owns a speech jump, but UIKit must preserve its exact semantic
+                // anchor, not adopt the clamped top line (especially on the last screen).
+                viewport.onNextRestoreIsNavigation = isNavigation && pendingSpeechAnchor == nil
+                window = rendered; loading = false
             } catch is CancellationError { }
             catch {
                 guard request == generation, life == lifecycle, !closing else { return }
@@ -394,6 +461,7 @@ final class ReaderViewModel: ObservableObject {
         if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel() }
         let navigation = navigationGate.navigation
         let navigationApplied = navigationGate.applied(window: id)
+        if navigationApplied { pendingSpeechAnchor = nil }
         if let visible = directoryAnchor() {
             if navigationApplied, let navigation, searchReturn.pendingNavigation == navigation {
                 guard viewport.interactionActive, viewport.controller?.navigationTargetVisible == true else {
@@ -448,6 +516,7 @@ extension ReaderViewModel {
         guard let panel = bookmarkContext, panel.presentation == presentation,
               bookmarkOwnerIsCurrent(panel) else { throw LibraryError.invalidAnchor }
         // The add-position snapshot is not a navigation lease. Capture a fresh lease at click time.
+        beginManualNavigation()
         let context = navigationContext(owner: panel.owner, presentation: presentation)
         preparedJump = nil
         guard bookmarkPositionIsCurrent(context) else { throw BookmarkJumpError.stateChanged }
@@ -477,6 +546,7 @@ extension ReaderViewModel {
                   bookmarkPositionIsCurrent(jump.context) else { return false }
             effect = .remember(visible)
         }
+        stopSpeech(restore: false)
         preparedJump = nil
         applyNavigationWindow(rendered, effect: effect)
         return true
@@ -529,6 +599,7 @@ extension ReaderViewModel {
         try Task.checkCancellation()
         guard let panel = bookmarkContext, bookmarkOwnerIsCurrent(panel),
               searchHitIDs.contains(hit.id) else { throw BookmarkJumpError.stateChanged }
+        beginManualNavigation()
         let request = UUID(); searchRequest = request // A later selection revokes this preparation.
         let context = navigationContext(owner: panel.owner, presentation: panel.presentation)
         preparedJump = nil
@@ -543,6 +614,7 @@ extension ReaderViewModel {
     func returnFromSearch() async {
         guard !Task.isCancelled, canReturnFromSearch, returnRequest == nil, let origin = searchReturn.origin,
               let reader, bookmarkContext == nil else { return }
+        beginManualNavigation()
         let context = navigationContext(owner: reader, presentation: nil)
         let intent = viewport.controller?.toolIntent?()
         guard bookmarkPositionIsCurrent(context) else { return }

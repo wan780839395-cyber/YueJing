@@ -177,7 +177,7 @@ enum EPUBLocationScript {
 
     /// Snaps a DOM UTF-16 code-unit offset inside `text` to a valid Swift Character boundary.
     /// Out-of-bounds (< 0 or > utf16.count) offsets are rejected rather than silently clamped.
-    static func snapUTF16OffsetToCharacterBoundary(_ utf16Offset: Int, in text: String) -> Int? {
+    nonisolated static func snapUTF16OffsetToCharacterBoundary(_ utf16Offset: Int, in text: String) -> Int? {
         let totalUTF16 = text.utf16.count
         guard utf16Offset >= 0, utf16Offset <= totalUTF16 else { return nil }
         if utf16Offset == 0 || utf16Offset == totalUTF16 { return utf16Offset }
@@ -1081,7 +1081,7 @@ enum EPUBLocationScript {
             return true;
         }
 
-        function sampleVisible(path) {
+        function sampleVisible(path, requireVisible) {
             var sampleStarted = diagnosticNow();
             var chapters = path ? state.chapters.filter(function(c) { return c.path === path; }) : state.chapters;
             var entries = [];
@@ -1143,12 +1143,16 @@ enum EPUBLocationScript {
             for (var c = 0; c < chapters.length; c++) {
                 var chapter = chapters[c];
                 if (chapter.path === chosenPath) { break; }
+                // Only an image-only chapter has a meaningful synthetic node 0. In a
+                // mixed chapter don't turn an image above the fold into invented prose.
+                if (requireVisible && !(chapter.spans.length === 1 && chapter.spans[0].textContent === "图片页")) { continue; }
                 var images = chapter.element.querySelectorAll("img");
                 if (Array.prototype.some.call(images, function(img) { return intersects(img.getClientRects()); })) {
                     chosenPath = chapter.path; chosenNode = 0; offset = 0; break;
                 }
             }
             if (!chosenPath) {
+                if (requireVisible) { return null; }
                 var visibleChapter = chapters.find(function(c) { return intersects(c.element.getClientRects()); });
                 chosenPath = visibleChapter ? visibleChapter.path : state.path;
                 if (state.lastAnchor && state.lastAnchor.path === chosenPath) {
@@ -1976,6 +1980,16 @@ enum EPUBLocationScript {
             },
             windowPaths: function() { return state.chapters.map(function(c) { return c.path; }); },
             sampleNow: sampleScrollPayload,
+            sampleSpeechStart: function() {
+                if (!state.ready || state.suppressingReflow || state.syncing) { return null; }
+                var sample = sampleVisible(null, true);
+                if (!sample) { return null; }
+                // Do not substitute preserveTargetAnchor or lastAnchor for the visible text.
+                sample.kind = "scroll";
+                sample.restoredNode = sample.node;
+                sample.restoredOffset = sample.utf16Offset;
+                return sample;
+            },
             sampleStatus: function() {
                 return {ready: state.ready, reflow: state.suppressingReflow, syncing: state.syncing,
                     chapters: state.chapters.length, revision: state.reflowRevision, scrollActive: state.scrollActive,
