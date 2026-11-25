@@ -19,7 +19,8 @@ int32_t withinBudget(const float *samples, int32_t n, void *arg) {
 }
 }
 
-const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName) {
+const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName,
+                                        bool normalizeNumbers) {
     try {
         const std::string root = std::string(directory) + "/";
         const auto model = root + modelName, voices = root + "voices.bin", tokens = root + "tokens.txt";
@@ -36,7 +37,9 @@ const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *mode
         k.length_scale = 1;
         config.model.num_threads = 2;
         config.model.provider = "cpu";
-        config.rule_fsts = rules.c_str();
+        // v1.12.20 replaces the entire utterance with each rule's output, even
+        // if empty. Plain prose needs only the multilingual lexicon frontend.
+        if (normalizeNumbers) config.rule_fsts = rules.c_str();
         config.max_num_sentences = 1;
         config.silence_scale = 1;
         auto *tts = SherpaOnnxCreateOfflineTts(&config);
@@ -56,6 +59,7 @@ void YJKokoroClose(const SherpaOnnxOfflineTts *tts) { SherpaOnnxDestroyOfflineTt
 const SherpaOnnxGeneratedAudio *YJKokoroGenerate(const SherpaOnnxOfflineTts *tts,
         const char *text, float speed, YJKokoroView *view) {
     try {
+        if (!text || !*text) return nullptr;
         int32_t remaining = maxSamples;
         auto *audio = SherpaOnnxOfflineTtsGenerateWithCallbackWithArg(tts, text, speaker, speed,
                                                                      withinBudget, &remaining);

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -8,7 +9,8 @@ extern "C" {
 struct SherpaOnnxOfflineTts;
 struct SherpaOnnxGeneratedAudio;
 
-const struct SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName);
+const struct SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName,
+    bool normalizeNumbers);
 void YJKokoroClose(const struct SherpaOnnxOfflineTts *tts);
 
 // On success the view borrows from the returned owner until YJKokoroFreeAudio.

@@ -24,14 +24,18 @@ actor KokoroRenderer {
         try Task.checkCancellation()
         guard directory.isFileURL else { throw KokoroRenderError.invalidPack }
         let root = directory.standardizedFileURL
-        if instance?.directory != root {
-            reset() // Never keep two models resident while switching packs.
-            instance = try Instance(directory: root)
+        let normalizeNumbers = text.rangeOfCharacter(from: .decimalDigits) != nil
+        if instance?.directory != root || instance?.normalizeNumbers != normalizeNumbers {
+            reset() // Rule FSTs are fixed at creation; keep at most one model resident.
+            instance = try Instance(directory: root, normalizeNumbers: normalizeNumbers)
         }
         guard let instance else { throw KokoroRenderError.initializationFailed }
         try Task.checkCancellation()
         var view = YJKokoroView()
-        guard let owner = YJKokoroGenerate(instance.handle, text, speed, &view) else {
+        let audio = text.withCString { utf8 in
+            YJKokoroGenerate(instance.handle, utf8, speed, &view)
+        }
+        guard let owner = audio else {
             throw KokoroRenderError.generationFailed
         }
         defer { YJKokoroFreeAudio(owner) }
@@ -50,8 +54,9 @@ actor KokoroRenderer {
     private final class Instance {
         let handle: OpaquePointer
         let directory: URL
+        let normalizeNumbers: Bool
 
-        init(directory: URL) throws {
+        init(directory: URL, normalizeNumbers: Bool) throws {
             let root = directory.path
             guard directory.lastPathComponent == "kokoro-int8-multi-lang-v1_1",
                   !root.contains(","), !root.utf8.contains(0) else { throw KokoroRenderError.invalidPack }
@@ -71,7 +76,10 @@ actor KokoroRenderer {
                   ["phontab", "phonindex", "phondata", "intonations"].allSatisfy({
                       (size("espeak-ng-data/" + $0) ?? 0) > 0
                   }) else { throw KokoroRenderError.invalidPack }
-            guard let handle = YJKokoroOpen(root, model) else { throw KokoroRenderError.initializationFailed }
+            guard let handle = YJKokoroOpen(root, model, normalizeNumbers) else {
+                throw KokoroRenderError.initializationFailed
+            }
+            self.normalizeNumbers = normalizeNumbers
             self.handle = handle
             self.directory = directory
         }

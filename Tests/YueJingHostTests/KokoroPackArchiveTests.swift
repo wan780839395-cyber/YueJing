@@ -75,7 +75,11 @@ struct KokoroPackArchiveTests {
         let restored = try await disk.restore() // Independent per-file size and SHA check of installed bytes.
         #expect(restored == live)
 
-        let pcm = try await KokoroRenderer().render(text: "今天是晴天。", speed: 1, directory: live)
+        let renderer = KokoroRenderer()
+        let pcm = try await renderer.render(text: "今天是晴天。", speed: 1, directory: live)
+        let numeric = try await renderer.render(text: "今天是6月18号。", speed: 1, directory: live)
+        #expect(numeric.sampleRate == 24_000 && numeric.samples.allSatisfy(\.isFinite))
+        #expect(numeric.samples.contains { abs($0) > 0.0001 })
         let count = pcm.samples.count
         let allFinite = pcm.samples.allSatisfy(\.isFinite)
         let nonSilent = pcm.samples.contains { abs($0) > 0.0001 } // Above 16-bit WAV quantization noise.

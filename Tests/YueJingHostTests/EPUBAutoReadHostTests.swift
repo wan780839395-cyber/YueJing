@@ -373,8 +373,33 @@ struct EPUBAutoReadHostTests {
             let speech = ReaderSpeechSession(audio: audio, foreground: { foreground })
             try await withReader(service, id, .scroll, .reader, speech: speech) { model, controller in
                 let scroll = controller.webView.scrollView
+                let startToken = try #require(model.presentationToken)
+                let startSample = try #require(await controller.sampleSpeechStart(for: startToken))
+                let package = try #require(model.reader?.publication.package)
+                let oracle = try EPUBSpeechCursor(
+                    package: package,
+                    path: startSample.path,
+                    node: startSample.node,
+                    rawOffset: startSample.utf16Offset
+                )
+                var expectedPassages: [EPUBSpeechCursor.Passage] = []
+                while let passage = try await oracle.next() {
+                    if passage.text.rangeOfCharacter(from: .alphanumerics) != nil {
+                        expectedPassages.append(passage)
+                    }
+                }
+                let ch2TargetIndex = try #require(expectedPassages.firstIndex { $0.text.contains("EPUB_A_C2_P1") })
+                let ch2Target = expectedPassages[ch2TargetIndex]
+                let ch2Nodes = try #require(try package.nodes(at: model.spine[1]))
+                #expect(ch2Target.position.path == model.spine[1] && ch2Nodes[ch2Target.position.node] == ch2Target.text && ch2Target.position.utf16Offset == 0)
+                let ch3TargetIndex = try #require(expectedPassages.firstIndex { $0.text.contains("EPUB_A_C3_P1") })
+                let ch3Target = expectedPassages[ch3TargetIndex]
+                let ch3Nodes = try #require(try package.nodes(at: model.spine[2]))
+                #expect(ch3Target.position.path == model.spine[2] && ch3Nodes[ch3Target.position.node] == ch3Target.text && ch3Target.position.utf16Offset == 0)
+
                 model.startSpeech()
                 try await until { model.speech.isActive && audio.texts.count == 1 && audio.finish != nil }
+                #expect(audio.texts.first == expectedPassages.first?.text)
 
                 foreground = false
                 await model.suspend()
@@ -382,13 +407,17 @@ struct EPUBAutoReadHostTests {
                 let lockedLoads = controller.documentLoadCount
 
                 // Advance across chapter 1 into chapter 2 while locked; WebKit must not move.
-                for _ in 0..<120 {
+                for _ in 0..<expectedPassages.count {
                     if audio.texts.last?.contains("EPUB_A_C2_P1") == true { break }
                     let count = audio.texts.count
+                    try #require(audio.finish != nil)
                     audio.finish?(true)
+                    if audio.texts.count == count && model.speech.isActive { await Task.yield() }
                     try await until { audio.texts.count > count || !model.speech.isActive }
+                    if !model.speech.isActive { break }
                 }
                 try #require(audio.texts.last?.contains("EPUB_A_C2_P1") == true)
+                #expect(audio.texts.last == ch2Target.text && audio.texts.count == ch2TargetIndex + 1)
                 #expect(model.speech.isActive && model.speech.isFollowing)
                 #expect(scroll.contentOffset == lockedOffset && controller.documentLoadCount == lockedLoads)
 
@@ -400,6 +429,11 @@ struct EPUBAutoReadHostTests {
                     !model.promotingVisibleChapter &&
                     scroll.contentOffset.y > lockedOffset.y + 100
                 }
+                let resumedToken = try #require(model.presentationToken)
+                let caughtUpOffset = scroll.contentOffset
+                #expect(await controller.inspectSpeechPosition(ch2Target.position, for: resumedToken, stillCurrent: { true }) == .visible)
+                try await Task.sleep(for: .milliseconds(80))
+                #expect(scroll.contentOffset == caughtUpOffset)
                 #expect(model.speech.isActive && model.speech.isFollowing)
                 #expect(controller.documentLoadCount == lockedLoads)
 
@@ -408,13 +442,20 @@ struct EPUBAutoReadHostTests {
                 #expect(!model.speech.isFollowing && model.speech.isActive)
                 foreground = false
                 await model.suspend()
-                for _ in 0..<120 {
+                let detachedOffset = scroll.contentOffset
+                let detachedLoads = controller.documentLoadCount
+                for _ in 0..<expectedPassages.count {
                     if audio.texts.last?.contains("EPUB_A_C3_P1") == true { break }
                     let count = audio.texts.count
+                    try #require(audio.finish != nil)
                     audio.finish?(true)
+                    if audio.texts.count == count && model.speech.isActive { await Task.yield() }
                     try await until { audio.texts.count > count || !model.speech.isActive }
+                    if !model.speech.isActive { break }
                 }
                 try #require(audio.texts.last?.contains("EPUB_A_C3_P1") == true)
+                #expect(audio.texts.last == ch3Target.text && audio.texts.count == ch3TargetIndex + 1)
+                #expect(scroll.contentOffset == detachedOffset && controller.documentLoadCount == detachedLoads)
                 foreground = true
                 await model.resume()
                 try await until { model.presentationToken != nil && !model.promotingVisibleChapter }
