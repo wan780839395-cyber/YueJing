@@ -4,6 +4,18 @@
   "branch": "dev/workflow-optimization",
   "cases": [
     {
+      "file": "ReaderDomainTests/StoryLaunchTests.swift",
+      "name": "localStoryStartsFromImportedTextAndEPUBAndRestoresBothRoles"
+    },
+    {
+      "file": "ReaderDomainTests/StoryPresetImportTests.swift",
+      "name": "localPresetImportChecksOrderAndPinsImmutableStoryVersion"
+    },
+    {
+      "file": "ReaderDomainTests/StoryGenerationTests.swift",
+      "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
+    },
+    {
       "file": "YueJingHostTests/EPUBReaderHostTests.swift",
       "name": "epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly"
     }
