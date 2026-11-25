@@ -90,7 +90,16 @@ struct ContentView: View {
                 }
             }
             .navigationDestination(isPresented: plannedFeaturePresentation) {
-                LibraryPlannedFeatureView(feature: plannedNavigation.displayedFeature, appearance: appearance)
+                switch plannedNavigation.displayedFeature {
+                case .aiStory:
+                    StoryLaunchView(
+                        model: model,
+                        appearance: appearance,
+                        isRouteActive: plannedNavigation.activeRoute?.feature == .aiStory
+                    )
+                default:
+                    LibraryPlannedFeatureView(feature: plannedNavigation.displayedFeature, appearance: appearance)
+                }
             }
             .navigationDestination(isPresented: informationPresentation) {
                 switch displayedInformation {

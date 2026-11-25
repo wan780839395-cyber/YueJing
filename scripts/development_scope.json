@@ -3,26 +3,22 @@
   "scope": "development-targeted",
   "branch": "dev/workflow-optimization",
   "cases": [
-    {"file":"YueJingHostTests/KokoroDownloadTests.swift","name":"packDownloadAcceptsOnlyPinnedSourceHostsAndCompleteResponses"},
-    {"file":"YueJingHostTests/KokoroDownloadTests.swift","name":"cancelledDownloadAndBadArchiveLeaveSystemUsableAndRetryable"},
-    {"file":"YueJingHostTests/KokoroPackStoreTests.swift","name":"officialIndexIsBundledAndComplete"},
-    {"file":"YueJingHostTests/KokoroPackStoreTests.swift","name":"managedLifecyclePreservesPreferenceAndCopiesOnlyPinnedFiles"},
-    {"file":"YueJingHostTests/KokoroPackStoreTests.swift","name":"failedReplacementAndCancellationKeepVerifiedInstall"},
-    {"file":"YueJingHostTests/KokoroPackStoreTests.swift","name":"rejectsLinkedRootDirectoryAndLeafEvenWhenTargetHasCorrectBytes"},
-    {"file":"YueJingHostTests/KokoroPackStoreTests.swift","name":"indexRejectsAbsoluteTraversalAndDuplicateNames"},
-    {"file":"YueJingHostTests/KokoroPackArchiveTests.swift","name":"wrongLengthAndWrongDigestLeavePriorInstallationUntouched"},
-    {"file":"YueJingHostTests/KokoroPackArchiveTests.swift","name":"officialArchiveAtomicallyReplacesDirectoryWithOnlyIndexedMembers"},
-    {"file":"YueJingHostTests/KokoroRoutingTests.swift","name":"unavailablePackOrSynthesisFailureUsesSystemOnSameSentence"},
-    {"file":"YueJingHostTests/KokoroRoutingTests.swift","name":"offlinePrefetchIsSilentAndLateRenderCannotRestartPlayback"},
-    {"file":"YueJingHostTests/KokoroRoutingTests.swift","name":"kokoroWaveIsBoundedMonoPCMAndRejectsInvalidOutput"},
-    {"file":"YueJingHostTests/ReaderSpeechSessionTests.swift","name":"speechFollowUsesAudibleStartAndManualReturnNotPrefetch"},
-    {"file":"YueJingHostTests/ReaderSpeechSessionTests.swift","name":"speechFollowCoalescesWhileLockedAndDoesNotReattachOnUnlock"},
-    {"file":"YueJingHostTests/TXTSpeechFollowHostTests.swift","name":"audibleStartFollowsMinimallyWithoutMovingVisibleLinesOrPrefetch"},
-    {"file":"YueJingHostTests/TXTSpeechFollowHostTests.swift","name":"crossWindowFollowRendersBoundedWindowWithoutConsumingLeaseAndRejectsStaleTakeover"},
-    {"file":"YueJingHostTests/TXTSpeechFollowHostTests.swift","name":"manualDragAndBrowsingDetachKeepSpeechPlayingReturnWorksWhilePausedAndExitStops"},
-    {"file":"YueJingHostTests/TXTSpeechFollowHostTests.swift","name":"lockSuspendsFollowWithoutMovementAndUnlockFollowsLatestOnceAfterReadiness"},
-    {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubSpeechFollowRevealsOnlyWhenOffscreenAndDetachesUntilReturn"},
-    {"file":"YueJingHostTests/EPUBAutoReadHostTests.swift","name":"epubSpeechFollowSkipsLockedWebKitAndRestoresOnceAfterReady"}
+    {
+      "file": "ReaderDomainTests/StoryLaunchTests.swift",
+      "name": "localStoryStartsFromImportedTextAndEPUBAndRestoresBothRoles"
+    },
+    {
+      "file": "ReaderDomainTests/StoryPresetImportTests.swift",
+      "name": "localPresetImportChecksOrderAndPinsImmutableStoryVersion"
+    },
+    {
+      "file": "ReaderDomainTests/StoryGenerationTests.swift",
+      "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
+    },
+    {
+      "file": "YueJingHostTests/EPUBReaderHostTests.swift",
+      "name": "epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly"
+    }
   ],
   "build_timeout_seconds": 900,
   "test_timeout_seconds": 480,

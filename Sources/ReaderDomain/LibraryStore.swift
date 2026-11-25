@@ -44,6 +44,26 @@ public actor LibraryStore {
         }
     }
 
+    public func storyPresets() throws -> [StoryPresetSummary] {
+        try StoryPresetRows.protect { try queue.read { db in try StoryPresetRows.list(db) } }
+    }
+
+    public func storyPreset(id: String) throws -> StoryPresetVersion {
+        try StoryPresetRows.protect { try queue.read { db in try StoryPresetRows.read(id, in: db) } }
+    }
+
+    func saveStoryPreset(_ value: StoryPresetVersion) throws -> StoryPresetVersion {
+        try StoryPresetRows.protect { try queue.write { db in try StoryPresetRows.insert(value, in: db) } }
+    }
+
+    public func storySessions() throws -> [StorySession] {
+        try queue.read { db in try StoryRows.list(in: db) }
+    }
+
+    func commitStory(_ session: StorySession, for book: LibraryBook) throws {
+        try queue.write { db in try StoryRows.insert(session, for: book, in: db) }
+    }
+
     public func books() throws -> [LibraryBook] {
         try queue.read { db in try LibraryBook.fetchAll(db, sql: "SELECT * FROM books ORDER BY COALESCE(lastReadAt, addedAt) DESC, id") }
     }
@@ -1026,5 +1046,31 @@ extension LibraryStore {
 
     private func finishPoolRemoval(_ job: ManagedRemoval) throws {
         try queue.write { try job.finish($0) }
+    }
+}
+
+extension LibraryStore {
+    /// Returns the persisted branch in play order; never regenerates its narration.
+    public func storyTurns(sessionID: UUID) throws -> [StoryTurn] {
+        try StoryTurnError.protect {
+            try queue.read { db in try StoryTurnRows.list(sessionID: sessionID, in: db) }
+        }
+    }
+
+    func checkGenerationDraft(_ draft: StoryGenerationDraft) throws {
+        try StoryTurnError.protect { try queue.read { db in try StoryGenerationRows.check(draft, in: db) } }
+    }
+
+    func commitStoryGeneration(_ draft: StoryGenerationDraft, text: String) throws -> StoryTurn {
+        try StoryTurnError.protect { try queue.write { db in try StoryGenerationRows.commit(draft, text: text, in: db) } }
+    }
+
+    /// Appends only if this live branch still has the caller's expected number of turns.
+    public func playStoryTurn(sessionID: UUID, expectedCount: Int, action: String) throws -> StoryTurn {
+        try StoryTurnError.protect {
+            try queue.write { db in
+                try StoryTurnRows.play(sessionID: sessionID, expectedCount: expectedCount, action: action, in: db)
+            }
+        }
     }
 }

@@ -12,8 +12,8 @@ enum LibraryPlannedFeature: String, Identifiable, Sendable {
 
     var isImplemented: Bool {
         switch self {
-        case .epub, .cover: return true
-        case .comics, .aiStory: return false
+        case .epub, .cover, .aiStory: return true
+        case .comics: return false
         }
     }
 
@@ -44,7 +44,7 @@ enum LibraryPlannedFeature: String, Identifiable, Sendable {
         case .comics:
             return "入口与返回路径已预留，当前不提供漫画内容源、抓取、下载或漫画阅读器。"
         case .aiStory:
-            return "仅预留独立故事模块的位置。未接入模型调用、服务连接、账户或额度，也不会自动发起请求。"
+            return "已支持基于书架已导入或新导入小说选择原著/原创角色，保存并恢复本地开局；支持离线演绎，也支持导入叙事预设并在配置自有 BYOK 接口、每次确认请求后联网生成。"
         }
     }
 
@@ -65,7 +65,11 @@ enum LibraryPlannedFeature: String, Identifiable, Sendable {
         case .comics:
             return ["后续独立组织漫画内容，不混入小说目录。", "不内置或自动连接内容源。", "聚合规则与阅读方式待后续需求明确。"]
         case .aiStory:
-            return ["普通阅读不依赖 AI。", "后续能力由用户主动配置并触发。", "故事结构、服务连接与保存方式尚未实现。"]
+            return [
+                "普通阅读不依赖 AI；AI 故事默认支持本地离线演绎，仅在用户自配 BYOK 接口并确认发送时发起远端模型请求。",
+                "开篇直接取自书内真实正文，退出或重启应用后可恢复已保存记录。",
+                "原书从书架删除后，其关联的本地故事记录会一并删除。"
+            ]
         }
     }
 }

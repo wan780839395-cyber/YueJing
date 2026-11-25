@@ -30,6 +30,8 @@ public actor LibraryService {
         var consumers: Set<UUID>
     }
     private var readingBuild: ReadingBuild?
+    // Actor-isolated; a second confirmation for this branch must not issue another paid request.
+    var activeStoryGenerations: Set<UUID> = []
 
     public init(store: LibraryStore, processingCacheLimit: Int = 64 * 1024 * 1024) {
         self.store = store; processed = ProcessedBookCache(limit: processingCacheLimit)

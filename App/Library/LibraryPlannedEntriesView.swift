@@ -25,12 +25,12 @@ struct LibraryPlannedEntriesView: View {
                         .foregroundStyle(appearance.secondary)
                         .accessibilityAddTraits(.isHeader)
                     Spacer(minLength: 8)
-                    Text("入口预留")
+                    Text(moduleFeatures.contains(where: \.isImplemented) ? "本地可用" : "入口预留")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(appearance.secondary)
+                        .foregroundStyle(moduleFeatures.contains(where: \.isImplemented) ? appearance.accent : appearance.secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(appearance.subtleSurface, in: Capsule())
+                        .background(moduleFeatures.contains(where: \.isImplemented) ? appearance.accentSoft : appearance.subtleSurface, in: Capsule())
                 }
 
                 Group {
@@ -69,7 +69,7 @@ struct LibraryPlannedEntriesView: View {
             }
 
             Text(features.contains(.comics)
-                 ? "漫画聚合与 AI 故事仍为规划入口，以上故事扩展均未接入。"
+                 ? "AI 故事已支持本地开局、离线演绎、预设导入及自配 BYOK 确认后联网生成；漫画聚合仍为规划入口。"
                  : "已支持本地 TXT 与非 DRM 可重排 EPUB 2/3（含内嵌封面与文字占位回退）；支持 EPUB 本地书签，不支持固定版式、DRM、脚本及联网资源。")
                 .font(.caption)
                 .foregroundStyle(appearance.secondary)
@@ -79,36 +79,41 @@ struct LibraryPlannedEntriesView: View {
     }
 
     private func moduleCard(_ feature: LibraryPlannedFeature) -> some View {
-        Button {
+        let implemented = feature.isImplemented
+        let statusBadge = implemented ? "已开放" : "规划中"
+        let subtitle = implemented ? "离线演绎 · 支持预设与 BYOK 生成" : "未接入 · 查看预留说明"
+        let axLabel = implemented ? "\(feature.title)，支持离线演绎与可选 BYOK 模型生成" : "\(feature.title)，规划中，未接入"
+        let axHint = implemented ? "进入 AI 故事，选择小说、角色与可选预设" : "查看静态规划说明，不启动服务"
+        return Button {
             onOpenFeature(feature)
         } label: {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .center) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(appearance.subtleSurface)
+                            .fill(implemented ? appearance.accentSoft : appearance.subtleSurface)
                         Image(systemName: feature.symbol)
                             .font(.body.weight(.medium))
-                            .foregroundStyle(appearance.accent)
+                            .foregroundStyle(implemented ? appearance.accent : appearance.secondary)
                     }
                     .frame(width: 40, height: 40)
                     .accessibilityHidden(true)
 
                     Spacer(minLength: 0)
 
-                    Text("规划中")
+                    Text(statusBadge)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(appearance.secondary)
+                        .foregroundStyle(implemented ? appearance.accent : appearance.secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3.5)
-                        .background(appearance.subtleSurface, in: Capsule())
+                        .background(implemented ? appearance.accentSoft : appearance.subtleSurface, in: Capsule())
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(feature.title)
                         .font(.system(.headline, design: .serif).weight(.semibold))
                         .foregroundStyle(appearance.foreground)
-                    Text("未接入 · 查看预留说明")
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(appearance.secondary)
                 }
@@ -119,15 +124,18 @@ struct LibraryPlannedEntriesView: View {
             .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous)
-                    .strokeBorder(appearance.edge.opacity(0.8), lineWidth: 0.75)
+                    .strokeBorder(
+                        implemented ? appearance.accent.opacity(0.35) : appearance.edge.opacity(0.8),
+                        lineWidth: 0.75
+                    )
                     .allowsHitTesting(false)
             }
             .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
             .contentShape(RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
         }
         .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: LibraryAppearance.cardCornerRadius))
-        .accessibilityLabel("\(feature.title)，规划中，未接入")
-        .accessibilityHint("查看静态规划说明，不启动服务")
+        .accessibilityLabel(axLabel)
+        .accessibilityHint(axHint)
         .accessibilityIdentifier("library.planned.entry.\(feature.rawValue)")
     }
 

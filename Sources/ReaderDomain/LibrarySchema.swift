@@ -114,6 +114,52 @@ enum LibrarySchema {
                 ) WITHOUT ROWID
                 """)
         }
+        migrator.registerMigration("v10-story-sessions") { db in
+            try db.execute(sql: """
+                CREATE TABLE storySessions (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    bookID TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                    versionID TEXT NOT NULL, bookTitle TEXT NOT NULL,
+                    roleKind TEXT NOT NULL CHECK(roleKind IN ('canon','original')),
+                    roleName TEXT NOT NULL, premise TEXT NOT NULL, opening TEXT NOT NULL,
+                    createdAt DOUBLE NOT NULL
+                );
+                CREATE INDEX storySessions_book ON storySessions(bookID);
+                """)
+        }
+        migrator.registerMigration("v11-story-turns") { db in
+            try db.execute(sql: """
+                CREATE TABLE storyTurns (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    sessionID TEXT NOT NULL REFERENCES storySessions(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(typeof(sequence) = 'integer' AND sequence BETWEEN 1 AND 64),
+                    action TEXT NOT NULL CHECK(typeof(action) = 'text' AND trim(action, char(9,10,11,12,13,32)) <> ''),
+                    narration TEXT NOT NULL CHECK(typeof(narration) = 'text' AND narration <> ''),
+                    consequence TEXT NOT NULL CHECK(typeof(consequence) = 'text' AND consequence <> ''),
+                    UNIQUE(sessionID, sequence)
+                );
+                """)
+        }
+        migrator.registerMigration("v12-story-preset-versions") { db in
+            try db.execute(sql: """
+                CREATE TABLE storyPresetVersions (
+                    id TEXT NOT NULL PRIMARY KEY CHECK(length(id) = 64),
+                    name TEXT NOT NULL,
+                    canSelect INTEGER NOT NULL CHECK(canSelect IN (0,1)),
+                    snapshot BLOB NOT NULL,
+                    importedAt REAL NOT NULL
+                );
+                ALTER TABLE storySessions ADD COLUMN presetID TEXT REFERENCES storyPresetVersions(id);
+                """)
+        }
+        migrator.registerMigration("v13-story-model-turns") { db in
+            try db.execute(sql: """
+                CREATE TABLE storyModelOrigins (
+                    turnID TEXT NOT NULL PRIMARY KEY REFERENCES storyTurns(id) ON DELETE CASCADE,
+                    modelName TEXT NOT NULL CHECK(length(modelName) BETWEEN 1 AND 256)
+                );
+                """)
+        }
         return migrator
     }
 }

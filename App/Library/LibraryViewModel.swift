@@ -3,6 +3,11 @@ import Foundation
 import ReaderDomain
 import TXTCore
 
+struct StoryImportEvent: Equatable {
+    let id: UUID
+    let book: LibraryBook
+}
+
 @MainActor
 final class LibraryViewModel: ObservableObject {
     @Published private(set) var service: LibraryService?
@@ -15,6 +20,7 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var importPresentation = LibraryImportPresentation()
     @Published private(set) var importDiagnostics = ImportDiagnosticState()
     @Published private(set) var fileSelection: FileSelectionSession?
+    @Published private(set) var lastStoryImport: StoryImportEvent?
     @Published private(set) var processingSummary: String?
     private var selectionReceivedAt: ContinuousClock.Instant?
     private var importMeasurements: [ProcessingMeasurement] = []
@@ -212,6 +218,11 @@ final class LibraryViewModel: ObservableObject {
         ticket = nil; importing = false; encodingChoice = nil
         notice = .committed(duplicate: receipt.duplicate, stopRequested: stopped, preparationDeferred: deferred)
         await reload()
+        if fileSelection?.id == id, let current = books.first(where: {
+            $0.id == receipt.book.id && $0.versionID == receipt.book.versionID && $0.addedAt == receipt.book.addedAt
+        }) {
+            lastStoryImport = StoryImportEvent(id: id, book: current)
+        }
         if importDiagnostics.attempt == id, let start = selectionReceivedAt {
             let elapsed = start.duration(to: ContinuousClock().now).components
             let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18

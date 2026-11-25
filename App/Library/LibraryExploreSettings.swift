@@ -12,7 +12,7 @@ struct LibraryExploreContent: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 24)
-                        Text("探索 · 远景陈列")
+                        Text("探索 · 故事扩展")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(appearance.secondary)
                     }
@@ -21,7 +21,7 @@ struct LibraryExploreContent: View {
                         .foregroundStyle(appearance.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
-                    Text("以下模块均为未来规划入口，当前版本保持纯离线阅读，不接入内容源、抓取或 AI 服务。")
+                    Text("可从书架小说开启可恢复的 AI 故事，支持本地离线演绎、叙事预设导入及确认后的自配 BYOK 模型生成；漫画聚合仍为规划入口。")
                         .font(.subheadline)
                         .foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)

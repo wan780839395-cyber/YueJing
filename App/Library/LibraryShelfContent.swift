@@ -326,7 +326,7 @@ struct LibraryShelfContent: View {
         let duplicateWarning = duplicateCount > 1
             ? "书架上共有 \(duplicateCount) 本同名书籍，本次仅删除此副本。\n"
             : ""
-        return "\(duplicateWarning)当前副本：\(identity)。\n将删除这本 \(book.format.rawValue.uppercased()) 在阅境中的副本、阅读进度和书签。不会删除“文件”中的原件或共享字体。"
+        return "\(duplicateWarning)当前副本：\(identity)。\n将删除这本 \(book.format.rawValue.uppercased()) 在阅境中的副本、阅读进度、书签及关联本地故事存档。不会删除“文件”中的原件或共享字体。"
     }
     private func bookButton<Label: View>(_ book: LibraryBook, @ViewBuilder label: () -> Label) -> some View {
         Button { searching = false; onOpenBook(book) } label: { label() }
