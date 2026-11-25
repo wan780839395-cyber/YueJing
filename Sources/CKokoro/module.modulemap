@@ -1,0 +1,4 @@
+module CKokoro {
+    header "KokoroBridge.h"
+    export *
+}

@@ -132,6 +132,15 @@ final class EPUBReaderViewModel: ObservableObject {
     private var speechID: UUID?
     private var onSpeechRevoked: (@MainActor () -> Void)?
     private var pendingSpeechLocation: EPUBReadingPosition?
+    private struct DeferredSpeechFollow {
+        let owner: UUID
+        let reader: OpenedEPUBReader
+        let position: EPUBReadingPosition
+        let stillCurrent: @MainActor () -> Bool
+    }
+    private var deferredSpeechFollow: DeferredSpeechFollow?
+    private var speechFollowAttemptID: UUID?
+    private var speechFollowTask: Task<Void, Never>?
     private var resumeAfterSettling = false
     @Published private(set) var suspending = false
     @Published private(set) var closing = false
@@ -239,6 +248,10 @@ final class EPUBReaderViewModel: ObservableObject {
 #endif
 
     func revokeSpeech() {
+        speechFollowTask?.cancel()
+        speechFollowTask = nil
+        speechFollowAttemptID = nil
+        deferredSpeechFollow = nil
         speechRestoreID = nil
         let stop = onSpeechRevoked
         speechID = nil
@@ -247,11 +260,28 @@ final class EPUBReaderViewModel: ObservableObject {
         stop?()
     }
 
+    func detachSpeechFollow() {
+        speechFollowTask?.cancel()
+        speechFollowTask = nil
+        speechFollowAttemptID = nil
+        deferredSpeechFollow = nil
+        speech.detachFollow()
+    }
+
+    func suspendSpeechFollowing() {
+        speechFollowTask?.cancel()
+        speechFollowTask = nil
+        speechFollowAttemptID = nil
+        deferredSpeechFollow = nil
+        speech.suspendFollowing()
+    }
+
     func noteViewportReadiness() {
         sceneReadyRevision &+= 1
     }
 
     func startSpeech() {
+        stopAutoRead()
         guard let source = speechSource(onRevoke: { [weak self] in
             self?.speech.stop(restorePosition: false)
         }) else { return }
@@ -282,6 +312,7 @@ final class EPUBReaderViewModel: ObservableObject {
             #endif
             return nil
         }
+        if autoRead.isRunning { stopAutoRead() }
         revokeSpeech()
         let owner = UUID()
         speechID = owner
@@ -357,20 +388,149 @@ final class EPUBReaderViewModel: ObservableObject {
             #if DEBUG
             self.debugSpeechCaptureOutcome = "captured"
             #endif
-            return ReaderSpeechChunk(text: passage.text) { [weak self] in
-                guard let self, self.speechID == owner, self.reader === reader,
-                      !self.closing, self.closeTask == nil, !self.exitSaveFailed else { return }
-                // Single-use. Navigation must not re-enter stop() during its own locate callback.
-                self.onSpeechRevoked = nil
-                self.speechID = nil
-                if self.suspending || self.suspended {
-                    self.pendingSpeechLocation = passage.position
-                } else {
-                    self.navigateExplicitly(path: passage.position.path, fragment: nil, target: passage.position)
-                    self.speechRestoreID = owner
+            return ReaderSpeechChunk(
+                text: passage.text,
+                follow: { [weak self] stillCurrent in
+                    self?.followSpeechPosition(passage.position, owner: owner, reader: reader, stillCurrent: stillCurrent)
+                },
+                locate: { [weak self] in
+                    guard let self, self.speechID == owner, self.reader === reader,
+                          !self.closing, self.closeTask == nil, !self.exitSaveFailed else { return }
+                    // Single-use. Navigation must not re-enter stop() during its own locate callback.
+                    self.speechFollowTask?.cancel()
+                    self.speechFollowTask = nil
+                    self.speechFollowAttemptID = nil
+                    self.deferredSpeechFollow = nil
+                    self.onSpeechRevoked = nil
+                    self.speechID = nil
+                    if self.suspending || self.suspended {
+                        self.pendingSpeechLocation = passage.position
+                    } else {
+                        self.navigateExplicitly(path: passage.position.path, fragment: nil, target: passage.position)
+                        self.speechRestoreID = owner
+                    }
+                }
+            )
+        }
+    }
+
+    private func followSpeechPosition(
+        _ position: EPUBReadingPosition,
+        owner: UUID,
+        reader: OpenedEPUBReader,
+        stillCurrent: @escaping @MainActor () -> Bool,
+        allowTokenRetry: Bool = true
+    ) {
+        guard speechID == owner, self.reader === reader,
+              !closing, closeTask == nil, !exitSaveFailed,
+              !autoRead.isRunning, stillCurrent() else {
+            return
+        }
+        speechFollowTask?.cancel()
+        speechFollowTask = nil
+        speechFollowAttemptID = nil
+        deferredSpeechFollow = nil
+        guard !suspending, !suspended, webView.interactionActive,
+              let token = presentationToken, let controller = webView.controller else {
+            deferredSpeechFollow = DeferredSpeechFollow(
+                owner: owner,
+                reader: reader,
+                position: position,
+                stillCurrent: stillCurrent
+            )
+            return
+        }
+        guard controller.renderedChapterPaths.contains(position.path) else {
+            navigateForSpeechFollow(to: position, owner: owner, reader: reader)
+            return
+        }
+        let attempt = UUID()
+        speechFollowAttemptID = attempt
+        speechFollowTask = Task { @MainActor [weak self] in
+            let outcome = await controller.inspectSpeechPosition(position, for: token, stillCurrent: stillCurrent)
+            guard let self, self.speechFollowAttemptID == attempt else { return }
+            self.speechFollowTask = nil
+            self.speechFollowAttemptID = nil
+            guard !Task.isCancelled, self.speechID == owner, self.reader === reader,
+                  !self.closing, self.closeTask == nil, !self.exitSaveFailed,
+                  !self.suspending, !self.suspended, !self.autoRead.isRunning,
+                  self.webView.interactionActive, stillCurrent() else {
+                return
+            }
+            guard self.presentationToken == token, self.webView.controller === controller else {
+                if self.presentationToken == nil {
+                    self.deferredSpeechFollow = DeferredSpeechFollow(
+                        owner: owner,
+                        reader: reader,
+                        position: position,
+                        stillCurrent: stillCurrent
+                    )
+                } else if allowTokenRetry {
+                    self.followSpeechPosition(
+                        position,
+                        owner: owner,
+                        reader: reader,
+                        stillCurrent: stillCurrent,
+                        allowTokenRetry: false
+                    )
+                }
+                return
+            }
+            switch outcome {
+            case .visible, .busy:
+                return
+            case .reveal(let point):
+                _ = controller.applySpeechReveal(to: point, for: token)
+            case .missing:
+                self.navigateForSpeechFollow(to: position, owner: owner, reader: reader)
+            case .unavailable:
+                if self.presentationToken == nil {
+                    self.deferredSpeechFollow = DeferredSpeechFollow(
+                        owner: owner,
+                        reader: reader,
+                        position: position,
+                        stillCurrent: stillCurrent
+                    )
                 }
             }
         }
+    }
+
+    private func navigateForSpeechFollow(
+        to position: EPUBReadingPosition,
+        owner: UUID,
+        reader: OpenedEPUBReader
+    ) {
+        guard speechID == owner, self.reader === reader,
+              !closing, closeTask == nil, !exitSaveFailed,
+              !suspending, !suspended, !autoRead.isRunning,
+              webView.interactionActive else {
+            return
+        }
+        navigateExplicitly(
+            path: position.path,
+            fragment: nil,
+            target: position,
+            searchCompletion: nil,
+            revokesSpeech: false
+        )
+    }
+
+    private func resumeSpeechFollowingIfReady() {
+        guard presentationToken != nil, webView.interactionActive else { return }
+        let deferred = deferredSpeechFollow
+        deferredSpeechFollow = nil
+        speech.restoreWhenVisible()
+        guard speechFollowTask == nil, presentationToken != nil,
+              let deferred, deferred.stillCurrent() else {
+            return
+        }
+        followSpeechPosition(
+            deferred.position,
+            owner: deferred.owner,
+            reader: deferred.reader,
+            stillCurrent: deferred.stillCurrent
+        )
     }
 
     func autoReadStep(from owner: EPUBNavigationToken, distance: CGFloat) -> AutoReadStep {
@@ -633,7 +793,7 @@ final class EPUBReaderViewModel: ObservableObject {
         let nextIndex = index + direction.rawValue
         let paths = reader.publication.package.spine
         guard paths.indices.contains(nextIndex) else { return false }
-        revokeSpeech()
+        detachSpeechFollow()
         // Close the old epoch's UI admission synchronously, before the task can suspend.
         ready = false
         currentToken = nil
@@ -693,14 +853,21 @@ final class EPUBReaderViewModel: ObservableObject {
     }
 
     private func navigateExplicitly(path: String, fragment: String?, target: EPUBReadingPosition?,
-                                    searchCompletion: SearchCompletion?) {
+                                    searchCompletion: SearchCompletion?, revokesSpeech: Bool = true) {
         guard let reader, !closing, !suspended, !exitSaveFailed,
               reader.publication.package.spine.contains(path) else {
             return
         }
         // Revoke old observations before scheduling: a queued scroll promotion must not
         // cancel this explicit user destination or overwrite its pending fragment.
-        revokeSpeech()
+        if revokesSpeech {
+            revokeSpeech()
+        } else {
+            speechFollowTask?.cancel()
+            speechFollowTask = nil
+            speechFollowAttemptID = nil
+            deferredSpeechFollow = nil
+        }
         webView.controller?.cancelAutoPage()
         ready = false
         loading = true
@@ -800,6 +967,9 @@ final class EPUBReaderViewModel: ObservableObject {
     ) async {
         guard !Task.isCancelled, let reader, !closing, !suspended, !exitSaveFailed else { return }
         webView.controller?.cancelAutoPage()
+        speechFollowTask?.cancel()
+        speechFollowTask = nil
+        speechFollowAttemptID = nil
         promotionTask?.cancel()
         promotionTask = nil
         saveTask?.cancel()
@@ -885,6 +1055,7 @@ final class EPUBReaderViewModel: ObservableObject {
                 loading = false
                 recordRuntimeFontFallback(payload.authorStyleFallback, token: token)
                 userFontUnavailable = userFontID != nil && payload.userFontUnavailable
+                resumeSpeechFollowingIfReady()
                 return
             }
             let node = payload.restoredNode
@@ -969,6 +1140,7 @@ final class EPUBReaderViewModel: ObservableObject {
                     }
                     self.recordRuntimeFontFallback(payload.authorStyleFallback, token: expectedToken)
                     self.userFontUnavailable = self.userFontID != nil && payload.userFontUnavailable
+                    self.resumeSpeechFollowingIfReady()
                     if let started = self.openingStarted {
                         self.openingObservation.becameReady(expectedToken)
                         self.openingPresentationSummary = self.openingObservation.summary
@@ -1224,6 +1396,7 @@ final class EPUBReaderViewModel: ObservableObject {
     func suspend() async {
         guard !closing, !suspended, !suspending else { return }
         stopAutoRead()
+        suspendSpeechFollowing()
         suspending = true
         openingObservation.interrupt(.background)
         openingPresentationSummary = openingObservation.summary
@@ -1268,6 +1441,9 @@ final class EPUBReaderViewModel: ObservableObject {
             debugResumeBranch = "not_suspended"
             #endif
             return
+        }
+        if !speech.isActive {
+            speech.restoreWhenVisible()
         }
         suspended = false
         lifecycle = UUID()

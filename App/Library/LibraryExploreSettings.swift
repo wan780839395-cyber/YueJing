@@ -57,7 +57,7 @@ struct LibrarySettingsContent<Options: View>: View {
                         .font(AppVisualStyle.pageTitleFont)
                         .foregroundStyle(appearance.foreground)
                         .accessibilityAddTraits(.isHeader)
-                    Text("调整书架外观，查看支持的书籍格式与版本信息。")
+                    Text("调整书架外观与听书语音，查看支持的书籍格式与版本信息。")
                         .font(.subheadline)
                         .foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -94,6 +94,7 @@ struct LibraryManagementOptions: View {
             ReadingTimeSummary(scope: .today)
                 .foregroundStyle(appearance.secondary)
             appearanceSection
+            LibraryKokoroVoiceSection(appearance: appearance, canChange: canChange)
             formatsSection
             aboutSection
         }

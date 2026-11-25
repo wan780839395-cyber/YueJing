@@ -303,6 +303,7 @@ struct EPUBReaderScreen: View {
             if phase != .active, !model.webView.isNativeSceneForegroundActive {
                 autoAfterSpeech = nil
                 stopAutoRead()
+                model.suspendSpeechFollowing()
             }
         }
         .task(id: model.presentationToken) {
@@ -502,7 +503,7 @@ struct EPUBReaderScreen: View {
     private func handleNativeScene(_ event: EPUBSceneEvent) {
         guard model.webView.isCurrent(event, routeID: routeID) else { return }
         if event.active { mutateTools { $0.resume() } }
-        else { autoAfterSpeech = nil; stopAutoRead(); mutateTools { $0.suspend() } }
+        else { autoAfterSpeech = nil; stopAutoRead(); model.suspendSpeechFollowing(); mutateTools { $0.suspend() } }
         model.noteViewportReadiness()
         model.webView.scheduleModelSceneTransition(event, routeID: routeID) { active in
             if active { await model.resume() } else { await model.suspend() }
@@ -697,7 +698,7 @@ struct EPUBReaderScreen: View {
     private func manualPage(_ direction: EPUBPageDirection) {
         autoAfterSpeech = nil
         if model.autoRead.isRunning { stopAutoRead(); return }
-        model.revokeSpeech()
+        model.detachSpeechFollow()
         _ = model.webView.controller?.turnPage(direction)
     }
 
@@ -709,7 +710,7 @@ struct EPUBReaderScreen: View {
             exitReader()
         case .scrollingBegan:
             autoAfterSpeech = nil
-            model.revokeSpeech()
+            model.detachSpeechFollow()
             guard model.ready, !model.loading, tools.panel == nil else { return }
             mutateTools { $0.scrollingBegan() }
         case .tap(let expected, let decision):

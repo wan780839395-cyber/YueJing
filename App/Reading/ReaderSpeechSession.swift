@@ -3,8 +3,14 @@ import Combine
 import UIKit
 
 struct ReaderSpeechChunk {
+    typealias Follow = @MainActor (@escaping @MainActor () -> Bool) -> Void
+    let follow: Follow?
     let text: String
     let locate: @MainActor () -> Void
+
+    init(text: String, follow: Follow? = nil, locate: @escaping @MainActor () -> Void) {
+        self.text = text; self.follow = follow; self.locate = locate
+    }
 }
 
 enum ReaderSpeechRate: String, CaseIterable {
@@ -22,6 +28,7 @@ final class ReaderSpeechSession: ObservableObject {
     @Published private(set) var phase = Phase.idle
     @Published var rate = ReaderSpeechRate.normal
     @Published private(set) var notice: String?
+    @Published private(set) var isFollowing = true
     var isActive: Bool { phase != .idle }
 
     private let audio: any ReaderSpeechAudio
@@ -34,10 +41,15 @@ final class ReaderSpeechSession: ObservableObject {
     private var eof = false
     private var sourceError = false
     private var heard: (@MainActor () -> Void)?
+    // Deliberately not published: utterances must not invalidate a hidden SwiftUI reader.
+    private var heardFollow: ReaderSpeechChunk.Follow?
+    private var followTicket = UUID()
+    private var followSuspended = false
+    private var needsCatchUp = false
     private var deferredLocation: (@MainActor () -> Void)?
     private var observers = Set<AnyCancellable>()
 
-    init(audio: any ReaderSpeechAudio = SystemReaderSpeechAudio(),
+    init(audio: any ReaderSpeechAudio = OfflineReaderSpeechAudio(),
          foreground: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }) {
         self.audio = audio; self.foreground = foreground
         let center = NotificationCenter.default
@@ -52,18 +64,21 @@ final class ReaderSpeechSession: ObservableObject {
                 if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { self?.pause() }
             }.store(in: &observers)
         center.publisher(for: UIApplication.didBecomeActiveNotification)
-            .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.restoreWhenVisible() }
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.restoreFinalLocation() }
             .store(in: &observers)
     }
 
     func start(next: @escaping Source) {
         stop(restorePosition: false)
+        if !isFollowing { isFollowing = true }
+        followSuspended = false
         notice = nil; self.next = next; phase = .playing
         pump()
     }
 
     func pause() {
         guard phase == .playing else { return }
+        followTicket = UUID(); needsCatchUp = false
         phase = .paused; speaking = nil; audio.silence()
         // Keep even an in-flight fetch: the source may already have advanced its cursor.
     }
@@ -74,15 +89,58 @@ final class ReaderSpeechSession: ObservableObject {
     }
 
     func stop(restorePosition: Bool = true) {
-        let location = restorePosition ? (heard ?? deferredLocation) : nil
+        let location = restorePosition && isFollowing ? (heard ?? deferredLocation) : nil
+        followTicket = UUID(); heardFollow = nil; needsCatchUp = false
         generation = UUID(); speaking = nil; loader?.cancel(); loader = nil
         next = nil; queue.removeAll(); heard = nil; eof = false; sourceError = false
         audio.silence(); phase = .idle; notice = nil
         deferredLocation = location
-        restoreWhenVisible()
+        restoreFinalLocation()
+    }
+
+    func detachFollow() {
+        guard isActive, isFollowing else { return }
+        followTicket = UUID(); needsCatchUp = false; isFollowing = false
+    }
+
+    func returnToSpeech() {
+        guard isActive, !isFollowing else { return }
+        isFollowing = true
+        // This explicit action may reveal the current sentence even while audio is paused.
+        offerHeardPosition(allowPaused: true)
+    }
+
+    func suspendFollowing() {
+        followSuspended = true; followTicket = UUID()
+        needsCatchUp = phase == .playing && isFollowing
     }
 
     func restoreWhenVisible() {
+        guard foreground() else { return }
+        followSuspended = false
+        restoreFinalLocation()
+        if needsCatchUp && phase == .playing { offerHeardPosition() }
+    }
+
+    func retryFollowIfNeeded() {
+        guard phase == .playing, isFollowing, !followSuspended else { return }
+        offerHeardPosition()
+    }
+
+    private func offerHeardPosition(allowPaused: Bool = false) {
+        guard isFollowing, let follow = heardFollow, isActive, allowPaused || phase == .playing else { return }
+        guard !followSuspended, foreground() else { needsCatchUp = true; return }
+        needsCatchUp = false
+        let ticket = UUID(), owner = generation
+        followTicket = ticket
+        follow { [weak self] in
+            guard let self else { return false }
+            return generation == owner && followTicket == ticket && isActive && isFollowing &&
+                !followSuspended && foreground() && (allowPaused || phase == .playing)
+        }
+    }
+
+    private func restoreFinalLocation() {
         guard foreground(), let location = deferredLocation else { return }
         deferredLocation = nil; location()
     }
@@ -93,7 +151,9 @@ final class ReaderSpeechSession: ObservableObject {
             let id = UUID(); speaking = id
             do {
                 try audio.speak(chunk.text, multiplier: rate.multiplier, started: { [weak self] in
-                    guard let self, speaking == id else { return }; heard = chunk.locate
+                    guard let self, speaking == id else { return }
+                    heard = chunk.locate; heardFollow = chunk.follow; followTicket = UUID()
+                    offerHeardPosition()
                 }, ended: { [weak self] ok in
                     guard let self, speaking == id else { return }
                     if !ok { pause(); return }
@@ -104,6 +164,9 @@ final class ReaderSpeechSession: ObservableObject {
         if eof && queue.isEmpty {
             let message = sourceError ? "未能读取下一段正文。" : heard == nil ? "当前位置没有可朗读的正文。" : nil
             stop(); notice = message; return
+        }
+        if speaking != nil, queue.count == 2 {
+            audio.prepare(queue[1].text, multiplier: rate.multiplier)
         }
         guard loader == nil, !eof, queue.count < 2 else { return }
         let owner = generation

@@ -67,9 +67,23 @@ final class ReaderViewModel: ObservableObject {
     private var steppingAutoRead = false
     private var queuedAutoProgress: (ReadingAnchor, Int64)?
     // A playback lease follows the opened book, not the scene/layout lifecycle (lock changes both).
+    private struct PendingSpeechFollow {
+        let window: UUID
+        let previousAnchor: ReadingAnchor?
+        let lease: @MainActor () -> Bool
+        let token: UUID
+    }
     private var speechID: UUID?
     private var speechSession: ReaderSpeechSession?
+    private var activeSpeechSession: ReaderSpeechSession { speechSession ?? speech }
     private var pendingSpeechAnchor: ReadingAnchor?
+    private var speechFollowTask: Task<Void, Never>?
+    private var speechFollowID = UUID()
+    private var speechFollowLease: (@MainActor () -> Bool)?
+    private var pendingSpeechFollow: PendingSpeechFollow?
+    private var speechFollowDeferred = false
+    private var speechFollowDeliveries: UInt64 = 0
+    private var speechStateObservers = Set<AnyCancellable>()
     var speechNavigation: UUID? { pendingSpeechAnchor == nil ? nil : navigationGate.navigation }
     private var settingsTask: Task<Void, Never>?
     private var openingStarted: ContinuousClock.Instant?
@@ -82,6 +96,8 @@ final class ReaderViewModel: ObservableObject {
         self.fontStore = fontStore; self.fontDefaults = fontDefaults
         self.autoRead = autoRead ?? AutoReadSession()
         self.speech = speech ?? ReaderSpeechSession()
+        observeSpeechSession(self.speech)
+        viewport.onUserScrollBegan = { [weak self] in self?.beginManualNavigation() }
         fontRemoval = EPUBUserFontPreference.removed.sink { [weak self] id in
             guard let self, self.selectedBodyFontID == id else { return }
             self.applyFont(nil, id: nil)
@@ -201,6 +217,7 @@ final class ReaderViewModel: ObservableObject {
     func makeSpeechCursor() -> (cursor: TXTSpeechCursor, id: UUID)? {
         guard speechAvailable, let owner = reader, let origin = viewport.controller?.visibleNavigationAnchor(),
               speechAvailable, origin.bookID == owner.book.id, origin.versionID == owner.book.versionID else { return nil }
+        cancelPendingSpeechFollow(revertWindow: false)
         let id = UUID()
         speechID = id
         return (TXTSpeechCursor(source: owner.source, origin: origin), id)
@@ -209,6 +226,7 @@ final class ReaderViewModel: ObservableObject {
     func restoreSpeech(_ heard: ReadingAnchor, lease: UUID) {
         guard speechID == lease, let owner = reader, heard.bookID == owner.book.id,
               heard.versionID == owner.book.versionID, !closing, !exitSaveFailed else { return }
+        cancelPendingSpeechFollow(revertWindow: false)
         speechID = nil
         positionRevision &+= 1; searchReturn.cancelPending(); navigationGate.begin()
         pendingSpeechAnchor = heard; anchor = heard; readinessRevision &+= 1
@@ -222,6 +240,7 @@ final class ReaderViewModel: ObservableObject {
 
     func startSpeech(_ session: ReaderSpeechSession) {
         guard let (cursor, token) = makeSpeechCursor(), let owner = reader else { return }
+        if speechSession !== session { observeSpeechSession(session) }
         speechSession = session
         session.start { [weak self, weak owner] in
             guard let self, let owner, speechID == token, reader === owner else { throw CancellationError() }
@@ -229,10 +248,165 @@ final class ReaderViewModel: ObservableObject {
             try Task.checkCancellation()
             guard speechID == token, reader === owner else { throw CancellationError() }
             guard let fragment else { return nil }
-            return ReaderSpeechChunk(text: fragment.text) { [weak self] in
+            let utf16 = try await owner.source.utf16Offset(for: RawByteOffset(fragment.anchor.rawByteOffset)).value
+            try Task.checkCancellation()
+            guard speechID == token, reader === owner else { throw CancellationError() }
+            return ReaderSpeechChunk(text: fragment.text, follow: { [weak self] lease in
+                self?.followSpeech(fragment.anchor, utf16: utf16, token: token, lease: lease)
+            }, locate: { [weak self] in
                 self?.restoreSpeech(fragment.anchor, lease: token)
+            })
+        }
+    }
+
+    func suspendSpeechFollowing() {
+        activeSpeechSession.suspendFollowing()
+        cancelPendingSpeechFollow(revertWindow: true)
+    }
+
+    func restoreSpeechFollowingIfReady() {
+        guard canDeliverSpeechFollow() else { return }
+        let session = activeSpeechSession
+        let wasDeferred = speechFollowDeferred
+        let before = speechFollowDeliveries
+        speechFollowDeferred = false
+        session.restoreWhenVisible()
+        if wasDeferred && speechFollowDeliveries == before && canDeliverSpeechFollow() {
+            session.retryFollowIfNeeded()
+        }
+    }
+
+    private func observeSpeechSession(_ session: ReaderSpeechSession) {
+        speechStateObservers.removeAll()
+        session.$phase.dropFirst().sink { [weak self] nextPhase in
+            self?.speechSessionStateChanged(phase: nextPhase, isFollowing: nil)
+        }.store(in: &speechStateObservers)
+        session.$isFollowing.dropFirst().sink { [weak self] nextFollowing in
+            self?.speechSessionStateChanged(phase: nil, isFollowing: nextFollowing)
+        }.store(in: &speechStateObservers)
+    }
+
+    private func speechSessionStateChanged(phase: ReaderSpeechSession.Phase?, isFollowing: Bool?) {
+        if let lease = speechFollowLease, !lease() {
+            speechFollowTask?.cancel(); speechFollowTask = nil
+            speechFollowLease = nil; speechFollowID = UUID()
+        }
+        if let pending = pendingSpeechFollow, !pending.lease() {
+            cancelPendingSpeechFollow(revertWindow: true)
+        }
+        if phase == .idle || isFollowing == false {
+            speechFollowDeferred = false
+        }
+    }
+
+    private func canDeliverSpeechFollow() -> Bool {
+        guard !closing, !suspended, !exitSaveFailed, !loading, !layoutNeedsRefresh,
+              navigationGate.navigation == nil, bookmarkContext == nil, returnRequest == nil,
+              viewport.interactionActive, !viewport.interacting,
+              let windowID = window?.id,
+              let controller = viewport.controller,
+              controller.viewIfLoaded?.window != nil,
+              controller.window?.id == windowID,
+              navigationGate.accepts(window: windowID) else { return false }
+        return true
+    }
+
+    private func followSpeech(_ heard: ReadingAnchor, utf16: Int, token: UUID,
+                              lease: @escaping @MainActor () -> Bool) {
+        speechFollowDeliveries &+= 1
+        guard lease(), speechID == token, let owner = reader,
+              heard.bookID == owner.book.id, heard.versionID == owner.book.versionID,
+              !closing, !exitSaveFailed else { return }
+        guard canDeliverSpeechFollow(), let controller = viewport.controller, let displayed = controller.window else {
+            if activeSpeechSession.phase == .playing && activeSpeechSession.isFollowing {
+                speechFollowDeferred = true
+            }
+            return
+        }
+        speechFollowDeferred = false
+        cancelPendingSpeechFollow(revertWindow: false)
+        switch controller.revealSpeechTarget(heard, utf16: utf16) {
+        case .alreadyVisible:
+            return
+        case .revealed:
+            if let visible = controller.restorableAnchor() { anchor = visible }
+            return
+        case .unavailable:
+            if activeSpeechSession.phase == .playing && activeSpeechSession.isFollowing {
+                speechFollowDeferred = true
+            }
+            return
+        case .outsideWindow:
+            break
+        }
+        let currentWidth = width
+        guard currentWidth >= 80 else {
+            if activeSpeechSession.phase == .playing && activeSpeechSession.isFollowing {
+                speechFollowDeferred = true
+            }
+            return
+        }
+        // Cross-window follow renders a bounded window around `heard` without consuming `speechID`.
+        let followRequest = UUID()
+        speechFollowID = followRequest
+        speechFollowLease = lease
+        let life = lifecycle, reqGen = generation, revision = positionRevision
+        let settings = preferences, font = bodyFont, fontID = selectedBodyFontID
+        let displayedID = displayed.id
+        speechFollowTask = Task { [weak self, weak owner, weak controller] in
+            do {
+                guard let owner else { return }
+                let rendered = try await owner.window(around: heard, width: currentWidth,
+                                                      preferences: settings, bodyFont: font)
+                try Task.checkCancellation()
+                guard let self, let controller, speechFollowID == followRequest else { return }
+                speechFollowTask = nil
+                speechFollowLease = nil
+                guard lease(), speechID == token, reader === owner,
+                      lifecycle == life, generation == reqGen, positionRevision == revision,
+                      width == currentWidth, preferences == settings, selectedBodyFontID == fontID,
+                      canDeliverSpeechFollow(), viewport.controller === controller,
+                      controller.window?.id == displayedID else {
+                    if lease(), activeSpeechSession.phase == .playing, activeSpeechSession.isFollowing {
+                        speechFollowDeferred = true
+                    }
+                    return
+                }
+                pendingSpeechFollow = PendingSpeechFollow(window: rendered.id, previousAnchor: anchor,
+                                                          lease: lease, token: token)
+                anchor = rendered.anchor
+                viewport.onNextRestoreIsNavigation = false
+                window = rendered
+                loading = false
+            } catch is CancellationError {
+                guard let self, speechFollowID == followRequest else { return }
+                speechFollowTask = nil
+                speechFollowLease = nil
+            } catch {
+                guard let self, speechFollowID == followRequest else { return }
+                speechFollowTask = nil
+                speechFollowLease = nil
             }
         }
+    }
+
+    private func cancelPendingSpeechFollow(revertWindow: Bool) {
+        speechFollowTask?.cancel(); speechFollowTask = nil
+        speechFollowLease = nil
+        speechFollowID = UUID()
+        speechFollowDeferred = false
+        guard let pending = pendingSpeechFollow else { return }
+        pendingSpeechFollow = nil
+        guard revertWindow, window?.id == pending.window,
+              let displayed = viewport.controller?.window, displayed.id != pending.window else { return }
+        anchor = viewport.anchor() ?? pending.previousAnchor ?? displayed.anchor
+        window = displayed
+        readinessRevision &+= 1
+    }
+
+    private func detachSpeechFollow() {
+        activeSpeechSession.detachFollow()
+        cancelPendingSpeechFollow(revertWindow: true)
     }
 
     func startAutoReading() {
@@ -246,13 +420,15 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private func stopSpeech(restore: Bool) {
-        (speechSession ?? speech).stop(restorePosition: restore)
+        cancelPendingSpeechFollow(revertWindow: false)
+        activeSpeechSession.stop(restorePosition: restore)
         speechID = nil; speechSession = nil
+        observeSpeechSession(speech)
     }
 
-    /// Explicit input wins even between locate() and application of its async layout.
+    /// Explicit input detaches speech follow without stopping playback and revokes unapplied speech layouts.
     func beginManualNavigation() {
-        stopSpeech(restore: false)
+        detachSpeechFollow()
         guard pendingSpeechAnchor != nil, let displayed = viewport.controller?.window else { return }
         pendingSpeechAnchor = nil; layoutTask?.cancel(); generation = UUID()
         navigationGate.reset(); navigationGate.applied(window: displayed.id)
@@ -357,6 +533,7 @@ final class ReaderViewModel: ObservableObject {
     func suspend() async {
         guard !closing else { return }
         autoRead.stop()
+        suspendSpeechFollowing()
         suspended = true; lifecycle = UUID(); generation = UUID()
         searchReturn.cancelPending()
         endBookmarkPanel()
@@ -452,6 +629,10 @@ final class ReaderViewModel: ObservableObject {
         // Reflow between playback samples must start at the current pixels. Never
         // substitute a displayed anchor for an explicit navigation destination.
         if navigationGate.navigation == nil { viewport.controller?.flushAutoReadAnchor() }
+        let shouldRetrySpeechFollow = navigationGate.navigation == nil &&
+            activeSpeechSession.phase == .playing && activeSpeechSession.isFollowing
+        cancelPendingSpeechFollow(revertWindow: false)
+        if shouldRetrySpeechFollow { speechFollowDeferred = true }
         guard let reader, let anchor, !closing, !suspended, !exitSaveFailed, width >= 80 else { return }
         bookmarks.invalidatePosition(); preparedJump = nil
         layoutTask?.cancel(); generation = UUID(); layoutNeedsRefresh = true
@@ -486,6 +667,7 @@ final class ReaderViewModel: ObservableObject {
     /// UIKit application completion is not a displayed-pixels/first-paint timestamp.
     func windowApplied(_ id: UUID) {
         guard !closing, !suspended, window?.id == id, viewport.controller?.window?.id == id else { return }
+        if pendingSpeechFollow?.window == id { pendingSpeechFollow = nil }
         if let context = bookmarkContext, !bookmarkOwnerIsCurrent(context) { endBookmarkPanel(notify: false) }
         let navigation = navigationGate.navigation
         let navigationApplied = navigationGate.applied(window: id)
@@ -515,6 +697,7 @@ final class ReaderViewModel: ObservableObject {
             guard let self, self.lifecycle == request, !self.closing else { return }
             if let summary { self.openingPerformanceSummary = summary }
             self.readinessRevision &+= 1
+            if self.window?.id == id { self.restoreSpeechFollowingIfReady() }
         }
     }
 }
@@ -522,7 +705,7 @@ final class ReaderViewModel: ObservableObject {
 extension ReaderViewModel {
     /// Called synchronously from the directory-button action, before the sheet appears.
     func beginBookmarkPanel(_ presentation: UUID) {
-        endBookmarkPanel()
+        endBookmarkPanel(resumeSpeechFollow: false)
         guard let owner = reader, !closing, !suspended, !exitSaveFailed else { return }
         // Sampling may finish pending UIKit layout and synchronously publish an anchor callback.
         // Build the lease afterwards, then validate it against the now-current window.
@@ -540,12 +723,13 @@ extension ReaderViewModel {
               bookmarkOwnerIsCurrent(context), !bookmarks.isBusy else { return }
         beginBookmarkPanel(presentation)
     }
-    func endBookmarkPanel(_ presentation: UUID? = nil, notify: Bool = true) {
+    func endBookmarkPanel(_ presentation: UUID? = nil, notify: Bool = true, resumeSpeechFollow: Bool = true) {
         if let presentation, bookmarkContext?.presentation != presentation { return }
         bookmarks.dismiss(presentation: presentation)
         searchRequest = UUID(); searchHitIDs = []
         bookmarkContext = nil; preparedJump = nil; returnRequest = nil
         if notify { readinessRevision &+= 1 }
+        if resumeSpeechFollow && speechFollowDeferred { restoreSpeechFollowingIfReady() }
     }
     func prepareBookmarkWindow(id: String, presentation: UUID,
                                request: BookmarkRequest) async throws -> ReadingWindow {
@@ -582,12 +766,13 @@ extension ReaderViewModel {
                   bookmarkPositionIsCurrent(jump.context) else { return false }
             effect = .remember(visible)
         }
-        stopSpeech(restore: false)
+        detachSpeechFollow()
         preparedJump = nil
         applyNavigationWindow(rendered, effect: effect)
         return true
     }
     private func applyNavigationWindow(_ rendered: ReadingWindow, effect: SearchEffect?) {
+        cancelPendingSpeechFollow(revertWindow: false)
         layoutTask?.cancel(); generation = UUID(); positionRevision &+= 1
         navigationGate.begin(); readinessRevision &+= 1
         guard let navigation = navigationGate.navigation else { return }

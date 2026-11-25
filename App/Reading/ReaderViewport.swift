@@ -22,6 +22,7 @@ final class ReaderViewportHandle {
     private var acceptedSceneActive: Bool?
     private struct ModelSceneRequest {
         let event: ReaderSceneEvent
+        let onSettled: (@MainActor (Bool) -> Void)?
         let apply: @MainActor (Bool) async -> Void
     }
     private struct ModelSceneTransition {
@@ -91,9 +92,10 @@ final class ReaderViewportHandle {
         interactionActive && controller?.viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive
     }
     func scheduleModelSceneTransition(_ event: ReaderSceneEvent, routeID: UUID,
+                                     onSettled: (@MainActor (Bool) -> Void)? = nil,
                                      apply: @escaping @MainActor (Bool) async -> Void) {
         guard isCurrent(event, routeID: routeID) else { return }
-        pendingModelScene = ModelSceneRequest(event: event, apply: apply)
+        pendingModelScene = ModelSceneRequest(event: event, onSettled: onSettled, apply: apply)
         if let running = modelSceneTransition {
             // Same-route/phase rebinding adopts the in-flight work; it must not cancel load().
             if running.request.event.routeID != routeID || running.request.event.active != event.active {
@@ -107,7 +109,11 @@ final class ReaderViewportHandle {
         guard modelSceneTransition == nil, let request = pendingModelScene else { return }
         pendingModelScene = nil
         let event = request.event
-        guard isCurrent(event, routeID: event.routeID), completedModelPhase != event.active else { return }
+        guard isCurrent(event, routeID: event.routeID) else { return }
+        if completedModelPhase == event.active {
+            request.onSettled?(event.active)
+            return
+        }
         let id = UUID()
         modelSceneTransition = ModelSceneTransition(id: id, request: request)
         modelSceneTask = Task { [weak self] in
@@ -126,7 +132,11 @@ final class ReaderViewportHandle {
             completedModelPhase = completed ? running.request.event.active : nil
         }
         modelSceneTask = nil; modelSceneTransition = nil
-        startModelSceneTransition() // Latest current owner takes over only after the old await settles.
+        if pendingModelScene != nil {
+            startModelSceneTransition() // Latest current owner takes over only after the old await settles.
+        } else if completed, isCurrent(running.request.event, routeID: running.request.event.routeID) {
+            running.request.onSettled?(running.request.event.active)
+        }
     }
     // BEGIN READER DIAGNOSTICS scene bridge
     private var diagnosticScene: ReaderInteractionDiagnostics.Scene = .unknown
@@ -163,6 +173,9 @@ final class ReaderViewportHandle {
         controller?.setInteractionActive(active)
     }
     var onNextRestoreIsNavigation = false
+    var onUserScrollBegan: (@MainActor () -> Void)? {
+        didSet { controller?.onUserScrollBegan = onUserScrollBegan }
+    }
     func anchor() -> ReadingAnchor? { controller?.restorableAnchor() ?? restoration?.anchor }
     var interacting: Bool { controller?.interacting ?? false }
     func attach(_ value: ReaderViewController) {
@@ -181,6 +194,7 @@ final class ReaderViewportHandle {
             pendingModelScene = nil
         }
         controller = value
+        value.onUserScrollBegan = onUserScrollBegan
         // BEGIN READER DIAGNOSTICS attach
         value.diagnosticHandle = self
         value.interactionDiagnostics.attach(scene: diagnosticScene, replacing: diagnosticReplacement)

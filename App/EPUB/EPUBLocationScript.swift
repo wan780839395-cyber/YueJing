@@ -283,6 +283,15 @@ enum EPUBLocationScript {
         return "window.__yjEpub && window.__yjEpub.configure(\(json));"
     }
 
+    static func inspectSpeechPositionScript(path: String, node: Int, offset: Int) -> String? {
+        let payload: [String: Any] = ["path": path, "node": node, "offset": offset]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return nil }
+        let json = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        return "window.__yjEpub && window.__yjEpub.inspectSpeechPosition ? window.__yjEpub.inspectSpeechPosition(\(json)) : null;"
+    }
+
     static func parseMessage(_ body: Any) -> EPUBLocatorPayload? {
         guard let dict = body as? [String: Any],
               let kindRaw = dict["kind"] as? String,
@@ -1989,6 +1998,39 @@ enum EPUBLocationScript {
                 sample.restoredNode = sample.node;
                 sample.restoredOffset = sample.utf16Offset;
                 return sample;
+            },
+            inspectSpeechPosition: function(target) {
+                if (!state.ready || state.suppressingReflow || state.syncing) { return {status: "transient"}; }
+                if (state.scrollActive) { return {status: "busy"}; }
+                if (!target || typeof target.path !== "string" || typeof target.node !== "number" ||
+                    target.node < 0 || typeof target.offset !== "number" || target.offset < 0) {
+                    return {status: "missing"};
+                }
+                var chapter = chapterFor(target.path);
+                if (!chapter) { return {status: "missing"}; }
+                var rect = textAnchorRect(target.path, target.node, target.offset);
+                if (!rect || !(rect.width > 0 && rect.height > 0)) { return {status: "missing"}; }
+                var viewportW = viewportWidth();
+                var viewportH = window.innerHeight || document.documentElement.clientHeight || 700;
+                var scrollX = window.scrollX || window.pageXOffset || 0;
+                var scrollY = window.scrollY || window.pageYOffset || 0;
+                if (state.paginated) {
+                    var targetPage = Math.floor(Math.max(0, scrollX + rect.left + rect.width * 0.5) / viewportW);
+                    var targetX = targetPage * viewportW;
+                    var onCurrentPage = Math.abs(scrollX - targetX) <= 1 &&
+                        rect.left >= -1 && rect.left < viewportW &&
+                        rect.bottom > 0 && rect.top < viewportH;
+                    if (onCurrentPage) {
+                        return {status: "visible", sessionID: state.sessionID, epoch: state.epoch};
+                    }
+                    return {status: "reveal", sessionID: state.sessionID, epoch: state.epoch, x: targetX, y: 0};
+                }
+                var visible = rect.right > 0 && rect.left < viewportW &&
+                    rect.top >= -0.5 && (rect.bottom <= viewportH + 0.5 || (rect.height > viewportH && rect.top < 36));
+                if (visible) {
+                    return {status: "visible", sessionID: state.sessionID, epoch: state.epoch};
+                }
+                return {status: "reveal", sessionID: state.sessionID, epoch: state.epoch, x: 0, y: Math.max(0, scrollY + rect.top - 18)};
             },
             sampleStatus: function() {
                 return {ready: state.ready, reflow: state.suppressingReflow, syncing: state.syncing,

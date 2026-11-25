@@ -270,6 +270,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
     var onExtend: (@MainActor (ReadingAnchor, UUID) -> Void)?
     var onWidth: (@MainActor (Double) -> Void)?
     var onSettled: (@MainActor (ReadingAnchor, UUID) -> Bool)?
+    var onUserScrollBegan: (@MainActor () -> Void)?
     var toolIntent: (@MainActor () -> UUID)?
     var onToolsInteraction: (@MainActor (ReadingToolsInteraction) -> Void)?
     var interacting: Bool { table.isDragging || table.isDecelerating }
@@ -398,7 +399,9 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         table.register(ReadingCell.self, forCellReuseIdentifier: "text")
         table.onUserIntent = { [weak self] in
             self?.autoReadOffset = nil
-            self?.userInputSinceRestore = true; self?.onToolsInteraction?(.scrollingBegan)
+            self?.userInputSinceRestore = true
+            self?.onUserScrollBegan?()
+            self?.onToolsInteraction?(.scrollingBegan)
         }
         toolsTap.addTarget(self, action: #selector(bodyTapped))
         toolsTap.delegate = self
@@ -478,7 +481,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         defer { sampleInteractionDiagnostics() }
         // END READER DIAGNOSTICS revoke
         setInteractionActive(false)
-        onAnchor = nil; onExtend = nil; onWidth = nil; onSettled = nil
+        onAnchor = nil; onExtend = nil; onWidth = nil; onSettled = nil; onUserScrollBegan = nil
         toolIntent = nil; onToolsInteraction = nil
     }
 
@@ -629,6 +632,115 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         return false
     }
 
+    enum SpeechRevealOutcome: Equatable {
+        case alreadyVisible
+        case revealed
+        case outsideWindow
+        case unavailable
+    }
+
+    /// Checks whether the line covering `anchor` (resolved via UTF-16 and raw-byte line geometry)
+    /// is currently fully visible inside the inset viewport.
+    func isSpeechTargetVisible(_ anchor: ReadingAnchor, utf16: Int? = nil) -> Bool {
+        guard isViewLoaded, viewIfLoaded?.window != nil, let window else { return false }
+        table.layoutIfNeeded()
+        guard let (row, line) = locateSpeechLine(for: anchor, utf16: utf16, in: window) else { return false }
+        let visibleTop = table.contentOffset.y + table.adjustedContentInset.top
+        let visibleBottom = table.contentOffset.y + table.bounds.height - table.adjustedContentInset.bottom
+        let visibleHeight = visibleBottom - visibleTop
+        guard table.bounds.height > 0, visibleHeight > 0 else { return false }
+        let rowRect = table.rectForRow(at: IndexPath(row: row, section: 0))
+        let lineTop = rowRect.minY + CGFloat(line.top)
+        let lineBottom = lineTop + CGFloat(line.height)
+        let tolerance = 0.5 / max(1, table.traitCollection.displayScale)
+        if CGFloat(line.height) <= visibleHeight + tolerance {
+            return lineTop >= visibleTop - tolerance && lineBottom <= visibleBottom + tolerance
+        }
+        return lineTop <= visibleTop + tolerance && lineBottom >= visibleBottom - tolerance
+    }
+
+    /// Minimally reveals an audible speech-start anchor within the currently displayed window.
+    /// Never moves when the target line is already visible; never emits user-drag callbacks.
+    func revealSpeechTarget(_ anchor: ReadingAnchor, utf16: Int? = nil) -> SpeechRevealOutcome {
+        guard isViewLoaded, viewIfLoaded?.window != nil, interactionContext.active,
+              !restoring, !interacting, !table.isTracking, let window,
+              anchor.bookID == window.anchor.bookID,
+              anchor.versionID == window.anchor.versionID else { return .unavailable }
+        table.layoutIfNeeded()
+        let visibleTop = table.contentOffset.y + table.adjustedContentInset.top
+        let visibleBottom = table.contentOffset.y + table.bounds.height - table.adjustedContentInset.bottom
+        let visibleHeight = visibleBottom - visibleTop
+        guard table.bounds.height > 0, visibleHeight > 0 else { return .unavailable }
+        guard let (row, line) = locateSpeechLine(for: anchor, utf16: utf16, in: window) else { return .outsideWindow }
+        let rowRect = table.rectForRow(at: IndexPath(row: row, section: 0))
+        let lineTop = rowRect.minY + CGFloat(line.top)
+        let lineBottom = lineTop + CGFloat(line.height)
+        let tolerance = 0.5 / max(1, table.traitCollection.displayScale)
+        let lineFits = CGFloat(line.height) <= visibleHeight + tolerance
+        let isVisible = lineFits
+            ? (lineTop >= visibleTop - tolerance && lineBottom <= visibleBottom + tolerance)
+            : (lineTop <= visibleTop + tolerance && lineBottom >= visibleBottom - tolerance)
+        if isVisible { return .alreadyVisible }
+        let minimum = -table.adjustedContentInset.top
+        let maximum = max(minimum, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
+        let rawDesired: CGFloat
+        if !lineFits || lineTop < visibleTop {
+            rawDesired = lineTop - table.adjustedContentInset.top
+        } else {
+            rawDesired = lineBottom - (table.bounds.height - table.adjustedContentInset.bottom)
+        }
+        let desired = min(maximum, max(minimum, rawDesired))
+        if abs(desired - table.contentOffset.y) <= tolerance { return .alreadyVisible }
+        settingAutoOffset = true
+        table.setContentOffset(CGPoint(x: table.contentOffset.x, y: desired), animated: false)
+        autoReadOffset = table.contentOffset.y
+        settingAutoOffset = false
+        table.layoutIfNeeded()
+        userInputSinceRestore = true
+        return .revealed
+    }
+
+    private func locateSpeechLine(for anchor: ReadingAnchor, utf16: Int?,
+                                  in window: ReadingWindow) -> (row: Int, line: ReadingLine)? {
+        guard anchor.bookID == window.anchor.bookID, anchor.versionID == window.anchor.versionID else { return nil }
+        if let utf16 {
+            guard let row = window.slices.firstIndex(where: {
+                $0.range.location.value <= utf16 && utf16 < $0.range.end.value
+            }) else { return nil }
+            let slice = window.slices[row]
+            guard let lineIndex = slice.lines.firstIndex(where: {
+                $0.range.location.value <= utf16 && utf16 < $0.range.end.value
+            }) else { return nil }
+            let line = slice.lines[lineIndex]
+            guard line.rawByteStart <= anchor.rawByteOffset else { return nil }
+            if let nextLine = nextLineAfter(row: row, lineIndex: lineIndex, in: window),
+               nextLine.rawByteStart > line.rawByteStart,
+               anchor.rawByteOffset >= nextLine.rawByteStart {
+                return nil
+            }
+            return (row, line)
+        }
+        var candidate: (row: Int, line: ReadingLine)?
+        for (row, slice) in window.slices.enumerated() {
+            for line in slice.lines {
+                if anchor.rawByteOffset < line.rawByteStart {
+                    return candidate
+                }
+                candidate = (row, line)
+            }
+        }
+        return window.hasNext ? nil : candidate
+    }
+
+    private func nextLineAfter(row: Int, lineIndex: Int, in window: ReadingWindow) -> ReadingLine? {
+        let slice = window.slices[row]
+        if lineIndex + 1 < slice.lines.count { return slice.lines[lineIndex + 1] }
+        for nextRow in (row + 1)..<window.slices.count {
+            if let first = window.slices[nextRow].lines.first { return first }
+        }
+        return nil
+    }
+
     /// Preserve the semantic target across repeated reflows until a real scrolling action changes it.
     func restorableAnchor() -> ReadingAnchor? {
         userInputSinceRestore ? actualVisibleAnchor() : window?.anchor
@@ -730,6 +842,7 @@ final class ReaderViewController: UIViewController, UITableViewDataSource, UITab
         // BEGIN READER DIAGNOSTICS drag facts
         sampleInteractionDiagnostics()
         // END READER DIAGNOSTICS drag facts
+        onUserScrollBegan?()
         onToolsInteraction?(.scrollingBegan)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {

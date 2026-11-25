@@ -7,10 +7,13 @@ struct ReaderSpeechSessionTests {
     private final class Audio: ReaderSpeechAudio {
         var texts: [String] = []
         var rates: [Float] = []
+        var begin: (@MainActor () -> Void)?
+        var immediateStart = true
         var finish: (@MainActor (Bool) -> Void)?
         func speak(_ text: String, multiplier: Float, started: @escaping @MainActor () -> Void,
                    ended: @escaping @MainActor (Bool) -> Void) throws {
-            texts.append(text); rates.append(multiplier); finish = ended; started()
+            texts.append(text); rates.append(multiplier); finish = ended; begin = started
+            if immediateStart { started() }
         }
         func silence() { finish = nil }
     }
@@ -64,6 +67,46 @@ struct ReaderSpeechSessionTests {
         active = true; session.restoreWhenVisible(); session.restoreWhenVisible()
         #expect(locations == [1])
     }
+    @Test func speechFollowUsesAudibleStartAndManualReturnNotPrefetch() async throws {
+        let audio = Audio(), session = ReaderSpeechSession(audio: audio, foreground: { true })
+        audio.immediateStart = false
+        var i = 0, reveals: [Int] = [], stops: [Int] = []
+        var valid: (@MainActor () -> Bool)?
+        session.start {
+            guard i < 3 else { return nil }; let n = i; i += 1
+            return ReaderSpeechChunk(text: String(n), follow: { lease in
+                if lease() { reveals.append(n) }; valid = lease
+            }, locate: { stops.append(n) })
+        }
+        try await waitFor { i == 2 && audio.texts == ["0"] }; #expect(reveals.isEmpty)
+        audio.begin?(); #expect(reveals == [0] && valid?() == true)
+        let staleStart = try #require(audio.begin)
+        session.detachFollow(); #expect(valid?() == false && session.phase == .playing)
+        audio.finish?(true); try await waitFor { audio.texts == ["0", "1"] }; audio.begin?()
+        #expect(reveals == [0]); session.returnToSpeech(); #expect(reveals == [0, 1])
+        session.pause(); staleStart(); #expect(valid?() == false && reveals == [0, 1])
+        session.detachFollow(); session.stop(); #expect(stops.isEmpty)
+    }
+
+    @Test func speechFollowCoalescesWhileLockedAndDoesNotReattachOnUnlock() async throws {
+        let audio = Audio(); var active = true, i = 0, reveals: [Int] = []
+        let session = ReaderSpeechSession(audio: audio, foreground: { active })
+        session.start {
+            let n = i; i += 1
+            return ReaderSpeechChunk(text: String(n), follow: { lease in
+                if lease() { reveals.append(n) }
+            }, locate: {})
+        }
+        try await waitFor { reveals == [0] }; session.suspendFollowing(); active = false
+        audio.finish?(true); try await waitFor { audio.texts.count == 2 }
+        audio.finish?(true); try await waitFor { audio.texts.count == 3 }; #expect(reveals == [0])
+        active = true; session.restoreWhenVisible(); session.restoreWhenVisible(); #expect(reveals == [0, 2])
+        session.detachFollow(); session.suspendFollowing(); active = false
+        audio.finish?(true); try await waitFor { audio.texts.count == 4 }
+        active = true; session.restoreWhenVisible(); #expect(!session.isFollowing && reveals == [0, 2])
+        session.returnToSpeech(); #expect(reveals == [0, 2, 3]); session.stop(restorePosition: false)
+    }
+
     @Test func lateSourceCannotStartAudioInNewBook() async throws {
         let audio = Audio(), session = ReaderSpeechSession(audio: audio, foreground: { true })
         var gate: CheckedContinuation<Void, Never>?

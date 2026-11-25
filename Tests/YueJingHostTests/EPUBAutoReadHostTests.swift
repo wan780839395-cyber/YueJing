@@ -8,6 +8,26 @@ import WebKit
 @MainActor
 @Suite(.serialized)
 struct EPUBAutoReadHostTests {
+    private final class MockSpeechAudio: ReaderSpeechAudio {
+        var texts: [String] = []
+        var begin: (@MainActor () -> Void)?
+        var finish: (@MainActor (Bool) -> Void)?
+        var immediateStart = true
+
+        func speak(_ text: String, multiplier: Float, started: @escaping @MainActor () -> Void,
+                   ended: @escaping @MainActor (Bool) -> Void) throws {
+            texts.append(text)
+            begin = started
+            finish = ended
+            if immediateStart { started() }
+        }
+
+        func silence() {
+            begin = nil
+            finish = nil
+        }
+    }
+
     @Test func epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd() async throws {
         for layout in EPUBLayoutMode.allCases {
             for mode in EPUBReadingMode.allCases {
@@ -263,6 +283,151 @@ struct EPUBAutoReadHostTests {
         }
     }
 
+    @Test func epubSpeechFollowRevealsOnlyWhenOffscreenAndDetachesUntilReturn() async throws {
+        for mode in EPUBReadingMode.allCases {
+            try await withBook { service, id in
+                let audio = MockSpeechAudio()
+                audio.immediateStart = false
+                let speech = ReaderSpeechSession(audio: audio, foreground: { true })
+                try await withReader(service, id, mode, .reader, speech: speech) { model, controller in
+                    controller.onToolsInteraction = { event in
+                        if case .scrollingBegan = event { model.detachSpeechFollow() }
+                    }
+                    let scroll = controller.webView.scrollView
+                    let initial = scroll.contentOffset
+                    let initialLoads = controller.documentLoadCount
+
+                    model.startSpeech()
+                    try await until { model.speech.isActive && audio.texts.count == 1 && audio.begin != nil }
+                    try await Task.sleep(for: .milliseconds(60))
+                    // Prefetching before didStart must not move the viewport.
+                    #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
+
+                    // Visible initial sentence must not scroll or turn the page on didStart.
+                    audio.begin?()
+                    try await Task.sleep(for: .milliseconds(80))
+                    #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
+                    #expect(model.speech.isFollowing && !model.autoRead.isRunning)
+
+                    // Advance until an actually started sentence lies offscreen and triggers reveal.
+                    var moved = false
+                    for _ in 0..<80 {
+                        let count = audio.texts.count
+                        audio.finish?(true)
+                        try await until { audio.texts.count > count && audio.begin != nil }
+                        audio.begin?()
+                        let deadline = ContinuousClock.now.advanced(by: .milliseconds(150))
+                        while scroll.contentOffset == initial && ContinuousClock.now < deadline {
+                            try await Task.sleep(for: .milliseconds(15))
+                        }
+                        if scroll.contentOffset != initial {
+                            moved = true
+                            break
+                        }
+                    }
+                    try #require(moved)
+                    #expect(controller.documentLoadCount == initialLoads)
+                    #expect(model.speech.isActive && model.speech.isFollowing)
+
+                    // The next sentence on the newly revealed screen stays stationary.
+                    let revealed = scroll.contentOffset
+                    let countAfterReveal = audio.texts.count
+                    audio.finish?(true)
+                    try await until { audio.texts.count > countAfterReveal && audio.begin != nil }
+                    audio.begin?()
+                    try await Task.sleep(for: .milliseconds(80))
+                    #expect(scroll.contentOffset == revealed)
+
+                    // Manual page turn detaches follow while keeping speech active.
+                    try #require(controller.turnPage(.next, animated: false))
+                    #expect(model.speech.isActive && !model.speech.isFollowing)
+                    let manual = scroll.contentOffset
+                    try #require(manual != revealed)
+
+                    let countWhileDetached = audio.texts.count
+                    audio.finish?(true)
+                    try await until { audio.texts.count > countWhileDetached && audio.begin != nil }
+                    audio.begin?()
+                    try await Task.sleep(for: .milliseconds(80))
+                    #expect(scroll.contentOffset == manual)
+                    #expect(model.speech.isActive && !model.speech.isFollowing)
+
+                    // Explicit return reattaches and reveals the latest started sentence.
+                    model.speech.returnToSpeech()
+                    #expect(model.speech.isFollowing)
+                    try await until { scroll.contentOffset != manual }
+                    #expect(controller.documentLoadCount == initialLoads)
+                    #expect(model.speech.isActive)
+
+                    model.speech.stop(restorePosition: false)
+                    #expect(await model.close())
+                }
+            }
+        }
+    }
+
+    @Test func epubSpeechFollowSkipsLockedWebKitAndRestoresOnceAfterReady() async throws {
+        try await withBook { service, id in
+            var foreground = true
+            let audio = MockSpeechAudio()
+            let speech = ReaderSpeechSession(audio: audio, foreground: { foreground })
+            try await withReader(service, id, .scroll, .reader, speech: speech) { model, controller in
+                let scroll = controller.webView.scrollView
+                model.startSpeech()
+                try await until { model.speech.isActive && audio.texts.count == 1 && audio.finish != nil }
+
+                foreground = false
+                await model.suspend()
+                let lockedOffset = scroll.contentOffset
+                let lockedLoads = controller.documentLoadCount
+
+                // Advance across chapter 1 into chapter 2 while locked; WebKit must not move.
+                for _ in 0..<120 {
+                    if audio.texts.last?.contains("EPUB_A_C2_P1") == true { break }
+                    let count = audio.texts.count
+                    audio.finish?(true)
+                    try await until { audio.texts.count > count || !model.speech.isActive }
+                }
+                try #require(audio.texts.last?.contains("EPUB_A_C2_P1") == true)
+                #expect(model.speech.isActive && model.speech.isFollowing)
+                #expect(scroll.contentOffset == lockedOffset && controller.documentLoadCount == lockedLoads)
+
+                // Unlock restores once after readiness and preserves audio ownership across the chapter jump.
+                foreground = true
+                await model.resume()
+                try await until {
+                    model.presentationToken?.path == model.spine[1] &&
+                    !model.promotingVisibleChapter &&
+                    scroll.contentOffset.y > lockedOffset.y + 100
+                }
+                #expect(model.speech.isActive && model.speech.isFollowing)
+                #expect(controller.documentLoadCount == lockedLoads)
+
+                // Detached playback stays detached across lock/unlock and never yanks to chapter 3.
+                model.detachSpeechFollow()
+                #expect(!model.speech.isFollowing && model.speech.isActive)
+                foreground = false
+                await model.suspend()
+                for _ in 0..<120 {
+                    if audio.texts.last?.contains("EPUB_A_C3_P1") == true { break }
+                    let count = audio.texts.count
+                    audio.finish?(true)
+                    try await until { audio.texts.count > count || !model.speech.isActive }
+                }
+                try #require(audio.texts.last?.contains("EPUB_A_C3_P1") == true)
+                foreground = true
+                await model.resume()
+                try await until { model.presentationToken != nil && !model.promotingVisibleChapter }
+                try await Task.sleep(for: .milliseconds(80))
+                #expect(!model.speech.isFollowing && model.speech.isActive)
+                #expect(model.presentationToken?.path == model.spine[1])
+
+                model.speech.stop(restorePosition: false)
+                #expect(await model.close())
+            }
+        }
+    }
+
     /// Poll the same action as the clock. No synthetic delegate callback or assumed animation duration.
     private func requireOneLanding(_ model: EPUBReaderViewModel, owner: EPUBNavigationToken) async throws {
         var result = model.autoReadStep(from: owner, distance: 0)
@@ -293,11 +458,12 @@ struct EPUBAutoReadHostTests {
     }
 
     private func withReader(_ service: LibraryService, _ id: String, _ mode: EPUBReadingMode, _ layout: EPUBLayoutMode,
+                            speech: ReaderSpeechSession? = nil,
                             _ body: @MainActor (EPUBReaderViewModel, EPUBWebViewController) async throws -> Void) async throws {
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
-        let model = EPUBReaderViewModel(bookID: id, service: service, readingMode: mode, layoutMode: layout)
+        let model = EPUBReaderViewModel(bookID: id, service: service, readingMode: mode, layoutMode: layout, speech: speech)
         let controller = EPUBWebViewController()
         model.webView.attach(controller)
         controller.onLocatorEvent = model.handleLocatorEvent

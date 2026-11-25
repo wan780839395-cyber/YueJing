@@ -45,12 +45,17 @@ FILES = {
     "YueJingHostTests/ReaderThemeUpdateTests.swift": """sameThemeUpdatesAreIdempotentAndRealChangesStillApply sameThemeDoesNotPreventANewWindowFromApplying""",
     "YueJingHostTests/ReaderSceneAuthorityTests.swift": """nativeSceneAuthorityRejectsStaleOwnersAndDuplicatePhaseWrites""",
     "ReaderDomainTests/TXTSpeechCursorTests.swift": """speechWindowsPreserveEveryUnitAndOriginalAnchorAcrossChaptersAndEncodings narrationKeepsDecimalsAndClosingQuotesAndPrefersClauseBoundaries nextNarrationSentenceIsNotCutAtPreviousStorageWindow oversizedGraphemeAndCancellationNeverSkipOrRepeatSpeechScalars""",
-    "YueJingHostTests/ReaderSpeechSessionTests.swift": """installedMandarinVoicePrefersQualityWithoutSwitchingDialect builtAppDeclaresAudioBackgroundMode pauseReplaysHeardSentenceAndRejectsOldCompletion backgroundPlaybackAdvancesAndRestoresOnlyWhenVisible lateSourceCannotStartAudioInNewBook""",
+    "YueJingHostTests/KokoroDownloadTests.swift": """packDownloadAcceptsOnlyPinnedSourceHostsAndCompleteResponses cancelledDownloadAndBadArchiveLeaveSystemUsableAndRetryable""",
+    "YueJingHostTests/KokoroPackArchiveTests.swift": """wrongLengthAndWrongDigestLeavePriorInstallationUntouched officialArchiveAtomicallyReplacesDirectoryWithOnlyIndexedMembers""",
+    "YueJingHostTests/KokoroPackStoreTests.swift": """officialIndexIsBundledAndComplete managedLifecyclePreservesPreferenceAndCopiesOnlyPinnedFiles failedReplacementAndCancellationKeepVerifiedInstall rejectsLinkedRootDirectoryAndLeafEvenWhenTargetHasCorrectBytes indexRejectsAbsoluteTraversalAndDuplicateNames""",
+    "YueJingHostTests/KokoroRoutingTests.swift": """unavailablePackOrSynthesisFailureUsesSystemOnSameSentence offlinePrefetchIsSilentAndLateRenderCannotRestartPlayback kokoroWaveIsBoundedMonoPCMAndRejectsInvalidOutput""",
+    "YueJingHostTests/ReaderSpeechSessionTests.swift": """installedMandarinVoicePrefersQualityWithoutSwitchingDialect builtAppDeclaresAudioBackgroundMode pauseReplaysHeardSentenceAndRejectsOldCompletion backgroundPlaybackAdvancesAndRestoresOnlyWhenVisible speechFollowUsesAudibleStartAndManualReturnNotPrefetch speechFollowCoalescesWhileLockedAndDoesNotReattachOnUnlock lateSourceCannotStartAudioInNewBook""",
     "YueJingHostTests/ReaderLockRecoveryHostTests.swift": """txtSpeechBackgroundPlaybackAndUnlockReadinessRecovery txtAutoReadLockRecoveryAndRejectionGates epubSpeechBackgroundPlaybackAndUnlockReadinessRecovery epubAutoReadLockRecoveryAndRejectionGates""",
     "YueJingHostTests/ReadingTimeLedgerTests.swift": """readingTimeSplitsMidnightAndDoesNotResumeFromDisk readingTimeExcludesPausedTimeAndRejectsStaleRouteUpdates changingWallTimeDoesNotManufactureReadingHours""",
     "YueJingHostTests/AutoReadCadenceTests.swift": """scrollClockAccumulatesSlowStepsWithoutCatchingUpAfterAStall pageClockWaitsForItsIntervalAndBoundsPendingContent openingAnotherReaderRestoresOnlyPaceAndCancelsOldTicks""",
     "YueJingHostTests/TXTAutoReadingTests.swift": """playbackMovesTableAndBodyTouchOnlyPauses boundaryWaitsForAppliedWindowThenStopsAtEOFAndSavesVisibleProgress speechPullsFromVisibleLineWhileSuspendedAndRestoresFinalFragment manualNavigationRevokesPendingSpeechLayoutAndLateLocate""",
-    "YueJingHostTests/EPUBAutoReadHostTests.swift": """epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation epubSpeechCursorBoundsUTF16AndSkipsImageAndEmptyChapters epubSpeechContinuesWhileSuspendedAndRestoresLastSentenceAtEOF epubSpeechRefusesCachedAnchorWhenViewportHasNoVisibleLocator epubSpeechRejectsLateSourceAndLocateAfterNavigationOrExit""",
+    "YueJingHostTests/EPUBAutoReadHostTests.swift": """epubAutoReadAdvancesAcrossResidentChaptersAndStopsAtBookEnd epubAutoReadEdgeTouchPausesWithoutTurningAndReopensAtConfirmedAnchor epubAutoReadRejectsOldOwnerDuringAndAfterExplicitNavigation epubSpeechCursorBoundsUTF16AndSkipsImageAndEmptyChapters epubSpeechContinuesWhileSuspendedAndRestoresLastSentenceAtEOF epubSpeechRefusesCachedAnchorWhenViewportHasNoVisibleLocator epubSpeechRejectsLateSourceAndLocateAfterNavigationOrExit epubSpeechFollowRevealsOnlyWhenOffscreenAndDetachesUntilReturn epubSpeechFollowSkipsLockedWebKitAndRestoresOnceAfterReady""",
+    "YueJingHostTests/TXTSpeechFollowHostTests.swift": """audibleStartFollowsMinimallyWithoutMovingVisibleLinesOrPrefetch crossWindowFollowRendersBoundedWindowWithoutConsumingLeaseAndRejectsStaleTakeover manualDragAndBrowsingDetachKeepSpeechPlayingReturnWorksWhilePausedAndExitStops lockSuspendsFollowWithoutMovementAndUnlockFollowsLatestOnceAfterReadiness""",
     "YueJingHostTests/TXTBodyFontHostTests.swift": """sharedPageSpecimenRendersTheSelectedFaceAtDraftSize bodyCanvasPaintsTheWideAAndRestoresItsDefaultInk reflowAndReopenKeepScrolledTextWithSelectedAndRestoredFont""",
     "YueJingHostTests/ReaderBookmarkTests.swift": """bookmarkVisibleCaptureAndMutationsDoNotSaveProgress bookmarkQueuedCancellationAndOldDismissCannotAffectNewPanel bookmarkPreparationPreservesWindowUntilExactApplication bookmarkReflowAndOwnerReplacementRevokeCapturedAndPreparedPositions txtSearchReturnConsumesExactVisibleAnchorOnlyAfterActiveWindowApplication""",
     "YueJingHostTests/SearchReturnTests.swift": """epubSearchReturnPreservesFirstLocatorUntilConfirmedReturn""",
@@ -84,14 +89,14 @@ FILES = {
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
 COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 293, "TXTBlockDecoderTests": 6,
-          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 94,
+          "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 114,
           "YueJingUITests": 13, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 9}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 444  # Declaration identities; the Bool parameter adds one execution (445).
+TOTAL = 464  # Declaration identities; the Bool parameter adds one execution (465).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
 EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 294}
-EXECUTION_TOTAL = 445
+EXECUTION_TOTAL = 465
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 

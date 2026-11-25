@@ -68,6 +68,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       device_route: ${{ steps.admit.outputs.device_route }}
+      delivery_mode: ${{ steps.privacy.outputs.delivery_mode }}
     env:
       VALIDATION_SCOPE: ${{ inputs.validation_scope }}
       SCOPE_ACKNOWLEDGEMENT: ${{ inputs.scope_acknowledgement }}
@@ -84,6 +85,9 @@ jobs:
       - name: Reject default unknown unbound or unacknowledged scopes before native preparation
         id: admit
         run: python3 -B scripts/workflow_admission.py
+      - name: Bind delivery policy to checked-out product before any artifact-producing job
+        id: privacy
+        run: python3 -B scripts/private_kokoro_delivery.py policy
 
   validate:
     needs: admission
@@ -1091,7 +1095,7 @@ jobs:
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$(awk 'NR == 1 { print $1 }' artifacts/SHA256SUMS)"
 
       - name: Preserve diagnostic build evidence including failures
-        if: always()
+        if: ${{ always() && needs.admission.outputs.delivery_mode == 'legacy' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task3-evidence-${{ github.run_id }}-${{ github.sha }}
@@ -1100,7 +1104,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish diagnostic IPA - UI NOT QUALIFIED
-        if: success()
+        if: ${{ success() && needs.admission.outputs.delivery_mode == 'legacy' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
@@ -1111,6 +1115,33 @@ jobs:
             artifacts/task3/app-dependency-gate.json
             artifacts/task3/ipa-verification.json
             artifacts/task3/epub-diagnostic-scope.json
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Seal private diagnostic evidence including failures
+        id: seal_evidence
+        if: ${{ always() && needs.admission.outputs.delivery_mode == 'cms40' }}
+        run: python3 -B scripts/private_kokoro_delivery.py device-evidence
+      - name: Preserve sealed diagnostic evidence only
+        if: ${{ always() && steps.seal_evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: task3-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/kokoro-device-evidence/device-evidence.cms
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Seal verified private diagnostic delivery after batch replay
+        if: ${{ success() && needs.admission.outputs.delivery_mode == 'cms40' }}
+        run: python3 -B scripts/private_kokoro_delivery.py device-delivery
+      - name: Publish sealed diagnostic IPA - UI NOT QUALIFIED
+        if: ${{ success() && needs.admission.outputs.delivery_mode == 'cms40' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: task3-unsigned-ipa-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/kokoro-device-delivery/device-delivery.cms
+          compression-level: 0
           retention-days: 3
           if-no-files-found: error
 
@@ -1587,7 +1618,7 @@ jobs:
               out.write('\n## Development only — no IPA or release qualification\n```json\n'+json.dumps(data, indent=2)+'\n```\n')
           PY
       - name: Preserve development raw evidence and preparation failures
-        if: always()
+        if: ${{ always() && needs.admission.outputs.delivery_mode == 'legacy' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: development-evidence-${{ github.run_id }}-${{ github.sha }}
@@ -1596,6 +1627,19 @@ jobs:
             artifacts/task3/
           retention-days: 3
           if-no-files-found: warn
+      - name: Seal private development evidence including preparation and test failures
+        id: seal_evidence
+        if: ${{ always() && needs.admission.outputs.delivery_mode == 'cms40' }}
+        run: python3 -B scripts/private_kokoro_delivery.py development-evidence
+      - name: Preserve sealed development evidence only
+        if: ${{ always() && steps.seal_evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: development-evidence-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ runner.temp }}/kokoro-development-evidence/development-evidence.cms
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
 
   woff2_native:
     needs: admission

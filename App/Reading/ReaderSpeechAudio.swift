@@ -6,6 +6,12 @@ protocol ReaderSpeechAudio: AnyObject {
     func speak(_ text: String, multiplier: Float, started: @escaping @MainActor () -> Void,
                ended: @escaping @MainActor (Bool) -> Void) throws
     func silence()
+    func prepare(_ text: String, multiplier: Float)
+}
+
+extension ReaderSpeechAudio {
+    // System synthesis and test doubles need no lookahead.
+    func prepare(_ text: String, multiplier: Float) { }
 }
 
 /// Only identity is inspected across the delegate hop; keep the object alive so its address cannot be recycled.

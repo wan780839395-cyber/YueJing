@@ -145,6 +145,23 @@ test('Swift compatibility defaults, horizontal payload decoding, paged-only CSS 
     }
 });
 
+test('speech visibility inspection is read-only and reveals offscreen text in either mode', () => {
+    for (const mode of ['scroll', 'paged']) {
+        const h = harness(['a'.repeat(300)], mode); h.configure();
+        const count = h.calls.length;
+        const inspect = offset => h.api.inspectSpeechPosition({path: 'chapter.xhtml', node: 0, offset});
+        assert.equal(inspect(12).status, 'visible');
+        const target = inspect(120);
+        assert.equal(target.status, 'reveal');
+        assert.equal(target.epoch, 'epoch-1');
+        if (mode === 'paged') assert.equal(target.x, 320); else assert.ok(target.y > 0);
+        assert.equal(h.calls.length, count, 'probe must never itself move the reading viewport');
+        h.window.scrollTo(target.x, target.y);
+        assert.equal(inspect(120).status, 'visible');
+        assert.equal(h.api.inspectSpeechPosition({path:'absent.xhtml',node:0,offset:1}).status, 'missing');
+    }
+});
+
 test('target character restores to horizontal page, ready includes both axes', () => {
     const h = harness(); h.configure({ targetNode: 0, targetOffset: 145, preserveTargetAnchor: true });
     assert.deepEqual(h.calls[0], [320, 0]);

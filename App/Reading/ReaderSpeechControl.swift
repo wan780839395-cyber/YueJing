@@ -50,6 +50,14 @@ struct ReaderSpeechControl: View {
         .accessibilityIdentifier("reader.speech.rate")
         Button { session.stop() } label: { Text("结束听书").frame(minHeight: 44) }
             .accessibilityIdentifier("reader.speech.stop")
+        if session.isActive && !session.isFollowing {
+            Button { session.returnToSpeech() } label: {
+                Text("回到朗读处").frame(minHeight: 44)
+            }
+            .accessibilityLabel("回到朗读处")
+            .accessibilityHint("回到当前朗读位置并继续跟随")
+            .accessibilityIdentifier("reader.speech.return")
+        }
     }
 }
 

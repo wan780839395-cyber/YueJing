@@ -1,0 +1,4 @@
+module CKokoroBZip {
+    header "KokoroBZip.h"
+    export *
+}

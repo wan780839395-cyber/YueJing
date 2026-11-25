@@ -40,8 +40,24 @@ targets:
           - Resources
       - path: App/Resources
         buildPhase: resources
+      - path: Sources/CKokoro
+        includes: [KokoroBridge.cpp]
+      - path: Sources/CKokoroBZip
+        includes: [KokoroBZip.c]
+    preBuildScripts:
+      - name: Check public BZip2 SDK inputs
+        script: 'test -r "$SDKROOT/usr/include/bzlib.h" && test -r "$SDKROOT/usr/lib/libbz2.tbd"'
+      - name: Prepare pinned Kokoro static runtime
+        script: 'python3 "$SRCROOT/scripts/prepare_kokoro.py" "$PLATFORM_NAME" "$KOKORO_LIB_DIR"'
+        inputFiles:
+          - $(SRCROOT)/scripts/prepare_kokoro.py
+        outputFiles:
+          - $(KOKORO_LIB_DIR)/libsherpa-onnx.a
+          - $(KOKORO_LIB_DIR)/onnxruntime.a
+          - $(KOKORO_LIB_DIR)/sherpa-onnx/c-api/c-api.h
     dependencies:
       - target: ReaderDomain
+      - sdk: libbz2.tbd
       - target: TXTCore
       - package: ZIPFoundation
         product: ZIPFoundation
@@ -49,11 +65,15 @@ targets:
       base:
         # The isolated-world calls use WebKit's public ObjC refined entry points.
         # Remove unused autolinked overlays; binary validation still rejects imports.
-        OTHER_LDFLAGS: "$(inherited) -Wl,-dead_strip_dylibs"
+        KOKORO_LIB_DIR: "$(DERIVED_FILE_DIR)/Kokoro-v1.12.20-$(PLATFORM_NAME)"
+        SWIFT_INCLUDE_PATHS: '$(inherited) "$(SRCROOT)/Sources/CKokoro" "$(SRCROOT)/Sources/CKokoroBZip"'
+        HEADER_SEARCH_PATHS: '$(inherited) "$(KOKORO_LIB_DIR)"'
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        OTHER_LDFLAGS: '$(inherited) -Wl,-dead_strip_dylibs "$(KOKORO_LIB_DIR)/libsherpa-onnx.a" "$(KOKORO_LIB_DIR)/onnxruntime.a" -lc++ -framework CoreML -framework Accelerate'
         PRODUCT_NAME: YueJing
         PRODUCT_BUNDLE_IDENTIFIER: dev.yuejing.app
-        MARKETING_VERSION: "0.2.37"
-        CURRENT_PROJECT_VERSION: "39"
+        MARKETING_VERSION: "0.2.38"
+        CURRENT_PROJECT_VERSION: "40"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"

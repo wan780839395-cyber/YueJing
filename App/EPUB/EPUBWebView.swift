@@ -1415,6 +1415,147 @@ final class EPUBWebViewController: UIViewController, WKNavigationDelegate, WKUID
         }
     }
 
+    enum SpeechFollowInspection: Equatable, Sendable {
+        case visible
+        case reveal(CGPoint)
+        case missing
+        case busy
+        case unavailable
+    }
+
+    private enum SpeechFollowProbe: Sendable {
+        case visible
+        case reveal(CGPoint)
+        case missing
+        case busy
+        case transient
+        case unavailable
+    }
+
+    func inspectSpeechPosition(
+        _ position: EPUBReadingPosition,
+        for token: EPUBNavigationToken,
+        stillCurrent: @escaping @MainActor () -> Bool
+    ) async -> SpeechFollowInspection {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(1500))
+        repeat {
+            guard !Task.isCancelled, stillCurrent() else { return .unavailable }
+            guard readyToken == token, let request = activeRequest, request.token == token,
+                  readinessPhase == .ready, let scroll = webView?.scrollView else {
+                return .unavailable
+            }
+            guard !scroll.isTracking, !scroll.isDecelerating, !nativeScrollActive,
+                  pageAnimationToken == nil, autoPage == .idle else {
+                return .busy
+            }
+            guard renderedChapterPaths.contains(position.path) else {
+                return .missing
+            }
+            switch await probeSpeechPositionOnce(position, for: request) {
+            case .visible:
+                return .visible
+            case .reveal(let point):
+                return .reveal(point)
+            case .missing:
+                return .missing
+            case .busy:
+                return .busy
+            case .unavailable:
+                return .unavailable
+            case .transient:
+                guard ContinuousClock.now < deadline else { return .unavailable }
+                do { try await Task.sleep(for: .milliseconds(10)) } catch { return .unavailable }
+            }
+        } while true
+    }
+
+    private func probeSpeechPositionOnce(
+        _ position: EPUBReadingPosition,
+        for current: EPUBNavigationRequest
+    ) async -> SpeechFollowProbe {
+        guard let script = EPUBLocationScript.inspectSpeechPositionScript(
+            path: position.path,
+            node: position.node,
+            offset: position.utf16Offset
+        ) else {
+            return .unavailable
+        }
+        return await withCheckedContinuation { continuation in
+            webView.__evaluateJavaScript(
+                script,
+                inFrame: nil,
+                in: EPUBLocationScript.world
+            ) { [weak self] raw, error in
+                guard let self, error == nil, let dict = raw as? [String: Any],
+                      self.activeRequest?.token == current.token,
+                      self.readyToken == current.token,
+                      self.readinessPhase == .ready else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                switch dict["status"] as? String {
+                case "transient":
+                    continuation.resume(returning: .transient)
+                case "busy":
+                    continuation.resume(returning: .busy)
+                case "missing":
+                    continuation.resume(returning: .missing)
+                case "visible":
+                    guard dict["sessionID"] as? String == current.token.sessionID,
+                          let epoch = dict["epoch"] as? String,
+                          UUID(uuidString: epoch) == current.token.epoch else {
+                        continuation.resume(returning: .unavailable)
+                        return
+                    }
+                    continuation.resume(returning: .visible)
+                case "reveal":
+                    guard dict["sessionID"] as? String == current.token.sessionID,
+                          let epoch = dict["epoch"] as? String,
+                          UUID(uuidString: epoch) == current.token.epoch,
+                          let x = (dict["x"] as? NSNumber)?.doubleValue,
+                          let y = (dict["y"] as? NSNumber)?.doubleValue,
+                          x.isFinite, y.isFinite, x >= 0, y >= 0 else {
+                        continuation.resume(returning: .unavailable)
+                        return
+                    }
+                    continuation.resume(returning: .reveal(CGPoint(x: x, y: y)))
+                default:
+                    continuation.resume(returning: .unavailable)
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func applySpeechReveal(to point: CGPoint, for token: EPUBNavigationToken) -> Bool {
+        guard let request = activeRequest, request.token == token, readyToken == token,
+              readinessPhase == .ready, pageAnimationToken == nil, autoPage == .idle,
+              let scroll = webView?.scrollView,
+              !scroll.isTracking, !scroll.isDecelerating, !nativeScrollActive,
+              point.x.isFinite, point.y.isFinite else {
+            return false
+        }
+        let target: CGPoint
+        switch request.readingMode {
+        case .scroll:
+            guard pageGeometry.valid else { return false }
+            let y = min(max(point.y, pageGeometry.minimum), pageGeometry.maximum)
+            target = CGPoint(x: scroll.contentOffset.x, y: y)
+        case .paged:
+            guard scroll.bounds.width > 0 else { return false }
+            let maxX = max(0, scroll.contentSize.width - scroll.bounds.width)
+            let x = min(max(point.x, 0), maxX)
+            target = CGPoint(x: x, y: 0)
+        }
+        guard abs(target.x - scroll.contentOffset.x) > 0.5 || abs(target.y - scroll.contentOffset.y) > 0.5 else {
+            return false
+        }
+        frozenAutoX = nil
+        scroll.setContentOffset(target, animated: false)
+        reportVisiblePosition(for: token)
+        return true
+    }
+
     private func sampleVisibleOnce(for current: EPUBNavigationRequest) async -> EPUBLocatorPayload? {
         await withCheckedContinuation { continuation in
             webView.__evaluateJavaScript(

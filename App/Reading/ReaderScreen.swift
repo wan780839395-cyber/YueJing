@@ -277,7 +277,7 @@ struct ReaderScreen: View {
         }
         .onChange(of: scenePhase) { phase in
             if phase != .active, !model.viewport.isNativeSceneForegroundActive {
-                autoAfterSpeech = nil; model.autoRead.stop()
+                autoAfterSpeech = nil; model.autoRead.stop(); model.suspendSpeechFollowing()
             }
             // BEGIN READER DIAGNOSTICS screen scene
             model.viewport.observeDiagnosticScene(phase)
@@ -309,12 +309,14 @@ struct ReaderScreen: View {
     private func handleNativeScene(_ event: ReaderSceneEvent) {
         guard model.viewport.isCurrent(event, routeID: routeID) else { return }
         if event.active { mutateTools { $0.resume() } }
-        else { autoAfterSpeech = nil; model.autoRead.stop(); mutateTools { $0.suspend() } }
+        else { autoAfterSpeech = nil; model.autoRead.stop(); model.suspendSpeechFollowing(); mutateTools { $0.suspend() } }
         model.noteViewportReadiness()
         // BEGIN READER DIAGNOSTICS scene tools completion
         model.viewport.controller?.interactionDiagnostics.sceneTools(tools)
         // END READER DIAGNOSTICS scene tools completion
-        model.viewport.scheduleModelSceneTransition(event, routeID: routeID) { active in
+        model.viewport.scheduleModelSceneTransition(event, routeID: routeID, onSettled: { active in
+            if active { model.restoreSpeechFollowingIfReady() }
+        }) { active in
             if active { await model.resume() } else { await model.suspend() }
         }
     }
