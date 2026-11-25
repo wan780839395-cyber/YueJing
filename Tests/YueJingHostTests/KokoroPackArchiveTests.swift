@@ -77,6 +77,7 @@ struct KokoroPackArchiveTests {
 
         let renderer = KokoroRenderer()
         let pcm = try await renderer.render(text: "今天是晴天。", speed: 1, directory: live)
+        #expect(KokoroRenderer.spokenCopy("今天是6月18号。") == "今天是六月十八号。")
         let numeric = try await renderer.render(text: "今天是6月18号。", speed: 1, directory: live)
         #expect(numeric.sampleRate == 24_000 && numeric.samples.allSatisfy(\.isFinite))
         #expect(numeric.samples.contains { abs($0) > 0.0001 })

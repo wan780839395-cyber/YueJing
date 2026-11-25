@@ -19,14 +19,12 @@ int32_t withinBudget(const float *samples, int32_t n, void *arg) {
 }
 }
 
-const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName,
-                                        bool normalizeNumbers) {
+const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName) {
     try {
         const std::string root = std::string(directory) + "/";
         const auto model = root + modelName, voices = root + "voices.bin", tokens = root + "tokens.txt";
         const auto data = root + "espeak-ng-data";
         const auto lexicons = root + "lexicon-zh.txt," + root + "lexicon-us-en.txt";
-        const auto rules = root + "phone-zh.fst," + root + "date-zh.fst," + root + "number-zh.fst";
         SherpaOnnxOfflineTtsConfig config{};
         auto &k = config.model.kokoro;
         k.model = model.c_str();
@@ -37,9 +35,8 @@ const SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *mode
         k.length_scale = 1;
         config.model.num_threads = 2;
         config.model.provider = "cpu";
-        // v1.12.20 replaces the entire utterance with each rule's output, even
-        // if empty. Plain prose needs only the multilingual lexicon frontend.
-        if (normalizeNumbers) config.rule_fsts = rules.c_str();
+        // Normalize decimal runs on the synthesis copy in Swift. Do not run
+        // sentence-wide FST rewrites that can erase unrelated Chinese text.
         config.max_num_sentences = 1;
         config.silence_scale = 1;
         auto *tts = SherpaOnnxCreateOfflineTts(&config);

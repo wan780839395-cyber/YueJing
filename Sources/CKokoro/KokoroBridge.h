@@ -9,8 +9,7 @@ extern "C" {
 struct SherpaOnnxOfflineTts;
 struct SherpaOnnxGeneratedAudio;
 
-const struct SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName,
-    bool normalizeNumbers);
+const struct SherpaOnnxOfflineTts *YJKokoroOpen(const char *directory, const char *modelName);
 void YJKokoroClose(const struct SherpaOnnxOfflineTts *tts);
 
 // On success the view borrows from the returned owner until YJKokoroFreeAudio.
