@@ -294,72 +294,220 @@ struct EPUBAutoReadHostTests {
                         if case .scrollingBegan = event { model.detachSpeechFollow() }
                     }
                     let scroll = controller.webView.scrollView
+                    let initialToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).initial")
                     let initial = scroll.contentOffset
                     let initialLoads = controller.documentLoadCount
 
+                    let startSample = try #require(await controller.sampleSpeechStart(for: initialToken))
+                    let package = try #require(model.reader?.publication.package)
+                    let oracle = try EPUBSpeechCursor(
+                        package: package,
+                        path: startSample.path,
+                        node: startSample.node,
+                        rawOffset: startSample.utf16Offset
+                    )
+                    var expectedPassages: [EPUBSpeechCursor.Passage] = []
+                    while let passage = try await oracle.next() {
+                        if passage.text.rangeOfCharacter(from: .alphanumerics) != nil {
+                            expectedPassages.append(passage)
+                        }
+                    }
+                    try #require(expectedPassages.count >= 4)
+                    try #require(
+                        await controller.inspectSpeechPosition(expectedPassages[0].position, for: initialToken, stillCurrent: { true }) == .visible
+                    )
+
+                    // Identify the first physically offscreen anchor from real WebKit geometry on the initial screen.
+                    var offscreenIndex: Int?
+                    for index in 1..<expectedPassages.count {
+                        let inspection = await controller.inspectSpeechPosition(
+                            expectedPassages[index].position,
+                            for: initialToken,
+                            stillCurrent: { true }
+                        )
+                        if case .reveal = inspection {
+                            offscreenIndex = index
+                            break
+                        }
+                        try #require(inspection == .visible)
+                    }
+                    let revealIndex = try #require(offscreenIndex)
+                    let revealPassage = expectedPassages[revealIndex]
+
                     model.startSpeech()
-                    try await until { model.speech.isActive && audio.texts.count == 1 && audio.begin != nil }
-                    try await Task.sleep(for: .milliseconds(60))
+                    try await until("\(mode.rawValue).initialSpeechQueued") {
+                        model.speech.isActive && audio.texts.count == 1 && audio.begin != nil && audio.finish != nil
+                    }
+                    #expect(audio.texts.first == expectedPassages[0].text)
                     // Prefetching before didStart must not move the viewport.
+                    await Task.yield()
+                    _ = try await settlePresentation(model, controller, label: "\(mode.rawValue).prefetchSettled")
+                    await Task.yield()
                     #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
 
                     // Visible initial sentence must not scroll or turn the page on didStart.
-                    audio.begin?()
-                    try await Task.sleep(for: .milliseconds(80))
+                    let beginFirst = try #require(audio.begin)
+                    audio.begin = nil
+                    beginFirst()
+                    await Task.yield()
+                    let afterFirstToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).initialStartSettled")
+                    await Task.yield()
+                    #expect(await controller.inspectSpeechPosition(expectedPassages[0].position, for: afterFirstToken, stillCurrent: { true }) == .visible)
                     #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
                     #expect(model.speech.isFollowing && !model.autoRead.isRunning)
 
-                    // Advance until an actually started sentence lies offscreen and triggers reveal.
-                    var moved = false
-                    for _ in 0..<80 {
+                    // Advance through all remaining observed-visible passages on the initial screen without moving.
+                    for index in 1..<revealIndex {
                         let count = audio.texts.count
-                        audio.finish?(true)
-                        try await until { audio.texts.count > count && audio.begin != nil }
-                        audio.begin?()
-                        let deadline = ContinuousClock.now.advanced(by: .milliseconds(150))
-                        while scroll.contentOffset == initial && ContinuousClock.now < deadline {
-                            try await Task.sleep(for: .milliseconds(15))
+                        let finishCurrent = try #require(audio.finish)
+                        audio.finish = nil
+                        finishCurrent(true)
+                        try await until("\(mode.rawValue).visiblePassageQueued.\(index)") {
+                            audio.texts.count > count && audio.begin != nil && audio.finish != nil
                         }
-                        if scroll.contentOffset != initial {
-                            moved = true
-                            break
-                        }
+                        #expect(audio.texts.last == expectedPassages[index].text)
+                        let beginVisible = try #require(audio.begin)
+                        audio.begin = nil
+                        beginVisible()
+                        #expect(scroll.contentOffset == initial)
                     }
-                    try #require(moved)
+                    await Task.yield()
+                    _ = try await settlePresentation(model, controller, label: "\(mode.rawValue).lastVisibleSettled")
+                    await Task.yield()
+                    #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
+
+                    // Queueing the first offscreen sentence before didStart must still not move the viewport.
+                    let countBeforeOffscreen = audio.texts.count
+                    let finishLastVisible = try #require(audio.finish)
+                    audio.finish = nil
+                    finishLastVisible(true)
+                    try await until("\(mode.rawValue).offscreenPassageQueued") {
+                        audio.texts.count > countBeforeOffscreen && audio.begin != nil && audio.finish != nil
+                    }
+                    #expect(audio.texts.last == revealPassage.text)
+                    await Task.yield()
+                    _ = try await settlePresentation(model, controller, label: "\(mode.rawValue).offscreenPrefetchSettled")
+                    await Task.yield()
+                    #expect(scroll.contentOffset == initial && controller.documentLoadCount == initialLoads)
+
+                    // Audible start of the offscreen sentence must reveal it so that exact anchor is now visible.
+                    let beginOffscreen = try #require(audio.begin)
+                    audio.begin = nil
+                    beginOffscreen()
+                    try await until("\(mode.rawValue).offscreenRevealMoved") {
+                        scroll.contentOffset != initial &&
+                        model.presentationToken != nil &&
+                        !model.promotingVisibleChapter
+                    }
+                    let revealedToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).revealedPresentation")
+                    let revealed = scroll.contentOffset
+                    #expect(await controller.inspectSpeechPosition(revealPassage.position, for: revealedToken, stillCurrent: { true }) == .visible)
                     #expect(controller.documentLoadCount == initialLoads)
                     #expect(model.speech.isActive && model.speech.isFollowing)
 
-                    // The next sentence on the newly revealed screen stays stationary.
-                    let revealed = scroll.contentOffset
+                    // Next sentence verified visible on the newly revealed screen stays stationary.
+                    let nextAfterRevealIndex = revealIndex + 1
+                    try #require(nextAfterRevealIndex < expectedPassages.count)
+                    let nextAfterReveal = expectedPassages[nextAfterRevealIndex]
+                    try #require(
+                        await controller.inspectSpeechPosition(nextAfterReveal.position, for: revealedToken, stillCurrent: { true }) == .visible
+                    )
                     let countAfterReveal = audio.texts.count
-                    audio.finish?(true)
-                    try await until { audio.texts.count > countAfterReveal && audio.begin != nil }
-                    audio.begin?()
-                    try await Task.sleep(for: .milliseconds(80))
+                    let finishRevealed = try #require(audio.finish)
+                    audio.finish = nil
+                    finishRevealed(true)
+                    try await until("\(mode.rawValue).nextVisibleAfterRevealQueued") {
+                        audio.texts.count > countAfterReveal && audio.begin != nil && audio.finish != nil
+                    }
+                    #expect(audio.texts.last == nextAfterReveal.text)
+                    let beginAfterReveal = try #require(audio.begin)
+                    audio.begin = nil
+                    beginAfterReveal()
+                    await Task.yield()
+                    let postVisibleToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).nextVisibleAfterRevealSettled")
+                    await Task.yield()
+                    #expect(await controller.inspectSpeechPosition(nextAfterReveal.position, for: postVisibleToken, stillCurrent: { true }) == .visible)
                     #expect(scroll.contentOffset == revealed)
+                    #expect(model.speech.isActive && model.speech.isFollowing)
 
                     // Manual page turn detaches follow while keeping speech active.
                     try #require(controller.turnPage(.next, animated: false))
                     #expect(model.speech.isActive && !model.speech.isFollowing)
-                    let manual = scroll.contentOffset
+                    var manualToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).manualTurnSettled")
+                    var manual = scroll.contentOffset
                     try #require(manual != revealed)
 
+                    let detachedIndex = nextAfterRevealIndex + 1
+                    try #require(detachedIndex < expectedPassages.count)
+                    let detachedPassage = expectedPassages[detachedIndex]
                     let countWhileDetached = audio.texts.count
-                    audio.finish?(true)
-                    try await until { audio.texts.count > countWhileDetached && audio.begin != nil }
-                    audio.begin?()
-                    try await Task.sleep(for: .milliseconds(80))
+                    let finishBeforeDetached = try #require(audio.finish)
+                    audio.finish = nil
+                    finishBeforeDetached(true)
+                    try await until("\(mode.rawValue).detachedPassageQueued") {
+                        audio.texts.count > countWhileDetached && audio.begin != nil && audio.finish != nil
+                    }
+                    #expect(audio.texts.last == detachedPassage.text)
+                    let beginDetached = try #require(audio.begin)
+                    audio.begin = nil
+                    beginDetached()
+                    await Task.yield()
+                    manualToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).detachedPassageSettled")
+                    await Task.yield()
                     #expect(scroll.contentOffset == manual)
                     #expect(model.speech.isActive && !model.speech.isFollowing)
 
-                    // Explicit return reattaches and reveals the latest started sentence.
+                    // Ensure the detached audible anchor is physically outside the viewport before explicit return.
+                    var beforeReturn = await controller.inspectSpeechPosition(
+                        detachedPassage.position,
+                        for: manualToken,
+                        stillCurrent: { true }
+                    )
+                    for _ in 0..<2 where beforeReturn == .visible {
+                        if !controller.turnPage(.next, animated: false) {
+                            try #require(controller.turnPage(.previous, animated: false))
+                        }
+                        manualToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).manualBrowseAwaySettled")
+                        manual = scroll.contentOffset
+                        beforeReturn = await controller.inspectSpeechPosition(
+                            detachedPassage.position,
+                            for: manualToken,
+                            stillCurrent: { true }
+                        )
+                    }
+                    let offscreenBeforeReturn: Bool
+                    if case .reveal = beforeReturn { offscreenBeforeReturn = true } else { offscreenBeforeReturn = false }
+                    try #require(
+                        offscreenBeforeReturn,
+                        "Expected detached audible anchor offscreen before returnToSpeech in \(mode.rawValue), got \(beforeReturn)"
+                    )
+                    #expect(model.speech.isActive && !model.speech.isFollowing)
+
+                    // Explicit return reattaches and physically reveals the latest started sentence.
                     model.speech.returnToSpeech()
                     #expect(model.speech.isFollowing)
-                    try await until { scroll.contentOffset != manual }
+                    try await until("\(mode.rawValue).returnToSpeechMoved") {
+                        scroll.contentOffset != manual &&
+                        model.presentationToken != nil &&
+                        !model.promotingVisibleChapter
+                    }
+                    let returnedToken = try await settlePresentation(model, controller, label: "\(mode.rawValue).returnToSpeechSettled")
+                    let returnedOffset = scroll.contentOffset
+                    #expect(await controller.inspectSpeechPosition(detachedPassage.position, for: returnedToken, stillCurrent: { true }) == .visible)
                     #expect(controller.documentLoadCount == initialLoads)
-                    #expect(model.speech.isActive)
+                    #expect(model.speech.isActive && model.speech.isFollowing)
 
+                    // Stale callbacks after stop must not restart playback or move the viewport.
+                    let staleFinish = audio.finish
                     model.speech.stop(restorePosition: false)
+                    #expect(!model.speech.isActive)
+                    beginDetached()
+                    staleFinish?(true)
+                    await Task.yield()
+                    _ = try await settlePresentation(model, controller, label: "\(mode.rawValue).postStopStaleSettled")
+                    await Task.yield()
+                    #expect(!model.speech.isActive)
+                    #expect(scroll.contentOffset == returnedOffset)
                     #expect(await model.close())
                 }
             }
@@ -480,10 +628,38 @@ struct EPUBAutoReadHostTests {
         try #require(result == .advanced)
     }
 
-    private func until(_ condition: @MainActor () -> Bool) async throws {
+    private func settlePresentation(
+        _ model: EPUBReaderViewModel,
+        _ controller: EPUBWebViewController,
+        label: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws -> EPUBNavigationToken {
+        var settled: EPUBNavigationToken?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            if let token = model.presentationToken, !model.promotingVisibleChapter,
+               await controller.sampleVisibleNow() != nil,
+               model.presentationToken == token, !model.promotingVisibleChapter {
+                settled = token
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return try #require(
+            settled,
+            "Timed out settling presentation for \(label)",
+            sourceLocation: sourceLocation
+        )
+    }
+
+    private func until(
+        _ label: String = "condition",
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while !condition() && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
-        try #require(condition())
+        try #require(condition(), "Timed out waiting for \(label)", sourceLocation: sourceLocation)
     }
 
     private func withBook(_ body: @MainActor (LibraryService, String) async throws -> Void) async throws {
@@ -500,8 +676,9 @@ struct EPUBAutoReadHostTests {
 
     private func withReader(_ service: LibraryService, _ id: String, _ mode: EPUBReadingMode, _ layout: EPUBLayoutMode,
                             speech: ReaderSpeechSession? = nil,
+                            sourceLocation: SourceLocation = #_sourceLocation,
                             _ body: @MainActor (EPUBReaderViewModel, EPUBWebViewController) async throws -> Void) async throws {
-        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first, sourceLocation: sourceLocation)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 390, height: 760)
         let model = EPUBReaderViewModel(bookID: id, service: service, readingMode: mode, layoutMode: layout, speech: speech)
@@ -515,7 +692,9 @@ struct EPUBAutoReadHostTests {
         defer { controller.detachCallbacks(); window.isHidden = true; window.rootViewController = nil }
         controller.view.layoutIfNeeded()
         await model.load()
-        try await until { model.presentationToken != nil && controller.renderedChapterPaths.count == model.spine.count }
+        try await until("withReader.ready", sourceLocation: sourceLocation) {
+            model.presentationToken != nil && controller.renderedChapterPaths.count == model.spine.count
+        }
         try await body(model, controller)
     }
 }
