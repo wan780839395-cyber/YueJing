@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "kokoro-device-038-r4",
+  "active": "kokoro-device-038-r5",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -154,6 +154,13 @@
       "version": "0.2.38",
       "build": "40",
       "product": "dddf97ceee9455f8be9aeecac1773498834e4193",
+      "plan_sha256": "eacbf1d967b761d0db29660dbf87a8ebfa1183aa67fd702299e077e1c79e10f1",
+      "runner": "macos-15-intel"
+    },
+    "kokoro-device-038-r5": {
+      "version": "0.2.38",
+      "build": "40",
+      "product": "af8c3b0d3a3375461b5f02a148cd842213fb5a30",
       "plan_sha256": "eacbf1d967b761d0db29660dbf87a8ebfa1183aa67fd702299e077e1c79e10f1",
       "runner": "macos-15-intel"
     }
