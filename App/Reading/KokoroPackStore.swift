@@ -75,8 +75,8 @@ final class KokoroPackStore: ObservableObject {
                 try Task.checkCancellation()
                 try await fetch(file) { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        guard let self, downloadID == id, canCancelDownload, let last = downloadProgress else { return }
-                        downloadProgress = max(last, min(1, progress))
+                        guard let self, self.downloadID == id, self.canCancelDownload, let last = self.downloadProgress else { return }
+                        self.downloadProgress = max(last, min(1, progress))
                     }
                 }
                 try Task.checkCancellation()
