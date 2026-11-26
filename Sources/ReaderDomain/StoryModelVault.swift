@@ -50,9 +50,12 @@ public enum StoryModelVault {
     /// Parse the raw authority and path before URL processing can interpret aliases or escapes.
     public static func lanEndpointCandidate(_ input: String) -> String? {
         let scheme = "http://"
-        guard input.utf8.count <= 4096, input.utf8.allSatisfy({ (33...126).contains($0) }),
-              input.hasPrefix(scheme) else { return nil }
-        let remainder = input.dropFirst(scheme.count)
+        guard input.utf8.count <= 4096, input.utf8.allSatisfy({ (33...126).contains($0) }) else { return nil }
+        var expanded = input.lowercased().hasPrefix(scheme) ? scheme + String(input.dropFirst(scheme.count)) : scheme + input
+        let suffix = expanded.dropFirst(scheme.count)
+        if !suffix.contains("/") { expanded += "/v1" }
+        else if suffix.firstIndex(of: "/") == suffix.index(before: suffix.endIndex) { expanded += "v1" }
+        let remainder = expanded.dropFirst(scheme.count)
         guard let slash = remainder.firstIndex(of: "/") else { return nil }
         let authority = remainder[..<slash].split(separator: ":", omittingEmptySubsequences: false)
         guard (1...2).contains(authority.count) else { return nil }
@@ -68,9 +71,10 @@ public enum StoryModelVault {
         guard octets.count == 4 else { return nil }
         let ip = octets.compactMap { decimal($0, maxDigits: 3) }
         guard ip.count == 4, ip.allSatisfy({ $0 <= 255 }),
-              ip[0] == 10 || (ip[0] == 172 && (16...31).contains(ip[1])) || (ip[0] == 192 && ip[1] == 168) else { return nil }
+              ip[0] == 10 || (ip[0] == 172 && (16...31).contains(ip[1])) || (ip[0] == 192 && ip[1] == 168)
+                || (ip[0] == 100 && (64...127).contains(ip[1]) && ip != [100,100,100,100]) else { return nil }
 
-        var path = input[input.index(after: slash)...]
+        var path = expanded[expanded.index(after: slash)...]
         if path.last == "/" { path = path.dropLast() }
         let segments = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !segments.isEmpty, segments.allSatisfy({ segment in
@@ -78,7 +82,7 @@ public enum StoryModelVault {
                 (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [45, 46, 95, 126].contains($0)
             }
         }) else { return nil }
-        let base = String(input[...slash]) + String(path)
+        let base = String(expanded[...slash]) + String(path)
         let candidate: String
         if segments.last == "v1" { candidate = base + "/chat/completions" }
         else if base.hasSuffix("/chat/completions") { candidate = base }
@@ -88,8 +92,8 @@ public enum StoryModelVault {
 
     static func configuration(endpoint: String, model: String, approvedLANEndpoint: String? = nil) throws -> StoryModelConfiguration {
         let url: URL
-        if endpoint.hasPrefix("http://") {
-            guard let canonical = lanEndpointCandidate(endpoint), let approvedLANEndpoint,
+        if let canonical = lanEndpointCandidate(endpoint) {
+            guard let approvedLANEndpoint,
                   canonical.utf8.elementsEqual(approvedLANEndpoint.utf8), let parsed = URL(string: canonical),
                   parsed.absoluteString.utf8.elementsEqual(canonical.utf8) else { throw StoryModelVaultError.invalidEndpoint }
             url = parsed

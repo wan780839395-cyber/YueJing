@@ -16,6 +16,21 @@ struct StoryGenerationTests {
             #expect(StoryModelVault.lanEndpointCandidate(input) == chat)
             #expect(try StoryModelCatalog.url(endpoint: input, approvedLANEndpoint: chat).absoluteString == models)
         }
+        let peer = "100.80.1.2:2048"
+        let approved = "http://" + peer + "/v1/chat/completions"
+        for text in [peer, peer + "/", peer + "/v1", "HTTP://" + peer, approved] {
+            #expect(StoryModelVault.lanEndpointCandidate(text) == approved)
+            #expect(throws: StoryModelVaultError.self) { try StoryModelCatalog.url(endpoint: text) }
+            let request = try StoryModelCatalog.request(endpoint: text, apiKey: "", approvedLANEndpoint: approved) { nil }
+            #expect(request.url?.absoluteString == "http://" + peer + "/v1/models")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        }
+        for host in ["100.64.0.0", "100.127.255.255"] {
+            #expect(StoryModelVault.lanEndpointCandidate(host) == "http://" + host + "/v1/chat/completions")
+        }
+        for host in ["100.63.255.255", "100.128.0.0", "100.100.100.100", "127.0.0.1:2048", "100.080.1.2"] {
+            #expect(StoryModelVault.lanEndpointCandidate(host) == nil)
+        }
         for host in ["10.0.0.1", "172.16.0.0", "172.31.255.255", "192.168.255.254"] {
             let direct = "http://\(host)/chat/completions"
             #expect(StoryModelVault.lanEndpointCandidate(direct) == direct)
