@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "active": "story-device-039",
+  "active": "story-device-040",
   "defaults": {
     "branch": "dev/workflow-optimization",
     "runner": "macos-15",
@@ -169,6 +169,13 @@
       "build": "41",
       "product": "7ddb76c97ff187ceaae85ea5d29d8fc5e5250ccd",
       "plan_sha256": "f1be0f1d138f62e2240650d3994f785726fe9afc6b9d33ed2dea1fe103a4bf98",
+      "runner": "macos-15-intel"
+    },
+    "story-device-040": {
+      "version": "0.2.40",
+      "build": "42",
+      "product": "fae293b3621196cc6392d254e246e06523deddb3",
+      "plan_sha256": "e3aecffdb2e3699c5448565b0a3c95e0499ae71a804823fed1f98185bad9f653",
       "runner": "macos-15-intel"
     }
   }
