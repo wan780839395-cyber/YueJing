@@ -143,6 +143,7 @@ struct StoryResolvedStyle: Equatable {
         palette == .default ? nil : (isDark ? .dark : .light)
     }
 
+    @MainActor
     static func resolve(recipe: StoryVisualRecipe, base: LibraryAppearance) -> StoryResolvedStyle {
         let p = PaletteKind(rawValue: recipe.palette) ?? .default
         let a = AtmosphereKind(rawValue: recipe.atmosphere) ?? .calm
