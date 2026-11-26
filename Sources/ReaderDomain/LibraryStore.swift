@@ -1066,6 +1066,26 @@ extension LibraryStore {
         }
     }
 
+    public func storyMemoryPending(sessionID: UUID) throws -> [StoryTurn] {
+        try StoryTurnError.protect { try queue.read { try StoryMemoryRows.pending(sessionID, in: $0) } }
+    }
+
+    public func applyMemory(sessionID: UUID, turnID: UUID, narration: String, changes: [StoryMemoryFact]) throws {
+        do {
+            try queue.write { db in
+                try StoryMemoryRows.apply(sessionID, turnID: turnID, narration: narration, changes: changes, in: db)
+            }
+        } catch is DatabaseError { throw StoryTurnError.storage }
+    }
+
+    func storyMemoryContext(sessionID: UUID, action: String, recentStart: Int) throws -> (text: String, revision: Int) {
+        do {
+            return try queue.read { db in
+                try StoryMemoryRows.context(sessionID, action: action, recentStart: recentStart, in: db)
+            }
+        } catch is DatabaseError { throw StoryTurnError.storage }
+    }
+
     func checkGenerationDraft(_ draft: StoryGenerationDraft) throws {
         try StoryTurnError.protect { try queue.read { db in try StoryGenerationRows.check(draft, in: db) } }
     }

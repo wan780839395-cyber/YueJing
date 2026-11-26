@@ -14,6 +14,7 @@ FILES = {
     "ReaderDomainTests/StoryGenerationTests.swift": """lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists""",
     "ReaderDomainTests/StoryPresetImportTests.swift": """localPresetImportChecksOrderAndPinsImmutableStoryVersion""",
     "ReaderDomainTests/StoryLaunchTests.swift": """localStoryStartsFromImportedTextAndEPUBAndRestoresBothRoles""",
+    "ReaderDomainTests/StoryMemoryTests.swift": """committedMemoryRecoversWithoutRewritingAndReachesNextRequest""",
     "ReaderDomainTests/TXTBookSearchTests.swift": """crossWindowMatchesMapNormalizedTextToOriginalBytesInEveryEncoding overlapAndLimitUseGlobalNonOverlappingMatchesAndOneExtraWitness oversizedGraphemeIsSkippedWithoutSplittingOrHidingFollowingMatches cancelledSupersededClosedAndInexactSearchPositionsAreRejected""",
     "ReaderDomainTests/EPUBBookSearchTests.swift": """searchReportsBothChaptersAndDoesNotMoveSavedPosition literalSearchRespectsUTF16GraphemesAndLimits""",
     "YueJingHostTests/EPUBFontFilePickerTests.swift": """genericProviderItemsAreBrowsableButOnlyFontURLsAreForwarded pickerDeliversFirstSelectionOrCancellationOnlyOnce""",

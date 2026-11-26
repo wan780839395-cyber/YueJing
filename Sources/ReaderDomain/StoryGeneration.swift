@@ -16,6 +16,7 @@ public struct StoryGenerationDraft: Identifiable, Sendable {
     let session: StorySession
     let expectedCount: Int
     let action: String
+    let memoryRevision: Int
     let body: Data
 }
 
@@ -33,7 +34,7 @@ public enum StoryGenerationError: Error, LocalizedError {
 
 enum StoryGenerationBuilder {
     static func prepare(session: StorySession, turns: [StoryTurn], preset: StoryPresetVersion?, action raw: String,
-                        configuration config: StoryModelConfiguration) throws -> StoryGenerationDraft {
+                        configuration config: StoryModelConfiguration, memoryText: String = "", memoryRevision: Int = 0) throws -> StoryGenerationDraft {
         let action = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !action.isEmpty, action.count <= 400 else { throw StoryTurnError.invalidAction }
         guard turns.count < 64 else { throw StoryTurnError.turnLimit }
@@ -41,6 +42,7 @@ enum StoryGenerationBuilder {
         let recent = turns.suffix(8)
         let kind = session.roleKind == .canon ? "原著角色" : "原创角色"
         var history: [StoryModelMessage] = [.init(role: "user", content: "我扮演\(kind)：\(session.roleName)。身份说明：\(session.premise)\n本局原文开篇：\n\(session.opening)")]
+        if !memoryText.isEmpty { history.append(.init(role: "user", content: memoryText)) }
         for turn in recent {
             history.append(.init(role: "user", content: turn.action))
             history.append(.init(role: "assistant", content: turn.narration))
@@ -61,7 +63,7 @@ enum StoryGenerationBuilder {
             }
             guard inserted else { throw StoryGenerationError.unsupported }
         } else {
-            messages = [.init(role: "system", content: "根据开篇、角色和玩家行动，续写一幕连贯的小说正文。让行动带来具体后果，保留玩家下一步决定。不要将分支冒充原著事实。")]+history
+            messages = [.init(role: "system", content: "根据开篇、角色和玩家行动，续写一幕连贯的小说正文。让行动带来具体后果，保留玩家下一步决定。不要将分支冒充原著事实。\n" + StoryMemoryProtocol.instruction)] + history
         }
         let parameters = preset?.parameters ?? [:]
         var payload: [String: Any] = ["model": config.model, "stream": true,
@@ -81,7 +83,7 @@ enum StoryGenerationBuilder {
         guard body.count <= 256 * 1024 else { throw StoryGenerationError.budget }
         return .init(id: UUID(), endpoint: config.endpoint, model: config.model, presetName: preset?.summary.name,
                      messages: messages, parameters: parameters, omittedTurns: turns.count - recent.count,
-                     session: session, expectedCount: turns.count, action: action, body: body)
+                     session: session, expectedCount: turns.count, action: action, memoryRevision: memoryRevision, body: body)
     }
 }
 
@@ -94,12 +96,16 @@ extension LibraryService {
         guard expectedCount == turns.count else { throw StoryTurnError.staleCount }
         let preset: StoryPresetVersion?
         if let id = session.presetID { preset = try await store.storyPreset(id: id) } else { preset = nil }
-        return try StoryGenerationBuilder.prepare(session: session, turns: turns, preset: preset, action: action, configuration: configuration)
+        try await recoverLocalStoryMemory(sessionID: session.id)
+        let memory = try await store.storyMemoryContext(sessionID: session.id, action: action, recentStart: max(1, turns.count - 7))
+        return try StoryGenerationBuilder.prepare(session: session, turns: turns, preset: preset, action: action, configuration: configuration, memoryText: memory.text, memoryRevision: memory.revision)
     }
 
     public func generateStoryTurn(_ draft: StoryGenerationDraft, onPartial: @escaping @Sendable (String) async -> Void) async throws -> StoryTurn {
         try await runConfirmedStoryGeneration(draft) { config, bytes in
-            try await StoryModelTransport.complete(configuration: config, body: bytes, onPartial: onPartial)
+            try await StoryModelTransport.complete(configuration: config, body: bytes) { cumulative in
+                await onPartial(draft.presetName == nil ? StoryMemoryProtocol.visiblePrefix(cumulative) : cumulative)
+            }
         }
     }
 
@@ -113,10 +119,21 @@ extension LibraryService {
         try await store.checkGenerationDraft(draft)
         try Task.checkCancellation()
         let config = StoryModelConfiguration(endpoint: draft.endpoint, model: draft.model)
-        let text = try await completion(config, draft.body).trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = try await completion(config, draft.body)
         try Task.checkCancellation()
-        guard !text.isEmpty else { throw StoryGenerationError.incomplete }
-        guard text.utf8.count <= 128 * 1024 else { throw StoryGenerationError.budget }
-        return try await store.commitStoryGeneration(draft, text: text)
+        // A malformed, oversized sidecar must not discard otherwise complete bounded prose.
+        guard raw.utf8.count <= StoryModelSSEParser.maxBytes else { throw StoryGenerationError.budget }
+        let response: (narration: String, changes: [StoryMemoryFact]?) = draft.presetName == nil
+            ? StoryMemoryProtocol.split(raw) : (raw, nil)
+        let prose = response.narration.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prose.isEmpty else { throw StoryGenerationError.incomplete }
+        guard prose.utf8.count <= 128 * 1024 else { throw StoryGenerationError.budget }
+        let turn = try await store.commitStoryGeneration(draft, text: prose)
+        // Publication is final. A failed/cancelled second transaction leaves the durable job pending.
+        if let changes = response.changes {
+            do { try await store.applyMemory(sessionID: key, turnID: turn.id, narration: prose, changes: changes) }
+            catch { return turn }
+        }
+        return turn
     }
 }

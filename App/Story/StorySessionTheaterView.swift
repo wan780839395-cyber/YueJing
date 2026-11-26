@@ -49,17 +49,31 @@ struct StorySessionTheaterView: View {
     @State private var streamingActionText: String = ""
     @State private var streamingNarration: String = ""
     @State private var atmospherePulse = 0
+    @State private var pendingMemoryTurns: [StoryTurn] = []
+    @State private var isLoadingPendingMemory = false
+    @State private var isPresentingMemorySheet = false
+    @State private var highlightedMemoryTurnID: UUID?
+    @State private var pendingMemoryDraft: StoryMemoryRepairDraft?
+    @State private var preparingMemoryTurnID: UUID?
+    @State private var isRepairingMemory = false
+    @State private var repairingMemorySequence: Int?
+    @State private var memoryStatusMessage: String?
 
     @State private var isViewActive = false
     @State private var loadGeneration = UUID()
+    @State private var memoryPendingGeneration = UUID()
     @State private var activePrepareID: UUID?
     @State private var activeGenerateID: UUID?
     @State private var activeStyleID: UUID?
+    @State private var activeMemoryPrepareID: UUID?
+    @State private var activeMemoryRepairID: UUID?
     @State private var loadTask: Task<Void, Never>?
+    @State private var memoryPendingTask: Task<Void, Never>?
     @State private var prepareTask: Task<Void, Never>?
     @State private var generateTask: Task<Void, Never>?
     @State private var styleTask: Task<Void, Never>?
-
+    @State private var memoryPrepareTask: Task<Void, Never>?
+    @State private var memoryRepairTask: Task<Void, Never>?
     @FocusState private var isActionFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -72,8 +86,25 @@ struct StorySessionTheaterView: View {
         trimmedAction.count > Self.maxActionLength
     }
 
+    private var isMemoryWorkBusy: Bool {
+        preparingMemoryTurnID != nil || isRepairingMemory || pendingMemoryDraft != nil
+    }
+
+    private var isOtherNetworkBusyForMemory: Bool {
+        isPreparingDraft
+            || isGeneratingRemote
+            || isDirectingStyle
+            || isDeletingSession
+            || pendingDraft != nil
+            || pendingStyleDraft != nil
+    }
+
+    private var pendingMemoryTurnIDs: Set<UUID> {
+        Set(pendingMemoryTurns.map(\.id))
+    }
+
     private var isBusyWithTurn: Bool {
-        isPreparingDraft || isGeneratingRemote || isDeletingSession
+        isPreparingDraft || isGeneratingRemote || isDeletingSession || isMemoryWorkBusy
     }
 
     private var canDeleteInTheater: Bool {
@@ -81,12 +112,12 @@ struct StorySessionTheaterView: View {
             && !isPreparingDraft
             && !isGeneratingRemote
             && !isDirectingStyle
+            && !isMemoryWorkBusy
             && pendingDraft == nil
             && pendingStyleDraft == nil
             && !isDeletingSession
             && isRouteActive
     }
-
     private var canSubmitRemoteAction: Bool {
         isRouteActive
             && model.service != nil
@@ -239,6 +270,60 @@ struct StorySessionTheaterView: View {
                 }
             )
         }
+        .sheet(isPresented: $isPresentingMemorySheet) {
+            StoryMemoryRepairSheet(
+                bookTitle: session.bookTitle,
+                pendingTurns: pendingMemoryTurns,
+                highlightedTurnID: highlightedMemoryTurnID,
+                hasModelConfig: modelConfig != nil,
+                isLoadingPending: isLoadingPendingMemory,
+                preparingTurnID: preparingMemoryTurnID,
+                isRepairing: isRepairingMemory,
+                repairingSequence: repairingMemorySequence,
+                isOtherNetworkBusy: isOtherNetworkBusyForMemory,
+                statusMessage: memoryStatusMessage,
+                appearance: appearance,
+                pendingDraft: $pendingMemoryDraft,
+                onRefreshPending: {
+                    triggerLoadPendingMemory()
+                },
+                onPrepareRepair: { turn in
+                    prepareMemoryRepair(turn: turn)
+                },
+                onConfirmRepair: { confirmed in
+                    pendingMemoryDraft = nil
+                    startMemoryRepair(draft: confirmed)
+                },
+                onCancelDraft: {
+                    pendingMemoryDraft = nil
+                    let msg = "已取消发送补记请求，正文与待补记项均已保留。"
+                    memoryStatusMessage = msg
+                    submitBannerMessage = msg
+                },
+                onCancelRepair: {
+                    cancelMemoryRepair(showBanner: true)
+                },
+                onOpenModelConfig: {
+                    isPresentingMemorySheet = false
+                    Task { @MainActor in
+                        await Task.yield()
+                        if isViewActive && isRouteActive && !isBusyWithTurn {
+                            isPresentingModelConfig = true
+                        }
+                    }
+                }
+            )
+        }
+        .onChange(of: isPresentingMemorySheet) { presented in
+            if !presented {
+                highlightedMemoryTurnID = nil
+                activeMemoryPrepareID = nil
+                memoryPrepareTask?.cancel()
+                memoryPrepareTask = nil
+                preparingMemoryTurnID = nil
+                pendingMemoryDraft = nil
+            }
+        }
         .onChange(of: activeRecipe) { _ in
             atmospherePulse &+= 1
         }
@@ -274,6 +359,18 @@ struct StorySessionTheaterView: View {
                     }
                     .disabled(isBusyWithTurn)
 
+                    Button {
+                        openMemorySheet(highlighting: nil)
+                    } label: {
+                        Label(
+                            pendingMemoryTurns.isEmpty
+                                ? "本局记忆"
+                                : "本局记忆（\(pendingMemoryTurns.count) 幕待补记）",
+                            systemImage: pendingMemoryTurns.isEmpty ? "bookmark" : "exclamationmark.bubble"
+                        )
+                    }
+                    .disabled(isDeletingSession)
+
                     if session.presetID != nil {
                         Button {
                             isActionFocused = false
@@ -282,7 +379,6 @@ struct StorySessionTheaterView: View {
                             Label("查看锁定预设", systemImage: "lock.doc")
                         }
                     }
-
                     if activeRecipe != .standard {
                         Button {
                             StoryHaptics.selection()
@@ -354,9 +450,13 @@ struct StorySessionTheaterView: View {
             if !active {
                 isActionFocused = false
                 cancelAllAsyncWork()
-            } else if isViewActive && !hasLoadedTurns && !isLoadingTurns {
+            } else if isViewActive {
                 refreshModelConfig()
-                triggerLoadTurns()
+                if !hasLoadedTurns && !isLoadingTurns {
+                    triggerLoadTurns()
+                } else if hasLoadedTurns {
+                    triggerLoadPendingMemory()
+                }
             }
         }
     }
@@ -456,6 +556,29 @@ struct StorySessionTheaterView: View {
                 .padding(.vertical, 8)
                 .background(resolvedStyle.surface.opacity(0.88), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .accessibilityIdentifier("story.style.directingBanner")
+            }
+
+            if isRepairingMemory {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(resolvedStyle.accent)
+                        .scaleEffect(0.85)
+                    Text(repairingMemorySequence.map { "正在补记第 \($0) 幕本局记忆…" } ?? "正在补记本局记忆…")
+                        .font(.caption)
+                        .foregroundStyle(resolvedStyle.secondary)
+                    Spacer(minLength: 4)
+                    Button("取消") {
+                        cancelMemoryRepair(showBanner: true)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(resolvedStyle.sealAccent)
+                    .accessibilityLabel("取消本次本局记忆补记")
+                    .accessibilityIdentifier("story.memory.inlineCancel")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(resolvedStyle.surface.opacity(0.88), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityIdentifier("story.memory.repairingBanner")
             }
         }
         .padding(.vertical, 6)
@@ -785,7 +908,7 @@ struct StorySessionTheaterView: View {
         let remoteModel = turn.modelName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let isRemoteModel = (remoteModel?.isEmpty == false)
         let formatted = Self.formatProse(turn.narration)
-
+        let isMemoryPending = pendingMemoryTurnIDs.contains(turn.id)
         let style = resolvedStyle
         return VStack(alignment: .leading, spacing: 14) {
             // Ornamental act divider
@@ -819,9 +942,31 @@ struct StorySessionTheaterView: View {
                             isRemoteModel ? style.accentSoft : style.subtleSurface,
                             in: Capsule()
                         )
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 4)
+                    if isMemoryPending {
+                        Button {
+                            openMemorySheet(highlighting: turn.id)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.caption2.weight(.semibold))
+                                    .accessibilityHidden(true)
+                                Text(isRepairingMemory && repairingMemorySequence == turn.sequence ? "补记中" : "待补记")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .foregroundStyle(style.sealAccent)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .frame(minHeight: 28)
+                            .background(style.sealSoft, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isDeletingSession)
+                        .accessibilityLabel("第 \(turn.sequence) 幕正文已保存，本局记忆待补记")
+                        .accessibilityHint("点按查看待补记项并选择是否预览后补记")
+                        .accessibilityIdentifier("story.turn.memoryPending.\(turn.sequence)")
+                    }
                 }
-
                 if let heading = formatted.chapterHeading {
                     Text(heading)
                         .font(style.chapterHeadingFont)
@@ -1301,6 +1446,10 @@ struct StorySessionTheaterView: View {
         loadErrorMessage = nil
         submitBannerMessage = nil
         styleFeedbackMessage = nil
+        pendingMemoryTurns = []
+        isPresentingMemorySheet = false
+        highlightedMemoryTurnID = nil
+        memoryStatusMessage = nil
         activeRecipe = .standard
         isImmersiveReading = false
         actionDraft = ""
@@ -1309,25 +1458,208 @@ struct StorySessionTheaterView: View {
 
     private func cancelAllAsyncWork() {
         loadGeneration = UUID()
+        memoryPendingGeneration = UUID()
         activePrepareID = nil
         activeGenerateID = nil
         activeStyleID = nil
+        activeMemoryPrepareID = nil
+        activeMemoryRepairID = nil
         loadTask?.cancel()
         loadTask = nil
+        memoryPendingTask?.cancel()
+        memoryPendingTask = nil
         prepareTask?.cancel()
         prepareTask = nil
         generateTask?.cancel()
         generateTask = nil
         styleTask?.cancel()
         styleTask = nil
+        memoryPrepareTask?.cancel()
+        memoryPrepareTask = nil
+        memoryRepairTask?.cancel()
+        memoryRepairTask = nil
         pendingDraft = nil
         pendingStyleDraft = nil
+        pendingMemoryDraft = nil
         streamingActionText = ""
         streamingNarration = ""
         isLoadingTurns = false
+        isLoadingPendingMemory = false
         isPreparingDraft = false
         isGeneratingRemote = false
         isDirectingStyle = false
+        preparingMemoryTurnID = nil
+        isRepairingMemory = false
+        repairingMemorySequence = nil
+    }
+
+    private func openMemorySheet(highlighting turnID: UUID?) {
+        isActionFocused = false
+        highlightedMemoryTurnID = turnID
+        memoryStatusMessage = nil
+        refreshModelConfig()
+        isPresentingMemorySheet = true
+        triggerLoadPendingMemory()
+    }
+
+    private func triggerLoadPendingMemory() {
+        guard isViewActive, isRouteActive, let store = model.service?.store else { return }
+        let generation = UUID()
+        let targetSessionID = session.id
+        memoryPendingGeneration = generation
+        memoryPendingTask?.cancel()
+        isLoadingPendingMemory = true
+
+        memoryPendingTask = Task { @MainActor in
+            defer {
+                if memoryPendingGeneration == generation {
+                    isLoadingPendingMemory = false
+                    memoryPendingTask = nil
+                }
+            }
+            do {
+                let pending = try await store.storyMemoryPending(sessionID: targetSessionID)
+                guard !Task.isCancelled,
+                      memoryPendingGeneration == generation,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                pendingMemoryTurns = pending.sorted { $0.sequence < $1.sequence }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      memoryPendingGeneration == generation,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                memoryStatusMessage = "正文已保存，但暂时未能检查本局待补记状态：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func cancelMemoryRepair(showBanner: Bool) {
+        activeMemoryRepairID = nil
+        memoryRepairTask?.cancel()
+        memoryRepairTask = nil
+        isRepairingMemory = false
+        repairingMemorySequence = nil
+        if showBanner {
+            let msg = "已取消本局记忆补记，已保存的正文与待补记项均已保留，不会自动重试。"
+            memoryStatusMessage = msg
+            submitBannerMessage = msg
+        }
+        triggerLoadPendingMemory()
+    }
+
+    private func prepareMemoryRepair(turn: StoryTurn) {
+        guard isViewActive,
+              isRouteActive,
+              !isOtherNetworkBusyForMemory,
+              !isMemoryWorkBusy,
+              let service = model.service else { return }
+        guard let config = try? StoryModelVault.load() else {
+            modelConfig = nil
+            memoryStatusMessage = "请先配置 OpenAI 兼容模型接口，再预览并补记本局记忆。"
+            return
+        }
+        modelConfig = config
+
+        let targetSessionID = session.id
+        let reqID = UUID()
+        activeMemoryPrepareID = reqID
+        preparingMemoryTurnID = turn.id
+        memoryStatusMessage = nil
+        memoryPrepareTask?.cancel()
+
+        memoryPrepareTask = Task { @MainActor in
+            defer {
+                if activeMemoryPrepareID == reqID {
+                    preparingMemoryTurnID = nil
+                    activeMemoryPrepareID = nil
+                    memoryPrepareTask = nil
+                }
+            }
+            do {
+                let draft = try await service.prepareStoryMemoryRepair(
+                    sessionID: targetSessionID,
+                    turnID: turn.id,
+                    configuration: config
+                )
+                guard !Task.isCancelled,
+                      activeMemoryPrepareID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      isPresentingMemorySheet,
+                      session.id == targetSessionID,
+                      draft.sessionID == targetSessionID else { return }
+                pendingMemoryDraft = draft
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      activeMemoryPrepareID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                memoryStatusMessage = "未能准备第 \(turn.sequence) 幕记忆补记（已保存正文未受影响）：\(error.localizedDescription)"
+                triggerLoadPendingMemory()
+            }
+        }
+    }
+
+    private func startMemoryRepair(draft: StoryMemoryRepairDraft) {
+        guard isViewActive,
+              isRouteActive,
+              draft.sessionID == session.id,
+              !isOtherNetworkBusyForMemory,
+              !isRepairingMemory,
+              let service = model.service else { return }
+        let targetSessionID = session.id
+        let reqID = UUID()
+
+        activeMemoryRepairID = reqID
+        isRepairingMemory = true
+        repairingMemorySequence = draft.sequence
+        memoryStatusMessage = nil
+        submitBannerMessage = nil
+        memoryRepairTask?.cancel()
+
+        memoryRepairTask = Task { @MainActor in
+            defer {
+                if activeMemoryRepairID == reqID {
+                    isRepairingMemory = false
+                    repairingMemorySequence = nil
+                    activeMemoryRepairID = nil
+                    memoryRepairTask = nil
+                }
+            }
+            do {
+                try await service.repairStoryMemory(draft)
+                guard !Task.isCancelled,
+                      activeMemoryRepairID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                StoryHaptics.success()
+                let msg = "第 \(draft.sequence) 幕本局记忆已补记完成。"
+                memoryStatusMessage = msg
+                submitBannerMessage = msg
+                triggerLoadPendingMemory()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      activeMemoryRepairID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                let msg = "第 \(draft.sequence) 幕记忆补记未完成（已保存正文未受影响，不自动重试，可手动再试）：\(error.localizedDescription)"
+                memoryStatusMessage = msg
+                submitBannerMessage = msg
+                triggerLoadPendingMemory()
+            }
+        }
     }
 
     private func cancelStyleDirection(showBanner: Bool) {
@@ -1342,7 +1674,11 @@ struct StorySessionTheaterView: View {
     }
 
     private func prepareAIDirectStyle() {
-        guard isViewActive, isRouteActive, !isDirectingStyle, !isDeletingSession else { return }
+        guard isViewActive,
+              isRouteActive,
+              !isDirectingStyle,
+              !isBusyWithTurn,
+              pendingDraft == nil else { return }
         guard let config = try? StoryModelVault.load() else {
             modelConfig = nil
             isPresentingModelConfig = true
@@ -1355,7 +1691,11 @@ struct StorySessionTheaterView: View {
     }
 
     private func startAIDirectStyle(draft: StoryStyleDraft) {
-        guard isViewActive, isRouteActive, !isDirectingStyle, !isDeletingSession else { return }
+        guard isViewActive,
+              isRouteActive,
+              !isDirectingStyle,
+              !isBusyWithTurn,
+              pendingDraft == nil else { return }
         let targetSessionID = session.id
         let reqID = UUID()
 
@@ -1493,7 +1833,13 @@ struct StorySessionTheaterView: View {
     }
 
     private func startRemoteGeneration(draft: StoryGenerationDraft) {
-        guard isViewActive, isRouteActive, !isGeneratingRemote, let service = model.service else { return }
+        guard isViewActive,
+              isRouteActive,
+              !isGeneratingRemote,
+              !isDirectingStyle,
+              !isMemoryWorkBusy,
+              !isDeletingSession,
+              let service = model.service else { return }
         let targetSessionID = session.id
         let reqID = UUID()
 
@@ -1546,6 +1892,7 @@ struct StorySessionTheaterView: View {
                 actionDraft = ""
                 atmospherePulse &+= 1
                 StoryHaptics.success()
+                triggerLoadPendingMemory()
             } catch is CancellationError {
                 return
             } catch {
@@ -1565,7 +1912,8 @@ struct StorySessionTheaterView: View {
                         let sorted = refreshed.sorted { $0.sequence < $1.sequence }
                         if sorted.count != turns.count {
                             turns = sorted
-                            submitBannerMessage = "存档已同步；本次模型生成中断，未保存半回合。"
+                            submitBannerMessage = "已保存的新回合正文已同步；若本局记忆待补记，可在右上角“更多 → 本局记忆”手动处理。"
+                            triggerLoadPendingMemory()
                             return
                         }
                     }
@@ -1600,6 +1948,7 @@ struct StorySessionTheaterView: View {
                       session.id == targetSessionID else { return }
                 turns = loaded.sorted { $0.sequence < $1.sequence }
                 hasLoadedTurns = true
+                triggerLoadPendingMemory()
             } catch {
                 guard !Task.isCancelled,
                       loadGeneration == generation,

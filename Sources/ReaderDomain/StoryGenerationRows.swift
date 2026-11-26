@@ -21,6 +21,7 @@ enum StoryGenerationRows {
             """, arguments: [s.id.uuidString, s.bookID, s.versionID, s.presetID, d.expectedCount]) else {
             throw StoryTurnError.staleCount
         }
+        try StoryMemoryRows.checkMemoryRevision(sessionID: s.id, revision: d.memoryRevision, in: db)
     }
 
     static func commit(_ d: StoryGenerationDraft, text: String, in db: Database) throws -> StoryTurn {
@@ -29,6 +30,7 @@ enum StoryGenerationRows {
         try db.execute(sql: """
             INSERT INTO storyTurns(id,sessionID,sequence,action,narration,consequence) VALUES(?,?,?,?,?,?)
             """, arguments: [t.id.uuidString, d.session.id.uuidString, t.sequence, t.action, t.narration, String(text.suffix(80))])
+        // v14 enqueues the pending job via the origin INSERT trigger in this writer transaction.
         try db.execute(sql: """
             INSERT INTO storyModelOrigins(turnID,modelName) VALUES(?,?)
             """, arguments: [t.id.uuidString, d.model])

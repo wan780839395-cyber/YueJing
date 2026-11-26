@@ -4,6 +4,10 @@
   "branch": "dev/workflow-optimization",
   "cases": [
     {
+      "file": "ReaderDomainTests/StoryMemoryTests.swift",
+      "name": "committedMemoryRecoversWithoutRewritingAndReachesNextRequest"
+    },
+    {
       "file": "ReaderDomainTests/StoryGenerationTests.swift",
       "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
     },

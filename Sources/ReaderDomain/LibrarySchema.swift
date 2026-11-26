@@ -160,6 +160,46 @@ enum LibrarySchema {
                 );
                 """)
         }
+        migrator.registerMigration("v14-story-memory") { db in
+            try db.execute(sql: """
+                CREATE TABLE storyMemoryJobs (
+                    turnID TEXT NOT NULL PRIMARY KEY REFERENCES storyModelOrigins(turnID) ON DELETE CASCADE,
+                    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','done'))
+                );
+                -- Only future model origins enqueue work; upgrading never reinterprets a saved turn.
+                CREATE TRIGGER storyModelOrigin_enqueue AFTER INSERT ON storyModelOrigins BEGIN
+                    INSERT INTO storyMemoryJobs(turnID) VALUES(NEW.turnID);
+                END;
+                CREATE TRIGGER storyMemoryJob_initial BEFORE INSERT ON storyMemoryJobs
+                WHEN NEW.state <> 'pending' OR EXISTS(SELECT 1 FROM storyMemoryJobs WHERE turnID=NEW.turnID)
+                BEGIN SELECT RAISE(ABORT,'invalid initial job'); END;
+                CREATE TRIGGER storyMemoryJob_transition BEFORE UPDATE ON storyMemoryJobs
+                WHEN NEW.turnID <> OLD.turnID OR OLD.state <> 'pending' OR NEW.state <> 'done'
+                BEGIN SELECT RAISE(ABORT,'invalid job transition'); END;
+                CREATE TRIGGER storyMemoryJob_keep BEFORE DELETE ON storyMemoryJobs
+                WHEN EXISTS(SELECT 1 FROM storyModelOrigins WHERE turnID=OLD.turnID)
+                BEGIN SELECT RAISE(ABORT,'job belongs to origin'); END;
+
+                CREATE TABLE storyMemoryEvents (
+                    turnID TEXT NOT NULL REFERENCES storyMemoryJobs(turnID) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK(kind IN ('possession','promise','knowledge')),
+                    subject TEXT NOT NULL CHECK(length(subject)>0), value TEXT NOT NULL CHECK(length(value)>0),
+                    evidence TEXT NOT NULL CHECK(length(evidence)>0), PRIMARY KEY(turnID,kind,subject)
+                ) WITHOUT ROWID;
+                CREATE TRIGGER storyMemoryEvent_admit BEFORE INSERT ON storyMemoryEvents
+                WHEN NOT EXISTS(SELECT 1 FROM storyMemoryJobs j JOIN storyTurns t ON t.id=j.turnID
+                    WHERE j.turnID=NEW.turnID AND j.state='pending'
+                    AND instr(CAST(t.narration AS BLOB),CAST(NEW.evidence AS BLOB))>0)
+                    OR EXISTS(SELECT 1 FROM storyMemoryEvents
+                        WHERE turnID=NEW.turnID AND kind=NEW.kind AND subject=NEW.subject)
+                BEGIN SELECT RAISE(ABORT,'invalid memory event'); END;
+                CREATE TRIGGER storyMemoryEvent_immutable BEFORE UPDATE ON storyMemoryEvents
+                BEGIN SELECT RAISE(ABORT,'immutable memory event'); END;
+                CREATE TRIGGER storyMemoryEvent_keep BEFORE DELETE ON storyMemoryEvents
+                WHEN EXISTS(SELECT 1 FROM storyMemoryJobs WHERE turnID=OLD.turnID)
+                BEGIN SELECT RAISE(ABORT,'event belongs to job'); END;
+                """)
+        }
         return migrator
     }
 }
