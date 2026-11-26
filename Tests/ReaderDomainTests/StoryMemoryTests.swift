@@ -39,8 +39,10 @@ struct StoryMemoryTests {
         #expect(afterFailure == pending)
         let reply = try encoded("阿宁",accepted)
         try await service.runConfirmedMemoryRepair(repair) { _,bytes in
-            let data = try #require(JSONSerialization.jsonObject(with:bytes) as? [String:Any]); let sent = try #require(data["messages"] as? [[String:String]])
-            #expect(sent == repair.messages.map { ["role":$0.role, "content":$0.content] }); return reply
+            let decoded = try JSONSerialization.jsonObject(with: bytes)
+            let data = try #require(decoded as? [String:Any]); let sent = try #require(data["messages"] as? [[String:String]])
+            let preview = repair.messages.map { ["role":$0.role, "content":$0.content] }
+            #expect(sent == preview); return reply
         }
         await #expect(throws: StoryTurnError.self) { try await service.runConfirmedMemoryRepair(repair) { _,_ in Issue.record("Duplicate repair reached transport"); return reply } }
         await #expect(throws: StoryTurnError.self) { try await service.runConfirmedStoryGeneration(stale) { _,_ in Issue.record("Stale memory preview sent"); return "unexpected" } }
@@ -50,8 +52,10 @@ struct StoryMemoryTests {
             let next = try await service.prepareStoryGeneration(session:branch, expectedCount:12, action:"我推了推门", configuration:cfg)
             let expectedLine = "possession · 钥匙：" + expected
             let actual = try await service.runConfirmedStoryGeneration(next) { _,bytes in
-                let data = try #require(JSONSerialization.jsonObject(with:bytes) as? [String:Any]); let sent = try #require(data["messages"] as? [[String:String]])
-                #expect(sent == next.messages.map { ["role":$0.role, "content":$0.content] }); let context = try #require(sent.first { $0["content"]?.hasPrefix("本局已整理的现状") == true }?["content"])
+                let decoded = try JSONSerialization.jsonObject(with: bytes)
+                let data = try #require(decoded as? [String:Any]); let sent = try #require(data["messages"] as? [[String:String]])
+                let preview = next.messages.map { ["role":$0.role, "content":$0.content] }; #expect(sent == preview)
+                let block = sent.first { $0["content"]?.hasPrefix("本局已整理的现状") == true }; let context = try #require(block?["content"])
                 #expect(context.contains(expectedLine)); #expect(!context.contains("尚有记忆缺口")); #expect(sent.last?["content"] == "我推了推门"); return "门响了一声。" + m + "[]"
             }
             #expect(actual.sequence == 13)

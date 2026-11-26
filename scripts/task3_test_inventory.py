@@ -92,15 +92,15 @@ FILES = {
     "YueJingHostTests/EPUBWarningStateTests.swift": """epubWarningBadChapterToNormalRetainsOnlySessionHistory epubWarningReaderChoiceAndAuthorReturnDoNotInheritFallback epubWarningSuccessfulExplicitRetryClearsCurrentFallback epubWarningReopenRejectsPreviousSessionAndResetsRuntimeHistory epubWarningRevocationRejectsQueuedReadyAndOldToken epubWarningCurrentScrollReplacesFallbackAndRearmsNotice epubWarningBookIssuesStayInDetailsWithoutCurrentChapterVerdict epubWarningSummaryDistinguishesForcedLayoutFromUserChoice epubWarningPendingRestorationDoesNotRecordFallback""",
     "YueJingHostTests/EPUBFontLoadingHostTests.swift": """epubWebKitDecodesSyntheticFontServesResourceAndMeasuresGlyphMetrics userBodyFontInOriginalLayoutRestoresAnchorAndCanFollowBookAgain deletingActiveBodyFontRestoresLiveGlyphWidthAndAnchor deletingSharedBodyFontInvalidatesOnlyMatchingBooksAcrossReimport bodyFontPreferenceAndCapabilityCannotSelectAnotherBookOrFile epubWebKitLoadsReconstructedWOFF2ThroughFontCapability epubWebKitGatesReadinessOnFontDecodingAndRebindsCapabilityAcrossEpochs epubWebKitRetriesTimedOutFontOnWarmExplicitOpenWithoutLateReflow epubWebKitRejectsInitialBadImageAndDecodeFailureBeforeRetryReady epubWebKitIsolatesFailedCondensedFaceFromNormalFace"""
 }
-COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 296, "TXTBlockDecoderTests": 6,
+COUNTS = {"TXTCoreTests": 25, "ReaderDomainTests": 297, "TXTBlockDecoderTests": 6,
           "ProcessingReuseMeasurementTests": 1, "YueJingHostTests": 114,
           "YueJingUITests": 13, "YueJingCanvasTests": 3, "YueJingEPUBUITests": 9}
 SWIFT_GROUPS = tuple(list(COUNTS)[:4]) + ("YueJingCanvasTests",)
-TOTAL = 467  # Declaration identities; the Bool parameter adds one execution (468).
+TOTAL = 468  # Declaration identities; the Bool parameter adds one execution (469).
 PARAMETERIZED = {"epubDamagedClosedWorkspaceFallsBackWithoutTrustingMtime": {
     "signature": "(symlink:)", "argument": "symlink", "values": ["false", "true"]}}
-EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 297}
-EXECUTION_TOTAL = 468
+EXECUTION_COUNTS = {**COUNTS, "ReaderDomainTests": 298}
+EXECUTION_TOTAL = 469
 EXCLUDED = {"TXTCorePerformanceTests": "Independent large-file performance baseline; not this acceptance batch."}
 
 
