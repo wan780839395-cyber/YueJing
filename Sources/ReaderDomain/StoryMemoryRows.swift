@@ -96,39 +96,45 @@ enum StoryMemoryRows {
         try Task.checkCancellation() // Throw inside the writer; never report cancellation after commit.
     }
 
-    static func context(_ sessionID: UUID, action: String, recentStart: Int, in db: Database) throws -> (text: String, revision: Int) {
+    static func context(_ sessionID: UUID, action: String, recentStart: Int, in db: Database) throws -> StorySceneMemory {
         let key = sessionID.uuidString, state = try snapshot(key, in: db)
         guard recentStart == max(1, state.turns - 7) else { throw StoryTurnError.staleCount }
         let sectionBytes = 8 * 1024
-        var current = "", gaps = "", quotes = ""
+        var entries: [StoryBriefEntry] = []; var currentBytes = 0, gapBytes = 0, quoteBytes = 0
         let latest = try Row.fetchCursor(db, sql: latestSQL, arguments: [key])
         while let row = try latest.next() {
             try Task.checkCancellation()
-            current += "\n第\(row["sequence"] as Int)回合 · \(row["kind"] as String) · \(row["subject"] as String)：\(row["value"] as String)"
-            guard current.utf8.count <= sectionBytes else { throw MemoryContextError.slots }
+            let seq: Int = row["sequence"], kind: String = row["kind"], subject: String = row["subject"], value: String = row["value"]
+            let line = "第\(seq)回合 · \(kind) · \(subject)：\(value)"
+            currentBytes += 1 + line.utf8.count; guard currentBytes <= sectionBytes else { throw MemoryContextError.slots }
+            let privateKnowledge = kind == "knowledge"
+            entries.append(.init(privateKnowledge ? .characterKnowledge : .branchState, line, privateKnowledge ? "此人和此命题的最近核实记录" : "本分支此状态的最后一次有效变更", sequence: seq, holder: privateKnowledge ? subject.components(separatedBy: "｜").first : nil))
         }
         let pending = try Row.fetchCursor(db, sql: gapsSQL, arguments: [recentStart, sectionBytes, key])
         while let row = try pending.next() {
             try Task.checkCancellation()
             let seq: Int = row["sequence"]
-            if seq >= recentStart { gaps += "\n第\(seq)回合：见最近回合原文。" }
+            let line: String
+            if seq >= recentStart { line = "第\(seq)回合：见最近回合原文。" }
             else {
                 guard let original: String = row["original"] else { throw MemoryContextError.gaps }
-                gaps += "\n第\(seq)回合原文：\n\(original)"
+                line = "第\(seq)回合原文：\n\(original)"
             }
-            guard gaps.utf8.count <= sectionBytes else { throw MemoryContextError.gaps }
+            gapBytes += 1 + line.utf8.count; guard gapBytes <= sectionBytes else { throw MemoryContextError.gaps }
+            entries.append(.init(.unresolved, line, "待整理幕：原文优先于较旧的状态", sequence: seq))
         }
-        if current.isEmpty && gaps.isEmpty { return ("", state.revision) }
+        if entries.isEmpty { return .init(entries: [], revision: state.revision) }
         // Illustrations only: old evidence must never overwrite the latest slot, or imply shared knowledge.
         let history = try Row.fetchAll(db, sql: historySQL, arguments: [key, recentStart, action, action])
         for row in history {
-            let quote = "\n第\(row["sequence"] as Int)回合 · \(row["kind"] as String) · \(row["subject"] as String)：「\(row["evidence"] as String)」"
-            if quotes.utf8.count + quote.utf8.count <= sectionBytes { quotes += quote }
+            let seq: Int = row["sequence"], kind: String = row["kind"], subject: String = row["subject"]
+            let quote = "第\(seq)回合 · \(kind) · \(subject)：「\(row["evidence"] as String)」"
+            if quoteBytes + quote.utf8.count + 1 <= sectionBytes {
+                quoteBytes += quote.utf8.count + 1
+                entries.append(.init(.historicalQuote,quote,"窗口外已核实的原句；按行动匹配优先，再按幕次",sequence:seq,holder:kind == "knowledge" ? subject.components(separatedBy:"｜").first : nil))
+            }
         }
-        var text = "本局已整理的现状（knowledge 仅属所列主体，不是在场或不在场者的公共知识）：" + current
-        if !gaps.isEmpty { text += "\n尚有记忆缺口；以上现状可能已被以下回合改变，按回合顺序核对原文：" + gaps }
-        if !quotes.isEmpty { text += "\n历史引文（示例，不是当前状态或公共知识）：" + quotes }
         try Task.checkCancellation()
-        return (text, state.revision)
+        return .init(entries: entries, revision: state.revision)
     }
 }

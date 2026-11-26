@@ -6,6 +6,10 @@
     {
       "file": "ReaderDomainTests/StoryMemoryTests.swift",
       "name": "committedMemoryRecoversWithoutRewritingAndReachesNextRequest"
+    },
+    {
+      "file": "ReaderDomainTests/StoryGenerationTests.swift",
+      "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
     }
   ],
   "build_timeout_seconds": 900,

@@ -1078,7 +1078,7 @@ extension LibraryStore {
         } catch is DatabaseError { throw StoryTurnError.storage }
     }
 
-    func storyMemoryContext(sessionID: UUID, action: String, recentStart: Int) throws -> (text: String, revision: Int) {
+    func storyMemoryContext(sessionID: UUID, action: String, recentStart: Int) throws -> StorySceneMemory {
         do {
             return try queue.read { db in
                 try StoryMemoryRows.context(sessionID, action: action, recentStart: recentStart, in: db)

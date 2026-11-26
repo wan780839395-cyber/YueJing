@@ -6,6 +6,7 @@ struct StoryMemoryTests {
     @Test func committedMemoryRecoversWithoutRewritingAndReachesNextRequest() async throws {
         try checkStoryMemoryProtocol()
         try measureNarrativeCorpus()
+        try checkStoryCandidateChecks()
         let f = try EPUBLibraryFixture(); defer { f.remove() }
         let book = try await f.install(f.archive()).book
         let a = try await f.service.startStory(book:book, roleKind:.original, roleName:"我", premise:"")
@@ -68,5 +69,21 @@ struct StoryMemoryTests {
         let context = try #require(last.messages.first { $0.content.hasPrefix("本局已整理的现状") }?.content)
         #expect(context.contains("第14回合 · possession · 钥匙：我")); #expect(context.contains(accepted)); #expect(!context.contains("尚有记忆缺口"))
         let jobs = try await fresh.store.storyMemoryPending(sessionID:a.id); #expect(jobs.isEmpty)
+        let promise = StoryMemoryFact(kind:"promise",subject:"我｜阿宁｜明日｜南门｜会面",value:"已约定",evidence:"我答应阿宁明日在南门会面。")
+        let secret = StoryMemoryFact(kind:"knowledge",subject:"小青｜账本｜在｜桌上",value:"已知",evidence:"小青知道账本在桌上。")
+        let ledger = [promise, secret]
+        let encodedLedger = String(decoding:try JSONEncoder().encode(ledger),as:UTF8.self)
+        _ = try await round(fresh,a,14,ledger.map(\.evidence).joined() + m + encodedLedger)
+        let briefDraft = try await fresh.prepareStoryGeneration(session:a, expectedCount:15, action:"问掌柜昨夜的客人", configuration:cfg)
+        let brief = briefDraft.sceneBrief
+        #expect(brief.sessionID == a.id && brief.bookVersion == book.versionID)
+        let privateRows = brief.entries.filter { $0.layer == .characterKnowledge }
+        #expect(privateRows.count == 1 && privateRows.first?.holder == "小青" && privateRows.first?.sequence == 15)
+        #expect(brief.entries.filter { $0.layer == .canonOpening }.map(\.text) == [a.opening])
+        #expect(brief.entries.contains { $0.layer == .branchState && $0.sequence == 15 && $0.text.contains("已约定") })
+        #expect(!brief.entries.contains { $0.layer == .branchState && $0.text.contains("小青知道") })
+        for entry in brief.entries { #expect(!entry.reason.isEmpty && briefDraft.messages.contains { $0.content.contains(entry.text) }) }
+        let otherBrief = try await fresh.prepareStoryGeneration(session:b, expectedCount:13, action:"问掌柜昨夜的客人", configuration:cfg)
+        #expect(!otherBrief.sceneBrief.entries.contains { $0.layer == .characterKnowledge || $0.text.contains(promise.evidence) })
     }
 }

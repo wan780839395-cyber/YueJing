@@ -13,6 +13,7 @@ public struct StoryGenerationDraft: Identifiable, Sendable {
     public let messages: [StoryModelMessage]
     public let parameters: [String: String]
     public let omittedTurns: Int
+    public let sceneBrief: StorySceneBrief
     let session: StorySession
     let expectedCount: Int
     let action: String
@@ -34,20 +35,14 @@ public enum StoryGenerationError: Error, LocalizedError {
 
 enum StoryGenerationBuilder {
     static func prepare(session: StorySession, turns: [StoryTurn], preset: StoryPresetVersion?, action raw: String,
-                        configuration config: StoryModelConfiguration, memoryText: String = "", memoryRevision: Int = 0) throws -> StoryGenerationDraft {
+                        configuration config: StoryModelConfiguration, memory: StorySceneMemory = .empty) throws -> StoryGenerationDraft {
         let action = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !action.isEmpty, action.count <= 400 else { throw StoryTurnError.invalidAction }
         guard turns.count < 64 else { throw StoryTurnError.turnLimit }
         guard session.presetID == preset?.summary.id else { throw StoryGenerationError.unsupported }
         let recent = turns.suffix(8)
-        let kind = session.roleKind == .canon ? "原著角色" : "原创角色"
-        var history: [StoryModelMessage] = [.init(role: "user", content: "我扮演\(kind)：\(session.roleName)。身份说明：\(session.premise)\n本局原文开篇：\n\(session.opening)")]
-        if !memoryText.isEmpty { history.append(.init(role: "user", content: memoryText)) }
-        for turn in recent {
-            history.append(.init(role: "user", content: turn.action))
-            history.append(.init(role: "assistant", content: turn.narration))
-        }
-        history.append(.init(role: "user", content: action))
+        let brief = StorySceneBrief(session: session, turns: recent, memory: memory, action: action)
+        let history = brief.history
         var messages: [StoryModelMessage] = []
         if let preset {
             guard preset.summary.canSelect, preset.issues.isEmpty else { throw StoryGenerationError.unsupported }
@@ -63,7 +58,7 @@ enum StoryGenerationBuilder {
             }
             guard inserted else { throw StoryGenerationError.unsupported }
         } else {
-            messages = [.init(role: "system", content: "根据开篇、角色和玩家行动，续写一幕连贯的小说正文。让行动带来具体后果，保留玩家下一步决定。不要将分支冒充原著事实。\n" + StoryMemoryProtocol.instruction)] + history
+            messages = [.init(role: "system", content: StorySceneBrief.writerInstruction + "\n" + StoryMemoryProtocol.instruction)] + history
         }
         let parameters = preset?.parameters ?? [:]
         var payload: [String: Any] = ["model": config.model, "stream": true,
@@ -83,7 +78,7 @@ enum StoryGenerationBuilder {
         guard body.count <= 256 * 1024 else { throw StoryGenerationError.budget }
         return .init(id: UUID(), endpoint: config.endpoint, model: config.model, presetName: preset?.summary.name,
                      messages: messages, parameters: parameters, omittedTurns: turns.count - recent.count,
-                     session: session, expectedCount: turns.count, action: action, memoryRevision: memoryRevision, body: body)
+                     sceneBrief: brief, session: session, expectedCount: turns.count, action: action, memoryRevision: memory.revision, body: body)
     }
 }
 
@@ -98,7 +93,7 @@ extension LibraryService {
         if let id = session.presetID { preset = try await store.storyPreset(id: id) } else { preset = nil }
         try await recoverLocalStoryMemory(sessionID: session.id)
         let memory = try await store.storyMemoryContext(sessionID: session.id, action: action, recentStart: max(1, turns.count - 7))
-        return try StoryGenerationBuilder.prepare(session: session, turns: turns, preset: preset, action: action, configuration: configuration, memoryText: memory.text, memoryRevision: memory.revision)
+        return try StoryGenerationBuilder.prepare(session: session, turns: turns, preset: preset, action: action, configuration: configuration, memory: memory)
     }
 
     public func generateStoryTurn(_ draft: StoryGenerationDraft, onPartial: @escaping @Sendable (String) async -> Void) async throws -> StoryTurn {
