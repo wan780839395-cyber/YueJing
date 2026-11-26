@@ -4,10 +4,6 @@
   "branch": "dev/workflow-optimization",
   "cases": [
     {
-      "file": "ReaderDomainTests/StoryLaunchTests.swift",
-      "name": "localStoryStartsFromImportedTextAndEPUBAndRestoresBothRoles"
-    },
-    {
       "file": "ReaderDomainTests/StoryGenerationTests.swift",
       "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
     },

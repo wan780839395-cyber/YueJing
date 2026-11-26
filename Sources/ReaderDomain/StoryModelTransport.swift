@@ -1,6 +1,31 @@
 import Foundation
 
-private final class StoryModelSessionPolicy: NSObject, URLSessionTaskDelegate {
+final class StoryModelSessionPolicy: NSObject, URLSessionTaskDelegate {
+    static func settings(for target: URL) -> URLSessionConfiguration {
+        let settings = URLSessionConfiguration.ephemeral
+        settings.httpCookieStorage = nil
+        settings.httpShouldSetCookies = false
+        settings.urlCache = nil
+        settings.requestCachePolicy = .reloadIgnoringLocalCacheData
+        settings.urlCredentialStorage = nil
+        if target.scheme == "http" {
+            settings.allowsCellularAccess = false
+            // Non-nil per-session CFNetwork proxy settings instead of system defaults.
+            settings.connectionProxyDictionary = ["HTTPEnable": false, "HTTPSEnable": false, "SOCKSEnable": false,
+                                                  "ProxyAutoConfigEnable": false, "ProxyAutoDiscoveryEnable": false]
+        }
+        return settings
+    }
+
+    static func request(to target: URL, key: String) -> URLRequest {
+        var request = URLRequest(url: target)
+        request.httpShouldHandleCookies = false
+        if target.scheme == "http" { request.allowsCellularAccess = false }
+        if !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        return request
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? { nil }
@@ -17,27 +42,22 @@ private final class StoryModelSessionPolicy: NSObject, URLSessionTaskDelegate {
 }
 
 enum StoryModelTransport {
-    /// Caller owns user confirmation and the immutable body. This method never retries,
-    /// rewrites a URL, changes stream mode, or chooses a different model.
+    static func request(configuration: StoryModelConfiguration, body: Data, record: StoryModelVault.Record?) throws -> URLRequest {
+        let key = try StoryModelVault.credential(for: configuration, record: record)
+        var request = StoryModelSessionPolicy.request(to: configuration.endpoint, key: key)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = body
+        return request
+    }
+
+    /// Re-read authorization for the frozen preview, never from the draft itself.
     static func complete(configuration: StoryModelConfiguration, body: Data,
                          onPartial: @escaping @Sendable (String) async -> Void) async throws -> String {
         try Task.checkCancellation()
-        let key = try StoryModelVault.credential(for: configuration)
-        var request = URLRequest(url: configuration.endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.httpShouldHandleCookies = false
-        request.httpBody = body
-
-        let settings = URLSessionConfiguration.ephemeral
-        settings.httpCookieStorage = nil
-        settings.httpShouldSetCookies = false
-        settings.urlCache = nil
-        settings.requestCachePolicy = .reloadIgnoringLocalCacheData
-        settings.urlCredentialStorage = nil
+        let request = try Self.request(configuration: configuration, body: body, record: StoryModelVault.read())
+        let settings = StoryModelSessionPolicy.settings(for: configuration.endpoint)
         settings.timeoutIntervalForRequest = 45
         settings.timeoutIntervalForResource = 120
         let session = URLSession(configuration: settings, delegate: StoryModelSessionPolicy(), delegateQueue: nil)

@@ -24,7 +24,7 @@ def policy(version, build, scope):
         batch = dispatch_batch(scope)
         if (version, build) != (batch.version, batch.build):
             raise ValueError('Device registry and checked-out product disagree')
-    if (version, build) in (PRIVATE, ('0.2.39', '41'), ('0.2.40', '42')) and scope in ('development-targeted', 'device-active'):
+    if (version, build) in (PRIVATE, ('0.2.39', '41'), ('0.2.40', '42'), ('0.2.41', '43')) and scope in ('development-targeted', 'device-active'):
         return 'cms40'
     if tuple(map(int, version.split('.'))) < (0, 2, 38) and int(build) < 40:
         return 'legacy'

@@ -15,7 +15,7 @@ enum StoryModelVaultError: LocalizedError {
     case invalidEndpoint, invalidModel, invalidKey, unavailable, configurationChanged
     var errorDescription: String? {
         switch self {
-        case .invalidEndpoint: return "请填写完整的 HTTPS 接口地址，不要附带用户名、密码、查询参数或片段。"
+        case .invalidEndpoint: return "请填写有效的 HTTPS 接口，或明确批准完整的私网 HTTP 聊天地址。"
         case .invalidModel: return "请输入服务商提供的有效模型标识。"
         case .invalidKey: return "密钥格式无效，请重新输入。"
         case .unavailable: return "设备钥匙串不可用，请解锁设备后再试。"
@@ -33,18 +33,76 @@ public enum StoryModelVault {
          kSecAttrSynchronizable as String: false]
     }
 
-    private struct Record: Codable {
+    struct Record: Codable, Sendable {
         let endpoint: String
         let model: String
         let apiKey: String
+        let approvedLANEndpoint: String?
 
         func validated() throws -> StoryModelConfiguration {
-            try StoryModelVault.validateKey(apiKey)
-            return try StoryModelVault.configuration(endpoint: endpoint, model: model)
+            let config = try StoryModelVault.configuration(endpoint: endpoint, model: model, approvedLANEndpoint: approvedLANEndpoint)
+            guard config.endpoint.absoluteString.utf8.elementsEqual(endpoint.utf8) else { throw StoryModelVaultError.invalidEndpoint }
+            if !apiKey.isEmpty || config.endpoint.scheme != "http" { try StoryModelVault.validateKey(apiKey) }
+            return config
         }
     }
 
-    static func configuration(endpoint: String, model: String) throws -> StoryModelConfiguration {
+    /// Parse the raw authority and path before URL processing can interpret aliases or escapes.
+    public static func lanEndpointCandidate(_ input: String) -> String? {
+        let scheme = "http://"
+        guard input.utf8.count <= 4096, input.utf8.allSatisfy({ (33...126).contains($0) }),
+              input.hasPrefix(scheme) else { return nil }
+        let remainder = input.dropFirst(scheme.count)
+        guard let slash = remainder.firstIndex(of: "/") else { return nil }
+        let authority = remainder[..<slash].split(separator: ":", omittingEmptySubsequences: false)
+        guard (1...2).contains(authority.count) else { return nil }
+        func decimal(_ s: Substring, maxDigits: Int) -> Int? {
+            guard (1...maxDigits).contains(s.utf8.count), s == "0" || s.first != "0",
+                  s.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+            return Int(s)
+        }
+        if authority.count == 2 {
+            guard let port = decimal(authority[1], maxDigits: 5), (1...65535).contains(port) else { return nil }
+        }
+        let octets = authority[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        let ip = octets.compactMap { decimal($0, maxDigits: 3) }
+        guard ip.count == 4, ip.allSatisfy({ $0 <= 255 }),
+              ip[0] == 10 || (ip[0] == 172 && (16...31).contains(ip[1])) || (ip[0] == 192 && ip[1] == 168) else { return nil }
+
+        var path = input[input.index(after: slash)...]
+        if path.last == "/" { path = path.dropLast() }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !segments.isEmpty, segments.allSatisfy({ segment in
+            !segment.isEmpty && segment != "." && segment != ".." && segment.utf8.allSatisfy {
+                (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [45, 46, 95, 126].contains($0)
+            }
+        }) else { return nil }
+        let base = String(input[...slash]) + String(path)
+        let candidate: String
+        if segments.last == "v1" { candidate = base + "/chat/completions" }
+        else if base.hasSuffix("/chat/completions") { candidate = base }
+        else { return nil }
+        return candidate.utf8.count <= 4096 ? candidate : nil
+    }
+
+    static func configuration(endpoint: String, model: String, approvedLANEndpoint: String? = nil) throws -> StoryModelConfiguration {
+        let url: URL
+        if endpoint.hasPrefix("http://") {
+            guard let canonical = lanEndpointCandidate(endpoint), let approvedLANEndpoint,
+                  canonical.utf8.elementsEqual(approvedLANEndpoint.utf8), let parsed = URL(string: canonical),
+                  parsed.absoluteString.utf8.elementsEqual(canonical.utf8) else { throw StoryModelVaultError.invalidEndpoint }
+            url = parsed
+        } else {
+            url = try httpsURL(endpoint)
+        }
+        guard (1...256).contains(model.utf8.count),
+              model.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)) == nil
+        else { throw StoryModelVaultError.invalidModel }
+        return StoryModelConfiguration(endpoint: url, model: model)
+    }
+
+    private static func httpsURL(_ endpoint: String) throws -> URL {
         guard (1...4096).contains(endpoint.utf8.count),
               endpoint.utf8.allSatisfy({ (33...126).contains($0) && $0 != 92 }),
               // Require a literal DNS/IP authority and bound the port before asking
@@ -58,10 +116,7 @@ public enum StoryModelVault {
               parts.port.map({ (1...65535).contains($0) }) ?? true,
               let url = parts.url, url.absoluteString.utf8.elementsEqual(endpoint.utf8)
         else { throw StoryModelVaultError.invalidEndpoint }
-        guard (1...256).contains(model.utf8.count),
-              model.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)) == nil
-        else { throw StoryModelVaultError.invalidModel }
-        return StoryModelConfiguration(endpoint: url, model: model)
+        return url
     }
 
     static func validateKey(_ key: String) throws {
@@ -69,7 +124,7 @@ public enum StoryModelVault {
         else { throw StoryModelVaultError.invalidKey }
     }
 
-    private static func read() throws -> Record? {
+    static func read() throws -> Record? {
         var query = identity
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -86,15 +141,29 @@ public enum StoryModelVault {
         try read()?.validated()
     }
 
-    static func credential(for expected: StoryModelConfiguration) throws -> String {
-        guard let record = try read() else { throw StoryModelVaultError.configurationChanged }
+    static func credential(for expected: StoryModelConfiguration, record: Record?) throws -> String {
+        guard let record else { throw StoryModelVaultError.configurationChanged }
         let actual = try record.validated()
         guard expected.endpoint.baseURL == nil, expected == actual else { throw StoryModelVaultError.configurationChanged }
         return record.apiKey
     }
 
-    public static func save(endpoint: String, model: String, apiKey: String) throws {
-        let record = Record(endpoint: endpoint, model: model, apiKey: apiKey)
+    static func existingKey(endpoint: String, record: Record?) throws -> String? {
+        guard let record, record.endpoint.utf8.elementsEqual(endpoint.utf8) else { return nil }
+        _ = try record.validated()
+        return record.apiKey
+    }
+
+    public static func saveKeepingKey(endpoint: String, model: String, approvedLANEndpoint: String? = nil) throws {
+        let config = try configuration(endpoint: endpoint, model: model, approvedLANEndpoint: approvedLANEndpoint)
+        guard let key = try existingKey(endpoint: config.endpoint.absoluteString, record: read()) else { throw StoryModelVaultError.configurationChanged }
+        try save(endpoint: endpoint, model: model, apiKey: key, approvedLANEndpoint: approvedLANEndpoint)
+    }
+
+    public static func save(endpoint: String, model: String, apiKey: String, approvedLANEndpoint: String? = nil) throws {
+        let config = try configuration(endpoint: endpoint, model: model, approvedLANEndpoint: approvedLANEndpoint)
+        let record = Record(endpoint: config.endpoint.absoluteString, model: model, apiKey: apiKey,
+                            approvedLANEndpoint: config.endpoint.scheme == "http" ? approvedLANEndpoint : nil)
         _ = try record.validated()
         guard let data = try? JSONEncoder().encode(record) else { throw StoryModelVaultError.unavailable }
         let values: [String: Any] = [kSecValueData as String: data,

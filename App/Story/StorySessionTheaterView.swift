@@ -34,8 +34,14 @@ struct StorySessionTheaterView: View {
     @State private var submitBannerMessage: String?
     @State private var actionDraft: String = ""
     @State private var isOpeningExpanded = true
+    @State private var isImmersiveReading = false
     @State private var isPresentingLockedPreset = false
     @State private var isPresentingModelConfig = false
+    @State private var isPresentingStyleSheet = false
+    @State private var activeRecipe: StoryVisualRecipe = .standard
+    @State private var pendingStyleDraft: StoryStyleDraft?
+    @State private var isDirectingStyle = false
+    @State private var styleFeedbackMessage: String?
     @State private var modelConfig: StoryModelConfiguration?
     @State private var pendingDraft: StoryGenerationDraft?
     @State private var isPreparingDraft = false
@@ -48,9 +54,11 @@ struct StorySessionTheaterView: View {
     @State private var loadGeneration = UUID()
     @State private var activePrepareID: UUID?
     @State private var activeGenerateID: UUID?
+    @State private var activeStyleID: UUID?
     @State private var loadTask: Task<Void, Never>?
     @State private var prepareTask: Task<Void, Never>?
     @State private var generateTask: Task<Void, Never>?
+    @State private var styleTask: Task<Void, Never>?
 
     @FocusState private var isActionFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -72,7 +80,9 @@ struct StorySessionTheaterView: View {
         onRequestDelete != nil
             && !isPreparingDraft
             && !isGeneratingRemote
+            && !isDirectingStyle
             && pendingDraft == nil
+            && pendingStyleDraft == nil
             && !isDeletingSession
             && isRouteActive
     }
@@ -89,8 +99,12 @@ struct StorySessionTheaterView: View {
             && !isActionTooLong
     }
 
+    private var resolvedStyle: StoryResolvedStyle {
+        StoryResolvedStyle.resolve(recipe: activeRecipe, base: appearance)
+    }
+
     private var primaryButtonForeground: Color {
-        appearance.isDarkSurface ? Color.black.opacity(0.9) : Color.white
+        resolvedStyle.primaryButtonForeground
     }
 
     private var formattedOpening: FormattedProse {
@@ -98,8 +112,13 @@ struct StorySessionTheaterView: View {
     }
 
     var body: some View {
-        ZStack {
-            StoryAtmosphereCanvas(appearance: appearance, pulseToken: atmospherePulse)
+        let style = resolvedStyle
+        return ZStack {
+            style.pageBackground
+                .ignoresSafeArea()
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: activeRecipe)
+
+            StoryStyledAtmosphereCanvas(style: style, pulseToken: atmospherePulse)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -109,9 +128,13 @@ struct StorySessionTheaterView: View {
                             bookMasthead
                             openingReadingSection
                             turnsSection
-                            footerActionsRow
+                            if !isImmersiveReading {
+                                footerActionsRow
+                            }
                             Color.clear
-                                .frame(height: 16)
+                                .frame(height: isImmersiveReading
+                                       ? ((externalErrorMessage != nil || submitBannerMessage != nil) ? 132 : 80)
+                                       : 16)
                                 .id("story.theater.bottom")
                         }
                         .padding(.horizontal, LibraryAppearance.horizontalInset)
@@ -129,7 +152,27 @@ struct StorySessionTheaterView: View {
                     }
                 }
 
-                actionComposerBar
+                if !isImmersiveReading {
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [style.pageBackground.opacity(0), style.pageBackground.opacity(0.92)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 14)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+
+                        actionComposerBar
+                    }
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if isImmersiveReading {
+                    immersiveFloatingDock(style: style)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+                }
             }
         }
         .accessibilityIdentifier("story.session.screen")
@@ -164,10 +207,94 @@ struct StorySessionTheaterView: View {
                 }
             )
         }
+        .sheet(isPresented: $isPresentingStyleSheet) {
+            StoryStyleCompareSheet(
+                recipe: $activeRecipe,
+                appearance: appearance,
+                hasModelConfig: modelConfig != nil,
+                isDirectingStyle: isDirectingStyle,
+                styleStatusMessage: styleFeedbackMessage,
+                onRequestAIDirect: {
+                    prepareAIDirectStyle()
+                },
+                onCancelAIDirect: {
+                    cancelStyleDirection(showBanner: true)
+                },
+                onOpenModelConfig: {
+                    isPresentingModelConfig = true
+                }
+            )
+        }
+        .sheet(item: $pendingStyleDraft) { draft in
+            StoryStyleConfirmSheet(
+                draft: draft,
+                appearance: appearance,
+                onConfirm: { confirmed in
+                    pendingStyleDraft = nil
+                    startAIDirectStyle(draft: confirmed)
+                },
+                onCancel: {
+                    pendingStyleDraft = nil
+                    submitBannerMessage = "已取消 AI 判型，未发起网络请求，保持当前风格。"
+                }
+            )
+        }
+        .onChange(of: activeRecipe) { _ in
+            atmospherePulse &+= 1
+        }
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                if let onRequestDelete {
-                    Menu {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button {
+                    toggleImmersiveReading()
+                } label: {
+                    Image(systemName: isImmersiveReading ? "rectangle.compress.vertical" : "book.pages")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(resolvedStyle.accent)
+                        .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(isImmersiveReading ? "退出专注阅读并显示行动栏" : "开启专注阅读，收起外围控件")
+                .accessibilityValue(isImmersiveReading ? "专注阅读中" : "标准模式")
+                .accessibilityIdentifier("story.session.immersiveToggle")
+
+                Menu {
+                    Button {
+                        isActionFocused = false
+                        isPresentingStyleSheet = true
+                    } label: {
+                        Label("书境视觉风格", systemImage: "wand.and.stars")
+                    }
+                    .disabled(isDeletingSession)
+
+                    Button {
+                        isActionFocused = false
+                        isPresentingModelConfig = true
+                    } label: {
+                        Label("BYOK 模型配置", systemImage: "key")
+                    }
+                    .disabled(isBusyWithTurn)
+
+                    if session.presetID != nil {
+                        Button {
+                            isActionFocused = false
+                            isPresentingLockedPreset = true
+                        } label: {
+                            Label("查看锁定预设", systemImage: "lock.doc")
+                        }
+                    }
+
+                    if activeRecipe != .standard {
+                        Button {
+                            StoryHaptics.selection()
+                            activeRecipe = .standard
+                        } label: {
+                            Label("还原默认风格", systemImage: "arrow.uturn.backward")
+                        }
+                        .disabled(isDirectingStyle || isDeletingSession)
+                    }
+
+                    if let onRequestDelete {
+                        Divider()
                         Button(role: .destructive) {
                             isActionFocused = false
                             onRequestDelete()
@@ -175,26 +302,29 @@ struct StorySessionTheaterView: View {
                             Label("删除本局故事", systemImage: "trash")
                         }
                         .disabled(!canDeleteInTheater)
-                    } label: {
-                        Group {
-                            if isDeletingSession {
-                                ProgressView()
-                                    .tint(appearance.sealAccent)
-                                    .scaleEffect(0.85)
-                            } else {
-                                Image(systemName: "ellipsis.circle")
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(canDeleteInTheater ? appearance.accent : appearance.secondary.opacity(0.45))
-                            }
-                        }
-                        .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
-                        .contentShape(Rectangle())
                     }
-                    .disabled(!canDeleteInTheater)
-                    .accessibilityLabel("更多故事操作")
-                    .accessibilityHint(canDeleteInTheater ? "包含删除本局故事选项" : "生成或确认预览进行中，暂不可删除")
-                    .accessibilityIdentifier("story.session.more")
+                } label: {
+                    Group {
+                        if isDeletingSession {
+                            ProgressView()
+                                .tint(resolvedStyle.sealAccent)
+                                .scaleEffect(0.85)
+                        } else {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(resolvedStyle.accent)
+                        }
+                    }
+                    .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                    .contentShape(Rectangle())
                 }
+                .accessibilityLabel("更多故事操作")
+                .accessibilityHint(
+                    onRequestDelete == nil
+                        ? "包含视觉风格、模型配置与还原风格"
+                        : (canDeleteInTheater ? "包含视觉风格、模型配置、还原风格与删除本局故事" : "生成或确认预览进行中，暂不可删除")
+                )
+                .accessibilityIdentifier("story.session.more")
             }
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
@@ -202,7 +332,7 @@ struct StorySessionTheaterView: View {
                     isActionFocused = false
                 }
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(appearance.accent)
+                .foregroundStyle(resolvedStyle.accent)
                 .accessibilityIdentifier("story.keyboard.done")
             }
         }
@@ -245,8 +375,8 @@ struct StorySessionTheaterView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("《\(session.bookTitle)》")
-                        .font(.system(.title3, design: .serif).weight(.bold))
-                        .foregroundStyle(appearance.foreground)
+                        .font(resolvedStyle.bookTitleFont)
+                        .foregroundStyle(resolvedStyle.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
 
@@ -254,12 +384,12 @@ struct StorySessionTheaterView: View {
                         roleBadge(session.roleKind)
                         Text(session.roleName)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(appearance.foreground)
+                            .foregroundStyle(resolvedStyle.foreground)
                             .lineLimit(1)
                         if !turns.isEmpty {
                             Text("· \(turns.count) 幕")
                                 .font(.caption.monospacedDigit())
-                                .foregroundStyle(appearance.secondary)
+                                .foregroundStyle(resolvedStyle.secondary)
                         }
                     }
                 }
@@ -271,35 +401,89 @@ struct StorySessionTheaterView: View {
             if !session.premise.isEmpty {
                 HStack(alignment: .top, spacing: 10) {
                     RoundedRectangle(cornerRadius: 1, style: .continuous)
-                        .fill(appearance.accent.opacity(0.65))
+                        .fill(resolvedStyle.accent.opacity(0.65))
                         .frame(width: 2)
                         .accessibilityHidden(true)
                     Text(session.premise)
                         .font(.footnote)
                         .lineSpacing(4)
-                        .foregroundStyle(appearance.secondary)
+                        .foregroundStyle(resolvedStyle.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            // Compact utility pills: locked preset (if any) & model status
-            ViewThatFits(in: .horizontal) {
+            if !isImmersiveReading {
+                // Compact utility pills: style compare / AI director, model status, locked preset
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        styleControlPill
+                        modelStatusPill
+                        if let lockedPresetID = session.presetID {
+                            lockedPresetPill(lockedPresetID)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            styleControlPill
+                            modelStatusPill
+                        }
+                        if let lockedPresetID = session.presetID {
+                            lockedPresetPill(lockedPresetID)
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
+
+            if isDirectingStyle {
                 HStack(spacing: 8) {
-                    modelStatusPill
-                    if let lockedPresetID = session.presetID {
-                        lockedPresetPill(lockedPresetID)
+                    ProgressView()
+                        .tint(resolvedStyle.accent)
+                        .scaleEffect(0.85)
+                    Text("正在由模型判定本局视觉风格…")
+                        .font(.caption)
+                        .foregroundStyle(resolvedStyle.secondary)
+                    Spacer(minLength: 4)
+                    Button("取消") {
+                        cancelStyleDirection(showBanner: true)
                     }
-                    Spacer(minLength: 0)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(resolvedStyle.sealAccent)
+                    .accessibilityIdentifier("story.style.inlineCancel")
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    modelStatusPill
-                    if let lockedPresetID = session.presetID {
-                        lockedPresetPill(lockedPresetID)
-                    }
-                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(resolvedStyle.surface.opacity(0.88), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityIdentifier("story.style.directingBanner")
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private var styleControlPill: some View {
+        Button {
+            isActionFocused = false
+            isPresentingStyleSheet = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "wand.and.stars")
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+                Text(resolvedStyle.shortLabel)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(resolvedStyle.accent)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minHeight: 34)
+            .background(resolvedStyle.accentSoft, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDeletingSession)
+        .accessibilityLabel("视觉风格对照与 AI 判型，当前 \(resolvedStyle.shortLabel)")
+        .accessibilityIdentifier("story.session.styleControl")
     }
 
     private var modelStatusPill: some View {
@@ -359,18 +543,19 @@ struct StorySessionTheaterView: View {
 
     private var openingReadingSection: some View {
         let prose = formattedOpening
+        let style = resolvedStyle
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 8) {
                 Text("本书原文")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(appearance.accent)
+                    .foregroundStyle(style.accent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 3.5)
-                    .background(appearance.accentSoft, in: Capsule())
+                    .background(style.accentSoft, in: Capsule())
 
                 Text(session.createdAt.formatted(date: .numeric, time: .shortened))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(appearance.secondary)
+                    .foregroundStyle(style.secondary)
 
                 Spacer(minLength: 8)
 
@@ -386,7 +571,7 @@ struct StorySessionTheaterView: View {
                     } label: {
                         Text(isOpeningExpanded ? "收起原文" : "展开原文")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(appearance.accent)
+                            .foregroundStyle(style.accent)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                     }
@@ -400,21 +585,21 @@ struct StorySessionTheaterView: View {
                     if let heading = prose.chapterHeading {
                         VStack(alignment: .center, spacing: 8) {
                             Text(heading)
-                                .font(.system(.headline, design: .serif).weight(.bold))
-                                .foregroundStyle(appearance.foreground)
+                                .font(style.chapterHeadingFont)
+                                .foregroundStyle(style.foreground)
                                 .multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityAddTraits(.isHeader)
 
                             HStack(spacing: 8) {
                                 Rectangle()
-                                    .fill(appearance.accent.opacity(0.35))
+                                    .fill(style.accent.opacity(0.38))
                                     .frame(width: 28, height: 0.75)
                                 Circle()
-                                    .fill(appearance.accent.opacity(0.75))
+                                    .fill(style.accent.opacity(0.8))
                                     .frame(width: 4, height: 4)
                                 Rectangle()
-                                    .fill(appearance.accent.opacity(0.35))
+                                    .fill(style.accent.opacity(0.38))
                                     .frame(width: 28, height: 0.75)
                             }
                             .accessibilityHidden(true)
@@ -426,9 +611,9 @@ struct StorySessionTheaterView: View {
                     VStack(alignment: .leading, spacing: 13) {
                         ForEach(Array(prose.paragraphs.enumerated()), id: \.offset) { _, paragraph in
                             Text(paragraph)
-                                .font(.system(.body, design: .serif))
-                                .lineSpacing(9)
-                                .foregroundStyle(appearance.foreground)
+                                .font(style.proseFont)
+                                .lineSpacing(style.proseLineSpacing)
+                                .foregroundStyle(style.foreground)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                         }
@@ -437,20 +622,20 @@ struct StorySessionTheaterView: View {
                 .accessibilityIdentifier("story.session.opening")
             } else {
                 Text(prose.chapterHeading ?? prose.paragraphs.first ?? session.opening)
-                    .font(.system(.subheadline, design: .serif))
+                    .font(style.proseFont)
                     .lineSpacing(5)
                     .lineLimit(2)
-                    .foregroundStyle(appearance.secondary)
+                    .foregroundStyle(style.secondary)
                     .accessibilityIdentifier("story.session.opening")
             }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(appearance.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(style.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.65)
+            RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous)
+                .strokeBorder(style.edge.opacity(0.75), lineWidth: 0.7)
                 .allowsHitTesting(false)
         }
     }
@@ -531,50 +716,52 @@ struct StorySessionTheaterView: View {
     }
 
     private var streamingDraftCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let style = resolvedStyle
+        return VStack(alignment: .leading, spacing: 12) {
             if !streamingActionText.isEmpty {
-                playerActionBlock(text: streamingActionText, subtitle: "\(session.roleName) · 生成中")
+                playerActionBlock(text: streamingActionText, subtitle: "\(session.roleName) · 落笔中")
             }
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     ProgressView()
-                        .tint(appearance.accent)
+                        .tint(style.accent)
                         .scaleEffect(0.85)
-                    Text("模型生成中（未落盘）")
+                    Text("模型续写中（未落盘）")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(appearance.accent)
+                        .foregroundStyle(style.accent)
                     Spacer(minLength: 4)
                     Button("取消") {
                         cancelRemoteGeneration(showBanner: true)
                     }
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(appearance.sealAccent)
+                    .foregroundStyle(style.sealAccent)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 5)
-                    .background(appearance.sealSoft, in: Capsule())
+                    .background(style.sealSoft, in: Capsule())
                     .accessibilityLabel("取消本次模型生成")
                     .accessibilityIdentifier("story.streaming.cancel")
                 }
 
                 if streamingNarration.isEmpty {
                     Text("正在等待远端模型返回首个片段…")
-                        .font(.system(.subheadline, design: .serif))
-                        .foregroundStyle(appearance.secondary)
+                        .font(style.proseFont)
+                        .foregroundStyle(style.secondary)
                         .accessibilityIdentifier("story.streaming.text")
                 } else {
                     let streamed = Self.formatProse(streamingNarration)
                     VStack(alignment: .leading, spacing: 12) {
                         if let heading = streamed.chapterHeading {
                             Text(heading)
-                                .font(.system(.headline, design: .serif).weight(.semibold))
-                                .foregroundStyle(appearance.foreground)
+                                .font(style.chapterHeadingFont)
+                                .foregroundStyle(style.foreground)
                         }
-                        ForEach(Array(streamed.paragraphs.enumerated()), id: \.offset) { _, p in
-                            Text(p)
-                                .font(.system(.body, design: .serif))
-                                .lineSpacing(9)
-                                .foregroundStyle(appearance.foreground)
+                        ForEach(Array(streamed.paragraphs.enumerated()), id: \.offset) { idx, p in
+                            let isLast = idx == streamed.paragraphs.count - 1
+                            Text(isLast ? "\(p) ▍" : p)
+                                .font(style.proseFont)
+                                .lineSpacing(style.proseLineSpacing)
+                                .foregroundStyle(style.foreground)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -584,10 +771,10 @@ struct StorySessionTheaterView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(style.surface.opacity(0.94), in: RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(appearance.accent.opacity(0.5), lineWidth: 0.9)
+                RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous)
+                    .strokeBorder(style.accent.opacity(0.55), lineWidth: 0.95)
                     .allowsHitTesting(false)
             }
         }
@@ -599,17 +786,18 @@ struct StorySessionTheaterView: View {
         let isRemoteModel = (remoteModel?.isEmpty == false)
         let formatted = Self.formatProse(turn.narration)
 
+        let style = resolvedStyle
         return VStack(alignment: .leading, spacing: 14) {
             // Ornamental act divider
             HStack(spacing: 10) {
                 Rectangle()
-                    .fill(appearance.edge.opacity(0.55))
+                    .fill(style.edge.opacity(0.65))
                     .frame(height: 0.6)
                 Text("✦ 第 \(turn.sequence) 幕 ✦")
                     .font(.caption2.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(isRemoteModel ? appearance.accent : appearance.secondary)
+                    .foregroundStyle(isRemoteModel ? style.accent : style.secondary)
                 Rectangle()
-                    .fill(appearance.edge.opacity(0.55))
+                    .fill(style.edge.opacity(0.65))
                     .frame(height: 0.6)
             }
             .padding(.vertical, 2)
@@ -624,11 +812,11 @@ struct StorySessionTheaterView: View {
                          ? "AI 生成 · \(remoteModel!) · 第 \(turn.sequence) 幕"
                          : "历史离线记录 · 第 \(turn.sequence) 幕")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(isRemoteModel ? appearance.accent : appearance.secondary)
+                        .foregroundStyle(isRemoteModel ? style.accent : style.secondary)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 3.5)
                         .background(
-                            isRemoteModel ? appearance.accentSoft : appearance.subtleSurface,
+                            isRemoteModel ? style.accentSoft : style.subtleSurface,
                             in: Capsule()
                         )
                     Spacer(minLength: 0)
@@ -636,17 +824,17 @@ struct StorySessionTheaterView: View {
 
                 if let heading = formatted.chapterHeading {
                     Text(heading)
-                        .font(.system(.headline, design: .serif).weight(.semibold))
-                        .foregroundStyle(appearance.foreground)
+                        .font(style.chapterHeadingFont)
+                        .foregroundStyle(style.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 VStack(alignment: .leading, spacing: 13) {
                     ForEach(Array(formatted.paragraphs.enumerated()), id: \.offset) { _, p in
                         Text(p)
-                            .font(.system(.body, design: .serif))
-                            .lineSpacing(9)
-                            .foregroundStyle(appearance.foreground)
+                            .font(style.proseFont)
+                            .lineSpacing(style.proseLineSpacing)
+                            .foregroundStyle(style.foreground)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
@@ -655,12 +843,12 @@ struct StorySessionTheaterView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 20)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(style.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: style.cardCornerRadius, style: .continuous)
                     .strokeBorder(
-                        isRemoteModel ? appearance.accent.opacity(0.26) : appearance.edge.opacity(0.65),
-                        lineWidth: 0.7
+                        isRemoteModel ? style.accent.opacity(0.32) : style.edge.opacity(0.75),
+                        lineWidth: 0.75
                     )
                     .allowsHitTesting(false)
             }
@@ -669,26 +857,132 @@ struct StorySessionTheaterView: View {
     }
 
     private func playerActionBlock(text: String, subtitle: String) -> some View {
-        HStack {
-            Spacer(minLength: 32)
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(subtitle)
+        let style = resolvedStyle
+        let cornerRadius = max(10, style.cardCornerRadius - 4)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "pencil.line")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(appearance.accent)
-                Text(text)
-                    .font(.subheadline)
-                    .lineSpacing(4)
-                    .foregroundStyle(appearance.foreground)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
+                    .foregroundStyle(style.accent)
+                    .accessibilityHidden(true)
+                Text(subtitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(style.accent)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(appearance.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .accessibilityElement(children: .combine)
+            Text(text)
+                .font(style.proseFont)
+                .lineSpacing(5)
+                .foregroundStyle(style.foreground.opacity(0.95))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .padding(.vertical, 12)
+        .background(style.accentSoft.opacity(0.72), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(style.accent)
+                .frame(width: 2.5)
+                .padding(.vertical, 10)
+                .padding(.leading, 8)
+                .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func immersiveFloatingDock(style: StoryResolvedStyle) -> some View {
+        VStack(spacing: 10) {
+            if externalErrorMessage != nil || submitBannerMessage != nil {
+                statusBanners(style: style)
+                    .padding(.horizontal, LibraryAppearance.horizontalInset)
+                    .shadow(color: Color.black.opacity(style.isDark ? 0.3 : 0.1), radius: 10, x: 0, y: 3)
+            }
+
+            HStack(spacing: 10) {
+                if isGeneratingRemote {
+                    Button {
+                        cancelRemoteGeneration(showBanner: true)
+                    } label: {
+                        Label("取消生成", systemImage: "stop.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(style.sealAccent)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .frame(minHeight: LibraryAppearance.minimumControlHeight)
+                            .background(style.surface.opacity(0.95), in: Capsule())
+                            .overlay {
+                                Capsule()
+                                    .strokeBorder(style.sealAccent.opacity(0.45), lineWidth: 0.9)
+                                    .allowsHitTesting(false)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("story.immersive.cancel")
+                } else {
+                    Button {
+                        if modelConfig == nil {
+                            isPresentingModelConfig = true
+                        } else {
+                            exitImmersiveAndCompose()
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: modelConfig == nil ? "key" : "pencil.and.outline")
+                                .font(.subheadline.weight(.semibold))
+                                .accessibilityHidden(true)
+                            Text(modelConfig == nil
+                                 ? "配置模型"
+                                 : (trimmedAction.isEmpty ? "执笔行动" : "继续草稿（\(trimmedAction.count)字）"))
+                                .font(.subheadline.weight(.semibold))
+                                .multilineTextAlignment(.center)
+                        }
+                        .foregroundStyle(primaryButtonForeground)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .frame(minHeight: LibraryAppearance.minimumControlHeight)
+                        .background(style.accent, in: Capsule())
+                        .shadow(color: style.accent.opacity(style.isDark ? 0.34 : 0.22), radius: 12, x: 0, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusyWithTurn)
+                    .accessibilityLabel(modelConfig == nil ? "配置 BYOK 模型接口" : "展开底部行动输入栏并继续输入")
+                    .accessibilityIdentifier("story.immersive.compose")
+                }
+            }
+        }
+        .padding(.bottom, 14)
+    }
+
+    private func toggleImmersiveReading() {
+        StoryHaptics.selection()
+        isActionFocused = false
+        if reduceMotion {
+            isImmersiveReading.toggle()
+        } else {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                isImmersiveReading.toggle()
+            }
         }
     }
 
+    private func exitImmersiveAndCompose() {
+        StoryHaptics.selection()
+        if reduceMotion {
+            isImmersiveReading = false
+        } else {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                isImmersiveReading = false
+            }
+        }
+        Task { @MainActor in
+            await Task.yield()
+            if isViewActive && isRouteActive && !isImmersiveReading && !isBusyWithTurn {
+                isActionFocused = true
+            }
+        }
+    }
     private var footerActionsRow: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
@@ -741,17 +1035,17 @@ struct StorySessionTheaterView: View {
 
     // MARK: - Clean Single-Track Action Composer
 
-    private var actionComposerBar: some View {
+    private func statusBanners(style: StoryResolvedStyle) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let externalErrorMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(appearance.sealAccent)
+                        .foregroundStyle(style.sealAccent)
                         .accessibilityHidden(true)
                     Text("未能删除本局故事：\(externalErrorMessage)")
                         .font(.caption)
-                        .foregroundStyle(appearance.foreground)
+                        .foregroundStyle(style.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     Button {
@@ -759,7 +1053,7 @@ struct StorySessionTheaterView: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(appearance.secondary)
+                            .foregroundStyle(style.secondary)
                             .frame(minWidth: 28, minHeight: 28)
                     }
                     .buttonStyle(.plain)
@@ -767,7 +1061,13 @@ struct StorySessionTheaterView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(style.sealSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(style.surface.opacity(0.96), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(style.sealAccent.opacity(0.32), lineWidth: 0.7)
+                        .allowsHitTesting(false)
+                }
                 .accessibilityIdentifier("story.session.deleteError")
             }
 
@@ -775,11 +1075,11 @@ struct StorySessionTheaterView: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill")
                         .font(.caption)
-                        .foregroundStyle(appearance.sealAccent)
+                        .foregroundStyle(style.sealAccent)
                         .accessibilityHidden(true)
                     Text(submitBannerMessage)
                         .font(.caption)
-                        .foregroundStyle(appearance.foreground)
+                        .foregroundStyle(style.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     Button {
@@ -787,7 +1087,7 @@ struct StorySessionTheaterView: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(appearance.secondary)
+                            .foregroundStyle(style.secondary)
                             .frame(minWidth: 28, minHeight: 28)
                     }
                     .buttonStyle(.plain)
@@ -795,10 +1095,24 @@ struct StorySessionTheaterView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(style.sealSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(style.surface.opacity(0.96), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(style.sealAccent.opacity(0.32), lineWidth: 0.7)
+                        .allowsHitTesting(false)
+                }
                 .accessibilityIdentifier("story.action.banner")
             }
+        }
+    }
 
+    private var actionComposerBar: some View {
+        let style = resolvedStyle
+        return VStack(alignment: .leading, spacing: 8) {
+            if externalErrorMessage != nil || submitBannerMessage != nil {
+                statusBanners(style: style)
+            }
             if modelConfig == nil {
                 unconfiguredModelGuideBar
             } else {
@@ -808,10 +1122,10 @@ struct StorySessionTheaterView: View {
         .padding(.horizontal, LibraryAppearance.horizontalInset)
         .padding(.top, 10)
         .padding(.bottom, 12)
-        .background(appearance.surface.opacity(0.97))
+        .background(resolvedStyle.surface.opacity(0.97))
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(appearance.edge.opacity(0.65))
+                .fill(resolvedStyle.edge.opacity(0.75))
                 .frame(height: 0.5)
         }
     }
@@ -821,10 +1135,10 @@ struct StorySessionTheaterView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("需要配置 BYOK 模型接口")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(appearance.foreground)
+                    .foregroundStyle(resolvedStyle.foreground)
                 Text("配置后可输入行动，并在每次发送前预览确认")
                     .font(.caption)
-                    .foregroundStyle(appearance.secondary)
+                    .foregroundStyle(resolvedStyle.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 4)
@@ -839,7 +1153,7 @@ struct StorySessionTheaterView: View {
             }
             .buttonStyle(AppControlButtonStyle(
                 foreground: primaryButtonForeground,
-                surface: appearance.accent,
+                surface: resolvedStyle.accent,
                 cornerRadius: 14
             ))
             .accessibilityLabel("配置自带密钥模型接口以继续生成故事")
@@ -852,24 +1166,25 @@ struct StorySessionTheaterView: View {
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("写下你的行动或台词…", text: $actionDraft, axis: .vertical)
                     .font(.subheadline)
+                    .foregroundStyle(resolvedStyle.foreground)
                     .lineLimit(1...4)
                     .focused($isActionFocused)
                     .disabled(isBusyWithTurn)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(appearance.subtleSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(resolvedStyle.subtleSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .strokeBorder(
                                 isActionTooLong
-                                    ? appearance.sealAccent
-                                    : (isActionFocused ? appearance.accent.opacity(0.85) : appearance.edge.opacity(0.85)),
+                                    ? resolvedStyle.sealAccent
+                                    : (isActionFocused ? resolvedStyle.accent.opacity(0.85) : resolvedStyle.edge.opacity(0.85)),
                                 lineWidth: (isActionTooLong || isActionFocused) ? 1.25 : 0.75
                             )
                             .allowsHitTesting(false)
                     }
                     .shadow(
-                        color: isActionFocused ? appearance.accent.opacity(appearance.isDarkSurface ? 0.22 : 0.14) : .clear,
+                        color: isActionFocused ? resolvedStyle.accent.opacity(resolvedStyle.isDark ? 0.22 : 0.14) : .clear,
                         radius: 8,
                         x: 0,
                         y: 2
@@ -893,7 +1208,7 @@ struct StorySessionTheaterView: View {
                 }
                 .buttonStyle(AppControlButtonStyle(
                     foreground: primaryButtonForeground,
-                    surface: appearance.accent,
+                    surface: resolvedStyle.accent,
                     cornerRadius: 22
                 ))
                 .disabled(!canSubmitRemoteAction)
@@ -904,7 +1219,7 @@ struct StorySessionTheaterView: View {
             if trimmedAction.count >= Self.countHintThreshold || isActionTooLong {
                 Text("\(trimmedAction.count)/\(Self.maxActionLength)")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(isActionTooLong ? appearance.sealAccent : appearance.secondary)
+                    .foregroundStyle(isActionTooLong ? resolvedStyle.sealAccent : resolvedStyle.secondary)
                     .padding(.trailing, 54)
                     .accessibilityIdentifier("story.action.count")
             }
@@ -985,6 +1300,9 @@ struct StorySessionTheaterView: View {
         hasLoadedTurns = false
         loadErrorMessage = nil
         submitBannerMessage = nil
+        styleFeedbackMessage = nil
+        activeRecipe = .standard
+        isImmersiveReading = false
         actionDraft = ""
         isOpeningExpanded = true
     }
@@ -993,18 +1311,98 @@ struct StorySessionTheaterView: View {
         loadGeneration = UUID()
         activePrepareID = nil
         activeGenerateID = nil
+        activeStyleID = nil
         loadTask?.cancel()
         loadTask = nil
         prepareTask?.cancel()
         prepareTask = nil
         generateTask?.cancel()
         generateTask = nil
+        styleTask?.cancel()
+        styleTask = nil
         pendingDraft = nil
+        pendingStyleDraft = nil
         streamingActionText = ""
         streamingNarration = ""
         isLoadingTurns = false
         isPreparingDraft = false
         isGeneratingRemote = false
+        isDirectingStyle = false
+    }
+
+    private func cancelStyleDirection(showBanner: Bool) {
+        activeStyleID = nil
+        styleTask?.cancel()
+        styleTask = nil
+        pendingStyleDraft = nil
+        isDirectingStyle = false
+        if showBanner {
+            submitBannerMessage = "已取消 AI 判型，保持当前视觉风格。"
+        }
+    }
+
+    private func prepareAIDirectStyle() {
+        guard isViewActive, isRouteActive, !isDirectingStyle, !isDeletingSession else { return }
+        guard let config = try? StoryModelVault.load() else {
+            modelConfig = nil
+            isPresentingModelConfig = true
+            submitBannerMessage = "请先配置 OpenAI 兼容模型接口（HTTPS 或已授权的局域网 HTTP），再由 AI 判定视觉风格。"
+            return
+        }
+        modelConfig = config
+        styleFeedbackMessage = nil
+        pendingStyleDraft = StoryStyleDirector.prepare(session: session, configuration: config)
+    }
+
+    private func startAIDirectStyle(draft: StoryStyleDraft) {
+        guard isViewActive, isRouteActive, !isDirectingStyle, !isDeletingSession else { return }
+        let targetSessionID = session.id
+        let reqID = UUID()
+
+        activeStyleID = reqID
+        isDirectingStyle = true
+        styleFeedbackMessage = nil
+        submitBannerMessage = nil
+        styleTask?.cancel()
+
+        styleTask = Task { @MainActor in
+            defer {
+                if activeStyleID == reqID {
+                    isDirectingStyle = false
+                    activeStyleID = nil
+                    styleTask = nil
+                }
+            }
+            do {
+                let recipe = try await StoryStyleDirector.generate(draft)
+                guard !Task.isCancelled,
+                      activeStyleID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                if reduceMotion {
+                    activeRecipe = recipe
+                } else {
+                    withAnimation(.easeInOut(duration: 0.45)) {
+                        activeRecipe = recipe
+                    }
+                }
+                StoryHaptics.success()
+                let resolved = StoryResolvedStyle.resolve(recipe: recipe, base: appearance)
+                submitBannerMessage = "AI 已为本局切换为「\(resolved.shortLabel)」（随时可点击顶部风格胶囊对照或还原默认）。"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      activeStyleID == reqID,
+                      isViewActive,
+                      isRouteActive,
+                      session.id == targetSessionID else { return }
+                let msg = "AI 判型失败，已维持当前风格：\(error.localizedDescription)"
+                styleFeedbackMessage = msg
+                submitBannerMessage = msg
+            }
+        }
     }
 
     private func refreshModelConfig() {
@@ -1028,7 +1426,7 @@ struct StorySessionTheaterView: View {
         guard let config = try? StoryModelVault.load() else {
             modelConfig = nil
             isPresentingModelConfig = true
-            submitBannerMessage = "请先配置 HTTPS OpenAI 兼容模型接口与 API Key。"
+            submitBannerMessage = "请先配置 OpenAI 兼容模型接口（HTTPS 或已授权的局域网 HTTP）。"
             return
         }
         modelConfig = config
