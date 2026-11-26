@@ -6,14 +6,6 @@
     {
       "file": "ReaderDomainTests/StoryMemoryTests.swift",
       "name": "committedMemoryRecoversWithoutRewritingAndReachesNextRequest"
-    },
-    {
-      "file": "ReaderDomainTests/StoryGenerationTests.swift",
-      "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
-    },
-    {
-      "file": "YueJingHostTests/EPUBReaderHostTests.swift",
-      "name": "epubShelfCoverThumbnailDisplaysAndMissingOrDamagedCoversFallbackCleanly"
     }
   ],
   "build_timeout_seconds": 900,

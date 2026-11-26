@@ -5,6 +5,7 @@ import Testing
 struct StoryMemoryTests {
     @Test func committedMemoryRecoversWithoutRewritingAndReachesNextRequest() async throws {
         try checkStoryMemoryProtocol()
+        try measureNarrativeCorpus()
         let f = try EPUBLibraryFixture(); defer { f.remove() }
         let book = try await f.install(f.archive()).book
         let a = try await f.service.startStory(book:book, roleKind:.original, roleName:"我", premise:"")
