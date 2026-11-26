@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var drawerPresented = false
     @State private var informationRoute: LibraryInformationRoute?
     @State private var displayedInformation: LibraryInformationPage = .diagnostics
+    @State private var storyPreselectedBookID: String?
     @Environment(\.colorScheme) private var colorScheme
     @AccessibilityFocusState private var focusedLibraryControl: String?
 
@@ -95,7 +96,8 @@ struct ContentView: View {
                     StoryLaunchView(
                         model: model,
                         appearance: appearance,
-                        isRouteActive: plannedNavigation.activeRoute?.feature == .aiStory
+                        isRouteActive: plannedNavigation.activeRoute?.feature == .aiStory,
+                        preselectedBookID: storyPreselectedBookID
                     )
                 default:
                     LibraryPlannedFeatureView(feature: plannedNavigation.displayedFeature, appearance: appearance)
@@ -191,6 +193,9 @@ struct ContentView: View {
                 guard canChangeManagement else { return }
                 if let service = model.service { readerRoutes.open(book: book, service: service) }
             },
+            onStartStory: { book in
+                openStoryForBook(book)
+            },
             onDismissNotice: { model.notice = nil },
             onCancelImport: { Task { await model.cancelImport() } },
             onRetry: { Task { await model.start() } },
@@ -255,14 +260,25 @@ struct ContentView: View {
 
     private func openPlannedFeature(_ feature: LibraryPlannedFeature) {
         guard canChangeManagement else { return }
+        storyPreselectedBookID = nil
         _ = plannedNavigation.begin(feature, allowed: canOpenPlannedFeatures)
+    }
+
+    private func openStoryForBook(_ book: LibraryBook) {
+        guard selectedSection == .shelf, canChangeManagement, canOpenPlannedFeatures else { return }
+        storyPreselectedBookID = book.id
+        if !plannedNavigation.begin(.aiStory, allowed: canOpenPlannedFeatures) {
+            storyPreselectedBookID = nil
+        }
     }
 
     private var plannedFeaturePresentation: Binding<Bool> {
         let expectedID = plannedNavigation.activeRoute?.id
         return Binding(get: { plannedNavigation.isActive }, set: { isPresented in
             guard !isPresented, let expectedID else { return }
-            _ = plannedNavigation.end(id: expectedID)
+            if plannedNavigation.end(id: expectedID) {
+                storyPreselectedBookID = nil
+            }
         })
     }
 }

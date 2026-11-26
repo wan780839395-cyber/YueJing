@@ -21,6 +21,7 @@ struct LibraryShelfContent: View {
     let canManageBooks: Bool
     let onDeleteBook: (LibraryBook) -> Void
     let onOpenBook: (LibraryBook) -> Void
+    var onStartStory: ((LibraryBook) -> Void)? = nil
     let onDismissNotice: () -> Void
     let onCancelImport: () -> Void
     let onRetry: () -> Void
@@ -334,9 +335,23 @@ struct LibraryShelfContent: View {
             .accessibilityElement(children: .combine)
             .accessibilityHint("打开正文，恢复已保存的阅读位置")
             .contextMenu {
+                if let onStartStory {
+                    Button {
+                        searching = false
+                        onStartStory(book)
+                    } label: {
+                        SwiftUI.Label("从本书开启 AI 故事", systemImage: "sparkles")
+                    }
+                    .accessibilityIdentifier("library.book.startStory.\(book.id)")
+                }
                 Button(role: .destructive) { requestDeletion(book) } label: {
                     SwiftUI.Label("删除书籍", systemImage: "trash")
                 }
+            }
+            .accessibilityAction(named: Text("从本书开启 AI 故事")) {
+                guard canManageBooks, let onStartStory else { return }
+                searching = false
+                onStartStory(book)
             }
             .accessibilityAction(named: Text("删除书籍")) { requestDeletion(book) }
             .disabled(!canManageBooks)

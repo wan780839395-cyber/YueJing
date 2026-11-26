@@ -60,6 +60,15 @@ public actor LibraryStore {
         try queue.read { db in try StoryRows.list(in: db) }
     }
 
+    /// A confirmed branch deletion is idempotent. Its turns and model origins cascade;
+    /// its source book, reader position, sibling branches and shared preset are not owned here.
+    public func deleteStorySession(id: UUID) throws {
+        try queue.write { db in
+            try Task.checkCancellation()
+            try db.execute(sql: "DELETE FROM storySessions WHERE id = ?", arguments: [id.uuidString])
+        }
+    }
+
     func commitStory(_ session: StorySession, for book: LibraryBook) throws {
         try queue.write { db in try StoryRows.insert(session, for: book, in: db) }
     }

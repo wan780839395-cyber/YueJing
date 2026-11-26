@@ -23,8 +23,10 @@ struct StoryLaunchView: View {
     @ObservedObject var model: LibraryViewModel
     let appearance: LibraryAppearance
     var isRouteActive: Bool = true
+    var preselectedBookID: String? = nil
 
     @State private var route: Route = .hub
+    @State private var consumedPreselectedBookID: String?
     @State private var sessions: [StorySession] = []
     @State private var isLoadingSessions = false
     @State private var hasLoadedSessions = false
@@ -41,6 +43,9 @@ struct StoryLaunchView: View {
     @State private var isStartingStory = false
     @State private var startErrorMessage: String?
     @State private var importStatusBanner: String?
+    @State private var pendingDeleteSession: StorySession?
+    @State private var deletingSessionID: UUID?
+    @State private var deleteErrorMessage: String?
 
     @State private var pendingImportTicket: UUID?
     @State private var isViewActive = false
@@ -48,6 +53,9 @@ struct StoryLaunchView: View {
     @State private var loadTask: Task<Void, Never>?
     @State private var activeStartRequestID: UUID?
     @State private var startTask: Task<Void, Never>?
+    @State private var activeDeleteRequestID: UUID?
+    @State private var deleteTask: Task<Void, Never>?
+    @State private var hubAtmospherePulse = 0
 
     @FocusState private var focusedField: FocusField?
     @Environment(\.dynamicTypeSize) private var dynamicType
@@ -93,25 +101,39 @@ struct StoryLaunchView: View {
         case .hub:
             return "AI 故事"
         case .setup:
-            return "新建本地开局"
+            return "新建故事"
         case .session:
-            return "本地开局"
+            return "故事剧场"
         }
     }
 
     var body: some View {
-        Group {
-            switch route {
-            case .hub:
-                hubContent
-            case .setup:
-                setupContent
-            case .session(let activeSession):
-                sessionContent(activeSession)
+        ZStack {
+            appearance.page.ignoresSafeArea()
+
+            if case .session = route {
+                EmptyView()
+            } else {
+                StoryAtmosphereCanvas(appearance: appearance, pulseToken: hubAtmospherePulse)
+                    .ignoresSafeArea()
             }
+
+            Group {
+                switch route {
+                case .hub:
+                    hubContent
+                case .setup:
+                    setupContent
+                case .session(let activeSession):
+                    sessionContent(activeSession)
+                }
+            }
+            .transition(reduceMotion ? .opacity : .asymmetric(
+                insertion: .opacity.combined(with: .scale(scale: 0.985)),
+                removal: .opacity
+            ))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(appearance.page.ignoresSafeArea())
         .foregroundStyle(appearance.foreground)
         .tint(appearance.accent)
         .navigationTitle(navigationTitleText)
@@ -211,10 +233,33 @@ struct StoryLaunchView: View {
                 }
             )
         }
+        .confirmationDialog(
+            "删除这段故事？",
+            isPresented: Binding(
+                get: { pendingDeleteSession != nil },
+                set: { presented in
+                    if !presented { pendingDeleteSession = nil }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeleteSession
+        ) { target in
+            Button("删除故事与全部回合", role: .destructive) {
+                confirmDeleteSession(target)
+            }
+            .accessibilityIdentifier("story.delete.confirm")
+            Button("取消", role: .cancel) {
+                pendingDeleteSession = nil
+            }
+            .accessibilityIdentifier("story.delete.cancel")
+        } message: { target in
+            Text("《\(target.bookTitle)》 · \(Self.roleKindTitle(target.roleKind))「\(target.roleName)」\n创建时间：\(target.createdAt.formatted(date: .numeric, time: .shortened))\n\n将永久删除这段故事及其中所有已保存回合，不会删除书架中的原书或阅读书签。")
+        }
         .accessibilityIdentifier("story.screen")
         .onAppear {
             isViewActive = true
             handleStoryImport(model.lastStoryImport)
+            applyPreselectedBookIfNeeded()
         }
         .task {
             isViewActive = true
@@ -244,6 +289,9 @@ struct StoryLaunchView: View {
         .onChange(of: model.importDiagnostics) { diagnostics in
             clearPendingImportIfTerminated(diagnostics)
         }
+        .onChange(of: preselectedBookID) { _ in
+            applyPreselectedBookIfNeeded()
+        }
     }
 
     // MARK: - Hub View
@@ -260,6 +308,10 @@ struct StoryLaunchView: View {
                 } else {
                     if let loadErrorMessage {
                         loadErrorCard(message: loadErrorMessage)
+                    }
+
+                    if let deleteErrorMessage {
+                        deleteErrorBanner(message: deleteErrorMessage)
                     }
 
                     if sessions.isEmpty && loadErrorMessage == nil {
@@ -281,7 +333,7 @@ struct StoryLaunchView: View {
     private var hubHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("离线演绎 · 可选 BYOK 生成")
+                Text("AI 故事 · BYOK 模型生成")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(appearance.accent)
                     .padding(.horizontal, 9)
@@ -294,7 +346,7 @@ struct StoryLaunchView: View {
                 .foregroundStyle(appearance.foreground)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
-            Text("选一本已导入或新导入的小说，确定原著或原创角色即可保存本地开局并随时恢复。默认支持本地离线演绎；配置自带密钥（BYOK）模型后，也可在每次确认请求后联网生成。")
+            Text("选一本已导入或新导入的小说，设定原著或原创角色并可选绑定叙事预设；配置自带密钥（BYOK）模型后，每次行动经你预览确认即可生成新剧情，记录保存在本地可随时恢复。")
                 .font(.subheadline)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -401,7 +453,7 @@ struct StoryLaunchView: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
-                Text("基于已导入的小说或现场导入 TXT / EPUB，选择原著或原创角色即可生成可恢复的本地开局。")
+                Text("基于已导入的小说或现场导入 TXT / EPUB，选择原著或原创角色即可开启故事并保存在本地，随时可继续阅读与推进。")
                     .font(.subheadline)
                     .foregroundStyle(appearance.secondary)
                     .multilineTextAlignment(.center)
@@ -421,7 +473,7 @@ struct StoryLaunchView: View {
                 surface: appearance.accent,
                 cornerRadius: 24
             ))
-            .accessibilityHint("选择书架小说或导入新书，设定角色并保存本地开局")
+            .accessibilityHint("选择书架小说或导入新书，设定角色并开启故事")
             .accessibilityIdentifier("story.action.new")
         }
         .padding(.horizontal, 20)
@@ -446,7 +498,7 @@ struct StoryLaunchView: View {
                 Image(systemName: "plus.circle.fill")
                     .font(.body.weight(.semibold))
                     .accessibilityHidden(true)
-                Text("新建故事开局")
+                Text("新建故事")
                     .font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
@@ -461,24 +513,16 @@ struct StoryLaunchView: View {
             surface: appearance.accent,
             cornerRadius: 18
         ))
-        .accessibilityHint("选择小说与角色，创建一段新的本地开局")
+        .accessibilityHint("选择小说与角色，开启一段新故事")
         .accessibilityIdentifier("story.action.new")
     }
 
     private var sessionsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(title: "可恢复的本地开局", badge: "\(sessions.count)")
+            sectionHeader(title: "已保存的故事", badge: "\(sessions.count)")
 
             ForEach(Array(sessions.enumerated()), id: \.element.id) { index, item in
-                Button {
-                    openSession(item)
-                } label: {
-                    sessionRowCard(item, isLatest: index == 0)
-                }
-                .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: LibraryAppearance.cardCornerRadius))
-                .accessibilityLabel("恢复本地开局，\(item.bookTitle)，\(Self.roleKindTitle(item.roleKind))，\(item.roleName)")
-                .accessibilityHint("打开已保存的角色信息与书内开篇")
-                .accessibilityIdentifier("story.session.item.\(item.id.uuidString)")
+                sessionItemContainer(item, isLatest: index == 0)
             }
 
             Text("原书从书架删除后，对应的本地故事记录也会一并清除。")
@@ -489,41 +533,245 @@ struct StoryLaunchView: View {
         }
     }
 
-    private func sessionRowCard(_ item: StorySession, isLatest: Bool) -> some View {
+    private func deleteErrorBanner(message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(appearance.sealAccent)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("未能删除故事")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(appearance.foreground)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(appearance.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Button {
+                deleteErrorMessage = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(appearance.secondary)
+                    .frame(minWidth: 28, minHeight: 28)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭删除错误提示")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(appearance.sealAccent.opacity(0.42), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
+        .accessibilityIdentifier("story.delete.error")
+    }
+
+    private func sessionItemContainer(_ item: StorySession, isLatest: Bool) -> some View {
+        let isDeletingThis = deletingSessionID == item.id
+        return ZStack(alignment: .topTrailing) {
+            Button {
+                openSession(item)
+            } label: {
+                sessionRowCard(item, isLatest: isLatest, isDeleting: isDeletingThis)
+            }
+            .buttonStyle(AppControlButtonStyle(foreground: appearance.foreground, cornerRadius: LibraryAppearance.cardCornerRadius))
+            .disabled(deletingSessionID != nil)
+            .accessibilityLabel("继续故事，\(item.bookTitle)，\(Self.roleKindTitle(item.roleKind))，\(item.roleName)")
+            .accessibilityHint("打开已保存的角色信息与书内开篇")
+            .accessibilityIdentifier("story.session.item.\(item.id.uuidString)")
+            .contextMenu {
+                Button(role: .destructive) {
+                    requestDeleteSession(item)
+                } label: {
+                    Label("删除此故事", systemImage: "trash")
+                }
+                .disabled(deletingSessionID != nil)
+            }
+
+            Menu {
+                Button(role: .destructive) {
+                    requestDeleteSession(item)
+                } label: {
+                    Label("删除此故事", systemImage: "trash")
+                }
+            } label: {
+                Group {
+                    if isDeletingThis {
+                        ProgressView()
+                            .tint(appearance.sealAccent)
+                            .scaleEffect(0.8)
+                    } else {
+                        Image(systemName: "ellipsis")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(appearance.secondary)
+                    }
+                }
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+            }
+            .disabled(deletingSessionID != nil)
+            .padding(.top, 10)
+            .padding(.trailing, 10)
+            .accessibilityLabel("更多操作，\(item.bookTitle)，\(item.roleName)")
+            .accessibilityIdentifier("story.session.menu.\(item.id.uuidString)")
+        }
+    }
+
+    private func sessionRowCard(_ item: StorySession, isLatest: Bool, isDeleting: Bool = false) -> some View {
+        Group {
+            if isLatest {
+                heroPortalCard(item, isDeleting: isDeleting)
+            } else {
+                archiveStoryCard(item, isDeleting: isDeleting)
+            }
+        }
+        .opacity(isDeleting ? 0.55 : 1.0)
+        .scaleEffect(isDeleting ? 0.98 : 1.0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isDeleting)
+    }
+
+    private func heroPortalCard(_ item: StorySession, isDeleting: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 8) {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles")
+                        .font(.caption2.weight(.semibold))
+                        .accessibilityHidden(true)
+                    Text("最近入戏")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(appearance.accent)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3.5)
+                .background(appearance.accentSoft, in: Capsule())
+
+                roleBadge(item.roleKind)
+                Spacer(minLength: 6)
+                Text(item.createdAt.formatted(date: .numeric, time: .shortened))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(appearance.secondary)
+                    .padding(.trailing, 30)
+            }
+
+            HStack(alignment: .center, spacing: 14) {
+                StoryLivingSigilView(
+                    roleKind: item.roleKind,
+                    roleName: item.roleName,
+                    appearance: appearance,
+                    size: dynamicType.isAccessibilitySize ? 44 : 56
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("《\(item.bookTitle)》")
+                        .font(.system(.title3, design: .serif).weight(.bold))
+                        .foregroundStyle(appearance.foreground)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("扮演 · \(item.roleName)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(appearance.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !item.premise.isEmpty {
+                        Text(item.premise)
+                            .font(.caption)
+                            .foregroundStyle(appearance.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(appearance.accent.opacity(0.65))
+                    .frame(width: 2)
+                    .accessibilityHidden(true)
+                Text(item.opening)
+                    .font(.system(.footnote, design: .serif))
+                    .lineSpacing(4)
+                    .foregroundStyle(appearance.secondary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }
+
+            HStack {
+                Text(isDeleting ? "正在删除…" : "继续这段书境")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(appearance.accent)
+                Spacer(minLength: 8)
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(appearance.accent)
+                    .accessibilityHidden(true)
+            }
+            .padding(.top, 2)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [
+                    appearance.surface,
+                    appearance.surface.opacity(0.92),
+                    appearance.accentSoft.opacity(appearance.isDarkSurface ? 0.35 : 0.45)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay {
+            StoryShimmerBorder(cornerRadius: 22, appearance: appearance)
+        }
+        .shadow(color: appearance.cardShadow, radius: 12, x: 0, y: 5)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private func archiveStoryCard(_ item: StorySession, isDeleting: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                if isLatest {
-                    Text("最近开局")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(appearance.accent)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(appearance.accentSoft, in: Capsule())
-                }
                 roleBadge(item.roleKind)
                 Spacer(minLength: 8)
                 Text(item.createdAt.formatted(date: .numeric, time: .shortened))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(appearance.secondary)
+                    .padding(.trailing, 30)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.bookTitle)
-                    .font(LibraryAppearance.bookTitleFont)
-                    .foregroundStyle(appearance.foreground)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 12) {
+                StorySoulSigilView(
+                    roleKind: item.roleKind,
+                    roleName: item.roleName,
+                    appearance: appearance,
+                    size: 38
+                )
 
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("扮演：\(item.roleName)")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(appearance.foreground.opacity(0.9))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.bookTitle)
+                        .font(.system(.headline, design: .serif).weight(.semibold))
+                        .foregroundStyle(appearance.foreground)
+                        .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(appearance.secondary.opacity(0.65))
-                        .accessibilityHidden(true)
+
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("扮演：\(item.roleName)")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(appearance.foreground.opacity(0.88))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(appearance.secondary.opacity(0.65))
+                            .accessibilityHidden(true)
+                    }
                 }
             }
 
@@ -536,7 +784,8 @@ struct StoryLaunchView: View {
             }
 
             Text(item.opening)
-                .font(.footnote)
+                .font(.system(.footnote, design: .serif))
+                .lineSpacing(3)
                 .foregroundStyle(appearance.secondary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
@@ -544,9 +793,9 @@ struct StoryLaunchView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
+        .background(appearance.surface.opacity(0.94), in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
         .overlay {
-            cardBorder(isLatest ? appearance.accent.opacity(0.35) : appearance.edge.opacity(0.8))
+            cardBorder(appearance.edge.opacity(0.8))
         }
         .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
         .contentShape(RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
@@ -592,7 +841,7 @@ struct StoryLaunchView: View {
                         Spacer(minLength: 4)
                     }
                 } else {
-                    Text("默认跳过预设。如需绑定 ST Chat Completion JSON 版本供后续确认后的 BYOK 模型生成使用，可从预设工坊导入并选用无问题版本；离线演绎不使用预设。")
+                    Text("默认跳过预设。如需绑定 ST Chat Completion JSON 版本供确认后的 BYOK 模型生成使用，可从预设工坊导入并选用无问题版本。")
                         .font(.footnote)
                         .foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -904,9 +1153,36 @@ struct StoryLaunchView: View {
 
     private var roleSetupSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(title: "2. 设定角色", badge: nil)
+            sectionHeader(title: "2. 角色铸印", badge: nil)
 
             VStack(alignment: .leading, spacing: 16) {
+                // Live reactive sigil preview card
+                HStack(spacing: 14) {
+                    StoryLivingSigilView(
+                        roleKind: roleKind,
+                        roleName: trimmedRoleName,
+                        appearance: appearance,
+                        size: dynamicType.isAccessibilitySize ? 42 : 52
+                    )
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        roleBadge(roleKind)
+                        Text(trimmedRoleName.isEmpty ? "等待角色名…" : trimmedRoleName)
+                            .font(.system(.headline, design: .serif).weight(.bold))
+                            .foregroundStyle(trimmedRoleName.isEmpty ? appearance.secondary : appearance.foreground)
+                            .lineLimit(2)
+                        Text(selectedBook.map { "即将踏入《\($0.title)》" } ?? "选择一本小说后即可生成星印开局")
+                            .font(.caption)
+                            .foregroundStyle(appearance.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(appearance.subtleSurface.opacity(0.65), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .accessibilityHidden(true)
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("角色来源")
                         .font(.subheadline.weight(.medium))
@@ -1102,13 +1378,13 @@ struct StoryLaunchView: View {
                     if isStartingStory {
                         ProgressView()
                             .tint(primaryButtonForeground)
-                        Text("正在生成本地开局…")
+                        Text("正在读取书内开篇…")
                             .font(.subheadline.weight(.semibold))
                     } else {
                         Image(systemName: "book.closed")
                             .font(.subheadline.weight(.semibold))
                             .accessibilityHidden(true)
-                        Text("开始本地开局")
+                        Text("进入故事剧场")
                             .font(.subheadline.weight(.semibold))
                     }
                 }
@@ -1120,7 +1396,7 @@ struct StoryLaunchView: View {
                 cornerRadius: 18
             ))
             .disabled(!canSubmitStory)
-            .accessibilityHint("读取书内真实开篇并保存本地故事记录，不调用 AI 模型")
+            .accessibilityHint("读取书内真实开篇并在本地创建故事存档，进入剧场后再按需发起模型生成")
             .accessibilityIdentifier("story.setup.start")
 
             Text(setupSubmitHint)
@@ -1133,7 +1409,7 @@ struct StoryLaunchView: View {
 
     private var setupSubmitHint: String {
         if model.importing {
-            return "正在导入书籍，请等待导入完成后再开始本地开局。"
+            return "正在导入书籍，请等待导入完成后再进入故事。"
         }
         if selectedBook == nil {
             return "请先选择一本小说，或点击“导入新书”。"
@@ -1144,7 +1420,7 @@ struct StoryLaunchView: View {
         if isRoleNameTooLong || isPremiseTooLong {
             return "请将角色名控制在 \(Self.maxRoleNameLength) 字以内、身份说明控制在 \(Self.maxPremiseLength) 字以内。"
         }
-        return "将读取书内真实开篇并保存本地开局记录，不会调用模型或发起网络请求。"
+        return "将读取书内真实开篇并在本地保存故事存档（此步不联网）；进入剧场后可配置 BYOK 模型并经确认生成新回合。"
     }
 
     // MARK: - Active Session View
@@ -1155,12 +1431,20 @@ struct StoryLaunchView: View {
             model: model,
             appearance: appearance,
             isRouteActive: isRouteActive,
+            isDeletingSession: deletingSessionID == active.id,
+            externalErrorMessage: deleteErrorMessage,
+            onDismissExternalError: {
+                deleteErrorMessage = nil
+            },
             onBackToHub: {
                 returnToHub()
             },
             onNewStory: { bookID in
                 let matchingBook = model.books.contains { $0.id == bookID } ? bookID : nil
                 openSetup(preselectedBookID: matchingBook)
+            },
+            onRequestDelete: {
+                requestDeleteSession(active)
             }
         )
     }
@@ -1210,6 +1494,20 @@ struct StoryLaunchView: View {
 
     // MARK: - Actions & Async Lifecycle
 
+    private func applyPreselectedBookIfNeeded() {
+        guard let targetBookID = preselectedBookID else {
+            consumedPreselectedBookID = nil
+            return
+        }
+        guard isRouteActive,
+              consumedPreselectedBookID != targetBookID,
+              model.books.contains(where: { $0.id == targetBookID }) else {
+            return
+        }
+        consumedPreselectedBookID = targetBookID
+        openSetup(preselectedBookID: targetBookID)
+    }
+
     private func openSetup(preselectedBookID: String?) {
         focusedField = nil
         cancelActiveStart()
@@ -1225,10 +1523,18 @@ struct StoryLaunchView: View {
     }
 
     private func openSession(_ session: StorySession) {
+        StoryHaptics.selection()
         focusedField = nil
         cancelActiveStart()
         pendingImportTicket = nil
-        route = .session(session)
+        hubAtmospherePulse &+= 1
+        if reduceMotion {
+            route = .session(session)
+        } else {
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                route = .session(session)
+            }
+        }
     }
 
     private func returnToHub() {
@@ -1373,6 +1679,77 @@ struct StoryLaunchView: View {
         isStartingStory = false
     }
 
+    private func requestDeleteSession(_ target: StorySession) {
+        guard isRouteActive, isViewActive, deletingSessionID == nil, model.service != nil else { return }
+        deleteErrorMessage = nil
+        pendingDeleteSession = target
+    }
+
+    private func confirmDeleteSession(_ target: StorySession) {
+        guard isRouteActive, isViewActive, deletingSessionID == nil, let store = model.service?.store else {
+            pendingDeleteSession = nil
+            return
+        }
+        pendingDeleteSession = nil
+        deleteErrorMessage = nil
+
+        let requestID = UUID()
+        activeDeleteRequestID = requestID
+        deletingSessionID = target.id
+        deleteTask?.cancel()
+
+        deleteTask = Task { @MainActor in
+            defer {
+                if activeDeleteRequestID == requestID {
+                    deletingSessionID = nil
+                    activeDeleteRequestID = nil
+                    deleteTask = nil
+                }
+            }
+            do {
+                try await store.deleteStorySession(id: target.id)
+                guard !Task.isCancelled,
+                      activeDeleteRequestID == requestID,
+                      isRouteActive,
+                      isViewActive else { return }
+
+                let removeBlock = {
+                    sessions.removeAll { $0.id == target.id }
+                }
+                if reduceMotion {
+                    removeBlock()
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        removeBlock()
+                    }
+                }
+
+                if case .session(let active) = route, active.id == target.id {
+                    route = .hub
+                }
+                StoryHaptics.success()
+                hubAtmospherePulse &+= 1
+                triggerReloadSessions()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      activeDeleteRequestID == requestID,
+                      isRouteActive,
+                      isViewActive else { return }
+                deleteErrorMessage = Self.safeStoryErrorMessage(error)
+            }
+        }
+    }
+
+    private func cancelActiveDelete() {
+        activeDeleteRequestID = nil
+        deleteTask?.cancel()
+        deleteTask = nil
+        deletingSessionID = nil
+        pendingDeleteSession = nil
+    }
+
     private func handleDisappear() {
         // Keep pendingImportTicket while this route stays active and the matching ticket is still in flight or awaiting reappear handoff.
         let keepPendingImport = isRouteActive
@@ -1390,6 +1767,8 @@ struct StoryLaunchView: View {
         loadTask = nil
         isLoadingSessions = false
         cancelActiveStart()
+        cancelActiveDelete()
+        consumedPreselectedBookID = nil
         if clearPendingImport {
             pendingImportTicket = nil
         }

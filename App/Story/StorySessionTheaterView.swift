@@ -3,28 +3,33 @@ import ReaderDomain
 import SwiftUI
 
 /// Native iOS 16.6 SwiftUI Story Theater for an active `StorySession`.
-/// Clearly distinguishes real book opening ("本书原文") from offline turns ("离线演绎").
+/// Presents book-first long-form typography with clear chapter/prose hierarchy.
+/// New turns are exclusively generated via user-confirmed BYOK model requests;
+/// persisted legacy offline turns remain readable with honest source attribution.
 @MainActor
 struct StorySessionTheaterView: View {
     private static let maxActionLength = 400
-    private static let quickPrompts: [(title: String, text: String)] = [
-        ("试探追问", "我稳住气息，直视对方眼睛追问眼下异样的真正来历。"),
-        ("暗中观察", "我暂不打草惊蛇，放慢脚步留意四周细节与退路。"),
-        ("果断破局", "我不再等待局势发酵，率先迈出一步打破眼前的僵局。"),
-        ("表明立场", "我沉声亮明自己的身份与态度，观察在场众人的反应。")
-    ]
+    private static let countHintThreshold = 320
+
+    private struct FormattedProse: Equatable {
+        let chapterHeading: String?
+        let paragraphs: [String]
+    }
 
     let session: StorySession
     @ObservedObject var model: LibraryViewModel
     let appearance: LibraryAppearance
     let isRouteActive: Bool
+    var isDeletingSession: Bool = false
+    var externalErrorMessage: String? = nil
+    var onDismissExternalError: () -> Void = {}
     let onBackToHub: () -> Void
     let onNewStory: (String) -> Void
+    var onRequestDelete: (() -> Void)? = nil
 
     @State private var turns: [StoryTurn] = []
     @State private var hasLoadedTurns = false
     @State private var isLoadingTurns = false
-    @State private var isSubmittingTurn = false
     @State private var loadErrorMessage: String?
     @State private var submitBannerMessage: String?
     @State private var actionDraft: String = ""
@@ -41,16 +46,15 @@ struct StorySessionTheaterView: View {
 
     @State private var isViewActive = false
     @State private var loadGeneration = UUID()
-    @State private var activeSubmitID: UUID?
     @State private var activePrepareID: UUID?
     @State private var activeGenerateID: UUID?
     @State private var loadTask: Task<Void, Never>?
-    @State private var submitTask: Task<Void, Never>?
     @State private var prepareTask: Task<Void, Never>?
     @State private var generateTask: Task<Void, Never>?
 
     @FocusState private var isActionFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicType
 
     private var trimmedAction: String {
         actionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,12 +65,22 @@ struct StorySessionTheaterView: View {
     }
 
     private var isBusyWithTurn: Bool {
-        isSubmittingTurn || isPreparingDraft || isGeneratingRemote
+        isPreparingDraft || isGeneratingRemote || isDeletingSession
     }
 
-    private var canSubmitAction: Bool {
+    private var canDeleteInTheater: Bool {
+        onRequestDelete != nil
+            && !isPreparingDraft
+            && !isGeneratingRemote
+            && pendingDraft == nil
+            && !isDeletingSession
+            && isRouteActive
+    }
+
+    private var canSubmitRemoteAction: Bool {
         isRouteActive
             && model.service != nil
+            && modelConfig != nil
             && hasLoadedTurns
             && loadErrorMessage == nil
             && !isLoadingTurns
@@ -79,6 +93,10 @@ struct StorySessionTheaterView: View {
         appearance.isDarkSurface ? Color.black.opacity(0.9) : Color.white
     }
 
+    private var formattedOpening: FormattedProse {
+        Self.formatProse(session.opening)
+    }
+
     var body: some View {
         ZStack {
             StoryAtmosphereCanvas(appearance: appearance, pulseToken: atmospherePulse)
@@ -87,22 +105,27 @@ struct StorySessionTheaterView: View {
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            sessionHeaderCard
-                            openingProseCard
+                        VStack(alignment: .leading, spacing: 22) {
+                            bookMasthead
+                            openingReadingSection
                             turnsSection
                             footerActionsRow
                             Color.clear
-                                .frame(height: 12)
+                                .frame(height: 16)
                                 .id("story.theater.bottom")
                         }
                         .padding(.horizontal, LibraryAppearance.horizontalInset)
-                        .padding(.top, 12)
+                        .padding(.top, 10)
                         .padding(.bottom, 16)
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: turns.count) { _ in
                         scrollToBottom(proxy: proxy)
+                    }
+                    .onChange(of: isGeneratingRemote) { generating in
+                        if generating {
+                            scrollToBottom(proxy: proxy)
+                        }
                     }
                 }
 
@@ -122,6 +145,9 @@ struct StorySessionTheaterView: View {
         .sheet(isPresented: $isPresentingModelConfig) {
             StoryModelConfigSheet(appearance: appearance) { updated in
                 modelConfig = updated
+                if updated != nil {
+                    submitBannerMessage = nil
+                }
             }
         }
         .sheet(item: $pendingDraft) { draft in
@@ -139,6 +165,37 @@ struct StorySessionTheaterView: View {
             )
         }
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if let onRequestDelete {
+                    Menu {
+                        Button(role: .destructive) {
+                            isActionFocused = false
+                            onRequestDelete()
+                        } label: {
+                            Label("删除本局故事", systemImage: "trash")
+                        }
+                        .disabled(!canDeleteInTheater)
+                    } label: {
+                        Group {
+                            if isDeletingSession {
+                                ProgressView()
+                                    .tint(appearance.sealAccent)
+                                    .scaleEffect(0.85)
+                            } else {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(canDeleteInTheater ? appearance.accent : appearance.secondary.opacity(0.45))
+                            }
+                        }
+                        .frame(minWidth: 44, minHeight: LibraryAppearance.minimumControlHeight)
+                        .contentShape(Rectangle())
+                    }
+                    .disabled(!canDeleteInTheater)
+                    .accessibilityLabel("更多故事操作")
+                    .accessibilityHint(canDeleteInTheater ? "包含删除本局故事选项" : "生成或确认预览进行中，暂不可删除")
+                    .accessibilityIdentifier("story.session.more")
+                }
+            }
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
                 Button("完成") {
@@ -160,6 +217,7 @@ struct StorySessionTheaterView: View {
         }
         .onChange(of: session.id) { _ in
             resetForSessionChange()
+            refreshModelConfig()
             triggerLoadTurns()
         }
         .onChange(of: isRouteActive) { active in
@@ -167,222 +225,245 @@ struct StorySessionTheaterView: View {
                 isActionFocused = false
                 cancelAllAsyncWork()
             } else if isViewActive && !hasLoadedTurns && !isLoadingTurns {
+                refreshModelConfig()
                 triggerLoadTurns()
             }
         }
     }
 
-    // MARK: - Header & Opening
+    // MARK: - Editorial Masthead
 
-    private var sessionHeaderCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                StorySoulSigilView(
+    private var bookMasthead: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                StoryLivingSigilView(
                     roleKind: session.roleKind,
                     roleName: session.roleName,
                     appearance: appearance,
-                    size: 48
+                    size: dynamicType.isAccessibilitySize ? 38 : 48
                 )
 
                 VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 6) {
-                        Text(modelConfig == nil ? "离线演绎 · 未配模型" : "支持离线与 BYOK 生成")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(appearance.accent)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(appearance.accentSoft, in: Capsule())
-
-                        roleBadge(session.roleKind)
-                        Spacer(minLength: 0)
-                    }
-
                     Text("《\(session.bookTitle)》")
-                        .font(AppVisualStyle.heroBookTitleFont)
+                        .font(.system(.title3, design: .serif).weight(.bold))
                         .foregroundStyle(appearance.foreground)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
+
+                    HStack(spacing: 6) {
+                        roleBadge(session.roleKind)
+                        Text(session.roleName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(appearance.foreground)
+                            .lineLimit(1)
+                        if !turns.isEmpty {
+                            Text("· \(turns.count) 幕")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(appearance.secondary)
+                        }
+                    }
                 }
+                Spacer(minLength: 0)
             }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("当前角色")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(appearance.secondary)
-                    Text(session.roleName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(appearance.foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    Text("已演 \(turns.count) 幕")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(appearance.accent)
-                }
-
-                if !session.premise.isEmpty {
-                    Text(session.premise)
-                        .font(.subheadline)
-                        .foregroundStyle(appearance.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Text("记录时间 · \(session.createdAt.formatted(date: .numeric, time: .shortened))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(appearance.secondary)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.subtleSurface.opacity(0.68), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("story.session.role")
 
-            if let lockedPresetID = session.presetID {
-                Button {
-                    isActionFocused = false
-                    isPresentingLockedPreset = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "lock.doc")
-                            .font(.caption2.weight(.semibold))
-                            .accessibilityHidden(true)
-                        Text("本局锁定预设 · \(StoryPresetWorkshopView.shortHash(lockedPresetID))")
-                            .font(.caption.weight(.semibold).monospaced())
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text("查看")
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .foregroundStyle(appearance.accent)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, minHeight: LibraryAppearance.minimumControlHeight, alignment: .leading)
-                    .background(appearance.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            if !session.premise.isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    RoundedRectangle(cornerRadius: 1, style: .continuous)
+                        .fill(appearance.accent.opacity(0.65))
+                        .frame(width: 2)
+                        .accessibilityHidden(true)
+                    Text(session.premise)
+                        .font(.footnote)
+                        .lineSpacing(4)
+                        .foregroundStyle(appearance.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("查看本局锁定的叙事预设版本")
-                .accessibilityHint("只读查看，主动联网模型生成时将按本局锁定版本组装")
-                .accessibilityIdentifier("story.session.lockedPreset")
             }
 
-            Button {
-                isActionFocused = false
-                isPresentingModelConfig = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: modelConfig == nil ? "key" : "network")
-                        .font(.caption2.weight(.semibold))
-                        .accessibilityHidden(true)
-                    Text(modelConfig.map { "BYOK 模型 · \($0.model)" } ?? "配置 BYOK 模型（可选联网生成）")
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(modelConfig == nil ? "配置" : "管理")
-                        .font(.caption2.weight(.semibold))
+            // Compact utility pills: locked preset (if any) & model status
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    modelStatusPill
+                    if let lockedPresetID = session.presetID {
+                        lockedPresetPill(lockedPresetID)
+                    }
+                    Spacer(minLength: 0)
                 }
-                .foregroundStyle(appearance.foreground)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: LibraryAppearance.minimumControlHeight, alignment: .leading)
-                .background(appearance.subtleSurface.opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                VStack(alignment: .leading, spacing: 8) {
+                    modelStatusPill
+                    if let lockedPresetID = session.presetID {
+                        lockedPresetPill(lockedPresetID)
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(isBusyWithTurn)
-            .accessibilityLabel(modelConfig == nil ? "配置自带密钥模型接口" : "管理已配置的模型接口")
-            .accessibilityIdentifier("story.session.modelConfig")
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
-        .overlay {
-            cardBorder(appearance.edge.opacity(0.8))
-        }
-        .shadow(color: appearance.cardShadow, radius: 8, x: 0, y: 3)
+        .padding(.vertical, 6)
     }
 
-    private var openingProseCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private var modelStatusPill: some View {
+        Button {
+            isActionFocused = false
+            isPresentingModelConfig = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: modelConfig == nil ? "key" : "sparkles")
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+                Text(modelConfig.map { $0.model } ?? "未配置模型")
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(modelConfig == nil ? appearance.sealAccent : appearance.accent)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minHeight: 34)
+            .background(
+                (modelConfig == nil ? appearance.sealSoft : appearance.accentSoft),
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isBusyWithTurn)
+        .accessibilityLabel(modelConfig == nil ? "配置自带密钥模型接口" : "管理已配置的模型接口")
+        .accessibilityIdentifier("story.session.modelConfig")
+    }
+
+    private func lockedPresetPill(_ presetID: String) -> some View {
+        Button {
+            isActionFocused = false
+            isPresentingLockedPreset = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "lock.doc")
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+                Text("预设 · \(StoryPresetWorkshopView.shortHash(presetID).prefix(8))")
+                    .font(.caption.weight(.medium).monospaced())
+                    .lineLimit(1)
+            }
+            .foregroundStyle(appearance.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .frame(minHeight: 34)
+            .background(appearance.subtleSurface, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("查看本局锁定的叙事预设版本")
+        .accessibilityHint("只读查看，发送模型请求时将按本局锁定版本组装")
+        .accessibilityIdentifier("story.session.lockedPreset")
+    }
+
+    // MARK: - Book-First Opening Reading Section
+
+    private var openingReadingSection: some View {
+        let prose = formattedOpening
+        return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 8) {
-                HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(appearance.accent)
-                        .frame(width: 3, height: 15)
-                        .accessibilityHidden(true)
-                    Text("本书原文 · 真实开篇")
-                        .font(LibraryAppearance.sectionTitleFont)
-                        .foregroundStyle(appearance.foreground)
-                        .accessibilityAddTraits(.isHeader)
-                }
+                Text("本书原文")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(appearance.accent)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3.5)
+                    .background(appearance.accentSoft, in: Capsule())
+
+                Text(session.createdAt.formatted(date: .numeric, time: .shortened))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(appearance.secondary)
 
                 Spacer(minLength: 8)
 
-                Button {
-                    if reduceMotion {
-                        isOpeningExpanded.toggle()
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.22)) {
+                if !turns.isEmpty || !isOpeningExpanded {
+                    Button {
+                        if reduceMotion {
                             isOpeningExpanded.toggle()
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.22)) {
+                                isOpeningExpanded.toggle()
+                            }
                         }
+                    } label: {
+                        Text(isOpeningExpanded ? "收起原文" : "展开原文")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(appearance.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
                     }
-                } label: {
-                    Text(isOpeningExpanded ? "收起原文" : "展开原文")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(appearance.accent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(appearance.accentSoft, in: Capsule())
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("story.session.toggleOpening")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("story.session.toggleOpening")
             }
 
             if isOpeningExpanded {
-                Text(session.opening)
-                    .font(.system(.body, design: .serif))
-                    .lineSpacing(8)
-                    .foregroundStyle(appearance.foreground)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("story.session.opening")
+                VStack(alignment: .leading, spacing: 14) {
+                    if let heading = prose.chapterHeading {
+                        VStack(alignment: .center, spacing: 8) {
+                            Text(heading)
+                                .font(.system(.headline, design: .serif).weight(.bold))
+                                .foregroundStyle(appearance.foreground)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
+
+                            HStack(spacing: 8) {
+                                Rectangle()
+                                    .fill(appearance.accent.opacity(0.35))
+                                    .frame(width: 28, height: 0.75)
+                                Circle()
+                                    .fill(appearance.accent.opacity(0.75))
+                                    .frame(width: 4, height: 4)
+                                Rectangle()
+                                    .fill(appearance.accent.opacity(0.35))
+                                    .frame(width: 28, height: 0.75)
+                            }
+                            .accessibilityHidden(true)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 13) {
+                        ForEach(Array(prose.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                            Text(paragraph)
+                                .font(.system(.body, design: .serif))
+                                .lineSpacing(9)
+                                .foregroundStyle(appearance.foreground)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("story.session.opening")
             } else {
-                Text(session.opening)
+                Text(prose.chapterHeading ?? prose.paragraphs.first ?? session.opening)
                     .font(.system(.subheadline, design: .serif))
                     .lineSpacing(5)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .foregroundStyle(appearance.secondary)
                     .accessibilityIdentifier("story.session.opening")
             }
-
-            HStack(spacing: 6) {
-                Image(systemName: "book.closed")
-                    .font(.caption2)
-                    .foregroundStyle(appearance.secondary)
-                    .accessibilityHidden(true)
-                Text("以上为书架中本书的真实原文节选；下方回合会明确标注为“离线演绎”或具体“模型生成”来源。")
-                    .font(.caption)
-                    .foregroundStyle(appearance.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, 2)
         }
-        .padding(18)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
+        .background(appearance.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            cardBorder(appearance.edge.opacity(0.8))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(appearance.edge.opacity(0.65), lineWidth: 0.65)
+                .allowsHitTesting(false)
         }
-        .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
     }
 
-    // MARK: - Offline Turns Feed
+    // MARK: - Story Turns Feed
 
     private var turnsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 18) {
             if isLoadingTurns && turns.isEmpty {
                 HStack(spacing: 10) {
                     ProgressView()
                         .tint(appearance.accent)
-                    Text("正在恢复本地演绎存档…")
+                    Text("正在恢复本局已保存的剧情…")
                         .font(.subheadline)
                         .foregroundStyle(appearance.secondary)
                     Spacer(minLength: 0)
@@ -390,13 +471,12 @@ struct StorySessionTheaterView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(appearance.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay { cardBorder(appearance.edge.opacity(0.7)) }
                 .accessibilityIdentifier("story.turns.loading")
             }
 
             if let loadErrorMessage {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("未能读取已保存的演绎回合")
+                    Text("未能读取已保存的剧情回合")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(appearance.foreground)
                     Text(loadErrorMessage)
@@ -422,12 +502,16 @@ struct StorySessionTheaterView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(appearance.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay { cardBorder(appearance.sealAccent.opacity(0.45)) }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(appearance.sealAccent.opacity(0.45), lineWidth: 0.75)
+                        .allowsHitTesting(false)
+                }
                 .accessibilityIdentifier("story.turns.error")
             }
 
             if !turns.isEmpty {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 20) {
                     ForEach(turns) { turn in
                         turnRow(turn)
                             .id(turn.id)
@@ -447,119 +531,161 @@ struct StorySessionTheaterView: View {
     }
 
     private var streamingDraftCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             if !streamingActionText.isEmpty {
-                HStack {
-                    Spacer(minLength: 28)
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text("\(session.roleName) · 行动（生成中）")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(appearance.accent)
-                        Text(streamingActionText)
-                            .font(.subheadline)
-                            .foregroundStyle(appearance.foreground)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(appearance.accentSoft.opacity(0.75), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
+                playerActionBlock(text: streamingActionText, subtitle: "\(session.roleName) · 生成中")
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     ProgressView()
                         .tint(appearance.accent)
                         .scaleEffect(0.85)
-                    Text("模型流式生成中（临时预览 · 未落盘）")
-                        .font(.caption2.weight(.semibold))
+                    Text("模型生成中（未落盘）")
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(appearance.accent)
                     Spacer(minLength: 4)
-                    Button("取消生成") {
+                    Button("取消") {
                         cancelRemoteGeneration(showBanner: true)
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(appearance.sealAccent)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 12)
                     .padding(.vertical, 5)
                     .background(appearance.sealSoft, in: Capsule())
+                    .accessibilityLabel("取消本次模型生成")
                     .accessibilityIdentifier("story.streaming.cancel")
                 }
 
-                Text(streamingNarration.isEmpty ? "正在等待远端模型返回首个片段…" : streamingNarration)
-                    .font(.system(.body, design: .serif))
-                    .lineSpacing(8)
-                    .foregroundStyle(streamingNarration.isEmpty ? appearance.secondary : appearance.foreground)
-                    .fixedSize(horizontal: false, vertical: true)
+                if streamingNarration.isEmpty {
+                    Text("正在等待远端模型返回首个片段…")
+                        .font(.system(.subheadline, design: .serif))
+                        .foregroundStyle(appearance.secondary)
+                        .accessibilityIdentifier("story.streaming.text")
+                } else {
+                    let streamed = Self.formatProse(streamingNarration)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let heading = streamed.chapterHeading {
+                            Text(heading)
+                                .font(.system(.headline, design: .serif).weight(.semibold))
+                                .foregroundStyle(appearance.foreground)
+                        }
+                        ForEach(Array(streamed.paragraphs.enumerated()), id: \.offset) { _, p in
+                            Text(p)
+                                .font(.system(.body, design: .serif))
+                                .lineSpacing(9)
+                                .foregroundStyle(appearance.foreground)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     .accessibilityIdentifier("story.streaming.text")
+                }
             }
-            .padding(18)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
-            .overlay { cardBorder(appearance.accent.opacity(0.55)) }
+            .background(appearance.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(appearance.accent.opacity(0.5), lineWidth: 0.9)
+                    .allowsHitTesting(false)
+            }
         }
         .accessibilityIdentifier("story.streaming.card")
     }
 
     private func turnRow(_ turn: StoryTurn) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Player Action Bubble (right-aligned)
-            HStack {
-                Spacer(minLength: 28)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("\(session.roleName) · 行动")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(appearance.accent)
-                    Text(turn.action)
-                        .font(.subheadline)
-                        .lineSpacing(4)
-                        .foregroundStyle(appearance.foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(appearance.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(appearance.accent.opacity(0.32), lineWidth: 0.8)
-                        .allowsHitTesting(false)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("story.turn.action.\(turn.sequence)")
-            }
+        let remoteModel = turn.modelName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isRemoteModel = (remoteModel?.isEmpty == false)
+        let formatted = Self.formatProse(turn.narration)
 
-            // Persisted Narration Card: distinguish remote model vs offline turn via turn.modelName
-            let remoteModel = turn.modelName?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isRemoteModel = (remoteModel?.isEmpty == false)
-            VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 14) {
+            // Ornamental act divider
+            HStack(spacing: 10) {
+                Rectangle()
+                    .fill(appearance.edge.opacity(0.55))
+                    .frame(height: 0.6)
+                Text("✦ 第 \(turn.sequence) 幕 ✦")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(isRemoteModel ? appearance.accent : appearance.secondary)
+                Rectangle()
+                    .fill(appearance.edge.opacity(0.55))
+                    .frame(height: 0.6)
+            }
+            .padding(.vertical, 2)
+            .accessibilityHidden(true)
+
+            playerActionBlock(text: turn.action, subtitle: session.roleName)
+                .accessibilityIdentifier("story.turn.action.\(turn.sequence)")
+
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     Text(isRemoteModel
-                         ? "模型生成 · \(remoteModel!) · 第 \(turn.sequence) 幕"
-                         : "离线演绎 · 第 \(turn.sequence) 幕")
+                         ? "AI 生成 · \(remoteModel!) · 第 \(turn.sequence) 幕"
+                         : "历史离线记录 · 第 \(turn.sequence) 幕")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(isRemoteModel ? appearance.accent : appearance.sealAccent)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(isRemoteModel ? appearance.accentSoft : appearance.sealSoft, in: Capsule())
+                        .foregroundStyle(isRemoteModel ? appearance.accent : appearance.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            isRemoteModel ? appearance.accentSoft : appearance.subtleSurface,
+                            in: Capsule()
+                        )
                     Spacer(minLength: 0)
                 }
 
-                Text(turn.narration)
-                    .font(.system(.body, design: .serif))
-                    .lineSpacing(8)
+                if let heading = formatted.chapterHeading {
+                    Text(heading)
+                        .font(.system(.headline, design: .serif).weight(.semibold))
+                        .foregroundStyle(appearance.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 13) {
+                    ForEach(Array(formatted.paragraphs.enumerated()), id: \.offset) { _, p in
+                        Text(p)
+                            .font(.system(.body, design: .serif))
+                            .lineSpacing(9)
+                            .foregroundStyle(appearance.foreground)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(appearance.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(
+                        isRemoteModel ? appearance.accent.opacity(0.26) : appearance.edge.opacity(0.65),
+                        lineWidth: 0.7
+                    )
+                    .allowsHitTesting(false)
+            }
+            .accessibilityIdentifier("story.turn.narration.\(turn.sequence)")
+        }
+    }
+
+    private func playerActionBlock(text: String, subtitle: String) -> some View {
+        HStack {
+            Spacer(minLength: 32)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(subtitle)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(appearance.accent)
+                Text(text)
+                    .font(.subheadline)
+                    .lineSpacing(4)
                     .foregroundStyle(appearance.foreground)
                     .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+                    .multilineTextAlignment(.leading)
             }
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(appearance.surface, in: RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous))
-            .overlay {
-                cardBorder(appearance.sealAccent.opacity(0.28))
-            }
-            .shadow(color: appearance.cardShadow, radius: 6, x: 0, y: 2)
-            .accessibilityIdentifier("story.turn.narration.\(turn.sequence)")
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(appearance.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -574,7 +700,7 @@ struct StorySessionTheaterView: View {
                 newAnotherStoryButton
             }
         }
-        .padding(.top, 6)
+        .padding(.top, 4)
     }
 
     private var backToHubButton: some View {
@@ -583,13 +709,13 @@ struct StorySessionTheaterView: View {
             onBackToHub()
         } label: {
             Text("返回故事列表")
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .font(.subheadline.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: 42)
         }
         .buttonStyle(AppControlButtonStyle(
-            foreground: appearance.accent,
-            surface: appearance.accentSoft,
-            border: appearance.accent.opacity(0.28),
+            foreground: appearance.secondary,
+            surface: appearance.subtleSurface.opacity(0.75),
+            border: appearance.edge.opacity(0.65),
             cornerRadius: 14
         ))
         .accessibilityIdentifier("story.session.backToHub")
@@ -600,23 +726,51 @@ struct StorySessionTheaterView: View {
             isActionFocused = false
             onNewStory(session.bookID)
         } label: {
-            Text("新建另一段开局")
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity, minHeight: 44)
+            Text("新建另一段故事")
+                .font(.subheadline.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: 42)
         }
         .buttonStyle(AppControlButtonStyle(
-            foreground: appearance.foreground,
-            surface: appearance.subtleSurface,
-            border: appearance.edge.opacity(0.8),
+            foreground: appearance.accent,
+            surface: appearance.accentSoft.opacity(0.75),
+            border: appearance.accent.opacity(0.24),
             cornerRadius: 14
         ))
         .accessibilityIdentifier("story.session.new")
     }
 
-    // MARK: - Bottom Action Composer
+    // MARK: - Clean Single-Track Action Composer
 
     private var actionComposerBar: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let externalErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(appearance.sealAccent)
+                        .accessibilityHidden(true)
+                    Text("未能删除本局故事：\(externalErrorMessage)")
+                        .font(.caption)
+                        .foregroundStyle(appearance.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button {
+                        onDismissExternalError()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(appearance.secondary)
+                            .frame(minWidth: 28, minHeight: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭删除错误提示")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(appearance.sealSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityIdentifier("story.session.deleteError")
+            }
+
             if let submitBannerMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill")
@@ -645,144 +799,185 @@ struct StorySessionTheaterView: View {
                 .accessibilityIdentifier("story.action.banner")
             }
 
-            // Quick intent starter chips
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Array(Self.quickPrompts.enumerated()), id: \.offset) { idx, prompt in
-                        Button {
-                            actionDraft = prompt.text
-                            submitBannerMessage = nil
-                        } label: {
-                            Text(prompt.title)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(appearance.accent)
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 6)
-                                .background(appearance.accentSoft, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isBusyWithTurn || isLoadingTurns)
-                        .accessibilityIdentifier("story.action.quickChip.\(idx)")
-                    }
-                }
-            }
-
-            HStack(alignment: .bottom, spacing: 10) {
-                VStack(alignment: .trailing, spacing: 4) {
-                    TextField("输入你的行动、台词或抉择（1–400 字）…", text: $actionDraft, axis: .vertical)
-                        .font(.subheadline)
-                        .lineLimit(1...4)
-                        .focused($isActionFocused)
-                        .disabled(isBusyWithTurn)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(appearance.subtleSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(
-                                    isActionTooLong ? appearance.sealAccent : appearance.edge.opacity(0.9),
-                                    lineWidth: isActionTooLong ? 1.2 : 0.8
-                                )
-                                .allowsHitTesting(false)
-                        }
-                        .accessibilityIdentifier("story.action.input")
-
-                    Text("\(trimmedAction.count)/\(Self.maxActionLength)")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(isActionTooLong ? appearance.sealAccent : appearance.secondary)
-                        .accessibilityIdentifier("story.action.count")
-                }
-
-                VStack(spacing: 6) {
-                    Button {
-                        submitAction()
-                    } label: {
-                        Group {
-                            if isSubmittingTurn {
-                                ProgressView()
-                                    .tint(appearance.accent)
-                            } else {
-                                Text("离线演绎")
-                                    .font(.caption.weight(.semibold))
-                            }
-                        }
-                        .frame(minWidth: 74, minHeight: 36)
-                    }
-                    .buttonStyle(AppControlButtonStyle(
-                        foreground: appearance.accent,
-                        surface: appearance.accentSoft,
-                        border: appearance.accent.opacity(0.32),
-                        cornerRadius: 12
-                    ))
-                    .disabled(!canSubmitAction)
-                    .accessibilityLabel("提交行动并生成离线演绎")
-                    .accessibilityIdentifier("story.action.submit")
-
-                    Button {
-                        triggerPrepareRemoteGeneration()
-                    } label: {
-                        Group {
-                            if isPreparingDraft || isGeneratingRemote {
-                                ProgressView()
-                                    .tint(primaryButtonForeground)
-                            } else {
-                                Text("AI 生成")
-                                    .font(.caption.weight(.semibold))
-                            }
-                        }
-                        .frame(minWidth: 74, minHeight: 36)
-                    }
-                    .buttonStyle(AppControlButtonStyle(
-                        foreground: primaryButtonForeground,
-                        surface: appearance.accent,
-                        cornerRadius: 12
-                    ))
-                    .disabled(!canSubmitAction)
-                    .accessibilityLabel("准备并确认向 BYOK 模型发送生成请求")
-                    .accessibilityIdentifier("story.action.generateRemote")
-                }
+            if modelConfig == nil {
+                unconfiguredModelGuideBar
+            } else {
+                configuredInputRow
             }
         }
         .padding(.horizontal, LibraryAppearance.horizontalInset)
         .padding(.top, 10)
         .padding(.bottom, 12)
-        .background(appearance.surface.opacity(0.96))
+        .background(appearance.surface.opacity(0.97))
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(appearance.edge.opacity(0.75))
-                .frame(height: 0.6)
+                .fill(appearance.edge.opacity(0.65))
+                .frame(height: 0.5)
         }
     }
 
-    // MARK: - Helpers
+    private var unconfiguredModelGuideBar: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("需要配置 BYOK 模型接口")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(appearance.foreground)
+                Text("配置后可输入行动，并在每次发送前预览确认")
+                    .font(.caption)
+                    .foregroundStyle(appearance.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Button {
+                isActionFocused = false
+                isPresentingModelConfig = true
+            } label: {
+                Text("去配置")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: LibraryAppearance.minimumControlHeight)
+            }
+            .buttonStyle(AppControlButtonStyle(
+                foreground: primaryButtonForeground,
+                surface: appearance.accent,
+                cornerRadius: 14
+            ))
+            .accessibilityLabel("配置自带密钥模型接口以继续生成故事")
+            .accessibilityIdentifier("story.action.configureModel")
+        }
+    }
+
+    private var configuredInputRow: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("写下你的行动或台词…", text: $actionDraft, axis: .vertical)
+                    .font(.subheadline)
+                    .lineLimit(1...4)
+                    .focused($isActionFocused)
+                    .disabled(isBusyWithTurn)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(appearance.subtleSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(
+                                isActionTooLong
+                                    ? appearance.sealAccent
+                                    : (isActionFocused ? appearance.accent.opacity(0.85) : appearance.edge.opacity(0.85)),
+                                lineWidth: (isActionTooLong || isActionFocused) ? 1.25 : 0.75
+                            )
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(
+                        color: isActionFocused ? appearance.accent.opacity(appearance.isDarkSurface ? 0.22 : 0.14) : .clear,
+                        radius: 8,
+                        x: 0,
+                        y: 2
+                    )
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isActionFocused)
+                    .accessibilityIdentifier("story.action.input")
+
+                Button {
+                    triggerPrepareRemoteGeneration()
+                } label: {
+                    Group {
+                        if isPreparingDraft || isGeneratingRemote {
+                            ProgressView()
+                                .tint(primaryButtonForeground)
+                        } else {
+                            Image(systemName: "arrow.up")
+                                .font(.subheadline.weight(.bold))
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                }
+                .buttonStyle(AppControlButtonStyle(
+                    foreground: primaryButtonForeground,
+                    surface: appearance.accent,
+                    cornerRadius: 22
+                ))
+                .disabled(!canSubmitRemoteAction)
+                .accessibilityLabel("预览请求并确认向模型发送")
+                .accessibilityIdentifier("story.action.generateRemote")
+            }
+
+            if trimmedAction.count >= Self.countHintThreshold || isActionTooLong {
+                Text("\(trimmedAction.count)/\(Self.maxActionLength)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(isActionTooLong ? appearance.sealAccent : appearance.secondary)
+                    .padding(.trailing, 54)
+                    .accessibilityIdentifier("story.action.count")
+            }
+        }
+    }
+
+    // MARK: - Formatting & Helpers
+
+    private static func formatProse(_ raw: String) -> FormattedProse {
+        let normalized = raw
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        let lines = normalized
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else {
+            return FormattedProse(chapterHeading: nil, paragraphs: [raw])
+        }
+
+        if lines.count >= 2, looksLikeChapterHeading(lines[0]) {
+            return FormattedProse(
+                chapterHeading: lines[0],
+                paragraphs: Array(lines.dropFirst())
+            )
+        }
+        return FormattedProse(chapterHeading: nil, paragraphs: lines)
+    }
+
+    private static func looksLikeChapterHeading(_ line: String) -> Bool {
+        let count = line.count
+        guard count >= 2, count <= 36 else { return false }
+        // Exclude dialogue or full prose sentences ending in terminal punctuation
+        if line.hasSuffix("。") || line.hasSuffix("！") || line.hasSuffix("？")
+            || line.hasSuffix("”") || line.hasSuffix("」") || line.hasSuffix("\"") {
+            return false
+        }
+        if line.hasPrefix("第") && (line.contains("章") || line.contains("回") || line.contains("节") || line.contains("卷")) {
+            return true
+        }
+        if line.hasPrefix("序章") || line.hasPrefix("楔子") || line.hasPrefix("尾声") || line.hasPrefix("引子") {
+            return true
+        }
+        let lower = line.lowercased()
+        if lower.hasPrefix("chapter ") || lower.hasPrefix("prologue") {
+            return true
+        }
+        return count <= 18 && !line.contains("，") && !line.contains("。")
+    }
 
     private func roleBadge(_ kind: StoryRoleKind) -> some View {
         let isCanon = kind == .canon
-        return Text(isCanon ? "原著角色" : "原创角色")
+        return Text(isCanon ? "原著" : "原创")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(isCanon ? appearance.accent : appearance.sealAccent)
             .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.vertical, 2.5)
             .background(isCanon ? appearance.accentSoft : appearance.sealSoft, in: Capsule())
-    }
-
-    private func cardBorder(_ color: Color) -> some View {
-        RoundedRectangle(cornerRadius: LibraryAppearance.cardCornerRadius, style: .continuous)
-            .strokeBorder(color, lineWidth: 0.75)
-            .allowsHitTesting(false)
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
         if reduceMotion {
             proxy.scrollTo("story.theater.bottom", anchor: .bottom)
         } else {
-            withAnimation(.easeOut(duration: 0.3)) {
+            withAnimation(.easeOut(duration: 0.28)) {
                 proxy.scrollTo("story.theater.bottom", anchor: .bottom)
             }
         }
     }
 
-    // MARK: - Async Store Integration (Stale-Writeback & Conflict Guarded)
+    // MARK: - Async Store & BYOK Generation Lifecycle
 
     private func resetForSessionChange() {
         cancelAllAsyncWork()
@@ -796,13 +991,10 @@ struct StorySessionTheaterView: View {
 
     private func cancelAllAsyncWork() {
         loadGeneration = UUID()
-        activeSubmitID = nil
         activePrepareID = nil
         activeGenerateID = nil
         loadTask?.cancel()
         loadTask = nil
-        submitTask?.cancel()
-        submitTask = nil
         prepareTask?.cancel()
         prepareTask = nil
         generateTask?.cancel()
@@ -811,7 +1003,6 @@ struct StorySessionTheaterView: View {
         streamingActionText = ""
         streamingNarration = ""
         isLoadingTurns = false
-        isSubmittingTurn = false
         isPreparingDraft = false
         isGeneratingRemote = false
     }
@@ -833,11 +1024,11 @@ struct StorySessionTheaterView: View {
     }
 
     private func triggerPrepareRemoteGeneration() {
-        guard canSubmitAction, let service = model.service else { return }
+        guard canSubmitRemoteAction, let service = model.service else { return }
         guard let config = try? StoryModelVault.load() else {
             modelConfig = nil
             isPresentingModelConfig = true
-            submitBannerMessage = "请先配置 HTTPS OpenAI 兼容模型接口与 API Key，再发起联网生成。"
+            submitBannerMessage = "请先配置 HTTPS OpenAI 兼容模型接口与 API Key。"
             return
         }
         modelConfig = config
@@ -913,6 +1104,8 @@ struct StorySessionTheaterView: View {
         streamingActionText = trimmedAction
         streamingNarration = ""
         submitBannerMessage = nil
+        atmospherePulse &+= 1
+        StoryHaptics.impact(.medium)
         generateTask?.cancel()
 
         generateTask = Task { @MainActor in
@@ -954,6 +1147,7 @@ struct StorySessionTheaterView: View {
                 }
                 actionDraft = ""
                 atmospherePulse &+= 1
+                StoryHaptics.success()
             } catch is CancellationError {
                 return
             } catch {
@@ -1015,81 +1209,6 @@ struct StorySessionTheaterView: View {
                       isRouteActive,
                       session.id == targetSessionID else { return }
                 loadErrorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func submitAction() {
-        guard canSubmitAction, let store = model.service?.store else { return }
-        let actionText = trimmedAction
-        let expectedCount = turns.count
-        let targetSessionID = session.id
-        let requestID = UUID()
-
-        activeSubmitID = requestID
-        isSubmittingTurn = true
-        submitBannerMessage = nil
-        isActionFocused = false
-        submitTask?.cancel()
-
-        submitTask = Task { @MainActor in
-            defer {
-                if activeSubmitID == requestID {
-                    isSubmittingTurn = false
-                    activeSubmitID = nil
-                    submitTask = nil
-                }
-            }
-            do {
-                let newTurn = try await store.playStoryTurn(
-                    sessionID: targetSessionID,
-                    expectedCount: expectedCount,
-                    action: actionText
-                )
-                guard !Task.isCancelled,
-                      activeSubmitID == requestID,
-                      isViewActive,
-                      isRouteActive,
-                      session.id == targetSessionID else { return }
-
-                if !turns.contains(where: { $0.id == newTurn.id || $0.sequence == newTurn.sequence }) {
-                    if reduceMotion {
-                        turns.append(newTurn)
-                    } else {
-                        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
-                            turns.append(newTurn)
-                        }
-                    }
-                    turns.sort { $0.sequence < $1.sequence }
-                }
-                actionDraft = ""
-                atmospherePulse &+= 1
-            } catch {
-                guard !Task.isCancelled,
-                      activeSubmitID == requestID,
-                      isViewActive,
-                      isRouteActive,
-                      session.id == targetSessionID else { return }
-
-                // Re-read persisted turns on conflict or write failure so state stays consistent.
-                let refreshed = try? await store.storyTurns(sessionID: targetSessionID)
-                guard !Task.isCancelled,
-                      activeSubmitID == requestID,
-                      isViewActive,
-                      isRouteActive,
-                      session.id == targetSessionID else { return }
-
-                if let refreshed {
-                    let sorted = refreshed.sorted { $0.sequence < $1.sequence }
-                    if sorted.count != turns.count {
-                        turns = sorted
-                        submitBannerMessage = "存档已更新，已重新同步最新演绎记录；你可以继续提交当前行动。"
-                    } else {
-                        submitBannerMessage = "未能完成本轮演绎：\(error.localizedDescription)"
-                    }
-                } else {
-                    submitBannerMessage = "未能完成本轮演绎：\(error.localizedDescription)"
-                }
             }
         }
     }

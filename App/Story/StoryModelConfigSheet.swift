@@ -130,7 +130,7 @@ struct StoryModelConfigSheet: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将清除已保存的接口地址、模型名与 API Key。清除后仍可继续使用离线演绎。")
+            Text("将清除已保存的接口地址、模型名与 API Key。清除后仍可阅读已保存的故事原文与历史记录，重新配置后可继续生成新回合。")
         }
         .onAppear {
             loadCurrentConfiguration()

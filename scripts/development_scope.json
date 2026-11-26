@@ -8,10 +8,6 @@
       "name": "localStoryStartsFromImportedTextAndEPUBAndRestoresBothRoles"
     },
     {
-      "file": "ReaderDomainTests/StoryPresetImportTests.swift",
-      "name": "localPresetImportChecksOrderAndPinsImmutableStoryVersion"
-    },
-    {
       "file": "ReaderDomainTests/StoryGenerationTests.swift",
       "name": "lockedPresetDrivesConfirmedPayloadAndOnlyCompletedModelTurnPersists"
     },

@@ -43,5 +43,15 @@ struct StoryLaunchTests {
         let restored = try await fresh.storyTurns(sessionID: canon.id)
         let otherBranch = try await fresh.storyTurns(sessionID: original.id)
         #expect(restored == [first, next] && otherBranch.isEmpty)
+        let sibling = try await f.service.startStory(book: a, roleKind: .canon, roleName: canon.roleName, premise: "")
+        let kept = try await fresh.playStoryTurn(sessionID: sibling.id, expectedCount: 0, action: "驻足片刻")
+        try await fresh.deleteStorySession(id: canon.id)
+        try await fresh.deleteStorySession(id: canon.id)
+        let reopened = try LibraryStore(root: f.managed)
+        let remaining = try await reopened.storySessions()
+        let keptTurns = try await reopened.storyTurns(sessionID: sibling.id)
+        let remainingBooks = try await reopened.books()
+        #expect(Set(remaining.map(\.id)) == Set([sibling.id, original.id]))
+        #expect(keptTurns == [kept] && remainingBooks == before)
     }
 }

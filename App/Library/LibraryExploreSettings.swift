@@ -7,39 +7,49 @@ struct LibraryExploreContent: View {
     let onOpenFeature: (LibraryPlannedFeature) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 24)
-                        Text("探索 · 故事扩展")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(appearance.secondary)
-                    }
-                    Text("探索更多故事")
-                        .font(AppVisualStyle.pageTitleFont)
-                        .foregroundStyle(appearance.foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                    Text("可从书架小说开启可恢复的 AI 故事，支持本地离线演绎、叙事预设导入及确认后的自配 BYOK 模型生成；漫画聚合仍为规划入口。")
-                        .font(.subheadline)
-                        .foregroundStyle(appearance.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.top, 6)
+        ZStack {
+            appearance.page.ignoresSafeArea()
 
-                LibraryPlannedEntriesView(
-                    appearance: appearance,
-                    canOpenFeatures: canOpenFeatures,
-                    features: LibraryPlannedFeature.modules,
-                    onOpenFeature: onOpenFeature
-                )
+            StoryAtmosphereCanvas(appearance: appearance, pulseToken: 0)
+                .opacity(appearance.isDarkSurface ? 0.78 : 0.68)
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            YueJingBrandMark(tint: appearance.accent, sealTint: appearance.sealAccent, size: 24)
+                            Text("探索 · 万象书境")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(appearance.accent)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3)
+                                .background(appearance.accentSoft, in: Capsule())
+                        }
+                        Text("探索更多故事")
+                            .font(AppVisualStyle.pageTitleFont)
+                            .foregroundStyle(appearance.foreground)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                        Text("把书架上的任意小说变成可交互的故事剧场；漫画聚合仍为预留入口。")
+                            .font(.subheadline)
+                            .foregroundStyle(appearance.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, 6)
+
+                    LibraryPlannedEntriesView(
+                        appearance: appearance,
+                        canOpenFeatures: canOpenFeatures,
+                        features: LibraryPlannedFeature.modules,
+                        onOpenFeature: onOpenFeature
+                    )
+                }
+                .padding(.horizontal, LibraryAppearance.horizontalInset)
+                .padding(.top, 8)
+                .padding(.bottom, LibraryAppearance.contentBottomSpacing)
             }
-            .padding(.horizontal, LibraryAppearance.horizontalInset)
-            .padding(.top, 8)
-            .padding(.bottom, LibraryAppearance.contentBottomSpacing)
         }
-        .background(appearance.page.ignoresSafeArea())
         .foregroundStyle(appearance.foreground)
     }
 }

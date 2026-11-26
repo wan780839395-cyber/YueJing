@@ -178,7 +178,7 @@ struct StoryPresetWorkshopView: View {
                 Spacer(minLength: 0)
             }
 
-            Text("预设工坊的导入、解析与结构预览均在本地完成，永不上网。绑定到故事开局后，仅在你于剧场主动确认发送 BYOK 模型请求时才会按本局版本组装；离线演绎不使用预设。")
+            Text("预设工坊的导入、解析与结构预览均在本地完成，永不上网。绑定到故事开局后，仅在你于剧场主动确认发送 BYOK 模型请求时按本局版本组装。")
                 .font(.footnote)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -252,7 +252,7 @@ struct StoryPresetWorkshopView: View {
                     Text("跳过预设（不绑定版本）")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(appearance.foreground)
-                    Text("直接开启本地开局，稍后可另建开局绑定预设")
+                    Text("直接开启故事，稍后可另建故事绑定预设")
                         .font(.caption)
                         .foregroundStyle(appearance.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -718,7 +718,7 @@ struct StoryPresetDetailView: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(appearance.secondary)
 
-            Text("预设导入与预览均在本地离线完成；若绑定至故事开局，将在你主动确认 BYOK 联网模型生成时生效，离线演绎不使用此预设。")
+            Text("预设导入与预览均在本地离线完成；若绑定至故事开局，将在你主动确认 BYOK 联网模型生成时按此版本组装。")
                 .font(.caption)
                 .foregroundStyle(appearance.secondary)
                 .fixedSize(horizontal: false, vertical: true)
